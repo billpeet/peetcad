@@ -1,0 +1,87 @@
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+  TRUNK_VERSION: v0.21.14
+  # Budget from ROADMAP.md: compressed .wasm under 10 MB.
+  WASM_GZIP_BUDGET_BYTES: 10485760
+
+jobs:
+  windows:
+    name: Windows (fmt, clippy, test)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      # rust-toolchain.toml selects the toolchain, components and targets.
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo fmt --all --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+
+  web:
+    name: Web (clippy, build)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy -p peetcad --target wasm32-unknown-unknown -- -D warnings
+      - name: Install Trunk
+        run: |
+          curl -sSL "https://github.com/trunk-rs/trunk/releases/download/${TRUNK_VERSION}/trunk-x86_64-unknown-linux-gnu.tar.gz" \
+            | tar -xz -C ~/.cargo/bin
+          trunk --version
+      - name: Build
+        working-directory: crates/peetcad
+        run: trunk build --release --cargo-profile release-web --public-url "/${{ github.event.repository.name }}/"
+      - name: Check download size
+        run: |
+          wasm=$(ls dist/*.wasm)
+          raw=$(stat -c %s "$wasm")
+          gz=$(gzip -9 -c "$wasm" | wc -c)
+          echo "### Web build size" >> "$GITHUB_STEP_SUMMARY"
+          echo "wasm: $((raw / 1024)) KiB raw, $((gz / 1024)) KiB gzipped" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$gz" -gt "$WASM_GZIP_BUDGET_BYTES" ]; then
+            echo "::error::Compressed wasm is $gz bytes, over the $WASM_GZIP_BUDGET_BYTES byte budget"
+            exit 1
+          fi
+      - uses: actions/upload-pages-artifact@v4
+        with:
+          path: dist
+
+  deploy-web:
+    name: Deploy to GitHub Pages
+    if: github.event_name == 'push'
+    needs: [windows, web]
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
+
+  windows-release:
+    name: Windows release build
+    if: github.event_name == 'push'
+    needs: [windows]
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo build --release -p peetcad
+      - uses: actions/upload-artifact@v4
+        with:
+          name: peetcad-windows-x86_64
+          path: target/release/peetcad.exe

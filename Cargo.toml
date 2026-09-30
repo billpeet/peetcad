@@ -1,0 +1,50 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/peetcad"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.90"
+license = "MIT"
+repository = "https://github.com/billpeet/peetcad"
+authors = ["PeetCAD contributors"]
+
+[workspace.dependencies]
+peet-math = { path = "crates/peet-math" }
+peet-platform = { path = "crates/peet-platform" }
+peet-render = { path = "crates/peet-render" }
+peet-ui = { path = "crates/peet-ui" }
+
+eframe = { version = "0.36", default-features = false }
+egui = "0.36"
+egui-wgpu = "0.36"
+glam = { version = "0.33", features = ["bytemuck"] }
+bytemuck = { version = "1", features = ["derive"] }
+log = "0.4"
+web-time = "1"
+serde = { version = "1", features = ["derive"] }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+codegen-units = 1
+strip = true
+
+# Web release builds favour size.
+[profile.release-web]
+inherits = "release"
+opt-level = "z"
+lto = "fat"
+panic = "abort"
+
+# Keep dependencies optimised in dev builds: geometry and rendering code is unusable at opt-level 0.
+[profile.dev.package."*"]
+opt-level = 2

@@ -1,0 +1,23 @@
+[package]
+name = "peet-render"
+description = "wgpu viewport renderer for PeetCAD: camera, grid, shaded meshes, edges and overlays"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+peet-math.workspace = true
+bytemuck.workspace = true
+glam.workspace = true
+log.workspace = true
+# Backends are chosen by the application (through eframe), so only the core API is requested here.
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl"] }
+
+[dev-dependencies]
+# Validates the WGSL shaders in unit tests, without needing a GPU.
+naga = { version = "30", features = ["wgsl-in"] }
+
+[lints]
+workspace = true

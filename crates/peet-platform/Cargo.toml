@@ -1,0 +1,15 @@
+[package]
+name = "peet-platform"
+description = "Thin platform abstraction (time, storage locations, crash reports) for native and web builds of PeetCAD"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+log.workspace = true
+web-time.workspace = true
+
+[lints]
+workspace = true

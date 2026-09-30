@@ -1,0 +1,20 @@
+[package]
+name = "peet-ui"
+description = "PeetCAD application shell: panels, commands, viewport interaction"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+peet-math.workspace = true
+peet-platform.workspace = true
+peet-render.workspace = true
+eframe = { workspace = true, features = ["wgpu", "persistence"] }
+egui.workspace = true
+log.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

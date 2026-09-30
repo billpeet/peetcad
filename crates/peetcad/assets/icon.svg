@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
+  <!-- PeetCAD: a bent sheet metal bracket on a rounded tile. Same design as src/icon.rs. -->
+  <rect x="2" y="2" width="60" height="60" rx="12" fill="#262c38"/>
+  <path d="M14 14 H20 V42 H50 V48 H14 Z" fill="#78aaf0"/>
+  <path d="M18.5 14 H20 V42 H50 V43.5 H18.5 Z" fill="#c8deff"/>
+</svg>
