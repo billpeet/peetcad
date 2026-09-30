@@ -10,6 +10,7 @@ mod document;
 mod palette;
 mod perf;
 pub mod settings;
+mod sketch_ui;
 mod view_cube;
 mod viewport;
 

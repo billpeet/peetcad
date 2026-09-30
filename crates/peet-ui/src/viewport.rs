@@ -21,6 +21,9 @@ use crate::view_cube;
 pub struct ViewportEvents {
     /// Left click on empty space (clears the selection).
     pub clicked_background: bool,
+    /// The viewport widget's response, for tools that handle their own mouse input
+    /// (the sketcher).
+    pub response: Option<egui::Response>,
 }
 
 pub struct ViewportParams<'a> {
@@ -30,6 +33,8 @@ pub struct ViewportParams<'a> {
     pub selected: Option<ItemId>,
     pub hovered: Option<ItemId>,
     pub dark: bool,
+    /// The sketch open for editing: drawn by the sketch editor instead of the 3D overlay.
+    pub editing_sketch: Option<ItemId>,
 }
 
 pub struct Viewport {
@@ -146,7 +151,10 @@ impl Viewport {
         let rect = ui.available_rect_before_wrap();
         self.last_rect = rect;
         let response = ui.allocate_rect(rect, Sense::click_and_drag());
-        let mut events = ViewportEvents::default();
+        let mut events = ViewportEvents {
+            response: Some(response.clone()),
+            ..ViewportEvents::default()
+        };
 
         self.handle_navigation(ui, &response, rect, params.settings);
         if response.clicked_by(PointerButton::Primary) {
@@ -362,8 +370,8 @@ impl Viewport {
         self.overlay.clear();
         let doc = params.document;
 
-        // Reference planes are sized to comfortably frame the visible bodies.
-        let bounds = doc.visible_body_bounds();
+        // Reference planes are sized to comfortably frame the visible bodies and sketches.
+        let bounds = doc.visible_bounds();
         let half = if bounds.is_empty() {
             50.0
         } else {
@@ -413,6 +421,35 @@ impl Viewport {
                         .line(DVec3::ZERO, DVec3::Z * len, [84, 146, 240, alpha]);
                 }
                 ItemKind::Body { .. } => {}
+                ItemKind::Sketch(sketch) => {
+                    if params.editing_sketch == Some(item.id) {
+                        continue;
+                    }
+                    let color = if highlighted {
+                        outline_hi
+                    } else if params.dark {
+                        [150, 190, 255, 230]
+                    } else {
+                        [40, 90, 190, 230]
+                    };
+                    let plane = sketch.plane;
+                    for (id, e) in sketch.sketch.entities() {
+                        if e.construction {
+                            continue;
+                        }
+                        let Some(curve) = sketch.sketch.curve(id) else {
+                            continue;
+                        };
+                        let pts = curve.tessellate(wpp * 0.5);
+                        for w in pts.windows(2) {
+                            self.overlay.line(
+                                plane.from_plane_coords(w[0]),
+                                plane.from_plane_coords(w[1]),
+                                color,
+                            );
+                        }
+                    }
+                }
             }
         }
     }

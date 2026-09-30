@@ -1,0 +1,22 @@
+[package]
+name = "peet-sketch"
+description = "2D sketch entities, constraints, dimensions and the geometric constraint solver for PeetCAD"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+peet-math.workspace = true
+serde.workspace = true
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
+
+[lints]
+workspace = true
+
+[[bench]]
+name = "solver"
+harness = false

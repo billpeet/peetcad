@@ -15,6 +15,7 @@ authors = ["PeetCAD contributors"]
 peet-math = { path = "crates/peet-math" }
 peet-platform = { path = "crates/peet-platform" }
 peet-render = { path = "crates/peet-render" }
+peet-sketch = { path = "crates/peet-sketch" }
 peet-ui = { path = "crates/peet-ui" }
 
 eframe = { version = "0.36", default-features = false }

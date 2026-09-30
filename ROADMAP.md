@@ -130,21 +130,23 @@ Each phase ends with something usable and demonstrable. Estimates are rough and 
 ### Phase 1: 2D Sketcher
 *Goal: a sketcher that is pleasant to use and correct.*
 
-- [ ] Entities: point, line, arc, circle, construction geometry, rectangle/slot/polygon helpers
-- [ ] Constraints: coincident, horizontal, vertical, parallel, perpendicular, tangent, equal, concentric, midpoint, symmetric, fix
-- [ ] Dimensions: distance, horizontal/vertical distance, radius/diameter, angle, all driving or driven
-- [ ] Constraint solver:
+- [x] Entities: point, line, arc, circle, construction geometry, rectangle/slot/polygon helpers
+- [x] Constraints: coincident, horizontal, vertical, parallel, perpendicular, tangent, equal, concentric, midpoint, symmetric, fix
+- [x] Dimensions: distance, horizontal/vertical distance, radius/diameter, angle, all driving or driven
+- [x] Constraint solver:
   - Graph decomposition into independent clusters, so only affected parts are solved
   - Newton–Raphson / Levenberg–Marquardt with a dogleg fallback
   - DOF analysis: color-code under, fully and over constrained geometry
   - Detect conflicting or redundant constraints and explain *which* ones
-- [ ] Interactive dragging with live solve (target: under 2 ms per solve for sketches with 100+ entities)
-- [ ] Automatic constraint inference while drawing (snap to horizontal, coincident, tangent…)
-- [ ] Trim, extend, offset, mirror, fillet (2D)
-- [ ] Profile/region detection: find closed loops and nested regions for features to use
-- [ ] Expressions and named parameters in dimensions (`width = 2 * height + 5`)
+- [x] Interactive dragging with live solve (target: under 2 ms per solve for sketches with 100+ entities)
+- [x] Automatic constraint inference while drawing (snap to horizontal, coincident, tangent…)
+- [x] Trim, extend, offset, mirror, fillet (2D)
+- [x] Profile/region detection: find closed loops and nested regions for features to use
+- [x] Expressions and named parameters in dimensions (`width = 2 * height + 5`)
 
 **Exit criteria:** A user can draw and fully constrain a realistic bracket profile without fighting the tool.
+
+**Status:** Implemented in `peet-sketch` (headless, 165 tests including property tests) and sketch mode in `peet-ui` (19 tests that drive the tools with simulated input). The bracket test in `crates/peet-sketch/tests/bracket.rs` builds an L bracket with a fillet, two holes and a slot, reaches 0 DOF with no diagnostics, and rebuilds correctly after a dimension change. `solve_drag` takes about 0.01 ms on that bracket and 0.1–0.2 ms on 120–180-line sketches (`cargo bench -p peet-sketch --bench solver`). Still to do: a hands-on usability pass by a real user against the exit criterion. Known gaps: fillets only between two lines, no tangent-arc drawing tool, and sketch undo is per editing session (document undo comes in Phase 3).
 
 ### Phase 2: Kernel v0 (analytic B-rep)
 *Goal: turn sketches into valid solids.*

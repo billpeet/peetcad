@@ -11,10 +11,15 @@ authors.workspace = true
 peet-math.workspace = true
 peet-platform.workspace = true
 peet-render.workspace = true
+peet-sketch.workspace = true
 eframe = { workspace = true, features = ["wgpu", "persistence"] }
 egui.workspace = true
 log.workspace = true
 serde.workspace = true
+
+[dev-dependencies]
+# Drives the sketch editor with simulated mouse input in tests (no GPU needed).
+egui_kittest = "0.36"
 
 [lints]
 workspace = true
