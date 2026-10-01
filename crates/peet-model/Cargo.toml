@@ -1,0 +1,17 @@
+[package]
+name = "peet-model"
+description = "PeetCAD's feature model: features (extrude, cut) and how they rebuild into solids"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+peet-math.workspace = true
+peet-sketch.workspace = true
+peet-kernel.workspace = true
+serde.workspace = true
+
+[lints]
+workspace = true

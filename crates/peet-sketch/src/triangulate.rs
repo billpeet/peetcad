@@ -117,21 +117,39 @@ fn bridge(poly: &[DVec2], hole: &[DVec2]) -> Vec<DVec2> {
     };
     let hit = DVec2::new(x, m.y);
     let j = (i + 1) % n;
-    let mut p_idx = if poly[i].x > poly[j].x { i } else { j };
-    // A reflex vertex inside triangle (M, hit, P) would block the bridge: take the one
-    // closest in angle to the ray instead.
-    let p = poly[p_idx];
-    let mut best_angle = f64::INFINITY;
-    let mut best_dist = f64::INFINITY;
-    for k in 0..n {
-        if k == p_idx {
-            continue;
-        }
+    let cross = |a: DVec2, b: DVec2, c: DVec2| (b - a).perp_dot(c - a);
+    // Whether `m` is inside the polygon's interior wedge at position `k`. A vertex already
+    // used by a bridge occurs several times in the polygon, each with its own wedge; only
+    // the occurrence whose wedge contains `m` gives a bridge that doesn't cross the others.
+    let sees_m = |k: usize| {
         let q = poly[k];
         let prev = poly[(k + n - 1) % n];
         let next = poly[(k + 1) % n];
-        let reflex = (q - prev).perp_dot(next - q) <= 0.0;
-        if reflex && point_in_triangle(q, m, hit, p) {
+        let (left_of_out, left_of_in) = (cross(q, next, m) >= 0.0, cross(prev, q, m) >= 0.0);
+        if cross(prev, q, next) > 0.0 {
+            left_of_out && left_of_in
+        } else {
+            left_of_out || left_of_in
+        }
+    };
+    let endpoint = if poly[i].x > poly[j].x { i } else { j };
+    let p = poly[endpoint];
+    let mut p_idx = (0..n)
+        .find(|&k| poly[k] == p && sees_m(k))
+        .unwrap_or(endpoint);
+    // A reflex vertex inside triangle (M, hit, P) would block the bridge: take the one
+    // closest in angle to the ray instead.
+    let mut best_angle = f64::INFINITY;
+    let mut best_dist = f64::INFINITY;
+    for k in 0..n {
+        let q = poly[k];
+        if q == p {
+            continue;
+        }
+        let prev = poly[(k + n - 1) % n];
+        let next = poly[(k + 1) % n];
+        let reflex = cross(prev, q, next) <= 0.0;
+        if reflex && q.x >= m.x && point_in_triangle(q, m, hit, p) && sees_m(k) {
             let d = q - m;
             let angle = (d.y / d.length().max(f64::MIN_POSITIVE)).abs();
             let dist = d.length_squared();
@@ -257,6 +275,38 @@ mod tests {
         for t in &tris.triangles {
             let [a, b, c] = t.map(|i| tris.points[i as usize]);
             assert!((b - a).perp_dot(c - a) > 0.0, "counter-clockwise");
+        }
+    }
+
+    #[test]
+    fn many_holes_bridge_without_crossing() {
+        let mut s = Sketch::new();
+        rect(&mut s, DVec2::ZERO, DVec2::new(100.0, 60.0));
+        for ix in 0..4 {
+            for iy in 0..3 {
+                s.add_circle(
+                    DVec2::new(15.0 + 22.0 * f64::from(ix), 12.0 + 18.0 * f64::from(iy)),
+                    5.0,
+                );
+            }
+        }
+        let profile = find_regions(&s);
+        let plate = profile
+            .regions
+            .iter()
+            .find(|r| r.holes.len() == 12)
+            .expect("plate region");
+        let tris = triangulate_region(plate, 0.01);
+        let expected = plate.area();
+        assert!(
+            // Circles are flattened to polygons, which accounts for about 0.05%.
+            (tris.area() - expected).abs() < expected * 1e-3,
+            "{} vs {expected}",
+            tris.area()
+        );
+        for t in &tris.triangles {
+            let [a, b, c] = t.map(|i| tris.points[i as usize]);
+            assert!((b - a).perp_dot(c - a) > 0.0);
         }
     }
 

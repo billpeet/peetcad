@@ -5,8 +5,10 @@
 //! `peetcad` binary crate only handles platform startup.
 
 mod app;
+mod bodies;
 pub mod commands;
 mod document;
+mod features_ui;
 mod palette;
 mod perf;
 pub mod settings;

@@ -11,5 +11,15 @@ authors.workspace = true
 log.workspace = true
 web-time.workspace = true
 
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Native save dialog (MIT). Uses the system dialog: COM on Windows.
+rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "pollster"] }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+js-sys = "0.3"
+web-sys = { version = "0.3", features = ["Blob", "BlobPropertyBag", "Document", "Element", "HtmlAnchorElement", "HtmlElement", "Url", "Window"] }
+wasm-bindgen = "0.2"
+
 [lints]
 workspace = true

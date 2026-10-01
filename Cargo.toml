@@ -12,7 +12,10 @@ repository = "https://github.com/billpeet/peetcad"
 authors = ["PeetCAD contributors"]
 
 [workspace.dependencies]
+peet-io = { path = "crates/peet-io" }
+peet-kernel = { path = "crates/peet-kernel" }
 peet-math = { path = "crates/peet-math" }
+peet-model = { path = "crates/peet-model" }
 peet-platform = { path = "crates/peet-platform" }
 peet-render = { path = "crates/peet-render" }
 peet-sketch = { path = "crates/peet-sketch" }

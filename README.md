@@ -3,7 +3,7 @@
 A lightweight parametric 3D CAD application written in Rust, with sheet metal first.
 It runs as a native Windows app and in the browser (WebAssembly), from one codebase.
 
-> **Status:** early development (Phase 1: 2D sketcher).
+> **Status:** early development (Phase 2: sketches to solids with extrude and cut).
 > See [ROADMAP.md](ROADMAP.md) for the plan.
 
 ## Running
@@ -70,6 +70,17 @@ black/white once fully defined; conflicting or redundant relations turn red, and
 properties panel says which ones clash. Dimensions accept expressions such as `width / 2 + 5`,
 using the named values from **Tools → Parameters** and other dimensions' names (`d1`, `d2`, …).
 
+### Solids
+
+With a sketch open or selected, click **Extrude** or **Cut** in the toolbar. The properties
+panel sets the operation (new body, add, cut), the end condition (blind, mid-plane, through
+all, up to a face) and the depth; the model rebuilds as you change them. A feature that fails
+is flagged in the tree with the reason, and the rest of the model still builds.
+
+Click a face or edge in the viewport to select it (hovering highlights it first). To sketch on
+a model face, select a flat face and press `S`. **File → Export STL** saves the bodies as a
+mesh.
+
 ## Layout
 
 ```
@@ -78,6 +89,9 @@ crates/
   peet-platform/  time, storage locations and crash reports for native and web
   peet-render/    wgpu viewport renderer: camera, grid, meshes, edges, overlays
   peet-sketch/    2D sketches: entities, constraints, solver, expressions, editing operations
+  peet-kernel/    B-rep kernel: planes and cylinders, extrude, booleans, validation, tessellation
+  peet-model/     features (extrude, cut) and how they rebuild into solids
+  peet-io/        file formats (STL export)
   peet-ui/        egui application shell: panels, commands, viewport interaction
   peetcad/        the application binary (native main and web entry point)
 ```

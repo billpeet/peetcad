@@ -13,6 +13,12 @@ pub struct MeshData {
     pub indices: Vec<u32>,
     /// Line segments as pairs of points, drawn in the edge colour on top of the shading.
     pub edges: Vec<[f32; 3]>,
+    /// Pick id of each vertex (one per entry in `vertices`), reported by GPU picking for
+    /// the face under the cursor. Give each face its own vertices and id. Empty means
+    /// every vertex has id 0.
+    pub pick_ids: Vec<u32>,
+    /// Pick id of each edge segment (one per pair of points in `edges`). Empty means 0.
+    pub edge_pick_ids: Vec<u32>,
 }
 
 impl MeshData {
@@ -26,6 +32,36 @@ impl MeshData {
 
     pub fn triangle_count(&self) -> usize {
         self.indices.len() / 3
+    }
+
+    /// One pick id per vertex, as uploaded to the GPU (zeros if `pick_ids` is unusable).
+    pub(crate) fn vertex_pick_ids(&self) -> Vec<u32> {
+        if self.pick_ids.len() == self.vertices.len() {
+            return self.pick_ids.clone();
+        }
+        if !self.pick_ids.is_empty() {
+            log::warn!(
+                "mesh has {} pick ids for {} vertices; using id 0",
+                self.pick_ids.len(),
+                self.vertices.len()
+            );
+        }
+        vec![0; self.vertices.len()]
+    }
+
+    /// One pick id per edge vertex (each segment's id twice), as uploaded to the GPU.
+    pub(crate) fn edge_vertex_pick_ids(&self) -> Vec<u32> {
+        let segments = self.edges.len() / 2;
+        if self.edge_pick_ids.len() != segments && !self.edge_pick_ids.is_empty() {
+            log::warn!(
+                "mesh has {} edge pick ids for {segments} edge segments; using id 0",
+                self.edge_pick_ids.len()
+            );
+        }
+        let ids_ok = self.edge_pick_ids.len() == segments;
+        (0..self.edges.len())
+            .map(|i| if ids_ok { self.edge_pick_ids[i / 2] } else { 0 })
+            .collect()
     }
 }
 
@@ -312,5 +348,25 @@ mod tests {
             let n = glam::Vec3::from(v.normal);
             assert!((n.length() - 1.0).abs() < 1e-4);
         }
+    }
+
+    #[test]
+    fn pick_ids_expand_per_vertex() {
+        let mut mesh = demo::u_channel();
+        assert_eq!(mesh.vertex_pick_ids(), vec![0; mesh.vertices.len()]);
+        assert_eq!(mesh.edge_vertex_pick_ids(), vec![0; mesh.edges.len()]);
+
+        mesh.pick_ids = (0..mesh.vertices.len() as u32).collect();
+        assert_eq!(mesh.vertex_pick_ids(), mesh.pick_ids);
+        mesh.edge_pick_ids = (10..10 + mesh.edges.len() as u32 / 2).collect();
+        let per_vertex = mesh.edge_vertex_pick_ids();
+        assert_eq!(per_vertex.len(), mesh.edges.len());
+        assert_eq!(&per_vertex[..4], &[10, 10, 11, 11]);
+
+        // Mismatched lengths fall back to id 0 rather than misattributing.
+        mesh.pick_ids.pop();
+        mesh.edge_pick_ids.pop();
+        assert!(mesh.vertex_pick_ids().iter().all(|&i| i == 0));
+        assert!(mesh.edge_vertex_pick_ids().iter().all(|&i| i == 0));
     }
 }

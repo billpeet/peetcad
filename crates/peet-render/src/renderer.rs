@@ -2,8 +2,8 @@
 //!
 //! Renders the 3D scene into an offscreen texture (with MSAA and its own depth buffer),
 //! which the UI then shows as an image. Keeping the viewport in its own texture decouples
-//! it from the UI's render pass, and will let us add GPU picking and ambient occlusion
-//! passes later without touching the UI.
+//! it from the UI's render pass. GPU picking (see [`crate::pick`]) renders into its own
+//! small targets in the same command buffer.
 //!
 //! Depth is **reversed** (near = 1, far = 0) with a 32-bit float buffer, which gives
 //! near-uniform precision from millimetre details up to kilometre-scale grids.
@@ -16,11 +16,14 @@ use wgpu::util::DeviceExt as _;
 
 use crate::camera::{Camera, Projection};
 use crate::mesh::{ColorVertex, MeshData, MeshVertex, Overlay};
+use crate::pick::{
+    PICK_FORMAT, PICK_SIZE, PickFrame, PickRequest, PickResult, Picker, encode_object, pick_matrix,
+};
 
 /// Colour format of the viewport image. The shaders write sRGB-encoded values into it,
 /// which is what the UI expects when it samples the texture.
 pub const COLOR_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Rgba8Unorm;
-const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
+pub(crate) const DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// Minimum on-screen spacing of the finest visible grid lines, in pixels.
 const GRID_MIN_SPACING_PX: f64 = 12.0;
@@ -84,6 +87,24 @@ pub struct ObjectDraw {
     pub show_edges: bool,
     /// How strongly to blend in the highlight colour (0 = none, 1 = fully tinted).
     pub highlight: f32,
+    /// Id reported by GPU picking for this object, or `None` if it can't be picked (it is
+    /// then left out of the pick pass entirely, so it doesn't occlude either).
+    /// `u32::MAX` is reserved.
+    pub pick_object: Option<u32>,
+}
+
+impl Default for ObjectDraw {
+    /// Identity transform, edges shown, no highlight, not pickable. The mesh is a handle
+    /// that is never allocated, so set it before drawing.
+    fn default() -> Self {
+        Self {
+            mesh: MeshId(u64::MAX),
+            transform: DMat4::IDENTITY,
+            show_edges: true,
+            highlight: 0.0,
+            pick_object: None,
+        }
+    }
 }
 
 /// Everything the renderer needs for one frame.
@@ -97,6 +118,9 @@ pub struct FrameInput<'a> {
     pub overlay: &'a Overlay,
     /// Bounds of everything in the scene (objects and overlays). Used to set clip planes.
     pub scene_bounds: Aabb,
+    /// Pick at this cursor position. The result arrives asynchronously through
+    /// [`ViewportRenderer::pick_result`], usually a frame or two later.
+    pub pick: Option<PickRequest>,
 }
 
 /// Counters for the performance overlay.
@@ -119,6 +143,9 @@ pub struct RenderOutput<'a> {
 /// Size of the globals uniform block; checked against the WGSL declaration in tests.
 #[cfg(test)]
 pub(crate) const GLOBALS_SIZE: usize = std::mem::size_of::<Globals>();
+/// Size of the per-object uniform block; checked against the WGSL declaration in tests.
+#[cfg(test)]
+pub(crate) const OBJECT_SIZE: usize = std::mem::size_of::<ObjectUniform>();
 
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -145,6 +172,8 @@ struct Globals {
 struct ObjectUniform {
     model: [[f32; 4]; 4],
     tint: [f32; 4],
+    /// x = pick object id + 1 (0 = not pickable).
+    pick: [u32; 4],
 }
 
 struct ObjectBinding {
@@ -159,6 +188,7 @@ impl ObjectBinding {
             contents: bytemuck::bytes_of(&ObjectUniform {
                 model: glam::Mat4::IDENTITY.to_cols_array_2d(),
                 tint: [0.0; 4],
+                pick: [0; 4],
             }),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         });
@@ -180,6 +210,10 @@ struct GpuMesh {
     index_count: u32,
     edges: Option<wgpu::Buffer>,
     edge_vertex_count: u32,
+    /// Per-vertex face pick ids (`u32`), parallel to `vertices`.
+    pick_ids: wgpu::Buffer,
+    /// Per-edge-vertex pick ids (`u32`), parallel to `edges`.
+    edge_pick_ids: Option<wgpu::Buffer>,
     object: ObjectBinding,
 }
 
@@ -288,6 +322,12 @@ pub struct ViewportRenderer {
     line_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
     overlay_tri_pipeline: wgpu::RenderPipeline,
+    /// Globals for the pick pass: the same as `globals` but with the pick window's matrix.
+    pick_globals_buffer: wgpu::Buffer,
+    pick_globals_bind_group: wgpu::BindGroup,
+    pick_face_pipeline: wgpu::RenderPipeline,
+    pick_edge_pipeline: wgpu::RenderPipeline,
+    picker: Picker,
     targets: Option<Targets>,
     meshes: HashMap<MeshId, GpuMesh>,
     next_mesh_id: u64,
@@ -330,6 +370,20 @@ impl ViewportRenderer {
                 resource: globals_buffer.as_entire_binding(),
             }],
         });
+        let pick_globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("pick_globals"),
+            size: std::mem::size_of::<Globals>() as u64,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+        let pick_globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pick_globals"),
+            layout: &globals_layout,
+            entries: &[wgpu::BindGroupEntry {
+                binding: 0,
+                resource: pick_globals_buffer.as_entire_binding(),
+            }],
+        });
         let identity_object = ObjectBinding::new(device, &object_layout, "identity_object");
 
         let layout_globals_only = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -355,6 +409,7 @@ impl ViewportRenderer {
         let grid_shader = shader("grid", include_str!("shaders/grid.wgsl"));
         let mesh_shader = shader("mesh", include_str!("shaders/mesh.wgsl"));
         let color_shader = shader("color", include_str!("shaders/color.wgsl"));
+        let pick_shader = shader("pick", include_str!("shaders/pick.wgsl"));
 
         let mesh_vertex_layout = wgpu::VertexBufferLayout {
             array_stride: std::mem::size_of::<MeshVertex>() as u64,
@@ -482,6 +537,73 @@ impl ViewportRenderer {
             blend: true,
         });
 
+        // Pick pipelines: positions from the regular vertex buffers (slot 0), ids from a
+        // parallel `u32` buffer (slot 1); no MSAA and no blending.
+        let pick_pipeline = |label, vs, stride: usize, topology, depth_write| {
+            let buffers = [
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: stride as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![0 => Float32x3],
+                }),
+                Some(wgpu::VertexBufferLayout {
+                    array_stride: 4,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![1 => Uint32],
+                }),
+            ];
+            let target = Some(wgpu::ColorTargetState {
+                format: PICK_FORMAT,
+                blend: None,
+                write_mask: wgpu::ColorWrites::ALL,
+            });
+            device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+                label: Some(label),
+                layout: Some(&layout_with_object),
+                vertex: wgpu::VertexState {
+                    module: &pick_shader,
+                    entry_point: Some(vs),
+                    buffers: &buffers,
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                },
+                primitive: wgpu::PrimitiveState {
+                    topology,
+                    cull_mode: None,
+                    ..Default::default()
+                },
+                depth_stencil: Some(wgpu::DepthStencilState {
+                    format: DEPTH_FORMAT,
+                    depth_write_enabled: Some(depth_write),
+                    depth_compare: Some(wgpu::CompareFunction::GreaterEqual),
+                    stencil: wgpu::StencilState::default(),
+                    bias: wgpu::DepthBiasState::default(),
+                }),
+                multisample: wgpu::MultisampleState::default(),
+                fragment: Some(wgpu::FragmentState {
+                    module: &pick_shader,
+                    entry_point: Some("fs_pick"),
+                    targets: &[target.clone(), target.clone(), target],
+                    compilation_options: wgpu::PipelineCompilationOptions::default(),
+                }),
+                multiview_mask: None,
+                cache: None,
+            })
+        };
+        let pick_face_pipeline = pick_pipeline(
+            "pick_faces",
+            "vs_pick_face",
+            std::mem::size_of::<MeshVertex>(),
+            wgpu::PrimitiveTopology::TriangleList,
+            true,
+        );
+        let pick_edge_pipeline = pick_pipeline(
+            "pick_edges",
+            "vs_pick_edge",
+            std::mem::size_of::<ColorVertex>(),
+            wgpu::PrimitiveTopology::LineList,
+            false,
+        );
+
         Self {
             samples,
             globals_buffer,
@@ -494,6 +616,11 @@ impl ViewportRenderer {
             line_pipeline,
             edge_pipeline,
             overlay_tri_pipeline,
+            pick_globals_buffer,
+            pick_globals_bind_group,
+            pick_face_pipeline,
+            pick_edge_pipeline,
+            picker: Picker::new(device),
             targets: None,
             meshes: HashMap::new(),
             next_mesh_id: 0,
@@ -532,6 +659,18 @@ impl ViewportRenderer {
                 usage: wgpu::BufferUsages::VERTEX,
             })
         });
+        let pick_ids = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("mesh_pick_ids"),
+            contents: bytemuck::cast_slice(&mesh.vertex_pick_ids()),
+            usage: wgpu::BufferUsages::VERTEX,
+        });
+        let edge_pick_ids = (!edge_vertices.is_empty()).then(|| {
+            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("mesh_edge_pick_ids"),
+                contents: bytemuck::cast_slice(&mesh.edge_vertex_pick_ids()),
+                usage: wgpu::BufferUsages::VERTEX,
+            })
+        });
         let object = ObjectBinding::new(device, &self.object_layout, "mesh_object");
         self.meshes.insert(
             id,
@@ -541,6 +680,8 @@ impl ViewportRenderer {
                 index_count: mesh.indices.len() as u32,
                 edges,
                 edge_vertex_count: edge_vertices.len() as u32,
+                pick_ids,
+                edge_pick_ids,
                 object,
             },
         );
@@ -549,6 +690,19 @@ impl ViewportRenderer {
 
     pub fn remove_mesh(&mut self, id: MeshId) {
         self.meshes.remove(&id);
+    }
+
+    /// Takes the newest completed pick result, if one arrived since the last call.
+    ///
+    /// Never blocks: results of a [`FrameInput::pick`] request typically arrive one or two
+    /// frames later. Keep repainting while [`Self::pick_pending`] is true.
+    pub fn pick_result(&mut self) -> Option<PickResult> {
+        self.picker.take_result()
+    }
+
+    /// True while a pick readback is still in flight.
+    pub fn pick_pending(&self) -> bool {
+        self.picker.pending()
     }
 
     /// Renders one frame into the offscreen viewport texture.
@@ -631,6 +785,7 @@ impl ViewportRenderer {
                 let uniform = ObjectUniform {
                     model: draw.transform.as_mat4().to_cols_array_2d(),
                     tint: rgb_a(style.highlight, draw.highlight.clamp(0.0, 1.0) * 0.55),
+                    pick: [draw.pick_object.map_or(0, encode_object), 0, 0, 0],
                 };
                 queue.write_buffer(&mesh.object.buffer, 0, bytemuck::bytes_of(&uniform));
             }
@@ -745,13 +900,137 @@ impl ViewportRenderer {
                 stats.lines += frame.overlay.lines.len() / 2;
             }
         }
+
+        // Picking, into a small window around the cursor. Skipped if every readback buffer
+        // is still in flight; the caller asks again next frame.
+        let pick = frame
+            .pick
+            .and_then(|request| Some((request, self.picker.free_slot()?)))
+            .map(|(request, slot)| {
+                let pick_frame = PickFrame::new(request, size, &view_proj);
+                self.encode_pick(
+                    queue,
+                    &mut encoder,
+                    frame,
+                    &globals,
+                    &view_proj,
+                    &pick_frame,
+                    slot,
+                );
+                (pick_frame, slot)
+            });
+
         queue.submit([encoder.finish()]);
+        if let Some((pick_frame, slot)) = pick {
+            self.picker.start_readback(slot, pick_frame);
+        }
+        // Collect finished readbacks so their buffers free up (never blocks).
+        self.picker.collect();
 
         RenderOutput {
             view: &self.targets.as_ref().expect("targets exist").resolved,
             texture_changed,
             stats,
         }
+    }
+}
+
+impl ViewportRenderer {
+    /// Records the pick passes (faces, then edges) and the readback copies.
+    #[allow(clippy::too_many_arguments)]
+    fn encode_pick(
+        &self,
+        queue: &wgpu::Queue,
+        encoder: &mut wgpu::CommandEncoder,
+        frame: &FrameInput<'_>,
+        globals: &Globals,
+        view_proj: &DMat4,
+        pick: &PickFrame,
+        slot: usize,
+    ) {
+        let pick_view_proj = pick_matrix(pick.viewport, pick.origin, PICK_SIZE) * *view_proj;
+        let pick_globals = Globals {
+            view_proj: pick_view_proj.as_mat4().to_cols_array_2d(),
+            ..*globals
+        };
+        queue.write_buffer(
+            &self.pick_globals_buffer,
+            0,
+            bytemuck::bytes_of(&pick_globals),
+        );
+
+        let pickable = || {
+            frame
+                .objects
+                .iter()
+                .filter(|d| d.pick_object.is_some())
+                .filter_map(|d| Some((d, self.meshes.get(&d.mesh)?)))
+        };
+        for edges in [false, true] {
+            let color_attachments: Vec<_> = self
+                .picker
+                .pass_views(edges)
+                .iter()
+                .map(|view| {
+                    Some(wgpu::RenderPassColorAttachment {
+                        view,
+                        resolve_target: None,
+                        ops: wgpu::Operations {
+                            // All zero bytes: "nothing here".
+                            load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
+                            store: wgpu::StoreOp::Store,
+                        },
+                        depth_slice: None,
+                    })
+                })
+                .collect();
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some(if edges { "pick_edges" } else { "pick_faces" }),
+                color_attachments: &color_attachments,
+                depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                    view: self.picker.depth_view(),
+                    depth_ops: Some(if edges {
+                        // Edges are depth tested against the faces drawn in the first pass.
+                        wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Discard,
+                        }
+                    } else {
+                        wgpu::Operations {
+                            load: wgpu::LoadOp::Clear(0.0),
+                            store: wgpu::StoreOp::Store,
+                        }
+                    }),
+                    stencil_ops: None,
+                }),
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+            pass.set_bind_group(0, &self.pick_globals_bind_group, &[]);
+            if edges {
+                pass.set_pipeline(&self.pick_edge_pipeline);
+                for (_, mesh) in pickable().filter(|(d, _)| d.show_edges) {
+                    let (Some(lines), Some(ids)) = (&mesh.edges, &mesh.edge_pick_ids) else {
+                        continue;
+                    };
+                    pass.set_bind_group(1, &mesh.object.bind_group, &[]);
+                    pass.set_vertex_buffer(0, lines.slice(..));
+                    pass.set_vertex_buffer(1, ids.slice(..));
+                    pass.draw(0..mesh.edge_vertex_count, 0..1);
+                }
+            } else {
+                pass.set_pipeline(&self.pick_face_pipeline);
+                for (_, mesh) in pickable().filter(|(_, m)| m.index_count > 0) {
+                    pass.set_bind_group(1, &mesh.object.bind_group, &[]);
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_vertex_buffer(1, mesh.pick_ids.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                }
+            }
+        }
+        self.picker.encode_copy(encoder, slot);
     }
 }
 

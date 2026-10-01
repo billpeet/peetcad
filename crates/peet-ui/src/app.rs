@@ -5,6 +5,7 @@ use egui::{Align, Layout, RichText, Ui};
 use peet_platform::Instant;
 use peet_render::{Projection, StandardView};
 
+use crate::bodies::GeomRef;
 use crate::commands::{CommandId, CommandState};
 use crate::document::{DEMO_BODY, Document, Item, ItemId, ItemKind, RefPlane, SketchItem};
 use crate::palette::CommandPalette;
@@ -45,6 +46,14 @@ pub struct PeetApp {
     /// Inputs of the "add parameter" row in the parameters window.
     new_param: (String, String),
     param_error: Option<String>,
+    /// Body face or edge under the cursor (from GPU picking).
+    hovered_geom: Option<GeomRef>,
+    /// Selected body faces and edges.
+    selected_geom: Vec<GeomRef>,
+    /// An extrude waiting for its "up to" face to be clicked.
+    picking_up_to: Option<ItemId>,
+    /// Last export/rebuild message for the status bar.
+    status_message: Option<(String, bool)>,
 }
 
 /// The sketch item with `id` among `items` (a free function so callers can borrow other
@@ -115,7 +124,66 @@ impl PeetApp {
             sketch: None,
             new_param: (String::new(), String::new()),
             param_error: None,
+            hovered_geom: None,
+            selected_geom: Vec::new(),
+            picking_up_to: None,
+            status_message: None,
         }
+    }
+
+    /// The selected planar face, if exactly one face is selected.
+    fn selected_face_plane(&self) -> Option<peet_math::Plane> {
+        match self.selected_geom[..] {
+            [GeomRef::Face { body, face }] => {
+                peet_model::face_sketch_plane(&self.document.bodies.get(body)?.solid, face)
+            }
+            _ => None,
+        }
+    }
+
+    /// The sketch an extrude command applies to: the open one, or the selected one.
+    fn extrude_source(&self) -> Option<ItemId> {
+        self.sketch
+            .as_ref()
+            .map(|e| e.item)
+            .or_else(|| self.selected_sketch())
+    }
+
+    fn start_extrude(&mut self, operation: peet_model::Operation) {
+        let Some(sketch) = self.extrude_source() else {
+            return;
+        };
+        self.close_sketch();
+        let id = self.document.add_extrude(sketch, operation);
+        self.selected = Some(id);
+        self.selected_geom.clear();
+    }
+
+    fn export_stl(&mut self) {
+        let mut triangles = Vec::new();
+        for body in &self.document.bodies {
+            for f in &body.tess.faces {
+                for t in &f.triangles {
+                    triangles.push(t.map(|i| f.positions[i as usize]));
+                }
+            }
+        }
+        if triangles.is_empty() {
+            self.status_message = Some(("There are no bodies to export.".to_owned(), true));
+            return;
+        }
+        let name = format!("{}.stl", self.document.name);
+        let bytes = peet_io::stl::write_binary(&self.document.name, &triangles);
+        self.status_message = Some(
+            match peet_platform::save_file(&name, ("STL mesh", &["stl"]), &bytes) {
+                Ok(peet_platform::SaveOutcome::Saved(to)) => (
+                    format!("Exported {} triangles to {to}", triangles.len()),
+                    false,
+                ),
+                Ok(peet_platform::SaveOutcome::Cancelled) => return,
+                Err(e) => (e, true),
+            },
+        );
     }
 
     /// Opens a sketch for editing and turns the view to look straight at it.
@@ -138,10 +206,11 @@ impl PeetApp {
     }
 
     fn close_sketch(&mut self) {
-        if let Some(editor) = self.sketch.take()
-            && let Some(item) = sketch_in(&mut self.document.items, editor.item)
-        {
-            item.status = editor.status();
+        if let Some(editor) = self.sketch.take() {
+            if let Some(item) = sketch_in(&mut self.document.items, editor.item) {
+                item.status = editor.status();
+            }
+            self.document.rebuild();
         }
     }
 
@@ -176,6 +245,16 @@ impl PeetApp {
                 };
             }
         }
+        self.document.rebuild();
+    }
+
+    fn selected_extrude(&self) -> Option<ItemId> {
+        self.selected.filter(|id| {
+            matches!(
+                self.document.item(*id).map(|i| &i.kind),
+                Some(ItemKind::Extrude(_))
+            )
+        })
     }
 
     fn selected_sketch(&self) -> Option<ItemId> {
@@ -216,10 +295,15 @@ impl PeetApp {
             // their own undo while being edited.
             CommandId::Undo | CommandId::Redo => enabled(false),
             CommandId::NewSketch => enabled(!in_sketch),
+            CommandId::Extrude | CommandId::CutExtrude => enabled(self.extrude_source().is_some()),
+            CommandId::ExportStl => enabled(!self.document.bodies.is_empty()),
             CommandId::EditSketch => enabled(!in_sketch && self.selected_sketch().is_some()),
             CommandId::ExitSketch => enabled(in_sketch),
             CommandId::Parameters => enabled(true),
-            CommandId::DeleteSelection => enabled(!in_sketch && self.selected_sketch().is_some()),
+            CommandId::DeleteSelection => enabled(
+                !in_sketch
+                    && (self.selected_sketch().is_some() || self.selected_extrude().is_some()),
+            ),
             CommandId::ViewIsometric
             | CommandId::ViewFront
             | CommandId::ViewBack
@@ -269,6 +353,15 @@ impl PeetApp {
             return;
         }
         match cmd {
+            CommandId::Extrude => self.start_extrude(peet_model::Operation::Add),
+            CommandId::CutExtrude => self.start_extrude(peet_model::Operation::Cut),
+            CommandId::ExportStl => self.export_stl(),
+            CommandId::NewSketch if self.selected_face_plane().is_some() => {
+                let plane = self.selected_face_plane().expect("checked");
+                let id = self.document.add_sketch(plane, "Face");
+                self.selected_geom.clear();
+                self.open_sketch(id);
+            }
             CommandId::NewSketch => match self.selected.and_then(|id| self.document.item(id)) {
                 Some(Item {
                     kind: ItemKind::ReferencePlane(plane),
@@ -287,9 +380,10 @@ impl PeetApp {
             CommandId::ExitSketch => self.close_sketch(),
             CommandId::Parameters => self.windows.parameters = true,
             CommandId::DeleteSelection => {
-                if let Some(id) = self.selected_sketch() {
+                if let Some(id) = self.selected_sketch().or_else(|| self.selected_extrude()) {
                     self.document.remove_item(id);
                     self.selected = None;
+                    self.document.rebuild();
                 }
             }
             CommandId::Undo | CommandId::Redo => {}
@@ -382,6 +476,8 @@ impl PeetApp {
                 }
             };
             ui.menu_button("File", |ui| {
+                item(ui, CommandId::ExportStl);
+                ui.separator();
                 item(ui, CommandId::Settings);
                 if CommandId::Quit.available() {
                     ui.separator();
@@ -414,6 +510,10 @@ impl PeetApp {
                 ui.separator();
                 item(ui, CommandId::ToggleConstruction);
                 item(ui, CommandId::ToggleRelations);
+            });
+            ui.menu_button("Features", |ui| {
+                item(ui, CommandId::Extrude);
+                item(ui, CommandId::CutExtrude);
             });
             ui.menu_button("Tools", |ui| {
                 item(ui, CommandId::Parameters);
@@ -481,7 +581,13 @@ impl PeetApp {
             tool(ui, CommandId::EditSketch, "Edit");
             tool(ui, CommandId::Parameters, "Parameters");
             ui.separator();
-            ui.weak("Features · Sheet Metal: coming soon");
+            ui.weak("Features");
+            tool(ui, CommandId::Extrude, "Extrude");
+            tool(ui, CommandId::CutExtrude, "Cut");
+            ui.separator();
+            tool(ui, CommandId::ExportStl, "Export STL");
+            ui.separator();
+            ui.weak("Sheet Metal: coming soon");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let palette = CommandId::CommandPalette;
                 let label = format!(
@@ -508,6 +614,8 @@ impl PeetApp {
                 }
             };
             tool(ui, CommandId::ExitSketch, "✔ Exit Sketch");
+            tool(ui, CommandId::Extrude, "Extrude");
+            tool(ui, CommandId::CutExtrude, "Cut");
             ui.separator();
             for (cmd, label) in [
                 (CommandId::SketchSelect, "Select"),
@@ -602,7 +710,20 @@ impl PeetApp {
             return;
         }
         ui.horizontal(|ui| {
-            ui.weak(self.settings.mouse_preset.status_hint());
+            if self.picking_up_to.is_some() {
+                ui.colored_label(
+                    egui::Color32::from_rgb(255, 150, 30),
+                    "Click a planar face parallel to the sketch (Up to face).",
+                );
+            } else if let Some((msg, error)) = &self.status_message {
+                if *error {
+                    ui.colored_label(egui::Color32::from_rgb(229, 72, 77), msg);
+                } else {
+                    ui.label(msg);
+                }
+            } else {
+                ui.weak(self.settings.mouse_preset.status_hint());
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label("mm");
                 ui.separator();
@@ -635,8 +756,15 @@ impl PeetApp {
                         }
                         last_was_reference = is_reference;
                         let row = ui.horizontal(|ui| {
-                            ui.checkbox(&mut item.visible, "")
-                                .on_hover_text(if item.visible { "Hide" } else { "Show" });
+                            if matches!(item.kind, ItemKind::Extrude(_)) {
+                                // Features have no visibility of their own.
+                                ui.add_space(
+                                    ui.spacing().interact_size.y + ui.spacing().item_spacing.x,
+                                );
+                            } else {
+                                ui.checkbox(&mut item.visible, "")
+                                    .on_hover_text(if item.visible { "Hide" } else { "Show" });
+                            }
                             let selected = self.selected == Some(item.id);
                             let text = match &item.kind {
                                 ItemKind::Sketch(s) => {
@@ -654,12 +782,23 @@ impl PeetApp {
                                     }
                                     t
                                 }
+                                ItemKind::Extrude(e) if e.error.is_some() => {
+                                    RichText::new(format!("⚠ {}", item.name))
+                                        .color(egui::Color32::from_rgb(229, 72, 77))
+                                }
                                 _ => RichText::new(&item.name),
                             };
                             let label = ui.selectable_label(selected, text);
                             if label.clicked() {
                                 self.selected = if selected { None } else { Some(item.id) };
                             }
+                            let label = match &item.kind {
+                                ItemKind::Extrude(e) => match &e.error {
+                                    Some(err) => label.on_hover_text(err),
+                                    None => label,
+                                },
+                                _ => label,
+                            };
                             if label.double_clicked() && matches!(item.kind, ItemKind::Sketch(_)) {
                                 self.selected = Some(item.id);
                                 pending.push(CommandId::EditSketch);
@@ -701,6 +840,39 @@ impl PeetApp {
         }
         ui.strong("Properties");
         ui.separator();
+        if let Some(id) = self.selected_extrude() {
+            let picking = self.picking_up_to == Some(id);
+            let name = self
+                .document
+                .item(id)
+                .map(|i| i.name.clone())
+                .unwrap_or_default();
+            ui.label(egui::RichText::new(name).strong());
+            let result = match self.document.extrude_mut(id) {
+                Some(ex) => crate::features_ui::extrude_panel(ui, ex, picking),
+                None => return,
+            };
+            if result.pick_up_to_face {
+                self.picking_up_to = Some(id);
+            }
+            if result.changed {
+                self.document.rebuild();
+            }
+            ui.add_space(8.0);
+            if let Some(sketch) = self.document.item(id).and_then(|i| match &i.kind {
+                ItemKind::Extrude(e) => Some(e.sketch),
+                _ => None,
+            }) && ui.button("Edit Sketch").clicked()
+            {
+                self.selected = Some(sketch);
+                pending.push(CommandId::EditSketch);
+            }
+            return;
+        }
+        if !self.selected_geom.is_empty() {
+            self.geometry_properties(ui);
+            return;
+        }
         let Some(item) = self.selected.and_then(|id| self.document.item_mut(id)) else {
             ui.weak("Select an item in the feature tree to see its properties.");
             return;
@@ -753,6 +925,7 @@ impl PeetApp {
                         ui.label(s.sketch.constraints().count().to_string());
                         ui.end_row();
                     }
+                    ItemKind::Extrude(_) => {}
                     ItemKind::Body { mesh } => {
                         let size = mesh.bounds().size();
                         ui.label("Size");
@@ -774,6 +947,67 @@ impl PeetApp {
             if ui.button("Edit Sketch").clicked() {
                 pending.push(CommandId::EditSketch);
             }
+        }
+    }
+
+    fn geometry_properties(&self, ui: &mut Ui) {
+        for g in &self.selected_geom {
+            let Some(body) = self.document.bodies.get(g.body()) else {
+                continue;
+            };
+            match *g {
+                GeomRef::Face { face, .. } => {
+                    let f = body.solid.face(face);
+                    let kind = match f.surface {
+                        peet_kernel::Surface::Plane(_) => "Planar face",
+                        peet_kernel::Surface::Cylinder(c) => {
+                            ui.label(format!(
+                                "Cylindrical face, R{}",
+                                sketch_ui::format_value(c.radius)
+                            ));
+                            continue;
+                        }
+                    };
+                    ui.label(kind);
+                }
+                GeomRef::Vertex { vertex, .. } => {
+                    let p = body.solid.vertex(vertex).point;
+                    ui.label(format!(
+                        "Vertex at {}, {}, {}",
+                        sketch_ui::format_value(p.x),
+                        sketch_ui::format_value(p.y),
+                        sketch_ui::format_value(p.z)
+                    ));
+                }
+                GeomRef::Edge { edge, .. } => {
+                    let e = body.solid.edge(edge);
+                    let len = body
+                        .tess
+                        .edges
+                        .iter()
+                        .find(|p| p.edge == edge)
+                        .map(|p| {
+                            p.points
+                                .windows(2)
+                                .map(|w| w[0].distance(w[1]))
+                                .sum::<f64>()
+                        })
+                        .unwrap_or(0.0);
+                    let kind = match e.curve {
+                        peet_kernel::Curve3::Line(_) => "Line edge",
+                        peet_kernel::Curve3::Circle(_) => "Circular edge",
+                        peet_kernel::Curve3::Ellipse(_) => "Elliptical edge",
+                    };
+                    ui.label(format!(
+                        "{kind}, length {} mm",
+                        sketch_ui::format_value(len)
+                    ));
+                }
+            }
+        }
+        if self.selected_face_plane().is_some() {
+            ui.add_space(6.0);
+            ui.weak("Press S to sketch on this face.");
         }
     }
 
@@ -1130,8 +1364,11 @@ impl eframe::App for PeetApp {
                     hovered: self.hovered,
                     dark,
                     editing_sketch: self.sketch.as_ref().map(|e| e.item),
+                    hovered_geom: if self.sketch.is_some() { None } else { self.hovered_geom },
+                    selected_geom: &self.selected_geom,
                 },
             );
+            self.hovered_geom = viewport.hovered_geom;
             if let Some(editor) = &mut self.sketch {
                 if let (Some(response), Some(item)) =
                     (&events.response, sketch_in(&mut self.document.items, editor.item))
@@ -1139,7 +1376,46 @@ impl eframe::App for PeetApp {
                     editor.show(ui, response, &viewport.camera, item, &self.document.parameters, dark);
                 }
             } else if events.clicked_background {
-                self.selected = None;
+                let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
+                if let Some(target) = self.picking_up_to.take() {
+                    // Finishing "Up to face": the clicked face sets the extrude's end.
+                    let plane = match events.clicked_geom {
+                        Some(GeomRef::Face { body, face }) => self
+                            .document
+                            .bodies
+                            .get(body)
+                            .and_then(|b| peet_model::face_sketch_plane(&b.solid, face)),
+                        _ => None,
+                    };
+                    match (plane, self.document.extrude_mut(target)) {
+                        (Some(plane), Some(ex)) => {
+                            ex.feature.end = peet_model::EndCondition::UpTo(plane);
+                            self.document.rebuild();
+                        }
+                        _ => {
+                            self.status_message =
+                                Some(("Up to face needs a planar face.".to_owned(), true));
+                        }
+                    }
+                    self.selected = Some(target);
+                } else if let Some(g) = events.clicked_geom {
+                    self.selected = None;
+                    if additive {
+                        if let Some(i) = self.selected_geom.iter().position(|x| *x == g) {
+                            self.selected_geom.remove(i);
+                        } else {
+                            self.selected_geom.push(g);
+                        }
+                    } else {
+                        self.selected_geom = vec![g];
+                    }
+                } else if let Some(plane) = events.clicked_plane {
+                    self.selected_geom.clear();
+                    self.selected = Some(plane);
+                } else {
+                    self.selected = None;
+                    self.selected_geom.clear();
+                }
             }
             if !self.initial_fit_done {
                 viewport.zoom_to_fit(&self.document.visible_bounds(), false);

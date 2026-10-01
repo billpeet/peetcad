@@ -1,0 +1,14 @@
+[package]
+name = "peet-io"
+description = "PeetCAD file formats: export and import (STL now; native format, DXF and STEP later)"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+peet-math.workspace = true
+
+[lints]
+workspace = true

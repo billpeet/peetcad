@@ -6,10 +6,12 @@
 
 pub mod camera;
 pub mod mesh;
+mod pick;
 mod renderer;
 
 pub use camera::{Camera, CameraAnimation, OrbitStyle, Projection, StandardView};
 pub use mesh::{ColorVertex, MeshData, MeshVertex, Overlay};
+pub use pick::{MAX_PICK_RADIUS_PX, PickHit, PickRequest, PickResult};
 pub use renderer::{
     COLOR_FORMAT, FrameInput, MeshId, ObjectDraw, RenderOutput, RenderStats, ViewStyle,
     ViewportRenderer,
@@ -30,6 +32,7 @@ mod shader_tests {
             ("grid", include_str!("shaders/grid.wgsl")),
             ("mesh", include_str!("shaders/mesh.wgsl")),
             ("color", include_str!("shaders/color.wgsl")),
+            ("pick", include_str!("shaders/pick.wgsl")),
         ];
         for (name, source) in shaders {
             let full = format!("{common}\n{source}");
@@ -44,7 +47,54 @@ mod shader_tests {
         }
     }
 
-    /// The Rust `Globals` struct must match the WGSL one byte for byte.
+    /// Every entry point must translate to GLSL ES 3.00, which is what the WebGL2
+    /// fallback runs.
+    #[test]
+    fn shaders_translate_to_webgl2_glsl() {
+        use naga::back::glsl;
+        let common = include_str!("shaders/common.wgsl");
+        let shaders = [
+            ("background", include_str!("shaders/background.wgsl")),
+            ("grid", include_str!("shaders/grid.wgsl")),
+            ("mesh", include_str!("shaders/mesh.wgsl")),
+            ("color", include_str!("shaders/color.wgsl")),
+            ("pick", include_str!("shaders/pick.wgsl")),
+        ];
+        for (name, source) in shaders {
+            let full = format!("{common}\n{source}");
+            let module = naga::front::wgsl::parse_str(&full).expect("parses");
+            let info = naga::valid::Validator::new(
+                naga::valid::ValidationFlags::all(),
+                naga::valid::Capabilities::empty(),
+            )
+            .validate(&module)
+            .expect("validates");
+            let options = glsl::Options {
+                version: glsl::Version::new_gles(300),
+                ..glsl::Options::default()
+            };
+            for entry in &module.entry_points {
+                let pipeline_options = glsl::PipelineOptions {
+                    shader_stage: entry.stage,
+                    entry_point: entry.name.clone(),
+                    multiview: None,
+                };
+                let mut out = String::new();
+                glsl::Writer::new(
+                    &mut out,
+                    &module,
+                    &info,
+                    &options,
+                    &pipeline_options,
+                    naga::proc::BoundsCheckPolicies::default(),
+                )
+                .and_then(|mut w| w.write().map(|_| ()))
+                .unwrap_or_else(|e| panic!("{name}.wgsl {}: {e}", entry.name));
+            }
+        }
+    }
+
+    /// The Rust `Globals` and `ObjectUniform` structs must match the WGSL ones byte for byte.
     #[test]
     fn globals_layout_matches_wgsl() {
         let full = format!(
@@ -62,5 +112,14 @@ mod shader_tests {
         layouter.update(module.to_ctx()).expect("layout");
         let wgsl_size = layouter[globals.0].size as usize;
         assert_eq!(wgsl_size, crate::renderer::GLOBALS_SIZE);
+        let object = module
+            .types
+            .iter()
+            .find(|(_, t)| t.name.as_deref() == Some("Object"))
+            .expect("Object struct");
+        assert_eq!(
+            layouter[object.0].size as usize,
+            crate::renderer::OBJECT_SIZE
+        );
     }
 }

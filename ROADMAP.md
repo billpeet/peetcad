@@ -151,17 +151,19 @@ Each phase ends with something usable and demonstrable. Estimates are rough and 
 ### Phase 2: Kernel v0 (analytic B-rep)
 *Goal: turn sketches into valid solids.*
 
-- [ ] Half-edge / winged B-rep topology: Solid → Shell → Face → Loop → Edge → Vertex
-- [ ] Geometry: plane, cylinder (surfaces); line, circle/arc (curves)
-- [ ] Topology validation (Euler checks, manifoldness, orientation)
-- [ ] Extrude (blind, symmetric, up-to) of sketch regions, including holes
-- [ ] Cut-extrude (planar/cylindrical booleans limited to what extrude and cut need)
-- [ ] Tessellation to render meshes with edges and silhouettes, cached per face
-- [ ] GPU picking of faces, edges and vertices, plus pre-selection highlighting
-- [ ] Sketch on face / on a reference plane
-- [ ] STL export (early, cheap win)
+- [x] Half-edge / winged B-rep topology: Solid → Shell → Face → Loop → Edge → Vertex
+- [x] Geometry: plane, cylinder (surfaces); line, circle/arc (curves)
+- [x] Topology validation (Euler checks, manifoldness, orientation)
+- [x] Extrude (blind, symmetric, up-to) of sketch regions, including holes
+- [x] Cut-extrude (planar/cylindrical booleans limited to what extrude and cut need)
+- [x] Tessellation to render meshes with edges and silhouettes, cached per face
+- [x] GPU picking of faces, edges and vertices, plus pre-selection highlighting
+- [x] Sketch on face / on a reference plane
+- [x] STL export (early, cheap win)
 
 **Exit criteria:** Sketch → extrude → sketch on a face → cut, with correct and valid topology.
+
+**Status:** Implemented in `peet-kernel` (B-rep, extrude, booleans, validation, tessellation; 96 tests including randomized boolean tests), `peet-model` (the extrude/cut feature), `peet-io` (STL) and picking in `peet-render`. `crates/peet-model/tests/exit_criterion.rs` runs the exit criterion headless twice (a plate with a pocket, through hole and boss; an L bracket with features cut from three directions) and checks validity, topology counts and exact volumes at every step. A 20-face body minus a box takes about 0.6 ms including validation. Still to do: a hands-on pass in the running app (extrude, cut, picking and STL export have only been tested headless or by the agents' GPU test). Known limits: crossing non-parallel cylinders (a hole drilled through another hole at an angle) are rejected with a clear error; "up to" only accepts planar faces parallel to the sketch; tessellation is cached per body, not per face; sketches on faces don't reference the face's edges yet; region selection is automatic (outer regions with their holes). Features are rebuilt from scratch on every change until Phase 3 adds incremental regeneration.
 
 ### Phase 3: Parametric core
 *Goal: a proper parametric history-based modeller.*

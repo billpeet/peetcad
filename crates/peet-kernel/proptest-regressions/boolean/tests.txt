@@ -1,0 +1,20 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5297db8bd116464cde9047854fa7b910100ccdca01e85e004f3b7d7b38b4ad5e # shrinks to a = GridBox { min: [0, 1, 2], max: [1, 3, 5] }, center = (3, 7), radius = 1, z = (2, 1), axis = 1
+cc a864f197f0724be091296d019d4400f8f7c43121570b52dde31df29b7be33f02 # shrinks to a = GridBox { min: [1, 2, 1], max: [4, 4, 2] }, b = GridBox { min: [2, 3, 0], max: [3, 4, 1] }
+cc 65217699f3547ec415d48a774f32941d722ea7afa37537b8da42cb7c79868fbf # shrinks to a = GridBox { min: [0, 0, 0], max: [3, 1, 1] }, b = GridBox { min: [0, 3, 1], max: [3, 4, 2] }, c = GridBox { min: [1, 2, 0], max: [2, 4, 2] }
+cc e578650ec8fa628f41daa50105a2b53f0487b0246277603ec9c7c1bdb3acea12 # shrinks to a = GridBox { min: [0, 0, 1], max: [1, 4, 4] }, center = (1, 3), radius = 1, z = (1, 1), axis = 1
+cc 3ec59cbc6401284b36e08efac8255209dc9b35e4bd47cb41f5553d47c3d2fce1 # shrinks to angle = 0.0, shift = (0.0, -2.00019019629525, 0.0), size = (0.5, 0.5, 0.5)
+cc 6933768b8ec213435c31905be444f4ccbfcb92cf35ecf4aff52657df2ce28de8 # shrinks to tools = [Tool { add: true, shape: GridBox { min: [3, 0, 2], max: [6, 3, 6] }, round: Some((1, 1)) }, Tool { add: false, shape: GridBox { min: [2, 0, 4], max: [6, 1, 6] }, round: Some((1, 2)) }]
+cc d5e936c1f45937318a2b37ec6fe30db08a9109aee5d27d7310e32238497b1ef4 # shrinks to tools = [Tool { add: false, shape: GridBox { min: [2, 1, 1], max: [6, 5, 3] }, round: Some((2, 3)) }, Tool { add: false, shape: GridBox { min: [2, 1, 3], max: [4, 4, 4] }, round: Some((2, 3)) }]
+cc 32c65e515048cb22e28ef422e36e4ddb326ed9f49e84f15d8770c21678f97cd3 # shrinks to tools = [Tool { add: true, shape: GridBox { min: [2, 3, 2], max: [3, 6, 6] }, round: Some((2, 2)) }, Tool { add: true, shape: GridBox { min: [2, 3, 3], max: [4, 5, 4] }, round: None }, Tool { add: false, shape: GridBox { min: [0, 2, 0], max: [4, 5, 2] }, round: Some((2, 1)) }]
+cc 0cab7542271db24495d58ac9e365ad6c4aa2ae34c0d2ecdb786c3949a76b1277 # shrinks to tools = [Tool { add: false, shape: GridBox { min: [3, 3, 0], max: [4, 4, 4] }, round: None }, Tool { add: true, shape: GridBox { min: [3, 2, 1], max: [5, 5, 2] }, round: Some((1, 2)) }, Tool { add: true, shape: GridBox { min: [1, 2, 0], max: [3, 5, 2] }, round: None }]
+cc a28b27d14b39d00b03a934a7890fcbaeecb21b90fcf398602dfd6b397df7aa84 # shrinks to tools = [Tool { add: false, shape: GridBox { min: [2, 0, 2], max: [4, 2, 3] }, round: Some((2, 2)) }, Tool { add: false, shape: GridBox { min: [2, 0, 0], max: [4, 2, 4] }, round: None }]
+cc 12cd576ce57cb9c092efa2368bf17eac8f7f6374a59ddc6348885733a03f02fc # shrinks to tools = [Tool { add: false, shape: GridBox { min: [0, 0, 3], max: [2, 1, 4] }, round: Some((2, 2)) }, Tool { add: false, shape: GridBox { min: [0, 1, 2], max: [2, 5, 5] }, round: Some((0, 3)) }]
+cc dd7bc55aa5030cf92bcede44345bef9981103be21d0c542404e579cdbe71d7e0 # shrinks to features = [Feature { add: false, plane: 2, profile: Slot([5, 6], [3, 8], 2), range: (0, 4) }, Feature { add: false, plane: 2, profile: Slot([7, 8], [4, 3], 1), range: (0, 1) }]
+cc 1f4bc615a0fb077b73ffe76d6de80f43622e96bea59ab861587d21aa4df4e26b # shrinks to angle = 2.363958894608904, shift = (-2.8254454502906725, -1.513612714688659, 0.5975874864183538), size = (0.7953092599294884, 3.4399585246874795, 1.8353091140038136)
+cc 72f2f6ff4fbeedcc8f158b37b8d9323d21eeb8533c5ac90bb0a0c1e568b128c9 # shrinks to angle = 0.0, shift = (-2.000001345945857, 0.0, 0.0), size = (0.5, 0.5, 0.5)

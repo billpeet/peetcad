@@ -65,6 +65,9 @@ pub enum CommandId {
     RelMidpoint,
     RelSymmetric,
     RelFix,
+    Extrude,
+    CutExtrude,
+    ExportStl,
 }
 
 /// Static description of a command.
@@ -93,7 +96,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 56] = [
+    pub const ALL: [Self; 59] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -150,6 +153,9 @@ impl CommandId {
         Self::RelMidpoint,
         Self::RelSymmetric,
         Self::RelFix,
+        Self::Extrude,
+        Self::CutExtrude,
+        Self::ExportStl,
     ];
 
     pub fn info(self) -> CommandInfo {
@@ -445,6 +451,24 @@ impl CommandId {
                 None,
             ),
             Self::RelFix => ("Fix", "Relation", "Fix geometry where it is now.", None),
+            Self::Extrude => (
+                "Extrude",
+                "Features",
+                "Extrude the selected (or open) sketch into a solid.",
+                None,
+            ),
+            Self::CutExtrude => (
+                "Cut-Extrude",
+                "Features",
+                "Cut the selected (or open) sketch's regions out of the bodies.",
+                None,
+            ),
+            Self::ExportStl => (
+                "Export STL…",
+                "File",
+                "Save the bodies as an STL mesh for 3D printing or other tools.",
+                None,
+            ),
         };
         CommandInfo {
             label,

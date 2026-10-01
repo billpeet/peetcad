@@ -12,6 +12,9 @@ peet-math.workspace = true
 peet-platform.workspace = true
 peet-render.workspace = true
 peet-sketch.workspace = true
+peet-kernel.workspace = true
+peet-model.workspace = true
+peet-io.workspace = true
 eframe = { workspace = true, features = ["wgpu", "persistence"] }
 egui.workspace = true
 log.workspace = true

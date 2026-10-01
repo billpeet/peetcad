@@ -11,6 +11,8 @@ use peet_sketch::Sketch;
 use peet_sketch::expr::Parameters;
 use peet_sketch::solver::DofStatus;
 
+use crate::bodies::Body;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ItemId(pub u32);
 
@@ -51,6 +53,17 @@ pub enum ItemKind {
         mesh: MeshData,
     },
     Sketch(Box<SketchItem>),
+    Extrude(Box<ExtrudeItem>),
+}
+
+/// An extrude (or cut-extrude) feature.
+#[derive(Clone, Debug)]
+pub struct ExtrudeItem {
+    /// The sketch whose regions are extruded.
+    pub sketch: ItemId,
+    pub feature: peet_model::Extrude,
+    /// Why the last rebuild of this feature failed, if it did.
+    pub error: Option<String>,
 }
 
 /// A sketch placed on a plane.
@@ -101,6 +114,8 @@ impl ItemKind {
             Self::ReferencePlane(_) => "Reference plane",
             Self::Body { .. } => "Solid body",
             Self::Sketch(_) => "Sketch",
+            Self::Extrude(e) if e.feature.operation == peet_model::Operation::Cut => "Cut-extrude",
+            Self::Extrude(_) => "Extrude",
         }
     }
 }
@@ -119,8 +134,13 @@ pub struct Document {
     pub items: Vec<Item>,
     /// Named parameters usable in dimension expressions.
     pub parameters: Parameters,
+    /// The solids the features build, in feature order (rebuilt by [`Document::rebuild`]).
+    pub bodies: Vec<Body>,
+    /// Incremented on every rebuild, so the viewport knows to re-upload meshes.
+    pub revision: u64,
     next_id: u32,
     next_sketch_number: u32,
+    next_extrude_number: u32,
 }
 
 pub const DEMO_BODY: ItemId = ItemId(100);
@@ -140,17 +160,23 @@ impl Default for Document {
                 item(1, "Front Plane", ItemKind::ReferencePlane(RefPlane::Front)),
                 item(2, "Top Plane", ItemKind::ReferencePlane(RefPlane::Top)),
                 item(3, "Right Plane", ItemKind::ReferencePlane(RefPlane::Right)),
-                item(
-                    DEMO_BODY.0,
-                    "Demo U-Channel",
-                    ItemKind::Body {
-                        mesh: peet_render::mesh::demo::u_channel(),
-                    },
-                ),
+                Item {
+                    visible: false,
+                    ..item(
+                        DEMO_BODY.0,
+                        "Demo U-Channel",
+                        ItemKind::Body {
+                            mesh: peet_render::mesh::demo::u_channel(),
+                        },
+                    )
+                },
             ],
             parameters: Parameters::default(),
+            bodies: Vec::new(),
+            revision: 0,
             next_id: 1000,
             next_sketch_number: 1,
+            next_extrude_number: 1,
         }
     }
 }
@@ -176,6 +202,84 @@ impl Document {
         id
     }
 
+    /// Adds an extrude feature using `sketch`, after the existing items, and rebuilds.
+    pub fn add_extrude(&mut self, sketch: ItemId, operation: peet_model::Operation) -> ItemId {
+        let id = ItemId(self.next_id);
+        self.next_id += 1;
+        let prefix = if operation == peet_model::Operation::Cut {
+            "Cut-Extrude"
+        } else {
+            "Extrude"
+        };
+        let name = format!("{prefix}{}", self.next_extrude_number);
+        self.next_extrude_number += 1;
+        let mut feature = peet_model::Extrude::new(operation);
+        if operation == peet_model::Operation::Add && self.bodies.is_empty() {
+            feature.operation = peet_model::Operation::NewBody;
+        }
+        self.items.push(Item {
+            id,
+            name,
+            kind: ItemKind::Extrude(Box::new(ExtrudeItem {
+                sketch,
+                feature,
+                error: None,
+            })),
+            visible: true,
+        });
+        // A sketch used by a feature is hidden, as in other CAD tools.
+        if let Some(item) = self.item_mut(sketch) {
+            item.visible = false;
+        }
+        self.rebuild();
+        id
+    }
+
+    pub fn extrude_mut(&mut self, id: ItemId) -> Option<&mut ExtrudeItem> {
+        match &mut self.item_mut(id)?.kind {
+            ItemKind::Extrude(e) => Some(e),
+            _ => None,
+        }
+    }
+
+    /// Re-runs every feature in order, rebuilding the bodies and their display meshes.
+    /// A failing feature is skipped (and keeps its error), so the rest still builds.
+    pub fn rebuild(&mut self) {
+        let mut solids: Vec<peet_kernel::Solid> = Vec::new();
+        let mut errors: Vec<(ItemId, Option<String>)> = Vec::new();
+        for (index, item) in self.items.iter().enumerate() {
+            let ItemKind::Extrude(ex) = &item.kind else {
+                continue;
+            };
+            let sketch = self.items[..index].iter().find_map(|i| match &i.kind {
+                ItemKind::Sketch(s) if i.id == ex.sketch => Some(s),
+                _ => None,
+            });
+            let result = match sketch {
+                None => Err("Its sketch was deleted, or comes after it in the tree.".to_owned()),
+                Some(s) => peet_model::apply_extrude(&mut solids, &s.plane, &s.sketch, &ex.feature)
+                    .map_err(|e| e.0),
+            };
+            errors.push((item.id, result.err()));
+        }
+        for (id, error) in errors {
+            if let Some(ex) = self.extrude_mut(id) {
+                ex.error = error;
+            }
+        }
+        self.bodies = solids.into_iter().map(Body::new).collect();
+        self.revision += 1;
+        // A body that can't be displayed is a bug, but must not go unnoticed.
+        if let Some(e) = self.bodies.iter().find_map(|b| b.error.clone())
+            && let Some(last) = self.items.iter_mut().rev().find_map(|i| match &mut i.kind {
+                ItemKind::Extrude(x) if x.error.is_none() => Some(x),
+                _ => None,
+            })
+        {
+            last.error = Some(format!("The result can't be displayed: {e}"));
+        }
+    }
+
     pub fn sketch(&self, id: ItemId) -> Option<&SketchItem> {
         match &self.item(id)?.kind {
             ItemKind::Sketch(s) => Some(s),
@@ -198,14 +302,16 @@ impl Document {
     /// Bounds of all visible bodies (reference geometry is excluded, as in other CAD tools'
     /// "zoom to fit").
     pub fn visible_body_bounds(&self) -> Aabb {
-        self.items
+        let meshes = self
+            .items
             .iter()
             .filter(|i| i.visible)
             .filter_map(|i| match &i.kind {
                 ItemKind::Body { mesh } => Some(mesh.bounds()),
                 _ => None,
-            })
-            .fold(Aabb::EMPTY, |a, b| a.union(&b))
+            });
+        let solids = self.bodies.iter().map(|b| b.solid.bounds());
+        meshes.chain(solids).fold(Aabb::EMPTY, |a, b| a.union(&b))
     }
 
     /// Bounds of all visible bodies and sketches: what "zoom to fit" frames.
@@ -260,4 +366,70 @@ pub fn sketch_bounds(item: &SketchItem) -> Aabb {
         }
     }
     bounds
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use peet_math::DVec2;
+
+    fn doc_with_extruded_rectangle() -> (Document, ItemId, ItemId) {
+        let mut doc = Document::default();
+        let sketch = doc.add_sketch(Plane::TOP, "Top Plane");
+        if let Some(Item {
+            kind: ItemKind::Sketch(s),
+            ..
+        }) = doc.item_mut(sketch)
+        {
+            peet_sketch::shapes::rectangle(&mut s.sketch, DVec2::ZERO, DVec2::new(40.0, 20.0));
+        }
+        let ex = doc.add_extrude(sketch, peet_model::Operation::Add);
+        (doc, sketch, ex)
+    }
+
+    #[test]
+    fn extrude_builds_a_body_and_hides_its_sketch() {
+        let (doc, sketch, ex) = doc_with_extruded_rectangle();
+        assert_eq!(doc.bodies.len(), 1);
+        let ItemKind::Extrude(e) = &doc.item(ex).unwrap().kind else {
+            panic!()
+        };
+        assert_eq!(e.error, None);
+        assert_eq!(
+            e.feature.operation,
+            peet_model::Operation::NewBody,
+            "first body"
+        );
+        assert!(!doc.item(sketch).unwrap().visible);
+        let body = &doc.bodies[0];
+        assert!(!body.mesh.indices.is_empty());
+        assert_eq!(body.mesh.pick_ids.len(), body.mesh.vertices.len());
+        assert_eq!(body.mesh.edge_pick_ids.len() * 2, body.mesh.edges.len());
+        let size = doc.visible_body_bounds().size();
+        assert!((size.x - 40.0).abs() < 1e-9 && (size.z - 10.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn failing_feature_keeps_the_rest() {
+        let (mut doc, sketch, ex) = doc_with_extruded_rectangle();
+        let rev = doc.revision;
+        doc.remove_item(sketch);
+        doc.rebuild();
+        assert!(doc.revision > rev);
+        let ItemKind::Extrude(e) = &doc.item(ex).unwrap().kind else {
+            panic!()
+        };
+        assert!(e.error.as_deref().unwrap().contains("sketch"));
+        assert!(doc.bodies.is_empty());
+        // Zero depth explains itself.
+        let (mut doc, _, ex) = doc_with_extruded_rectangle();
+        doc.extrude_mut(ex).unwrap().feature.depth = 0.0;
+        doc.rebuild();
+        let e = doc.extrude_mut(ex).unwrap();
+        assert!(
+            e.error.as_deref().unwrap().contains("depth"),
+            "{:?}",
+            e.error
+        );
+    }
 }

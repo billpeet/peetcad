@@ -8,6 +8,9 @@
 //! phases need them.
 
 pub mod crash;
+mod files;
+
+pub use files::{SaveOutcome, save_file};
 
 /// Monotonic clock that works on native and in the browser (`std::time::Instant` panics on wasm32).
 pub use web_time::{Duration, Instant, SystemTime, UNIX_EPOCH};

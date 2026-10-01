@@ -1,7 +1,5 @@
 // Shaded, two-sided solid meshes lit by a camera-attached key light.
 
-@group(1) @binding(0) var<uniform> object: Object;
-
 struct MeshIn {
     @location(0) position: vec3<f32>,
     @location(1) normal: vec3<f32>,

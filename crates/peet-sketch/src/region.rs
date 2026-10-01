@@ -73,16 +73,29 @@ impl Loop {
         let mut total = 0.0;
         for e in &self.edges {
             let (a, b) = (e.curve.start(), e.curve.end());
-            let mut w = (a - p).angle_to(b - p);
-            // Inside the circular segment between an arc and its chord, the arc sweeps a
-            // full turn more around `p` than the chord does. For a counter-clockwise arc
-            // the segment lies to the right of the chord.
-            if let Curve::Arc { center, radius, .. } = e.curve
-                && p.distance(center) < radius
-                && (b - a).perp_dot(p - a) < 0.0
-            {
-                w += TAU;
-            }
+            let chord = (a - p).angle_to(b - p);
+            let w = match e.curve {
+                // Seen from inside its circle, a counter-clockwise arc always sweeps a
+                // positive angle: the chord's angle taken in 0..2π (a full turn when the
+                // arc is the whole circle). From outside, it sweeps what its chord does.
+                Curve::Arc {
+                    center,
+                    radius,
+                    sweep,
+                    ..
+                } if p.distance(center) < radius => {
+                    let w = chord.rem_euclid(TAU);
+                    if sweep > std::f64::consts::PI && w < 1e-9 {
+                        TAU
+                    } else if sweep < std::f64::consts::PI && w > TAU - 1e-9 {
+                        0.0
+                    } else {
+                        w
+                    }
+                }
+                Curve::Circle { center, radius } if p.distance(center) < radius => TAU,
+                _ => chord,
+            };
             total += if e.reversed { -w } else { w };
         }
         (total / TAU).round() as i32
@@ -891,5 +904,41 @@ mod tests {
         let plate = &p.regions[p.region_at(DVec2::new(1.0, 1.0)).unwrap()];
         assert_eq!(plate.holes.len(), 32);
         eprintln!("find_regions on 84 curves: {elapsed:?}");
+    }
+}
+
+#[cfg(test)]
+mod winding_tests {
+    use super::*;
+    use crate::Sketch;
+
+    #[test]
+    fn region_at_centres_and_centrelines() {
+        let mut s = Sketch::new();
+        s.add_circle(DVec2::new(5.0, 5.0), 3.0);
+        let slot = crate::shapes::slot(&mut s, DVec2::new(20.0, 0.0), DVec2::new(40.0, 0.0), 4.0);
+        // The slot's construction centreline must not matter.
+        assert!(!slot.curves.is_empty());
+        let profile = find_regions(&s);
+        assert_eq!(profile.regions.len(), 2);
+        assert!(
+            profile.region_at(DVec2::new(5.0, 5.0)).is_some(),
+            "circle centre"
+        );
+        assert!(
+            profile.region_at(DVec2::new(30.0, 0.0)).is_some(),
+            "slot centreline"
+        );
+        assert!(
+            profile.region_at(DVec2::new(20.0, 0.0)).is_some(),
+            "slot arc centre"
+        );
+        assert!(
+            profile.region_at(DVec2::new(43.9, 0.0)).is_some(),
+            "inside the end arc"
+        );
+        assert!(profile.region_at(DVec2::new(44.1, 0.0)).is_none());
+        assert!(profile.region_at(DVec2::new(5.0, 8.1)).is_none());
+        assert!(profile.region_at(DVec2::new(12.0, 0.0)).is_none());
     }
 }
