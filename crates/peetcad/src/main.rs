@@ -19,8 +19,48 @@ fn install_crash_reporting() {
     });
 }
 
+/// `peetcad dump part.peet [part.ron]` and `peetcad pack part.ron part.peet`: convert
+/// between the binary format and readable text, for diffs and debugging. Returns `None`
+/// when the arguments are not a command (start the app).
+#[cfg(not(target_arch = "wasm32"))]
+fn command_line() -> Option<Result<(), String>> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let read = |p: &str| std::fs::read(p).map_err(|e| format!("Couldn't read {p}: {e}"));
+    let write =
+        |p: &str, b: &[u8]| std::fs::write(p, b).map_err(|e| format!("Couldn't write {p}: {e}"));
+    match args.iter().map(String::as_str).collect::<Vec<_>>()[..] {
+        ["dump", input, ref rest @ ..] if rest.len() <= 1 => Some((|| {
+            let text = peet_io::document::to_text(&read(input)?).map_err(|e| e.message)?;
+            match rest.first() {
+                Some(out) => write(out, text.as_bytes()),
+                None => {
+                    println!("{text}");
+                    Ok(())
+                }
+            }
+        })()),
+        ["pack", input, output] => Some((|| {
+            let text = String::from_utf8(read(input)?)
+                .map_err(|_| format!("{input} is not UTF-8 text"))?;
+            write(output, &peet_io::document::from_text(&text).map_err(|e| e.message)?)
+        })()),
+        ["dump" | "pack", ..] | ["--help" | "-h"] => Some(Err(
+            "Usage:\n  peetcad dump PART.peet [OUT.ron]   write a part as readable text\n  peetcad pack IN.ron PART.peet      turn the text back into a part"
+                .to_owned(),
+        )),
+        _ => None,
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
+    if let Some(result) = command_line() {
+        if let Err(e) = result {
+            eprintln!("{e}");
+            std::process::exit(1);
+        }
+        return Ok(());
+    }
     let process_start = Instant::now();
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"),

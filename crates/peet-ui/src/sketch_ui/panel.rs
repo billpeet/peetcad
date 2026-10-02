@@ -34,6 +34,7 @@ impl SketchEditor {
         item: &mut SketchItem,
         params: &Parameters,
     ) -> Option<CommandId> {
+        super::set_display_units(params);
         let mut picked = None;
         let dark = ui.visuals().dark_mode;
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -344,7 +345,7 @@ impl SketchEditor {
                 let key = egui::Id::new(("dim_value", id.0));
                 let mut text = ui
                     .data(|m| m.get_temp::<String>(key))
-                    .unwrap_or_else(|| d.expression.clone().unwrap_or_else(|| format_value(d.value)));
+                    .unwrap_or_else(|| d.expression.clone().unwrap_or_else(|| super::dim_value_text(&c.kind, d.value)));
                 let r = ui.add_enabled(
                     d.driving,
                     egui::TextEdit::singleline(&mut text)
@@ -356,7 +357,7 @@ impl SketchEditor {
                 }
                 if r.lost_focus() {
                     ui.data_mut(|m| m.remove::<String>(key));
-                    let current = d.expression.clone().unwrap_or_else(|| format_value(d.value));
+                    let current = d.expression.clone().unwrap_or_else(|| super::dim_value_text(&c.kind, d.value));
                     if text.trim() != current && !ui.input(|i| i.key_pressed(egui::Key::Escape)) {
                         self.checked_edit(item, "Dimension", |s| {
                             super::set_dimension(s, params, id, &text)
@@ -367,8 +368,8 @@ impl SketchEditor {
 
                 if d.expression.is_some() {
                     ui.label("Result");
-                    let unit = if c.kind.is_angular() { "°" } else { " mm" };
-                    ui.monospace(format!("{}{unit}", format_value(d.value)));
+                    let unit = if c.kind.is_angular() { "°".to_owned() } else { format!(" {}", super::length_suffix()) };
+                    ui.monospace(format!("{}{unit}", super::dim_value_text(&c.kind, d.value)));
                     ui.end_row();
                 }
 
@@ -527,12 +528,12 @@ fn geometry_details(ui: &mut Ui, sketch: &Sketch, e: peet_sketch::EntityId) {
             match kind {
                 EntityKind::Point => {
                     let p = sketch.point(e);
-                    row(ui, "X", format!("{} mm", format_value(p.x)));
-                    row(ui, "Y", format!("{} mm", format_value(p.y)));
+                    row(ui, "X", super::length_with_unit(p.x));
+                    row(ui, "Y", super::length_with_unit(p.y));
                 }
                 EntityKind::Line => {
                     if let Some(c) = sketch.curve(e) {
-                        row(ui, "Length", format!("{} mm", format_value(c.length())));
+                        row(ui, "Length", super::length_with_unit(c.length()));
                         if let Some(d) = c.line_direction() {
                             row(
                                 ui,
@@ -546,14 +547,18 @@ fn geometry_details(ui: &mut Ui, sketch: &Sketch, e: peet_sketch::EntityId) {
                     if let Some(c) = sketch.curve(e) {
                         let r = c.radius().unwrap_or(0.0);
                         let center = c.center().unwrap_or_default();
-                        row(ui, "Radius", format!("{} mm", format_value(r)));
+                        row(ui, "Radius", super::length_with_unit(r));
                         row(
                             ui,
                             "Centre",
-                            format!("{}, {}", format_value(center.x), format_value(center.y)),
+                            format!(
+                                "{}, {}",
+                                super::length_text(center.x),
+                                super::length_text(center.y)
+                            ),
                         );
                         if kind == EntityKind::Arc {
-                            row(ui, "Length", format!("{} mm", format_value(c.length())));
+                            row(ui, "Length", super::length_with_unit(c.length()));
                         }
                     }
                 }

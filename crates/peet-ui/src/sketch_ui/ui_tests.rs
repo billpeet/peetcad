@@ -29,7 +29,7 @@ fn harness() -> Harness<'static, State> {
         sketch: Sketch::new(),
         status: SketchStatus::Under,
     };
-    let editor = SketchEditor::new(ItemId(1000), &mut item);
+    let editor = SketchEditor::new(ItemId::Feature(peet_model::FeatureId(1000)), &mut item);
     let camera = Camera {
         rotation: StandardView::Top.rotation(),
         projection: Projection::Orthographic,

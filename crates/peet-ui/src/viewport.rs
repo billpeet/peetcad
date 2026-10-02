@@ -13,9 +13,10 @@ use peet_render::{
 };
 
 use crate::bodies::GeomRef;
-use crate::document::{Document, ItemId, ItemKind};
+use crate::document::{Document, ItemId};
 use crate::settings::{NavAction, Settings};
 use crate::view_cube;
+use peet_model::{Datum, FeatureKind, Output};
 
 /// What happened in the viewport this frame that the app needs to react to.
 #[derive(Default)]
@@ -51,9 +52,9 @@ pub struct Viewport {
     renderer: ViewportRenderer,
     texture_id: Option<egui::TextureId>,
     overlay: Overlay,
-    meshes: HashMap<ItemId, MeshId>,
-    /// GPU meshes of the document's bodies, and the document revision they were built from.
-    body_meshes: Vec<MeshId>,
+
+    /// GPU meshes of the document's bodies by body stamp, and the document revision.
+    body_meshes: Vec<(u64, MeshId)>,
     body_revision: Option<u64>,
     active_drag: Option<NavAction>,
     /// MSAA sample count in use.
@@ -94,7 +95,7 @@ impl Viewport {
             renderer: ViewportRenderer::new(&render_state.device, samples),
             texture_id: None,
             overlay: Overlay::default(),
-            meshes: HashMap::new(),
+
             body_meshes: Vec::new(),
             body_revision: None,
             active_drag: None,
@@ -213,40 +214,17 @@ impl Viewport {
         self.build_overlay(params, wpp);
         self.body_overlay(params, wpp);
 
-        let objects: Vec<ObjectDraw> = params
-            .document
-            .items
+        let objects: Vec<ObjectDraw> = self
+            .body_meshes
             .iter()
-            .filter(|item| item.visible)
-            .filter_map(|item| {
-                let mesh = *self.meshes.get(&item.id)?;
-                let highlight = if params.selected == Some(item.id) {
-                    1.0
-                } else if params.hovered == Some(item.id) {
-                    0.5
-                } else {
-                    0.0
-                };
-                Some(ObjectDraw {
-                    mesh,
-                    transform: DMat4::IDENTITY,
-                    show_edges: true,
-                    highlight,
-                    ..ObjectDraw::default()
-                })
+            .enumerate()
+            .map(|(i, (_, mesh))| ObjectDraw {
+                mesh: *mesh,
+                transform: DMat4::IDENTITY,
+                show_edges: true,
+                highlight: 0.0,
+                pick_object: Some(i as u32),
             })
-            .chain(
-                self.body_meshes
-                    .iter()
-                    .enumerate()
-                    .map(|(i, mesh)| ObjectDraw {
-                        mesh: *mesh,
-                        transform: DMat4::IDENTITY,
-                        show_edges: true,
-                        highlight: 0.0,
-                        pick_object: Some(i as u32),
-                    }),
-            )
             .collect();
 
         let mut scene_bounds = params.document.visible_body_bounds();
@@ -469,31 +447,30 @@ impl Viewport {
     }
 
     fn sync_meshes(&mut self, params: &ViewportParams<'_>) {
-        if self.body_revision != Some(params.document.revision) {
-            for id in self.body_meshes.drain(..) {
-                self.renderer.remove_mesh(id);
-            }
-            for body in &params.document.bodies {
-                let id = self
+        if self.body_revision == Some(params.document.revision) {
+            return;
+        }
+        // GPU meshes are kept per body stamp: unchanged bodies keep theirs.
+        let mut old: HashMap<u64, MeshId> = self.body_meshes.drain(..).collect();
+        for body in &params.document.bodies {
+            let id = match old.remove(&body.stamp) {
+                Some(id) => id,
+                None => self
                     .renderer
-                    .upload_mesh(&params.render_state.device, &body.mesh);
-                self.body_meshes.push(id);
-            }
-            self.body_revision = Some(params.document.revision);
+                    .upload_mesh(&params.render_state.device, &body.mesh),
+            };
+            self.body_meshes.push((body.stamp, id));
         }
-        for item in &params.document.items {
-            if let ItemKind::Body { mesh } = &item.kind
-                && !self.meshes.contains_key(&item.id)
-            {
-                let id = self.renderer.upload_mesh(&params.render_state.device, mesh);
-                self.meshes.insert(item.id, id);
-            }
+        for id in old.into_values() {
+            self.renderer.remove_mesh(id);
         }
+        self.body_revision = Some(params.document.revision);
     }
 
     fn build_overlay(&mut self, params: &ViewportParams<'_>, wpp: f64) {
         self.overlay.clear();
         let doc = params.document;
+        let eval = doc.evaluation();
 
         // Reference planes are sized to comfortably frame the visible bodies and sketches.
         let bounds = doc.visible_bounds();
@@ -521,85 +498,181 @@ impl Viewport {
                     [30, 100, 230, 255],
                 )
             };
+        let highlighted = |item: ItemId| {
+            params.selected == Some(item)
+                || params.hovered == Some(item)
+                || self.hovered_plane == Some(item)
+        };
+        let mut quads = Vec::new();
+        let mut lines: Vec<(DVec3, DVec3, [u8; 4])> = Vec::new();
+        let mut plane_quad = |plane: &Plane, hi: bool, half: f64| {
+            let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                .map(|(u, v)| plane.from_plane_coords(DVec2::new(u, v) * half));
+            quads.push((corners, hi));
+        };
 
-        for item in doc.items.iter().filter(|i| i.visible) {
-            let highlighted = params.selected == Some(item.id)
-                || params.hovered == Some(item.id)
-                || self.hovered_plane == Some(item.id);
-            match &item.kind {
-                ItemKind::ReferencePlane(which) => {
-                    let plane = which.plane();
-                    let corners = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
-                        .map(|(u, v)| plane.from_plane_coords(DVec2::new(u, v) * half));
-                    if highlighted {
-                        self.overlay.quad(corners, fill_hi, outline_hi);
-                    } else {
-                        self.overlay.quad(corners, fill, outline);
-                    }
-                }
-                ItemKind::Origin => {
+        for datum in Datum::ALL {
+            let item = ItemId::Datum(datum);
+            if !doc.model.datum_visible(datum) {
+                continue;
+            }
+            let hi = highlighted(item);
+            match datum {
+                Datum::Plane(p) => plane_quad(&p.plane(), hi, half),
+                Datum::Origin => {
                     // Constant on-screen size, like other CAD tools' origin marker.
                     let len = wpp * 36.0;
-                    let alpha = if highlighted { 255 } else { 210 };
-                    self.overlay
-                        .line(DVec3::ZERO, DVec3::X * len, [226, 86, 86, alpha]);
-                    self.overlay
-                        .line(DVec3::ZERO, DVec3::Y * len, [112, 196, 92, alpha]);
-                    self.overlay
-                        .line(DVec3::ZERO, DVec3::Z * len, [84, 146, 240, alpha]);
+                    let alpha = if hi { 255 } else { 210 };
+                    lines.push((DVec3::ZERO, DVec3::X * len, [226, 86, 86, alpha]));
+                    lines.push((DVec3::ZERO, DVec3::Y * len, [112, 196, 92, alpha]));
+                    lines.push((DVec3::ZERO, DVec3::Z * len, [84, 146, 240, alpha]));
                 }
-                ItemKind::Body { .. } | ItemKind::Extrude(_) => {}
-                ItemKind::Sketch(sketch) => {
-                    if params.editing_sketch == Some(item.id) {
+            }
+        }
+
+        let reference = if params.dark {
+            [230, 190, 120, 220]
+        } else {
+            [170, 110, 20, 220]
+        };
+        for feature in doc.model.features() {
+            let item = ItemId::Feature(feature.id);
+            let hi = highlighted(item);
+            // Hidden features still show while selected or hovered in the tree.
+            if !feature.visible && !hi {
+                continue;
+            }
+            let built = eval.status(feature.id).is_some_and(|s| s.is_built());
+            let color = if hi { outline_hi } else { reference };
+            match (&feature.kind, eval.output(feature.id)) {
+                (FeatureKind::Sketch(s), _) => {
+                    if params.editing_sketch == Some(item) {
                         continue;
                     }
-                    let color = if highlighted {
+                    let Some((plane, _)) = doc.sketch_placement(feature.id) else {
+                        continue;
+                    };
+                    let color = if hi {
                         outline_hi
+                    } else if !built {
+                        [150, 150, 150, 160]
                     } else if params.dark {
                         [150, 190, 255, 230]
                     } else {
                         [40, 90, 190, 230]
                     };
-                    let plane = sketch.plane;
-                    for (id, e) in sketch.sketch.entities() {
+                    for (id, e) in s.sketch.entities() {
                         if e.construction {
                             continue;
                         }
-                        let Some(curve) = sketch.sketch.curve(id) else {
+                        let Some(curve) = s.sketch.curve(id) else {
                             continue;
                         };
                         let pts = curve.tessellate(wpp * 0.5);
                         for w in pts.windows(2) {
-                            self.overlay.line(
+                            lines.push((
                                 plane.from_plane_coords(w[0]),
                                 plane.from_plane_coords(w[1]),
                                 color,
-                            );
+                            ));
                         }
                     }
                 }
+                (_, Output::Plane(plane)) => {
+                    // Centred where the plane is nearest the part, so it frames it.
+                    let centre = plane.project_point(bounds.center().max(DVec3::splat(-1e9)));
+                    let centre = if bounds.is_empty() {
+                        plane.origin()
+                    } else {
+                        centre
+                    };
+                    let local = Plane {
+                        frame: peet_math::Frame {
+                            origin: centre,
+                            ..plane.frame
+                        },
+                    };
+                    plane_quad(&local, hi, half * 0.8);
+                }
+                (_, Output::Axis(axis)) => {
+                    let len = half * 1.2;
+                    let (a, b) = (axis.origin - axis.dir * len, axis.origin + axis.dir * len);
+                    // Dashed.
+                    let steps = 40;
+                    for i in (0..steps).step_by(2) {
+                        let t0 = i as f64 / steps as f64;
+                        let t1 = (i + 1) as f64 / steps as f64;
+                        lines.push((a.lerp(b, t0), a.lerp(b, t1), color));
+                    }
+                }
+                (_, Output::Point(p)) => {
+                    let r = wpp * 6.0;
+                    for d in [DVec3::X, DVec3::Y, DVec3::Z] {
+                        lines.push((p - d * r, p + d * r, color));
+                    }
+                }
+                (_, Output::Frame(frame)) => {
+                    let len = wpp * 50.0;
+                    let alpha = if hi { 255 } else { 220 };
+                    let o = frame.origin;
+                    lines.push((o, o + frame.x_axis() * len, [226, 86, 86, alpha]));
+                    lines.push((o, o + frame.y_axis() * len, [112, 196, 92, alpha]));
+                    lines.push((o, o + frame.z_axis() * len, [84, 146, 240, alpha]));
+                }
+                _ => {}
             }
+        }
+        for (corners, hi) in quads {
+            if hi {
+                self.overlay.quad(corners, fill_hi, outline_hi);
+            } else {
+                self.overlay.quad(corners, fill, outline);
+            }
+        }
+        for (a, b, c) in lines {
+            self.overlay.line(a, b, c);
         }
     }
 }
 
 impl Viewport {
-    /// The visible reference plane under a screen position (nearest along the ray).
+    /// The visible standard or reference plane under a screen position (nearest along the
+    /// ray).
     fn plane_at(&self, params: &ViewportParams<'_>, rect: Rect, p: egui::Pos2) -> Option<ItemId> {
         let ray = self.camera.ray(ndc(rect, p), self.aspect());
-        params
-            .document
-            .items
-            .iter()
-            .filter(|i| i.visible)
-            .filter_map(|i| match i.kind {
-                ItemKind::ReferencePlane(which) => {
-                    let plane = which.plane();
-                    let t = plane.intersect_ray(&ray)?;
-                    let uv = plane.to_plane_coords(ray.at(t));
-                    (uv.abs().max_element() <= self.plane_half).then_some((t, i.id))
+        let doc = params.document;
+        let datums = Datum::ALL.into_iter().filter_map(|d| match d {
+            Datum::Plane(p) if doc.model.datum_visible(d) => {
+                Some((ItemId::Datum(d), p.plane(), 1.0))
+            }
+            _ => None,
+        });
+        let bounds = doc.visible_bounds();
+        let features = doc.model.features().filter(|f| f.visible).filter_map(|f| {
+            match doc.evaluation().output(f.id) {
+                Output::Plane(plane) => {
+                    let centre = if bounds.is_empty() {
+                        plane.origin()
+                    } else {
+                        plane.project_point(bounds.center())
+                    };
+                    let local = Plane {
+                        frame: peet_math::Frame {
+                            origin: centre,
+                            ..plane.frame
+                        },
+                    };
+                    Some((ItemId::Feature(f.id), local, 0.8))
                 }
                 _ => None,
+            }
+        });
+        datums
+            .chain(features)
+            .filter_map(|(item, plane, scale)| {
+                let t = plane.intersect_ray(&ray)?;
+                let uv = plane.to_plane_coords(ray.at(t));
+                (uv.abs().max_element() <= self.plane_half * scale).then_some((t, item))
             })
             .min_by(|a, b| a.0.total_cmp(&b.0))
             .map(|(_, id)| id)

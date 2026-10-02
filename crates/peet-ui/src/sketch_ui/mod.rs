@@ -743,6 +743,7 @@ impl SketchEditor {
         params: &Parameters,
         dark: bool,
     ) {
+        set_display_units(params);
         let view = SketchView::new(camera, response.rect, item.plane);
         self.cursor = response
             .hover_pos()
@@ -1076,7 +1077,7 @@ pub fn describe_constraint(sketch: &Sketch, id: ConstraintId) -> String {
         return format!(
             "{} = {}{unit} ({})",
             d.name,
-            format_value(d.value),
+            dim_value_text(&c.kind, d.value),
             c.kind.label()
         );
     }
@@ -1087,6 +1088,41 @@ pub fn describe_constraint(sketch: &Sketch, id: ConstraintId) -> String {
         .map(|e| describe_entity(sketch, e))
         .collect();
     format!("{} ({})", c.kind.label(), names.join(", "))
+}
+
+thread_local! {
+    /// The document's units, for showing lengths. Set from the parameter table whenever
+    /// the editor is shown, so every label and field in it agrees.
+    static UNITS: std::cell::Cell<peet_sketch::expr::Units> =
+        std::cell::Cell::new(peet_sketch::expr::Units::default());
+}
+
+fn set_display_units(params: &Parameters) {
+    UNITS.with(|u| u.set(params.units));
+}
+
+/// A length (mm) in document units, without the unit: what an edit field shows.
+pub fn length_text(mm: f64) -> String {
+    UNITS.with(|u| u.get().format_length_value(mm))
+}
+
+/// A length (mm) in document units, with the unit ("12.5 mm", "0.5 in").
+pub fn length_with_unit(mm: f64) -> String {
+    UNITS.with(|u| u.get().format_length(mm))
+}
+
+/// The document's length unit ("mm", "in").
+pub fn length_suffix() -> &'static str {
+    UNITS.with(|u| u.get().length.suffix())
+}
+
+/// A dimension's value as typed: degrees for angles, document units for lengths.
+pub fn dim_value_text(kind: &ConstraintKind, value: f64) -> String {
+    if kind.is_angular() {
+        format_value(value)
+    } else {
+        length_text(value)
+    }
 }
 
 /// Formats a dimension value compactly: up to three decimals, no trailing zeros.

@@ -1,355 +1,425 @@
-//! A placeholder document, until the parametric model (`peet-model`, Phase 3) exists.
+//! The open document: the parametric model, its rebuild state, the undo history and the
+//! display data derived from them.
 //!
-//! It holds what every new part starts with in a CAD tool (the origin and the three
-//! standard reference planes), a demo body, and the user's sketches, so the feature tree,
-//! properties panel, selection highlighting, viewport and sketcher can be built and
-//! tested end to end now.
+//! Every change to the model goes through [`Document::change`], which records an undo
+//! step and rebuilds. Rebuilds are incremental (see `peet_model::Engine`), and body
+//! tessellations are kept per body stamp, so only bodies whose geometry changed are
+//! tessellated again.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
 
 use peet_math::{Aabb, Plane};
-use peet_render::MeshData;
+use peet_model::naming::{find_edge, find_face, find_vertex};
+use peet_model::{
+    Datum, EdgeRef, Engine, Evaluation, FaceRef, Feature, FeatureId, FeatureKind, History, Model,
+    Output, Status, VertexRef,
+};
 use peet_sketch::Sketch;
-use peet_sketch::expr::Parameters;
-use peet_sketch::solver::DofStatus;
 
-use crate::bodies::Body;
+use crate::bodies::{BodyView, GeomRef};
+pub use peet_model::SketchStatus;
 
+/// Something in the feature tree: the built-in datums, or a feature.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub struct ItemId(pub u32);
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RefPlane {
-    Front,
-    Top,
-    Right,
+pub enum ItemId {
+    Datum(Datum),
+    Feature(FeatureId),
 }
 
-impl RefPlane {
-    pub const ALL: [Self; 3] = [Self::Front, Self::Top, Self::Right];
-
-    pub fn label(self) -> &'static str {
+impl ItemId {
+    pub fn feature(self) -> Option<FeatureId> {
         match self {
-            Self::Front => "Front Plane",
-            Self::Top => "Top Plane",
-            Self::Right => "Right Plane",
-        }
-    }
-
-    pub fn plane(self) -> Plane {
-        match self {
-            Self::Front => Plane::front(),
-            Self::Top => Plane::TOP,
-            Self::Right => Plane::right(),
+            Self::Feature(id) => Some(id),
+            Self::Datum(_) => None,
         }
     }
 }
 
-#[derive(Clone, Debug)]
-pub enum ItemKind {
-    /// The origin point and axes.
-    Origin,
-    ReferencePlane(RefPlane),
-    /// A body with a display mesh.
-    Body {
-        mesh: MeshData,
-    },
-    Sketch(Box<SketchItem>),
-    Extrude(Box<ExtrudeItem>),
-}
-
-/// An extrude (or cut-extrude) feature.
-#[derive(Clone, Debug)]
-pub struct ExtrudeItem {
-    /// The sketch whose regions are extruded.
-    pub sketch: ItemId,
-    pub feature: peet_model::Extrude,
-    /// Why the last rebuild of this feature failed, if it did.
-    pub error: Option<String>,
-}
-
-/// A sketch placed on a plane.
+/// The sketch being edited: a working copy, written back to the model (as one undo step)
+/// when editing ends.
 #[derive(Clone, Debug)]
 pub struct SketchItem {
     pub plane: Plane,
-    /// Name of the plane the sketch lies on, for the properties panel.
+    /// Name of what the sketch lies on, for the properties panel.
     pub plane_name: String,
     pub sketch: Sketch,
-    /// Summary of the last analysis, for the feature tree marker.
     pub status: SketchStatus,
 }
 
-/// How well defined a sketch is, as shown in the feature tree.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub enum SketchStatus {
-    #[default]
-    Under,
-    Fully,
-    Over,
+/// A selection that survives rebuilds.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Persistent {
+    Face(FaceRef),
+    Edge(EdgeRef),
+    Vertex(VertexRef),
 }
 
-impl SketchStatus {
-    /// Tree prefix, as in SolidWorks: "(-)" under defined, "(+)" over defined.
-    pub fn marker(self) -> &'static str {
-        match self {
-            Self::Under => "(-) ",
-            Self::Fully => "",
-            Self::Over => "(+) ",
-        }
-    }
-}
-
-impl From<DofStatus> for SketchStatus {
-    fn from(s: DofStatus) -> Self {
-        match s {
-            DofStatus::Under => Self::Under,
-            DofStatus::Fully => Self::Fully,
-            DofStatus::Over => Self::Over,
-        }
-    }
-}
-
-impl ItemKind {
-    pub fn type_name(&self) -> &'static str {
-        match self {
-            Self::Origin => "Origin",
-            Self::ReferencePlane(_) => "Reference plane",
-            Self::Body { .. } => "Solid body",
-            Self::Sketch(_) => "Sketch",
-            Self::Extrude(e) if e.feature.operation == peet_model::Operation::Cut => "Cut-extrude",
-            Self::Extrude(_) => "Extrude",
-        }
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Item {
-    pub id: ItemId,
+/// Where the document lives on disk (or, on the web, the name it was opened or
+/// downloaded as).
+#[derive(Clone, Debug, PartialEq)]
+pub struct FileLocation {
     pub name: String,
-    pub kind: ItemKind,
-    pub visible: bool,
+    pub path: Option<PathBuf>,
 }
 
-#[derive(Clone, Debug)]
 pub struct Document {
-    pub name: String,
-    pub items: Vec<Item>,
-    /// Named parameters usable in dimension expressions.
-    pub parameters: Parameters,
-    /// The solids the features build, in feature order (rebuilt by [`Document::rebuild`]).
-    pub bodies: Vec<Body>,
-    /// Incremented on every rebuild, so the viewport knows to re-upload meshes.
+    pub model: Model,
+    engine: Engine,
+    history: History<Model>,
+    /// The bodies of the last rebuild, ready to draw.
+    pub bodies: Vec<Arc<BodyView>>,
+    /// Incremented on every rebuild, so the viewport knows to refresh.
     pub revision: u64,
-    next_id: u32,
-    next_sketch_number: u32,
-    next_extrude_number: u32,
+    pub file: Option<FileLocation>,
+    /// Hash of the model as last saved: the document is modified when they differ.
+    saved_hash: u64,
+    current_hash: u64,
+    /// Set when the shown bodies come from a file's cache and the model still has to be
+    /// rebuilt.
+    pending_rebuild: bool,
 }
-
-pub const DEMO_BODY: ItemId = ItemId(100);
 
 impl Default for Document {
     fn default() -> Self {
-        let item = |id, name: &str, kind| Item {
-            id: ItemId(id),
-            name: name.to_owned(),
-            kind,
-            visible: true,
-        };
-        Self {
-            name: "Part1".to_owned(),
-            items: vec![
-                item(0, "Origin", ItemKind::Origin),
-                item(1, "Front Plane", ItemKind::ReferencePlane(RefPlane::Front)),
-                item(2, "Top Plane", ItemKind::ReferencePlane(RefPlane::Top)),
-                item(3, "Right Plane", ItemKind::ReferencePlane(RefPlane::Right)),
-                Item {
-                    visible: false,
-                    ..item(
-                        DEMO_BODY.0,
-                        "Demo U-Channel",
-                        ItemKind::Body {
-                            mesh: peet_render::mesh::demo::u_channel(),
-                        },
-                    )
-                },
-            ],
-            parameters: Parameters::default(),
-            bodies: Vec::new(),
-            revision: 0,
-            next_id: 1000,
-            next_sketch_number: 1,
-            next_extrude_number: 1,
-        }
+        Self::from_model(Model::new(), None)
     }
 }
 
 impl Document {
-    /// Adds an empty sketch on `plane` and returns its id.
-    pub fn add_sketch(&mut self, plane: Plane, plane_name: &str) -> ItemId {
-        let id = ItemId(self.next_id);
-        self.next_id += 1;
-        let name = format!("Sketch{}", self.next_sketch_number);
-        self.next_sketch_number += 1;
-        self.items.push(Item {
-            id,
-            name,
-            kind: ItemKind::Sketch(Box::new(SketchItem {
-                plane,
-                plane_name: plane_name.to_owned(),
-                sketch: Sketch::new(),
-                status: SketchStatus::Under,
-            })),
-            visible: true,
-        });
-        id
+    /// A document for `model`, rebuilt.
+    pub fn from_model(model: Model, file: Option<FileLocation>) -> Self {
+        let hash = peet_model::hash::of(&model);
+        let mut doc = Self {
+            model,
+            engine: Engine::new(),
+            history: History::default(),
+            bodies: Vec::new(),
+            revision: 0,
+            file,
+            saved_hash: hash,
+            current_hash: hash,
+            pending_rebuild: false,
+        };
+        doc.rebuild();
+        doc
     }
 
-    /// Adds an extrude feature using `sketch`, after the existing items, and rebuilds.
-    pub fn add_extrude(&mut self, sketch: ItemId, operation: peet_model::Operation) -> ItemId {
-        let id = ItemId(self.next_id);
-        self.next_id += 1;
-        let prefix = if operation == peet_model::Operation::Cut {
-            "Cut-Extrude"
-        } else {
-            "Extrude"
+    /// A document for a part read from a file. If the file has caches, its bodies are
+    /// shown at once and the model is rebuilt on the next frame (see
+    /// [`Document::finish_loading`]); cached meshes save tessellating again.
+    pub fn from_opened(opened: peet_io::document::Opened, file: Option<FileLocation>) -> Self {
+        let hash = peet_model::hash::of(&opened.model);
+        let mut meshes: HashMap<u64, peet_kernel::tessellate::SolidMesh> = opened
+            .meshes
+            .into_iter()
+            .map(|m| (m.stamp, m.mesh))
+            .collect();
+        let mut doc = Self {
+            model: opened.model,
+            engine: Engine::new(),
+            history: History::default(),
+            bodies: Vec::new(),
+            revision: 0,
+            file,
+            saved_hash: hash,
+            current_hash: hash,
+            pending_rebuild: true,
         };
-        let name = format!("{prefix}{}", self.next_extrude_number);
-        self.next_extrude_number += 1;
-        let mut feature = peet_model::Extrude::new(operation);
-        if operation == peet_model::Operation::Add && self.bodies.is_empty() {
-            feature.operation = peet_model::Operation::NewBody;
+        match opened.bodies {
+            Some(bodies) => {
+                doc.bodies = bodies
+                    .into_iter()
+                    .map(|b| {
+                        let cached = meshes.remove(&b.stamp);
+                        Arc::new(BodyView::new(b, cached))
+                    })
+                    .collect();
+                doc.revision += 1;
+            }
+            None => doc.rebuild(),
         }
-        self.items.push(Item {
-            id,
-            name,
-            kind: ItemKind::Extrude(Box::new(ExtrudeItem {
-                sketch,
-                feature,
-                error: None,
-            })),
-            visible: true,
-        });
-        // A sketch used by a feature is hidden, as in other CAD tools.
-        if let Some(item) = self.item_mut(sketch) {
-            item.visible = false;
+        doc
+    }
+
+    /// Rebuilds a model whose bodies came from a file's cache. Returns whether it did.
+    pub fn finish_loading(&mut self) -> bool {
+        if self.pending_rebuild {
+            self.rebuild();
+            true
+        } else {
+            false
+        }
+    }
+
+    /// The document's name for titles and file names.
+    pub fn title(&self) -> String {
+        match &self.file {
+            Some(f) => f.name.clone(),
+            None => self.model.name.clone(),
+        }
+    }
+
+    pub fn is_modified(&self) -> bool {
+        self.current_hash != self.saved_hash
+    }
+
+    /// Marks the document as never saved (recovered work).
+    pub fn mark_unsaved(&mut self) {
+        self.saved_hash = self.current_hash.wrapping_add(1);
+    }
+
+    /// Notes that the document was saved (to `file`).
+    pub fn mark_saved(&mut self, file: Option<FileLocation>) {
+        if file.is_some() {
+            self.file = file;
+        }
+        self.saved_hash = self.current_hash;
+    }
+
+    /// Rebuilds the model and refreshes the bodies (tessellating only changed ones).
+    pub fn rebuild(&mut self) {
+        self.pending_rebuild = false;
+        let previous: HashMap<u64, Arc<BodyView>> =
+            self.bodies.drain(..).map(|b| (b.stamp, b)).collect();
+        let eval = self.engine.regenerate(&mut self.model);
+        self.bodies = eval
+            .bodies
+            .iter()
+            .map(|b| match previous.get(&b.stamp) {
+                Some(view) => view.clone(),
+                None => Arc::new(BodyView::new(b.clone(), None)),
+            })
+            .collect();
+        // Rebuilds write solved sketches back, which can change the hash.
+        self.current_hash = peet_model::hash::of(&self.model);
+        self.revision += 1;
+    }
+
+    pub fn evaluation(&self) -> &Evaluation {
+        self.engine.evaluation()
+    }
+
+    /// Applies a change as one undo step and rebuilds. Returns whether anything changed.
+    pub fn change(&mut self, label: &str, f: impl FnOnce(&mut Model)) -> bool {
+        self.change_inner(label, None, f)
+    }
+
+    fn change_inner(&mut self, label: &str, key: Option<u64>, f: impl FnOnce(&mut Model)) -> bool {
+        let before = self.model.clone();
+        f(&mut self.model);
+        if self.model == before {
+            return false;
+        }
+        match key {
+            Some(k) => self.history.record_merging(label, k, before),
+            None => self.history.record(label, before),
         }
         self.rebuild();
-        id
+        true
     }
 
-    pub fn extrude_mut(&mut self, id: ItemId) -> Option<&mut ExtrudeItem> {
-        match &mut self.item_mut(id)?.kind {
-            ItemKind::Extrude(e) => Some(e),
-            _ => None,
+    pub fn can_undo(&self) -> bool {
+        self.history.can_undo()
+    }
+
+    pub fn can_redo(&self) -> bool {
+        self.history.can_redo()
+    }
+
+    pub fn undo_label(&self) -> Option<&str> {
+        self.history.undo_label()
+    }
+
+    pub fn redo_label(&self) -> Option<&str> {
+        self.history.redo_label()
+    }
+
+    /// Undoes the last change and rebuilds. Returns what was undone.
+    pub fn undo(&mut self) -> Option<String> {
+        let label = self.history.undo(&mut self.model)?;
+        self.rebuild();
+        Some(label)
+    }
+
+    pub fn redo(&mut self) -> Option<String> {
+        let label = self.history.redo(&mut self.model)?;
+        self.rebuild();
+        Some(label)
+    }
+
+    /// The bytes of the document as a `.peet` file.
+    pub fn save_bytes(&self, with_caches: bool) -> Result<Vec<u8>, String> {
+        let metadata = peet_io::document::Metadata {
+            saved_at: peet_platform::SystemTime::now()
+                .duration_since(peet_platform::UNIX_EPOCH)
+                .ok()
+                .map(|d| d.as_secs()),
+            ..Default::default()
+        };
+        // Caches only describe a fully built model.
+        let caches = (with_caches && !self.pending_rebuild).then(|| peet_io::document::Caches {
+            bodies: &self.evaluation().bodies,
+            meshes: self
+                .bodies
+                .iter()
+                .map(|b| peet_io::document::CachedMesh {
+                    stamp: b.stamp,
+                    mesh: b.tess.clone(),
+                })
+                .collect(),
+        });
+        peet_io::document::save(&self.model, &metadata, caches).map_err(|e| e.message)
+    }
+
+    // ---- Queries ----
+
+    pub fn feature(&self, id: FeatureId) -> Option<&Feature> {
+        self.model.feature(id)
+    }
+
+    pub fn status(&self, id: FeatureId) -> Option<&Status> {
+        self.evaluation().status(id)
+    }
+
+    pub fn item_name(&self, item: ItemId) -> String {
+        match item {
+            ItemId::Datum(d) => d.label().to_owned(),
+            ItemId::Feature(id) => self.model.name_of(id).to_owned(),
         }
     }
 
-    /// Re-runs every feature in order, rebuilding the bodies and their display meshes.
-    /// A failing feature is skipped (and keeps its error), so the rest still builds.
-    pub fn rebuild(&mut self) {
-        let mut solids: Vec<peet_kernel::Solid> = Vec::new();
-        let mut errors: Vec<(ItemId, Option<String>)> = Vec::new();
-        for (index, item) in self.items.iter().enumerate() {
-            let ItemKind::Extrude(ex) = &item.kind else {
-                continue;
-            };
-            let sketch = self.items[..index].iter().find_map(|i| match &i.kind {
-                ItemKind::Sketch(s) if i.id == ex.sketch => Some(s),
-                _ => None,
-            });
-            let result = match sketch {
-                None => Err("Its sketch was deleted, or comes after it in the tree.".to_owned()),
-                Some(s) => peet_model::apply_extrude(&mut solids, &s.plane, &s.sketch, &ex.feature)
-                    .map_err(|e| e.0),
-            };
-            errors.push((item.id, result.err()));
+    /// The plane a sketch is drawn on (its last known one if it can't be resolved now),
+    /// and how well defined it is.
+    pub fn sketch_placement(&self, id: FeatureId) -> Option<(Plane, SketchStatus)> {
+        match self.evaluation().output(id) {
+            Output::Sketch { plane, definition } => Some((plane, definition)),
+            _ => self
+                .model
+                .sketch(id)
+                .map(|s| (s.placement, SketchStatus::Under)),
         }
-        for (id, error) in errors {
-            if let Some(ex) = self.extrude_mut(id) {
-                ex.error = error;
+    }
+
+    /// Words for what a sketch lies on.
+    pub fn plane_name(&self, plane: &peet_model::PlaneRef) -> String {
+        match plane {
+            peet_model::PlaneRef::Standard(p) => p.label().to_owned(),
+            peet_model::PlaneRef::Feature(id) => self.model.name_of(*id).to_owned(),
+            peet_model::PlaneRef::Face(f) => {
+                let d = self.model.describe_face(&f.name);
+                let mut c = d.chars();
+                c.next()
+                    .map(|first| first.to_uppercase().chain(c).collect())
+                    .unwrap_or(d)
             }
         }
-        self.bodies = solids.into_iter().map(Body::new).collect();
-        self.revision += 1;
-        // A body that can't be displayed is a bug, but must not go unnoticed.
-        if let Some(e) = self.bodies.iter().find_map(|b| b.error.clone())
-            && let Some(last) = self.items.iter_mut().rev().find_map(|i| match &mut i.kind {
-                ItemKind::Extrude(x) if x.error.is_none() => Some(x),
+    }
+
+    /// The flat face, standard plane or reference plane a click picked, as something a
+    /// sketch or feature can refer to.
+    pub fn plane_ref_of_item(&self, item: ItemId) -> Option<peet_model::PlaneRef> {
+        match item {
+            ItemId::Datum(Datum::Plane(p)) => Some(peet_model::PlaneRef::Standard(p)),
+            ItemId::Feature(id) => match self.evaluation().output(id) {
+                Output::Plane(_) | Output::Frame(_) => Some(peet_model::PlaneRef::Feature(id)),
                 _ => None,
-            })
-        {
-            last.error = Some(format!("The result can't be displayed: {e}"));
+            },
+            ItemId::Datum(Datum::Origin) => None,
         }
     }
 
-    pub fn sketch(&self, id: ItemId) -> Option<&SketchItem> {
-        match &self.item(id)?.kind {
-            ItemKind::Sketch(s) => Some(s),
-            _ => None,
+    /// The resolved plane of a reference.
+    pub fn resolve_plane(&self, item: ItemId) -> Option<Plane> {
+        match item {
+            ItemId::Datum(Datum::Plane(p)) => Some(p.plane()),
+            ItemId::Feature(id) => match self.evaluation().output(id) {
+                Output::Plane(p) => Some(p),
+                Output::Frame(frame) => Some(Plane { frame }),
+                _ => None,
+            },
+            ItemId::Datum(Datum::Origin) => None,
         }
     }
 
-    pub fn remove_item(&mut self, id: ItemId) {
-        self.items.retain(|i| i.id != id);
+    /// Converts a selection into references that survive a rebuild.
+    pub fn persist(&self, g: GeomRef) -> Option<Persistent> {
+        let body = self.bodies.get(g.body())?;
+        Some(match g {
+            GeomRef::Face { face, .. } => Persistent::Face(body.face_ref(face)),
+            GeomRef::Edge { edge, .. } => Persistent::Edge(body.edge_ref(edge)?),
+            GeomRef::Vertex { vertex, .. } => Persistent::Vertex(body.vertex_ref(vertex)),
+        })
     }
 
-    pub fn item(&self, id: ItemId) -> Option<&Item> {
-        self.items.iter().find(|i| i.id == id)
+    /// Finds a persisted selection in the current bodies.
+    pub fn restore(&self, p: &Persistent) -> Option<GeomRef> {
+        let bodies = &self.evaluation().bodies;
+        Some(match p {
+            Persistent::Face(r) => {
+                let f = find_face(bodies, r)?;
+                GeomRef::Face {
+                    body: f.body,
+                    face: f.id,
+                }
+            }
+            Persistent::Edge(r) => {
+                let f = find_edge(bodies, r)?;
+                GeomRef::Edge {
+                    body: f.body,
+                    edge: f.id,
+                }
+            }
+            Persistent::Vertex(r) => {
+                let f = find_vertex(bodies, r)?;
+                GeomRef::Vertex {
+                    body: f.body,
+                    vertex: f.id,
+                }
+            }
+        })
     }
 
-    pub fn item_mut(&mut self, id: ItemId) -> Option<&mut Item> {
-        self.items.iter_mut().find(|i| i.id == id)
-    }
-
-    /// Bounds of all visible bodies (reference geometry is excluded, as in other CAD tools'
+    /// Bounds of all bodies (reference geometry is excluded, as in other CAD tools'
     /// "zoom to fit").
     pub fn visible_body_bounds(&self) -> Aabb {
-        let meshes = self
-            .items
+        self.bodies
             .iter()
-            .filter(|i| i.visible)
-            .filter_map(|i| match &i.kind {
-                ItemKind::Body { mesh } => Some(mesh.bounds()),
-                _ => None,
-            });
-        let solids = self.bodies.iter().map(|b| b.solid.bounds());
-        meshes.chain(solids).fold(Aabb::EMPTY, |a, b| a.union(&b))
+            .map(|b| b.solid.bounds())
+            .fold(Aabb::EMPTY, |a, b| a.union(&b))
     }
 
-    /// Bounds of all visible bodies and sketches: what "zoom to fit" frames.
+    /// Bounds of all bodies and visible sketches: what "zoom to fit" frames.
     pub fn visible_bounds(&self) -> Aabb {
         let mut bounds = self.visible_body_bounds();
-        for item in self.items.iter().filter(|i| i.visible) {
-            if let ItemKind::Sketch(s) = &item.kind {
-                bounds = bounds.union(&sketch_bounds(s));
+        for f in self.model.features().filter(|f| f.visible) {
+            if let FeatureKind::Sketch(s) = &f.kind
+                && let Some((plane, _)) = self.sketch_placement(f.id)
+            {
+                bounds = bounds.union(&sketch_bounds(&plane, &s.sketch));
             }
         }
         bounds
     }
 
-    /// Whether all three reference planes are visible.
+    /// Whether all three standard planes are visible.
     pub fn planes_visible(&self) -> bool {
-        self.items
+        Datum::ALL
             .iter()
-            .filter(|i| matches!(i.kind, ItemKind::ReferencePlane(_)))
-            .all(|i| i.visible)
-    }
-
-    pub fn set_planes_visible(&mut self, visible: bool) {
-        for item in &mut self.items {
-            if matches!(item.kind, ItemKind::ReferencePlane(_)) {
-                item.visible = visible;
-            }
-        }
+            .filter(|d| matches!(d, Datum::Plane(_)))
+            .all(|d| self.model.datum_visible(*d))
     }
 }
 
 /// Model-space bounds of a sketch's geometry (the origin point alone counts as empty).
-pub fn sketch_bounds(item: &SketchItem) -> Aabb {
+pub fn sketch_bounds(plane: &Plane, sketch: &Sketch) -> Aabb {
     let mut bounds = Aabb::EMPTY;
-    for (id, e) in item.sketch.entities() {
+    for (id, e) in sketch.entities() {
         if id == Sketch::ORIGIN {
             continue;
         }
-        let (lo, hi) = match item.sketch.curve(id) {
+        let (lo, hi) = match sketch.curve(id) {
             Some(c) => c.bounds(),
             None => match e.geometry {
                 peet_sketch::Geometry::Point { pos } => (pos, pos),
@@ -362,7 +432,7 @@ pub fn sketch_bounds(item: &SketchItem) -> Aabb {
             peet_math::DVec2::new(lo.x, hi.y),
             peet_math::DVec2::new(hi.x, lo.y),
         ] {
-            bounds.extend(item.plane.from_plane_coords(corner));
+            bounds.extend(plane.from_plane_coords(corner));
         }
     }
     bounds
@@ -372,35 +442,28 @@ pub fn sketch_bounds(item: &SketchItem) -> Aabb {
 mod tests {
     use super::*;
     use peet_math::DVec2;
+    use peet_model::{Operation, PlaneRef, StdPlane};
 
-    fn doc_with_extruded_rectangle() -> (Document, ItemId, ItemId) {
+    fn doc_with_extruded_rectangle() -> (Document, FeatureId, FeatureId) {
         let mut doc = Document::default();
-        let sketch = doc.add_sketch(Plane::TOP, "Top Plane");
-        if let Some(Item {
-            kind: ItemKind::Sketch(s),
-            ..
-        }) = doc.item_mut(sketch)
-        {
-            peet_sketch::shapes::rectangle(&mut s.sketch, DVec2::ZERO, DVec2::new(40.0, 20.0));
-        }
-        let ex = doc.add_extrude(sketch, peet_model::Operation::Add);
-        (doc, sketch, ex)
+        let mut ids = (FeatureId(0), FeatureId(0));
+        doc.change("Add", |m| {
+            let s = m.add_sketch(PlaneRef::Standard(StdPlane::Top), Plane::TOP);
+            if let Some(f) = m.feature_mut(s).and_then(|f| f.sketch_mut()) {
+                peet_sketch::shapes::rectangle(&mut f.sketch, DVec2::ZERO, DVec2::new(40.0, 20.0));
+            }
+            let e = m.add_extrude(s, Operation::Add);
+            ids = (s, e);
+        });
+        (doc, ids.0, ids.1)
     }
 
     #[test]
     fn extrude_builds_a_body_and_hides_its_sketch() {
         let (doc, sketch, ex) = doc_with_extruded_rectangle();
         assert_eq!(doc.bodies.len(), 1);
-        let ItemKind::Extrude(e) = &doc.item(ex).unwrap().kind else {
-            panic!()
-        };
-        assert_eq!(e.error, None);
-        assert_eq!(
-            e.feature.operation,
-            peet_model::Operation::NewBody,
-            "first body"
-        );
-        assert!(!doc.item(sketch).unwrap().visible);
+        assert_eq!(doc.status(ex), Some(&Status::Ok));
+        assert!(!doc.feature(sketch).unwrap().visible);
         let body = &doc.bodies[0];
         assert!(!body.mesh.indices.is_empty());
         assert_eq!(body.mesh.pick_ids.len(), body.mesh.vertices.len());
@@ -410,26 +473,68 @@ mod tests {
     }
 
     #[test]
-    fn failing_feature_keeps_the_rest() {
+    fn changes_are_undoable_and_tracked() {
         let (mut doc, sketch, ex) = doc_with_extruded_rectangle();
-        let rev = doc.revision;
-        doc.remove_item(sketch);
-        doc.rebuild();
-        assert!(doc.revision > rev);
-        let ItemKind::Extrude(e) = &doc.item(ex).unwrap().kind else {
+        assert!(doc.is_modified());
+        doc.mark_saved(None);
+        assert!(!doc.is_modified());
+        let stamp = doc.bodies[0].stamp;
+        doc.change("Delete", |m| {
+            m.remove(sketch);
+        });
+        assert!(doc.is_modified());
+        assert!(
+            doc.status(ex)
+                .unwrap()
+                .message()
+                .unwrap()
+                .contains("sketch")
+        );
+        assert!(doc.bodies.is_empty());
+        assert_eq!(doc.undo().as_deref(), Some("Delete"));
+        assert!(!doc.is_modified(), "back to the saved state");
+        assert_eq!(doc.bodies[0].stamp, stamp);
+        assert_eq!(doc.redo().as_deref(), Some("Delete"));
+        // A change that changes nothing is not a step.
+        assert!(!doc.change("Nothing", |_| {}));
+        assert_eq!(doc.undo_label(), Some("Delete"));
+    }
+
+    #[test]
+    fn selections_survive_rebuilds() {
+        let (mut doc, _, ex) = doc_with_extruded_rectangle();
+        let top = doc.bodies[0]
+            .solid
+            .face_ids()
+            .find(|f| doc.bodies[0].face_center(*f).z > 9.0)
+            .unwrap();
+        let p = doc.persist(GeomRef::Face { body: 0, face: top }).unwrap();
+        doc.change("Deeper", |m| {
+            m.feature_mut(ex)
+                .unwrap()
+                .extrude_mut()
+                .unwrap()
+                .params
+                .depth = peet_model::Scalar::new(25.0);
+        });
+        let Some(GeomRef::Face { face, .. }) = doc.restore(&p) else {
             panic!()
         };
-        assert!(e.error.as_deref().unwrap().contains("sketch"));
-        assert!(doc.bodies.is_empty());
-        // Zero depth explains itself.
-        let (mut doc, _, ex) = doc_with_extruded_rectangle();
-        doc.extrude_mut(ex).unwrap().feature.depth = 0.0;
-        doc.rebuild();
-        let e = doc.extrude_mut(ex).unwrap();
-        assert!(
-            e.error.as_deref().unwrap().contains("depth"),
-            "{:?}",
-            e.error
-        );
+        assert!((doc.bodies[0].face_center(face).z - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn opening_a_file_shows_cached_bodies_then_rebuilds() {
+        let (model, _) = peet_model::samples::bracket();
+        let doc = Document::from_model(model, None);
+        let bytes = doc.save_bytes(true).unwrap();
+        let opened = peet_io::document::open(&bytes).unwrap();
+        let mut loaded = Document::from_opened(opened, None);
+        assert_eq!(loaded.bodies.len(), 1, "shown from the cache");
+        assert!(!loaded.is_modified());
+        assert!(loaded.finish_loading());
+        assert!(!loaded.finish_loading());
+        assert_eq!(loaded.bodies[0].stamp, doc.bodies[0].stamp);
+        assert!(!loaded.is_modified());
     }
 }

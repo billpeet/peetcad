@@ -2,8 +2,8 @@
 //!
 //! Every user action is a named command with a label, a category, an optional keyboard
 //! shortcut and a description. Menus, toolbars, the command palette and keyboard
-//! shortcuts all go through this one registry, so they can never disagree. Undo/redo
-//! will hook in here once the document model exists (Phase 3).
+//! shortcuts all go through this one registry, so they can never disagree. Commands
+//! that change the part go through `Document::change`, which makes them undoable.
 
 use egui::{Key, KeyboardShortcut, Modifiers};
 
@@ -27,7 +27,17 @@ pub enum CommandId {
     ToggleFeatureTree,
     ToggleProperties,
     TogglePerfOverlay,
-    ToggleDemoPart,
+    NewDocument,
+    OpenDocument,
+    SaveDocumentAs,
+    SaveDocument,
+    OpenSample,
+    RefPlane,
+    RefAxis,
+    RefPoint,
+    RefCoordSystem,
+    ToggleSuppress,
+    RollToEnd,
     Settings,
     KeyboardShortcuts,
     About,
@@ -96,7 +106,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 59] = [
+    pub const ALL: [Self; 69] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -115,7 +125,17 @@ impl CommandId {
         Self::ToggleFeatureTree,
         Self::ToggleProperties,
         Self::TogglePerfOverlay,
-        Self::ToggleDemoPart,
+        Self::NewDocument,
+        Self::OpenDocument,
+        Self::SaveDocumentAs,
+        Self::SaveDocument,
+        Self::OpenSample,
+        Self::RefPlane,
+        Self::RefAxis,
+        Self::RefPoint,
+        Self::RefCoordSystem,
+        Self::ToggleSuppress,
+        Self::RollToEnd,
         Self::Settings,
         Self::KeyboardShortcuts,
         Self::About,
@@ -248,10 +268,63 @@ impl CommandId {
                 "Show frame timings and renderer statistics.",
                 key(Key::F3),
             ),
-            Self::ToggleDemoPart => (
-                "Demo Part",
-                "View",
-                "Show the placeholder sheet metal part used to test the viewport.",
+            Self::NewDocument => ("New", "File", "Start a new, empty part.", ctrl(Key::N)),
+            Self::OpenDocument => (
+                "Open…",
+                "File",
+                "Open a PeetCAD part (.peet).",
+                ctrl(Key::O),
+            ),
+            Self::SaveDocument => ("Save", "File", "Save the part.", ctrl(Key::S)),
+            Self::SaveDocumentAs => (
+                "Save As…",
+                "File",
+                "Save the part under a new name.",
+                Some(KeyboardShortcut::new(
+                    Modifiers::COMMAND.plus(Modifiers::SHIFT),
+                    Key::S,
+                )),
+            ),
+            Self::OpenSample => (
+                "Open Sample Bracket",
+                "File",
+                "Open a 20-feature sample part to explore.",
+                None,
+            ),
+            Self::RefPlane => (
+                "Plane",
+                "Reference",
+                "A reference plane: offset from the selected face or plane.",
+                None,
+            ),
+            Self::RefAxis => (
+                "Axis",
+                "Reference",
+                "A reference axis: along the selected edge, through a round face, or where two selected planes meet.",
+                None,
+            ),
+            Self::RefPoint => (
+                "Point",
+                "Reference",
+                "A reference point: at the selected vertex, or at coordinates.",
+                None,
+            ),
+            Self::RefCoordSystem => (
+                "Coordinate System",
+                "Reference",
+                "A coordinate system at the selected vertex (or the origin).",
+                None,
+            ),
+            Self::ToggleSuppress => (
+                "Suppress",
+                "Edit",
+                "Skip the selected feature when building the part, or bring it back.",
+                None,
+            ),
+            Self::RollToEnd => (
+                "Roll to End",
+                "Edit",
+                "Move the rollback bar to the end of the feature tree.",
                 None,
             ),
             Self::Settings => (

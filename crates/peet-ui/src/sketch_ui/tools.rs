@@ -416,10 +416,9 @@ impl SketchEditor {
             }
             return;
         }
-        let text = d
-            .expression
-            .clone()
-            .unwrap_or_else(|| super::format_value(d.value));
+        let text = d.expression.clone().unwrap_or_else(|| {
+            super::dim_value_text(&sketch.constraint(id).expect("checked above").kind, d.value)
+        });
         self.edit = Some(DimEdit {
             dimension: id,
             text,

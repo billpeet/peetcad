@@ -16,6 +16,7 @@ use std::f64::consts::TAU;
 
 use peet_math::{Aabb, DVec3};
 
+use super::FaceSource;
 use super::domain::Domain;
 use super::faces::{TracedFace, prune_dangling, sort_ccw, trace_faces};
 use super::util::{GEdge, HalfEdge, same_carrier, same_surface};
@@ -28,6 +29,8 @@ pub(crate) struct Patch {
     pub surface: Surface,
     pub reversed: bool,
     pub half_edges: Vec<HalfEdge>,
+    /// The input faces this piece is part of: more than one once pieces were merged.
+    pub sources: Vec<FaceSource>,
 }
 
 impl Patch {
@@ -40,11 +43,13 @@ impl Patch {
     }
 }
 
+/// Builds the result solid and, for each of its faces (in face order), the input faces it
+/// is made of.
 pub(crate) fn assemble(
     patches: Vec<Patch>,
     mut edges: Vec<GEdge>,
     points: &[DVec3],
-) -> Result<Solid, String> {
+) -> Result<(Solid, Vec<Vec<FaceSource>>), String> {
     let mut patches = merge_patches(patches, &edges, points);
     pair_edge_uses(&mut patches, &mut edges)?;
     merge_edges(&mut patches, &mut edges, points);
@@ -155,10 +160,15 @@ fn try_merge(
             return None;
         }
         let traced = trace_faces(&a.domain(), &half_edges, edges, points).ok()?;
+        let mut sources = a.sources.clone();
+        sources.extend(&b.sources);
+        sources.sort_unstable();
+        sources.dedup();
         (traced.len() == 1).then_some(Patch {
             surface: a.surface,
             reversed: a.reversed,
             half_edges,
+            sources,
         })
     };
     attempt(None).or_else(|| {
@@ -391,7 +401,11 @@ fn merge_edges(patches: &mut [Patch], edges: &mut Vec<GEdge>, points: &[DVec3]) 
 
 // ---- 4. The solid ----
 
-fn build(patches: &[Patch], edges: &[GEdge], points: &[DVec3]) -> Result<Solid, String> {
+fn build(
+    patches: &[Patch],
+    edges: &[GEdge],
+    points: &[DVec3],
+) -> Result<(Solid, Vec<Vec<FaceSource>>), String> {
     let mut traced: Vec<TracedFace> = Vec::with_capacity(patches.len());
     for p in patches {
         let mut faces = trace_faces(&p.domain(), &p.half_edges, edges, points)?;
@@ -442,6 +456,7 @@ fn build(patches: &[Patch], edges: &[GEdge], points: &[DVec3]) -> Result<Solid, 
     });
 
     let mut solid = Solid::new();
+    let mut sources: Vec<Vec<FaceSource>> = Vec::with_capacity(patches.len());
     let mut vertex_ids: HashMap<u32, VertexId> = HashMap::new();
     let mut edge_ids: HashMap<u32, EdgeId> = HashMap::new();
     for (_, members) in &groups {
@@ -449,6 +464,7 @@ fn build(patches: &[Patch], edges: &[GEdge], points: &[DVec3]) -> Result<Solid, 
         for &pi in members {
             let p = &patches[pi];
             let face = solid.add_face(shell, p.surface, p.reversed);
+            sources.push(p.sources.clone());
             let t = &traced[pi];
             for l in std::iter::once(&t.outer).chain(&t.holes) {
                 let mut loop_uses = Vec::with_capacity(l.half_edges.len());
@@ -475,7 +491,7 @@ fn build(patches: &[Patch], edges: &[GEdge], points: &[DVec3]) -> Result<Solid, 
         }
     }
     split_vertex_fans(&mut solid);
-    Ok(solid)
+    Ok((solid, sources))
 }
 
 /// Gives every fan of faces around a vertex its own copy of the vertex, so bodies (or

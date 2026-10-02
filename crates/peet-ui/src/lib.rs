@@ -9,10 +9,12 @@ mod bodies;
 pub mod commands;
 mod document;
 mod features_ui;
+mod files;
 mod palette;
 mod perf;
 pub mod settings;
 mod sketch_ui;
+mod tree;
 mod view_cube;
 mod viewport;
 

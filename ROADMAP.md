@@ -168,18 +168,20 @@ Each phase ends with something usable and demonstrable. Estimates are rough and 
 ### Phase 3: Parametric core
 *Goal: a proper parametric history-based modeller.*
 
-- [ ] Feature tree (history) with an explicit dependency graph
-- [ ] Incremental regeneration: rebuild only features downstream of a change
-- [ ] **Persistent / topological naming**: stable references to faces and edges that survive upstream edits. This is the classic weak spot in FreeCAD. We will design it in from the start, not patch it later.
-- [ ] Rollback bar, suppress/unsuppress, reorder features, edit a feature in place
-- [ ] Clear, recoverable rebuild errors: a failing feature is flagged, and the rest of the model still displays
-- [ ] Global parameter/variable table and a units system (mm, inch, with unit-aware expressions)
-- [ ] Undo/redo for everything (command-based, with snapshotting where cheap)
-- [ ] Native file format (`.peet`): compact, versioned binary container with the parametric model plus optional B-rep and mesh caches for instant opening (see [Native file format](#native-file-format-peet))
-- [ ] Autosave and crash recovery (to disk natively, to IndexedDB on the web)
-- [ ] Reference geometry: planes, axes, points, coordinate systems
+- [x] Feature tree (history) with an explicit dependency graph
+- [x] Incremental regeneration: rebuild only features downstream of a change
+- [x] **Persistent / topological naming**: stable references to faces and edges that survive upstream edits. This is the classic weak spot in FreeCAD. We will design it in from the start, not patch it later.
+- [x] Rollback bar, suppress/unsuppress, reorder features, edit a feature in place
+- [x] Clear, recoverable rebuild errors: a failing feature is flagged, and the rest of the model still displays
+- [x] Global parameter/variable table and a units system (mm, inch, with unit-aware expressions)
+- [x] Undo/redo for everything (command-based, with snapshotting where cheap)
+- [x] Native file format (`.peet`): compact, versioned binary container with the parametric model plus optional B-rep and mesh caches for instant opening (see [Native file format](#native-file-format-peet))
+- [x] Autosave and crash recovery (to disk natively, to IndexedDB on the web)
+- [x] Reference geometry: planes, axes, points, coordinate systems
 
 **Exit criteria:** Change a dimension in the first sketch, and a 20-feature part rebuilds correctly in under 100 ms.
+
+**Status:** Implemented in `peet-model` (feature tree, dependency graph, naming, engine, undo history), `peet-kernel` (face provenance from booleans and extrusions), `peet-io` (the `.peet` container and document sections), `peet-platform` (open/save, autosave storage) and `peet-ui`. `crates/peet-model/tests/exit_criterion.rs` builds a 20-feature bracket (sketches on faces of earlier features, cuts, a rib on an offset plane, a boss underneath, a reference plane), changes the width in Sketch1 five times and checks every feature builds and the volume matches the hand-calculated value each time. That rebuild takes about 5 ms in a release build (`cargo bench -p peet-model`), against the 100 ms budget. The design is recorded in [ADR 0001](docs/adr/0001-persistent-naming.md) (naming by feature origin), [ADR 0002](docs/adr/0002-incremental-regeneration.md) (content-keyed rebuilds and snapshot undo) and [ADR 0003](docs/adr/0003-native-file-format.md) (the file format). Still to do: a hands-on pass in the running app. The tree's drag and drop, picking references in the viewport, the dialogs and every web-only path (file picker, IndexedDB autosave) have been compile-checked but not exercised by hand. Known limits: undo while a sketch is open undoes within the sketch; sketches on faces don't yet project the face's edges; an angled plane turns about an axis feature or a standard axis, not directly about an edge; the 100 ms budget is only enforced in release builds and the benchmark, not in CI.
 
 ### Phase 4: Sheet Metal MVP ⭐
 *Goal: design a real sheet metal part and send its flat pattern to a laser cutter.*
@@ -308,7 +310,9 @@ Benchmarks (`criterion`) run in CI for the solver, kernel operations and regener
 |---|---|
 | Target platforms | Windows desktop and web browser (WASM) are both Tier 1 from day one |
 | License | MIT |
-| Native file format | Compact binary container (`postcard` + `lz4`), with regenerable geometry and mesh caches for fast opening |
+| Native file format | Compact binary container (`postcard` + `lz4`), with regenerable geometry and mesh caches for fast opening ([ADR 0003](docs/adr/0003-native-file-format.md)) |
+| Persistent naming | Faces are named by the feature and role that made them, carried through booleans; references add neighbours and a point to break ties ([ADR 0001](docs/adr/0001-persistent-naming.md)) |
+| Regeneration and undo | Content-hashed keys per feature decide what to rebuild; undo stores model snapshots that share unchanged features ([ADR 0002](docs/adr/0002-incremental-regeneration.md)) |
 
 ## Open questions
 

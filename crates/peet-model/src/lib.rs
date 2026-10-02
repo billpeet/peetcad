@@ -1,16 +1,40 @@
-//! PeetCAD's feature model: what each feature means and how it rebuilds into solids.
+//! PeetCAD's parametric core: a history-based feature model.
 //!
-//! For now this covers extrusions (new body, add and cut) and placing sketches on faces.
-//! The full parametric history (dependency graph, incremental regeneration, persistent
-//! naming) arrives in Phase 3 and will grow out of this crate.
+//! - [`Model`]: the feature tree (the history) and the parameter table. The source of
+//!   truth, and what is saved.
+//! - [`feature`]: what features there are (sketches, extrusions, reference geometry) and
+//!   how they refer to each other.
+//! - [`naming`]: persistent names for faces, edges and vertices, so references survive
+//!   upstream edits.
+//! - [`DependencyGraph`]: which feature uses which.
+//! - [`Engine`]: incremental regeneration into bodies, with per-feature status.
+//! - [`History`]: undo and redo.
+//!
+//! The crate has no UI or GPU dependency: everything here runs headless.
 
 mod extrude;
+pub mod feature;
+pub mod hash;
+mod history;
+mod model;
+pub mod naming;
 mod placement;
+mod regen;
+pub mod samples;
+mod units;
 
 pub use extrude::{
-    EndCondition, Extrude, Operation, RegionSelection, apply_extrude, default_regions,
+    EndCondition, Extrude, ExtrudeInput, Operation, RegionSelection, apply_extrude, default_regions,
 };
+pub use feature::{
+    Axis, AxisDef, AxisRef, CoordSystemDef, ExtrudeFeature, Feature, FeatureId, FeatureKind,
+    PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind, SketchFeature, StdAxis, StdPlane,
+};
+pub use history::History;
+pub use model::{Datum, DependencyGraph, Model};
+pub use naming::{Body, EdgeRef, FaceName, FaceOrigin, FaceRef, FaceRole, Found, VertexRef};
 pub use placement::face_sketch_plane;
+pub use regen::{Engine, Evaluation, FeatureState, Output, SketchStatus, Stats, Status};
 
 /// Why a feature failed to rebuild. The message is shown next to the feature.
 #[derive(Clone, Debug, PartialEq)]

@@ -1,6 +1,6 @@
 [package]
 name = "peet-platform"
-description = "Thin platform abstraction (time, storage locations, crash reports) for native and web builds of PeetCAD"
+description = "Thin platform abstraction (time, file dialogs, autosave storage, crash reports) for native and web builds of PeetCAD"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -13,13 +13,40 @@ web-time.workspace = true
 
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-# Native save dialog (MIT). Uses the system dialog: COM on Windows.
+# Native open and save dialogs (MIT). Uses the system dialog: COM on Windows.
 rfd = { version = "0.17", default-features = false, features = ["xdg-portal", "pollster"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 js-sys = "0.3"
-web-sys = { version = "0.3", features = ["Blob", "BlobPropertyBag", "Document", "Element", "HtmlAnchorElement", "HtmlElement", "Url", "Window"] }
+# Download, file picker (a hidden <input type="file">) and IndexedDB.
+web-sys = { version = "0.3", features = [
+    "Blob",
+    "BlobPropertyBag",
+    "Document",
+    "DomException",
+    "DomStringList",
+    "Element",
+    "Event",
+    "EventTarget",
+    "File",
+    "FileList",
+    "HtmlAnchorElement",
+    "HtmlElement",
+    "HtmlInputElement",
+    "IdbDatabase",
+    "IdbFactory",
+    "IdbObjectStore",
+    "IdbOpenDbRequest",
+    "IdbRequest",
+    "IdbTransaction",
+    "IdbTransactionMode",
+    "Node",
+    "Url",
+    "Window",
+] }
 wasm-bindgen = "0.2"
+# Awaiting browser promises (MIT/Apache-2.0). eframe already pulls it in on the web.
+wasm-bindgen-futures = "0.4"
 
 [lints]
 workspace = true

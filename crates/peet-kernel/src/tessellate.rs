@@ -43,7 +43,7 @@ const MAX_STEINER_POINTS: usize = 200_000;
 
 /// Triangles of one face. Vertices are not shared between faces, so per-face data (ids,
 /// highlight) can be attached per vertex.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FaceMesh {
     pub face: FaceId,
     pub positions: Vec<DVec3>,
@@ -67,13 +67,13 @@ impl FaceMesh {
 }
 
 /// Points along one edge, from its start vertex to its end vertex.
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EdgePolyline {
     pub edge: EdgeId,
     pub points: Vec<DVec3>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SolidMesh {
     pub faces: Vec<FaceMesh>,
     pub edges: Vec<EdgePolyline>,

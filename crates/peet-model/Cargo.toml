@@ -1,6 +1,6 @@
 [package]
 name = "peet-model"
-description = "PeetCAD's feature model: features (extrude, cut) and how they rebuild into solids"
+description = "PeetCAD's parametric core: the feature tree, persistent naming, incremental regeneration and undo"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,7 +11,16 @@ authors.workspace = true
 peet-math.workspace = true
 peet-sketch.workspace = true
 peet-kernel.workspace = true
-serde.workspace = true
+web-time.workspace = true
+postcard.workspace = true
+serde = { workspace = true, features = ["rc"] }
+
+[dev-dependencies]
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true
+
+[[bench]]
+name = "regen"
+harness = false

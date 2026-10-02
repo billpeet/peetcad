@@ -9,7 +9,7 @@ use peet_sketch::infer::Inferred;
 use peet_sketch::solver::{ConstraintStatus, DofStatus};
 use peet_sketch::{ConstraintId, ConstraintKind, Curve, EntityId, EntityKind, Geometry, Sketch};
 
-use super::{Sel, SketchEditor, SketchView, Tool, dof_color, format_value};
+use super::{Sel, SketchEditor, SketchView, Tool, dof_color};
 
 const SELECTED: Color32 = Color32::from_rgb(255, 150, 30);
 const PREVIEW: Color32 = Color32::from_rgb(255, 170, 60);
@@ -490,10 +490,10 @@ fn distance_points(sketch: &Sketch, a: EntityId, b: EntityId) -> Option<(DVec2, 
 
 fn dimension_text(kind: &ConstraintKind, value: f64) -> String {
     match kind {
-        ConstraintKind::Radius(_) => format!("R{}", format_value(value)),
-        ConstraintKind::Diameter(_) => format!("Ø{}", format_value(value)),
-        ConstraintKind::Angle(..) => format!("{}°", format_value(value)),
-        _ => format_value(value),
+        ConstraintKind::Radius(_) => format!("R{}", super::dim_value_text(kind, value)),
+        ConstraintKind::Diameter(_) => format!("Ø{}", super::dim_value_text(kind, value)),
+        ConstraintKind::Angle(..) => format!("{}°", super::dim_value_text(kind, value)),
+        _ => super::dim_value_text(kind, value),
     }
 }
 

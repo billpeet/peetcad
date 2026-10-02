@@ -1450,3 +1450,83 @@ mod random {
         }
     }
 }
+
+// ---- Face sources (what persistent naming builds on) ----
+
+/// The sources of every result face, checked for consistency: each is a face of its input
+/// on the same surface.
+#[track_caller]
+fn traced(a: &Solid, b: &Solid, op: BooleanOp) -> super::Traced {
+    let t = super::boolean_traced(a, b, op).expect("boolean");
+    assert_valid(&t.solid);
+    assert_eq!(t.sources.len(), t.solid.faces.len());
+    for (face, sources) in t.solid.faces.iter().zip(&t.sources) {
+        assert!(!sources.is_empty(), "every face comes from somewhere");
+        for s in sources {
+            let input = [a, b][s.solid as usize].face(s.face);
+            assert!(
+                super::util::same_surface(&input.surface, &face.surface),
+                "a face and its source lie on one surface"
+            );
+        }
+    }
+    t
+}
+
+#[test]
+fn sources_of_a_pocket() {
+    let plate = cuboid(v(0.0, 0.0, 0.0), v(10.0, 10.0, 4.0));
+    let tool = cuboid(v(3.0, 3.0, 2.0), v(7.0, 7.0, 6.0));
+    let t = traced(&plate, &tool, BooleanOp::Subtract);
+    assert_eq!(t.solid.faces.len(), 11);
+    // All six plate faces survive once each; five tool faces (not its top) line the pocket.
+    let from = |solid: u8| {
+        let mut faces: Vec<u32> = t
+            .sources
+            .iter()
+            .flatten()
+            .filter(|s| s.solid == solid)
+            .map(|s| s.face.0)
+            .collect();
+        faces.sort_unstable();
+        faces
+    };
+    assert_eq!(from(0), vec![0, 1, 2, 3, 4, 5]);
+    assert_eq!(from(1).len(), 5);
+    assert!(t.sources.iter().all(|s| s.len() == 1));
+}
+
+#[test]
+fn a_split_face_keeps_one_source_and_merged_faces_keep_both() {
+    // A slot right across the top splits it (and the two side faces it leaves through).
+    let plate = cuboid(v(0.0, 0.0, 0.0), v(10.0, 10.0, 4.0));
+    let slot = cuboid(v(4.0, -1.0, 2.0), v(6.0, 11.0, 5.0));
+    let t = traced(&plate, &slot, BooleanOp::Subtract);
+    let top = super::FaceSource {
+        solid: 0,
+        face: crate::FaceId(1),
+    };
+    let pieces = t.sources.iter().filter(|s| s.contains(&top)).count();
+    assert_eq!(pieces, 2, "the top face is now two faces with one source");
+
+    // Two boxes joined flush: the faces they continue across become one, with both sources.
+    let a = cuboid(v(0.0, 0.0, 0.0), v(5.0, 10.0, 4.0));
+    let b = cuboid(v(5.0, 0.0, 0.0), v(10.0, 10.0, 4.0));
+    let t = traced(&a, &b, BooleanOp::Union);
+    assert_eq!(t.solid.faces.len(), 6);
+    let merged = t.sources.iter().filter(|s| s.len() == 2).count();
+    assert_eq!(merged, 4, "top, bottom, front and back span both boxes");
+    for s in t.sources.iter().filter(|s| s.len() == 2) {
+        assert_ne!(s[0].solid, s[1].solid);
+    }
+}
+
+#[test]
+fn sources_when_one_input_is_empty() {
+    let a = cuboid(v(0.0, 0.0, 0.0), v(1.0, 1.0, 1.0));
+    let t = super::boolean_traced(&Solid::new(), &a, BooleanOp::Union).unwrap();
+    assert_eq!(t.sources.len(), 6);
+    assert!(t.sources.iter().all(|s| s.len() == 1 && s[0].solid == 1));
+    let t = super::boolean_traced(&a, &Solid::new(), BooleanOp::Subtract).unwrap();
+    assert!(t.sources.iter().all(|s| s[0].solid == 0));
+}

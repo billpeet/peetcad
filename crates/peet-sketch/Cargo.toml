@@ -13,6 +13,7 @@ serde.workspace = true
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
+ron = "0.12"
 
 [lints]
 workspace = true

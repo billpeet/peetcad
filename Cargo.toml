@@ -29,6 +29,7 @@ bytemuck = { version = "1", features = ["derive"] }
 log = "0.4"
 web-time = "1"
 serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", default-features = false, features = ["use-std"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

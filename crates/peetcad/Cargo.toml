@@ -14,6 +14,7 @@ eframe = { workspace = true, default-features = true, features = ["persistence"]
 log.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+peet-io.workspace = true
 env_logger = { version = "0.11", default-features = false, features = ["auto-color", "humantime"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]

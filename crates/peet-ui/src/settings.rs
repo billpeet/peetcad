@@ -201,6 +201,8 @@ pub struct Settings {
     pub show_perf_overlay: bool,
     pub show_feature_tree: bool,
     pub show_properties: bool,
+    /// Save parts with their display caches: larger files that open instantly.
+    pub save_caches: bool,
 }
 
 impl Default for Settings {
@@ -217,6 +219,7 @@ impl Default for Settings {
             show_perf_overlay: false,
             show_feature_tree: true,
             show_properties: true,
+            save_caches: true,
         }
     }
 }

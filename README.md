@@ -3,7 +3,8 @@
 A lightweight parametric 3D CAD application written in Rust, with sheet metal first.
 It runs as a native Windows app and in the browser (WebAssembly), from one codebase.
 
-> **Status:** early development (Phase 2: sketches to solids with extrude and cut).
+> **Status:** early development (Phase 3: a parametric, history-based modeller with
+> sketches, extrude and cut, reference geometry, undo and a native file format).
 > See [ROADMAP.md](ROADMAP.md) for the plan.
 
 ## Running
@@ -81,17 +82,54 @@ Click a face or edge in the viewport to select it (hovering highlights it first)
 a model face, select a flat face and press `S`. **File → Export STL** saves the bodies as a
 mesh.
 
+### The feature tree
+
+The tree is the part's history. Features refer to faces by what made them (not by number),
+so a sketch on a face follows it when anything upstream changes, and only what is affected
+is rebuilt (the status bar shows the last rebuild time).
+
+| Action | How |
+|---|---|
+| Edit a feature | Select it; the properties panel edits it in place. Double-click a sketch to open it |
+| Reorder | Drag a feature up or down (it can't move above what it uses) |
+| Roll back | Drag the bar at the end of the tree up; new features are added there |
+| Suppress, delete, roll back to here | Right-click a feature |
+| Undo / redo | `Ctrl+Z` / `Ctrl+Y`, for every change to the part |
+
+A feature that can't be built turns red with the reason in its tooltip and properties; the
+rest of the part still builds. **Features → Reference Geometry** adds planes (offset, at an
+angle, mid plane), axes (along an edge, through a round face, where two planes meet),
+points and coordinate systems; select a face, edge or vertex first to build on it, or use
+the **Pick** buttons. **Tools → Parameters** holds named values usable in any value field
+(`thickness * 2`) and the document units (mm, cm, m, inch, ft); values accept units too
+(`1in + 5mm`).
+
+### Files
+
+**File → Save** writes a `.peet` file (a 20-feature part is about 1 KB, plus display data
+that makes it open instantly, which you can turn off in Settings). **File → Open Sample
+Bracket** opens a 20-feature example. Unsaved work is autosaved and offered back after a
+crash. In the browser, files are opened with the browser's file picker, saved as
+downloads, and autosaved to the browser's storage.
+
+For diffs and debugging, a part can be turned into readable text and back:
+
+```sh
+peetcad dump part.peet part.ron
+peetcad pack part.ron part.peet
+```
+
 ## Layout
 
 ```
 crates/
   peet-math/      f64 geometry primitives and the tolerance model
-  peet-platform/  time, storage locations and crash reports for native and web
+  peet-platform/  time, files, autosave storage and crash reports for native and web
   peet-render/    wgpu viewport renderer: camera, grid, meshes, edges, overlays
   peet-sketch/    2D sketches: entities, constraints, solver, expressions, editing operations
   peet-kernel/    B-rep kernel: planes and cylinders, extrude, booleans, validation, tessellation
-  peet-model/     features (extrude, cut) and how they rebuild into solids
-  peet-io/        file formats (STL export)
+  peet-model/     the parametric core: feature tree, persistent naming, rebuilds, undo
+  peet-io/        file formats: native .peet, STL export
   peet-ui/        egui application shell: panels, commands, viewport interaction
   peetcad/        the application binary (native main and web entry point)
 ```

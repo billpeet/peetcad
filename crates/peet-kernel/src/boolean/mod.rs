@@ -76,6 +76,25 @@ pub enum BooleanOp {
     Intersect,
 }
 
+/// A face of one of a boolean's two inputs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FaceSource {
+    /// 0 for the first solid, 1 for the second.
+    pub solid: u8,
+    pub face: FaceId,
+}
+
+/// A boolean's result together with where its faces came from.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Traced {
+    pub solid: Solid,
+    /// For each face of `solid` (by face index), the input faces it is a part of. A face
+    /// usually has one source. It has several when pieces of different input faces were
+    /// merged into one (two boxes joined flush share one face afterwards). One input face
+    /// can be the source of several result faces (a slot cut across a face splits it).
+    pub sources: Vec<Vec<FaceSource>>,
+}
+
 /// Combines two closed solids. The result is a valid closed solid (possibly empty: no
 /// shells) or an error; inputs are never modified.
 ///
@@ -83,6 +102,12 @@ pub enum BooleanOp {
 /// whose axes are not parallel may be combined as long as their walls don't cross each
 /// other (that curve is a quartic); if they do, the result is [`KernelError::Unsupported`].
 pub fn boolean(a: &Solid, b: &Solid, op: BooleanOp) -> Result<Solid, KernelError> {
+    boolean_traced(a, b, op).map(|t| t.solid)
+}
+
+/// [`boolean`], also reporting which input faces each result face came from. Persistent
+/// naming builds on this: a feature's faces keep their identity through later features.
+pub fn boolean_traced(a: &Solid, b: &Solid, op: BooleanOp) -> Result<Traced, KernelError> {
     for (name, s) in [("first", a), ("second", b)] {
         let finite = s.vertices.iter().all(|v| v.point.is_finite())
             && s.edges
@@ -95,10 +120,17 @@ pub fn boolean(a: &Solid, b: &Solid, op: BooleanOp) -> Result<Solid, KernelError
         }
     }
     if a.faces.is_empty() || b.faces.is_empty() {
+        let whole = |solid: u8, s: &Solid| Traced {
+            solid: s.clone(),
+            sources: s
+                .face_ids()
+                .map(|face| vec![FaceSource { solid, face }])
+                .collect(),
+        };
         return Ok(match op {
-            BooleanOp::Union if a.faces.is_empty() => b.clone(),
-            BooleanOp::Union | BooleanOp::Subtract => a.clone(),
-            BooleanOp::Intersect => Solid::new(),
+            BooleanOp::Union if a.faces.is_empty() => whole(1, b),
+            BooleanOp::Union | BooleanOp::Subtract => whole(0, a),
+            BooleanOp::Intersect => Traced::empty(),
         });
     }
     let mut work = Work::new(a, b);
@@ -117,9 +149,9 @@ pub fn boolean(a: &Solid, b: &Solid, op: BooleanOp) -> Result<Solid, KernelError
         work.select(1, face, op, &edges, &canon, &mut patches)?;
     }
     if patches.is_empty() {
-        return Ok(Solid::new());
+        return Ok(Traced::empty());
     }
-    let solid = assemble::assemble(patches, edges, &work.pool.points)
+    let (solid, sources) = assemble::assemble(patches, edges, &work.pool.points)
         .map_err(|m| KernelError::InvalidResult(format!("The {} failed: {m}.", op_name(op))))?;
     // Always checked, not only in debug builds: a corrupt solid would poison every later
     // feature, and the check costs a fraction of the operation.
@@ -131,7 +163,16 @@ pub fn boolean(a: &Solid, b: &Solid, op: BooleanOp) -> Result<Solid, KernelError
             list.join("; ")
         )));
     }
-    Ok(solid)
+    Ok(Traced { solid, sources })
+}
+
+impl Traced {
+    fn empty() -> Self {
+        Self {
+            solid: Solid::new(),
+            sources: Vec::new(),
+        }
+    }
 }
 
 fn op_name(op: BooleanOp) -> &'static str {
@@ -417,6 +458,10 @@ impl<'a> Work<'a> {
         let solid = self.solids[side];
         let geom = &self.bodies[side].faces[face];
         let other = &self.bodies[1 - side];
+        let sources = vec![FaceSource {
+            solid: side as u8,
+            face: FaceId(face as u32),
+        }];
         let untouched =
             self.imprints[side][face].is_empty() && self.coincident[side][face].is_empty();
 
@@ -436,6 +481,7 @@ impl<'a> Work<'a> {
                     surface: geom.surface,
                     reversed: geom.reversed,
                     half_edges,
+                    sources,
                 });
             }
             return Ok(());
@@ -512,6 +558,7 @@ impl<'a> Work<'a> {
                 half_edges: all
                     .flat_map(|l| l.half_edges.iter().map(|&(e, f)| (e, f != flip)))
                     .collect(),
+                sources: sources.clone(),
             });
         }
         Ok(())

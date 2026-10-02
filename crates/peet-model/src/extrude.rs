@@ -1,18 +1,23 @@
 //! Extrude features: a sketch's regions pushed along the sketch normal, creating a new
 //! body, adding to bodies or cutting from them.
 
+use std::sync::Arc;
+
 use peet_kernel::Solid;
-use peet_kernel::boolean::{BooleanOp, boolean};
+use peet_kernel::boolean::{BooleanOp, boolean_traced};
+use peet_kernel::extrude::{ExtrudeFace, extrude_traced};
 use peet_math::{Aabb, DVec2, DVec3, Plane, tolerance};
 use peet_sketch::Sketch;
-use peet_sketch::region::{Profile, find_regions};
+use peet_sketch::region::{Profile, Region, find_regions};
 use peet_sketch::triangulate::triangulate_region;
 use serde::{Deserialize, Serialize};
 
 use crate::FeatureError;
+use crate::feature::{FeatureId, PlaneRef, Scalar};
+use crate::naming::{Body, FaceName, FaceRole};
 
 /// How far an extrusion goes.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum EndCondition {
     /// A given depth in one direction.
     Blind,
@@ -20,8 +25,8 @@ pub enum EndCondition {
     Symmetric,
     /// Through every body on that side of the sketch.
     ThroughAll,
-    /// Up to a plane (a planar face) parallel to the sketch.
-    UpTo(Plane),
+    /// Up to a plane or planar face parallel to the sketch.
+    UpTo(PlaneRef),
 }
 
 impl EndCondition {
@@ -32,6 +37,11 @@ impl EndCondition {
             Self::ThroughAll => "Through all",
             Self::UpTo(_) => "Up to face",
         }
+    }
+
+    /// Whether the depth value is used.
+    pub fn uses_depth(&self) -> bool {
+        matches!(self, Self::Blind | Self::Symmetric)
     }
 }
 
@@ -70,8 +80,8 @@ pub enum RegionSelection {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Extrude {
     pub end: EndCondition,
-    /// Depth in mm (Blind and Mid-plane).
-    pub depth: f64,
+    /// Depth (Blind and Mid-plane).
+    pub depth: Scalar,
     /// Flip the direction. The default direction is along the sketch normal, except for
     /// cuts, which go against it (into the face the sketch sits on).
     pub reverse: bool,
@@ -83,7 +93,7 @@ impl Extrude {
     pub fn new(operation: Operation) -> Self {
         Self {
             end: EndCondition::Blind,
-            depth: 10.0,
+            depth: Scalar::new(10.0),
             reverse: false,
             operation,
             regions: RegionSelection::Auto,
@@ -121,7 +131,7 @@ pub fn default_regions(profile: &Profile) -> Vec<usize> {
 }
 
 /// A point strictly inside a region (the centroid of its largest triangle).
-fn interior_point(region: &peet_sketch::region::Region) -> Option<DVec2> {
+fn interior_point(region: &Region) -> Option<DVec2> {
     let (lo, hi) = region.outer.bounds();
     let tris = triangulate_region(region, (lo.distance(hi) * 1e-3).max(1e-6));
     tris.triangles
@@ -147,16 +157,35 @@ fn overlaps(a: &Aabb, b: &Aabb) -> bool {
         && b.min.z <= a.max.z + m
 }
 
-/// The extrusion range `(from, to)` along the plane normal.
-fn range(plane: &Plane, ex: &Extrude, bodies: &[Solid]) -> Result<(f64, f64), FeatureError> {
+/// Everything an extrusion is built from, with references already resolved.
+pub struct ExtrudeInput<'a> {
+    /// The feature being built: its faces are named after it.
+    pub feature: FeatureId,
+    /// The bodies built so far.
+    pub bodies: &'a [Arc<Body>],
+    pub plane: &'a Plane,
+    pub sketch: &'a Sketch,
+    pub params: &'a Extrude,
+    /// The evaluated depth in mm.
+    pub depth: f64,
+    /// The resolved "up to" plane, for [`EndCondition::UpTo`].
+    pub up_to: Option<Plane>,
+    /// Seed for the stamps of the bodies this feature creates or changes.
+    pub stamp: u64,
+}
+
+/// The extrusion's offsets along the plane normal: where it starts (the near cap) and
+/// where it ends (the far cap). Either may be the larger.
+fn range(input: &ExtrudeInput<'_>) -> Result<(f64, f64), FeatureError> {
+    let (plane, ex) = (input.plane, input.params);
     let s = ex.direction();
-    let (a, b) = match ex.end {
-        EndCondition::Blind => (0.0, s * ex.depth),
-        EndCondition::Symmetric => (-ex.depth / 2.0, ex.depth / 2.0),
+    let (near, far) = match &ex.end {
+        EndCondition::Blind => (0.0, s * input.depth),
+        EndCondition::Symmetric => (-input.depth / 2.0, input.depth / 2.0),
         EndCondition::ThroughAll => {
             let mut reach = f64::NEG_INFINITY;
-            for body in bodies {
-                let bb = body.bounds();
+            for body in input.bodies {
+                let bb = body.solid.bounds();
                 for i in 0..8 {
                     let corner = DVec3::new(
                         if i & 1 == 0 { bb.min.x } else { bb.max.x },
@@ -173,34 +202,33 @@ fn range(plane: &Plane, ex: &Extrude, bodies: &[Solid]) -> Result<(f64, f64), Fe
             }
             (0.0, s * (reach + 1.0))
         }
-        EndCondition::UpTo(target) => {
+        EndCondition::UpTo(_) => {
+            let target = input.up_to.ok_or_else(|| {
+                FeatureError("Up to face: pick the face or plane to extrude up to.".to_owned())
+            })?;
             let parallel = target.normal().cross(plane.normal()).length() <= 1e-9;
             if !parallel {
                 return Err(FeatureError(
                     "Up to face: the face must be parallel to the sketch plane.".to_owned(),
                 ));
             }
-            let d = (target.origin() - plane.origin()).dot(plane.normal());
-            (0.0, d)
+            (0.0, (target.origin() - plane.origin()).dot(plane.normal()))
         }
     };
-    let (from, to) = (a.min(b), a.max(b));
-    if to - from <= tolerance::LINEAR {
+    if !near.is_finite() || !far.is_finite() {
+        return Err(FeatureError("The depth is not a finite number.".to_owned()));
+    }
+    if (far - near).abs() <= tolerance::LINEAR {
         return Err(FeatureError(
             "The extrusion has no depth. Enter a depth greater than zero.".to_owned(),
         ));
     }
-    Ok((from, to))
+    Ok((near, far))
 }
 
-/// Applies an extrude feature to the bodies built so far.
-pub fn apply_extrude(
-    bodies: &mut Vec<Solid>,
-    plane: &Plane,
-    sketch: &Sketch,
-    ex: &Extrude,
-) -> Result<(), FeatureError> {
-    let profile = find_regions(sketch);
+/// The extruded tool solid with its face names.
+fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> {
+    let profile = find_regions(input.sketch);
     if profile.regions.is_empty() {
         let hint = if profile.open_ends.is_empty() {
             "Draw a closed shape."
@@ -211,7 +239,7 @@ pub fn apply_extrude(
             "The sketch has no closed region. {hint}"
         )));
     }
-    let indices: Vec<usize> = match &ex.regions {
+    let indices: Vec<usize> = match &input.params.regions {
         RegionSelection::Auto => default_regions(&profile),
         RegionSelection::Points(points) => {
             let mut v: Vec<usize> = points
@@ -226,51 +254,157 @@ pub fn apply_extrude(
     if indices.is_empty() {
         return Err(FeatureError("No regions are selected.".to_owned()));
     }
-    let regions: Vec<_> = indices
+    let regions: Vec<Region> = indices
         .iter()
         .map(|&i| profile.regions[i].clone())
         .collect();
-    let (from, to) = range(plane, ex, bodies)?;
-    let tool = peet_kernel::extrude::extrude(plane, &regions, from, to)?;
-    let tool_box = tool.bounds();
+    let (near, far) = range(input)?;
+    let (from, to) = (near.min(far), near.max(far));
+    let (solid, faces) = extrude_traced(input.plane, &regions, from, to)?;
+    let names = faces
+        .iter()
+        .map(|f| {
+            let role = match *f {
+                // The kernel's start cap is the lower one along the normal.
+                ExtrudeFace::Start { .. } if near <= far => FaceRole::NearCap,
+                ExtrudeFace::Start { .. } => FaceRole::FarCap,
+                ExtrudeFace::End { .. } if near <= far => FaceRole::FarCap,
+                ExtrudeFace::End { .. } => FaceRole::NearCap,
+                ExtrudeFace::Side {
+                    region,
+                    loop_index,
+                    edge,
+                } => {
+                    let r = &regions[region];
+                    let l = if loop_index == 0 {
+                        &r.outer
+                    } else {
+                        &r.holes[loop_index - 1]
+                    };
+                    FaceRole::Side(l.edges[edge].entity)
+                }
+            };
+            FaceName::new(input.feature, role)
+        })
+        .collect();
+    Ok((solid, names))
+}
 
-    match ex.operation {
-        Operation::NewBody => bodies.push(tool),
-        Operation::Add => {
-            let touching: Vec<usize> = (0..bodies.len())
-                .filter(|&i| overlaps(&bodies[i].bounds(), &tool_box))
-                .collect();
-            let mut merged = tool;
-            for &i in &touching {
-                merged = boolean(&bodies[i], &merged, BooleanOp::Union)?;
-            }
-            for &i in touching.iter().rev() {
-                bodies.remove(i);
-            }
-            bodies.push(merged);
+/// The names of a boolean's result faces: each face takes the names of the input faces it
+/// is made of.
+fn result_names(
+    sources: &[Vec<peet_kernel::boolean::FaceSource>],
+    a: &[FaceName],
+    b: &[FaceName],
+) -> Vec<FaceName> {
+    sources
+        .iter()
+        .map(|list| {
+            FaceName::merged(list.iter().map(|s| {
+                let names = if s.solid == 0 { a } else { b };
+                &names[s.face.index()]
+            }))
+        })
+        .collect()
+}
+
+fn volume(solid: &Solid) -> f64 {
+    peet_kernel::validate::measure::volume(solid)
+}
+
+/// A stamp for the `index`-th body an operation produces.
+fn stamp(seed: u64, index: usize) -> u64 {
+    crate::hash::combine(seed, index as u64 + 1)
+}
+
+/// Applies an extrude feature to the bodies built so far and returns the new list of
+/// bodies. Bodies the feature doesn't touch are shared with the input, not copied.
+pub fn apply_extrude(input: &ExtrudeInput<'_>) -> Result<Vec<Arc<Body>>, FeatureError> {
+    let (tool, tool_names) = tool(input)?;
+    let tool_box = tool.bounds();
+    let bodies = input.bodies;
+    let touching: Vec<usize> = (0..bodies.len())
+        .filter(|&i| overlaps(&bodies[i].solid.bounds(), &tool_box))
+        .collect();
+
+    match input.params.operation {
+        Operation::NewBody => {
+            let mut out = bodies.to_vec();
+            out.push(Arc::new(Body {
+                solid: tool,
+                face_names: tool_names,
+                origin: input.feature,
+                stamp: stamp(input.stamp, 0),
+            }));
+            Ok(out)
         }
-        Operation::Cut => {
-            let mut touched = false;
-            let mut out = Vec::with_capacity(bodies.len());
-            // Build the new list first so a failure leaves the bodies untouched.
-            for body in bodies.iter() {
-                if overlaps(&body.bounds(), &tool_box) {
-                    touched = true;
-                    let result = boolean(body, &tool, BooleanOp::Subtract)?;
-                    if !result.faces.is_empty() {
-                        out.push(result);
-                    }
-                } else {
+        Operation::Add => {
+            let (mut solid, mut names) = (tool, tool_names);
+            for &i in &touching {
+                let traced = boolean_traced(&bodies[i].solid, &solid, BooleanOp::Union)?;
+                names = result_names(&traced.sources, &bodies[i].face_names, &names);
+                solid = traced.solid;
+            }
+            // The merged body takes the place (and identity) of the first body it joined.
+            let merged = Arc::new(Body {
+                solid,
+                face_names: names,
+                origin: touching
+                    .first()
+                    .map_or(input.feature, |&i| bodies[i].origin),
+                stamp: stamp(input.stamp, 0),
+            });
+            let mut out = Vec::with_capacity(bodies.len() + 1);
+            let mut merged = Some(merged);
+            for (i, body) in bodies.iter().enumerate() {
+                if !touching.contains(&i) {
                     out.push(body.clone());
+                } else if let Some(m) = merged.take() {
+                    out.push(m);
                 }
             }
-            if !touched {
+            out.extend(merged);
+            Ok(out)
+        }
+        Operation::Cut => {
+            if touching.is_empty() {
                 return Err(FeatureError(
                     "The cut doesn't reach any body. Check its direction and depth.".to_owned(),
                 ));
             }
-            *bodies = out;
+            // Build the new list first so a failure leaves the bodies untouched.
+            let mut out = Vec::with_capacity(bodies.len());
+            let mut removed = false;
+            for (i, body) in bodies.iter().enumerate() {
+                if !touching.contains(&i) {
+                    out.push(body.clone());
+                    continue;
+                }
+                let traced = boolean_traced(&body.solid, &tool, BooleanOp::Subtract)?;
+                if traced.solid.faces.is_empty() {
+                    removed = true;
+                    continue; // cut away completely
+                }
+                let before = volume(&body.solid);
+                if (before - volume(&traced.solid)).abs() <= 1e-9 * before.abs().max(1.0) {
+                    out.push(body.clone()); // the boxes overlap, the material doesn't
+                    continue;
+                }
+                removed = true;
+                out.push(Arc::new(Body {
+                    face_names: result_names(&traced.sources, &body.face_names, &tool_names),
+                    solid: traced.solid,
+                    origin: body.origin,
+                    stamp: stamp(input.stamp, i),
+                }));
+            }
+            if !removed {
+                return Err(FeatureError(
+                    "The cut doesn't remove any material. Check its direction and depth."
+                        .to_owned(),
+                ));
+            }
+            Ok(out)
         }
     }
-    Ok(())
 }

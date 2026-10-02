@@ -52,6 +52,34 @@ pub fn extrude(
     from: f64,
     to: f64,
 ) -> Result<Solid, KernelError> {
+    extrude_traced(plane, regions, from, to).map(|(solid, _)| solid)
+}
+
+/// What a face of an extrusion is, in terms of the input that made it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum ExtrudeFace {
+    /// The cap at `from`, of the region with this index in the input.
+    Start { region: usize },
+    /// The cap at `to`.
+    End { region: usize },
+    /// The wall swept by one loop edge. `loop_index` 0 is the region's outer loop and
+    /// `1..` are its holes; `edge` indexes that loop's `edges`. A circle given as several
+    /// arcs is one wall, reported with its first arc.
+    Side {
+        region: usize,
+        loop_index: usize,
+        edge: usize,
+    },
+}
+
+/// [`extrude`], also reporting what each face of the result is (by face index). Persistent
+/// naming builds on this.
+pub fn extrude_traced(
+    plane: &Plane,
+    regions: &[Region],
+    from: f64,
+    to: f64,
+) -> Result<(Solid, Vec<ExtrudeFace>), KernelError> {
     if !from.is_finite() || !to.is_finite() {
         return Err(KernelError::InvalidInput(
             "extrude depth is not a finite number".to_owned(),
@@ -73,6 +101,7 @@ pub fn extrude(
         plane: *plane,
         from,
         to,
+        faces: Vec::new(),
     };
     for (ri, region) in regions.iter().enumerate() {
         let outer = prepare_loop(&region.outer.edges, true)
@@ -86,9 +115,10 @@ pub fn extrude(
                     .map_err(|m| KernelError::InvalidInput(format!("region {ri}: hole {hi} {m}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        builder.add_region(&outer, &holes);
+        builder.add_region(ri, &outer, &holes);
     }
-    Ok(builder.solid)
+    debug_assert_eq!(builder.faces.len(), builder.solid.faces.len());
+    Ok((builder.solid, builder.faces))
 }
 
 /// A loop edge after cleaning: geometry plus traversal direction.
@@ -96,6 +126,8 @@ pub fn extrude(
 struct Piece {
     curve: Curve,
     reversed: bool,
+    /// Index of the edge in the loop as given.
+    source: usize,
 }
 
 impl Piece {
@@ -116,6 +148,8 @@ enum PreparedLoop {
         radius: f64,
         start_angle: f64,
         reversed: bool,
+        /// Index of the loop edge the circle is reported as.
+        source: usize,
     },
 }
 
@@ -124,10 +158,12 @@ enum PreparedLoop {
 fn prepare_loop(edges: &[LoopEdge], outer: bool) -> Result<PreparedLoop, String> {
     let mut pieces: Vec<Piece> = edges
         .iter()
-        .filter(|e| e.curve.length() > MIN_EDGE_LENGTH)
-        .map(|e| Piece {
+        .enumerate()
+        .filter(|(_, e)| e.curve.length() > MIN_EDGE_LENGTH)
+        .map(|(source, e)| Piece {
             curve: e.curve,
             reversed: e.reversed,
+            source,
         })
         .collect();
     if pieces.is_empty() {
@@ -240,6 +276,7 @@ fn full_circle(pieces: &[Piece], outer: bool) -> Option<PreparedLoop> {
         radius,
         start_angle: (start - center).to_angle(),
         reversed: !outer,
+        source: pieces[0].source,
     })
 }
 
@@ -248,6 +285,8 @@ struct Builder {
     plane: Plane,
     from: f64,
     to: f64,
+    /// What each face of `solid` is, in face order.
+    faces: Vec<ExtrudeFace>,
 }
 
 /// Bottom and top edge of one loop piece, plus its side surface.
@@ -283,11 +322,11 @@ impl Builder {
         }
     }
 
-    fn add_region(&mut self, outer: &PreparedLoop, holes: &[PreparedLoop]) {
+    fn add_region(&mut self, region: usize, outer: &PreparedLoop, holes: &[PreparedLoop]) {
         let shell = self.solid.add_shell();
-        let mut built = vec![self.add_loop_sides(shell, outer)];
-        for h in holes {
-            built.push(self.add_loop_sides(shell, h));
+        let mut built = vec![self.add_loop_sides(shell, outer, region, 0)];
+        for (hi, h) in holes.iter().enumerate() {
+            built.push(self.add_loop_sides(shell, h, region, hi + 1));
         }
         // Caps: top walks the loops as given, bottom walks them backwards.
         let top_plane = Plane {
@@ -300,6 +339,8 @@ impl Builder {
         let bottom = self
             .solid
             .add_face(shell, Surface::Plane(bottom_plane), true);
+        self.faces.push(ExtrudeFace::End { region });
+        self.faces.push(ExtrudeFace::Start { region });
         for l in &built {
             let uses: Vec<(EdgeId, bool)> = l.caps.iter().map(|&(_, t, r)| (t, r)).collect();
             self.solid.add_loop(top, &uses);
@@ -309,13 +350,25 @@ impl Builder {
     }
 
     /// Adds the side faces of one loop and returns its cap edges.
-    fn add_loop_sides(&mut self, shell: ShellId, l: &PreparedLoop) -> BuiltLoop {
+    fn add_loop_sides(
+        &mut self,
+        shell: ShellId,
+        l: &PreparedLoop,
+        region: usize,
+        loop_index: usize,
+    ) -> BuiltLoop {
+        let side = |edge: usize| ExtrudeFace::Side {
+            region,
+            loop_index,
+            edge,
+        };
         match *l {
             PreparedLoop::Circle {
                 center,
                 radius,
                 start_angle,
                 reversed,
+                source,
             } => {
                 let seam_uv = center + DVec2::from_angle(start_angle) * radius;
                 let vb = self.solid.add_vertex(self.point(seam_uv, self.from));
@@ -339,6 +392,7 @@ impl Builder {
                     radius,
                 });
                 let face = self.solid.add_face(shell, surface, reversed);
+                self.faces.push(side(source));
                 self.solid.add_loop(
                     face,
                     &[
@@ -369,19 +423,20 @@ impl Builder {
                 let mut caps = Vec::with_capacity(n);
                 for (i, p) in pieces.iter().enumerate() {
                     let j = (i + 1) % n;
-                    let side =
+                    let wall =
                         self.add_piece_edges(p, [bottom_v[i], bottom_v[j]], [top_v[i], top_v[j]]);
-                    let face = self.solid.add_face(shell, side.surface, side.face_reversed);
+                    let face = self.solid.add_face(shell, wall.surface, wall.face_reversed);
+                    self.faces.push(side(p.source));
                     self.solid.add_loop(
                         face,
                         &[
-                            (side.bottom, side.reversed),
+                            (wall.bottom, wall.reversed),
                             (vertical[j], false),
-                            (side.top, !side.reversed),
+                            (wall.top, !wall.reversed),
                             (vertical[i], true),
                         ],
                     );
-                    caps.push((side.bottom, side.top, side.reversed));
+                    caps.push((wall.bottom, wall.top, wall.reversed));
                 }
                 BuiltLoop { caps }
             }
