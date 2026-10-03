@@ -9,6 +9,7 @@ use peet_sketch::Sketch;
 use peet_sketch::expr::Parameters;
 use serde::{Deserialize, Serialize};
 
+use crate::config::Configurations;
 use crate::extrude::{Extrude, Operation};
 use crate::feature::{
     ExtrudeFeature, Feature, FeatureId, FeatureKind, PlaneRef, SketchFeature, StdPlane,
@@ -47,7 +48,10 @@ pub struct Model {
     pub name: String,
     /// The history, in build order. Shared pointers make snapshots (for undo) cheap: a
     /// snapshot copies only the features that change afterwards.
-    features: Vec<Arc<Feature>>,
+    ///
+    /// These, and the parameters, are those of the active configuration (see
+    /// [`crate::config`]).
+    pub(crate) features: Vec<Arc<Feature>>,
     /// Named values usable in every expression, and the document's units.
     pub parameters: Parameters,
     /// How many features are built: the rollback bar sits below this many. `None` means
@@ -58,6 +62,37 @@ pub struct Model {
     next_id: u32,
     /// The next number for automatic names, per name prefix.
     name_counters: BTreeMap<String, u32>,
+    /// The part's configurations, and what differs between them.
+    #[serde(default)]
+    pub(crate) configurations: Configurations,
+}
+
+/// A model as files of model schema 4 and earlier hold it: before configurations.
+#[derive(Deserialize)]
+pub struct ModelV4 {
+    name: String,
+    features: Vec<Arc<Feature>>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+}
+
+impl From<ModelV4> for Model {
+    /// The same part, with the one configuration every part starts with.
+    fn from(m: ModelV4) -> Self {
+        Self {
+            name: m.name,
+            features: m.features,
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            configurations: Configurations::default(),
+        }
+    }
 }
 
 impl Default for Model {
@@ -70,6 +105,7 @@ impl Default for Model {
             datums_visible: [true; 4],
             next_id: 1,
             name_counters: BTreeMap::new(),
+            configurations: Configurations::default(),
         }
     }
 }
@@ -181,7 +217,7 @@ impl Model {
     }
 
     /// Adds a feature with an automatic name, at the rollback bar (the end of the built
-    /// part of the tree), and returns its id.
+    /// part of the tree), and returns its id. It exists in every configuration.
     pub fn add(&mut self, kind: FeatureKind) -> FeatureId {
         let id = FeatureId(self.next_id);
         self.next_id += 1;
@@ -434,6 +470,7 @@ impl Model {
         {
             *r -= 1;
         }
+        self.tidy_configurations();
         Some(Arc::unwrap_or_clone(removed))
     }
 
@@ -498,7 +535,7 @@ impl Model {
         self.next_id = self.next_id.max(max.saturating_add(1));
         self.rollback = self.rollback.filter(|&b| b < self.features.len());
         self.parameters.evaluate();
-        Ok(())
+        self.validate_configurations()
     }
 }
 

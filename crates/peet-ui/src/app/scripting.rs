@@ -707,4 +707,101 @@ mod tests {
         // Nothing the application did was beyond the operations.
         assert_eq!(app.untranslated(), &[] as &[String]);
     }
+
+    #[test]
+    fn configurations_are_made_and_used_through_the_interface() {
+        use crate::configs_ui::ConfigAction;
+        use crate::document::ItemId;
+        use crate::tree::TreeAction;
+        use peet_ops::Configs;
+
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "open_sample", "sample": "enclosure"}),
+        );
+        let id = |app: &PeetApp, name: &str| {
+            let f = app.doc.model.features().find(|f| f.name == name);
+            f.expect("the feature").id
+        };
+        let cut = id(&app, "Sheet-Cut1");
+        let flange = id(&app, "Edge-Flange1");
+        app.update_title(&ctx);
+        assert_eq!(app.title, "Enclosure Panel - PeetCAD");
+
+        // The list: a new configuration is a copy and becomes the active one.
+        app.apply_configs(vec![ConfigAction::Add]);
+        assert_eq!(app.doc.model.active_configuration().name, "Configuration2");
+        app.apply_configs(vec![ConfigAction::Rename {
+            from: "Configuration2".to_owned(),
+            to: "Blank".to_owned(),
+        }]);
+        app.update_title(&ctx);
+        assert_eq!(app.title, "Enclosure Panel [Blank] * - PeetCAD");
+
+        // The tree: suppressing is for this configuration, or for all of them.
+        app.apply_tree(vec![TreeAction::SetSuppressed {
+            feature: cut,
+            on: true,
+            all: false,
+        }]);
+        app.apply_tree(vec![TreeAction::SetSuppressed {
+            feature: flange,
+            on: true,
+            all: true,
+        }]);
+        // The toolbar's Suppress is for this configuration too.
+        app.selected = Some(ItemId::Feature(id(&app, "Sheet-Cut2")));
+        app.execute(&ctx, CommandId::ToggleSuppress);
+        let default = app.doc.model.configuration_named("Default").unwrap().id;
+        assert_eq!(app.doc.model.suppressed_in(cut, default), Some(false));
+        assert_eq!(app.doc.model.suppressed_in(flange, default), Some(true));
+        assert!(app.doc.model.suppression_differs(id(&app, "Sheet-Cut2")));
+
+        // Back to the first one, a copy of it, and the copy deleted again.
+        app.apply_configs(vec![ConfigAction::Activate("Default".to_owned())]);
+        assert!(!app.doc.model.feature(cut).unwrap().suppressed);
+        assert!(app.doc.model.feature(flange).unwrap().suppressed);
+        app.apply_configs(vec![ConfigAction::Copy("Blank".to_owned())]);
+        assert_eq!(app.doc.model.active_configuration().name, "Configuration3");
+        assert!(app.doc.model.feature(cut).unwrap().suppressed);
+        app.apply_configs(vec![ConfigAction::Delete("Configuration3".to_owned())]);
+        assert_eq!(app.doc.model.active_configuration().name, "Blank");
+        // What can't be done is said, and changes nothing.
+        app.apply_configs(vec![ConfigAction::Rename {
+            from: "Blank".to_owned(),
+            to: "Default".to_owned(),
+        }]);
+        assert!(matches!(&app.status_message, Some((m, true)) if m.contains("already called")));
+        assert_eq!(app.doc.model.configurations().len(), 2);
+
+        // All of it was operations, with their scopes.
+        let journal = app.journal();
+        assert!(journal.iter().any(|op| matches!(
+            op,
+            Op::Suppress {
+                configurations: Configs::This,
+                ..
+            }
+        )));
+        assert!(journal.iter().any(|op| matches!(
+            op,
+            Op::Suppress {
+                configurations: Configs::All,
+                ..
+            }
+        )));
+        let words: Vec<&str> = journal.iter().map(Op::word).collect();
+        for word in [
+            "add_configuration",
+            "edit_configuration",
+            "configuration",
+            "delete_configuration",
+        ] {
+            assert!(words.contains(&word), "{word} is not in {words:?}");
+        }
+        assert_eq!(app.untranslated(), &[] as &[String]);
+    }
 }

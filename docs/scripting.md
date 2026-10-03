@@ -216,7 +216,8 @@ with their defaults' types):
 |---|---|
 | `edit` | `feature`, then any of its fields |
 | `rename` | `feature`, `name` |
-| `suppress`, `show` | `feature`, `on` (default true) |
+| `suppress` | `feature`, `on` (default true), `configurations`. What is built on a suppressed feature is suppressed with it |
+| `show` | `feature`, `on` (default true) |
 | `show` | `datum` (`origin`, `front`, `top`, `right`, `planes`), `on`: the built-in reference geometry |
 | `delete` | `feature` or `features` |
 | `move` | `feature`, and `before`, `after` or `index` |
@@ -226,10 +227,33 @@ with their defaults' types):
 
 | Operation | Fields |
 |---|---|
-| `set_parameter` | `name`, `value` |
+| `set_parameter` | `name`, `value`, `configurations`. A new parameter exists in every configuration |
 | `delete_parameter` | `name` |
 | `set_units` | `length` (`mm`, `cm`, `m`, `in`, `ft`) |
 | `undo`, `redo` | |
+
+### Configurations
+
+A part has one or more configurations: versions of it that differ in which features are
+suppressed and in the values of its parameters. One is active: it is what every other
+operation reads, builds and exports.
+
+| Operation | Fields |
+|---|---|
+| `add_configuration` | `name`, `copy` (a configuration; default the active one), `comment`. It becomes the active one |
+| `edit_configuration` | `configuration`, `name`, `comment` |
+| `delete_configuration` | `configuration`. A part keeps at least one |
+| `configuration` | `configuration`: make it the active one. Not an undo step |
+
+`suppress` and `set_parameter` take `configurations`: `"this"` (the active one, and what
+is meant if it is left out), `"all"`, a configuration's name, or a list of names.
+
+```json
+{"op": "add_configuration", "name": "Thick"}
+{"op": "set_parameter", "name": "thickness", "value": "2mm"}
+{"op": "suppress", "feature": "Sheet-Cut1", "configurations": ["Thick", "Blank"]}
+{"op": "configuration", "configuration": "Default"}
+```
 
 ### Queries
 
@@ -238,7 +262,8 @@ with their defaults' types):
 | `status` | name, file, units, counts, failures, undo and redo labels |
 | `features` | the tree, each feature's status and what it uses |
 | `feature` (`feature`) | its fields; a sketch's plane, definition, entities, relations and dimensions |
-| `parameters` | named values and units |
+| `parameters` | named values and units; a parameter that differs between configurations lists its expression in each |
+| `configurations` | the configurations, the active one, and what differs: the configurations each feature is suppressed in, each parameter's expression in every configuration |
 | `bodies` | bounds, volume, counts; flat size and thickness for sheet metal |
 | `faces`, `edges` (`body`) | what made each face, normals, centres; edge ends and the faces they join |
 | `bend_table` (`body`) | flat size, area, and each bend |

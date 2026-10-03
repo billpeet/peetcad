@@ -249,6 +249,9 @@ impl Document {
     fn change_inner(&mut self, label: &str, key: Option<u64>, f: impl FnOnce(&mut Model)) -> bool {
         let before = self.model.clone();
         f(&mut self.model);
+        // The change may have removed features or parameters that differ between
+        // configurations.
+        self.model.tidy_configurations();
         if self.model == before {
             return false;
         }
@@ -256,6 +259,20 @@ impl Document {
             Some(k) => self.history.record_merging(label, k, before),
             None => self.history.record(label, before),
         }
+        self.rebuild();
+        true
+    }
+
+    /// Makes another configuration the one that is built and shown. Returns whether that
+    /// changed anything.
+    ///
+    /// Like the flat pattern view this is not an undo step: undo goes back through the
+    /// changes to the part, and returns to the configuration each was made in.
+    pub fn activate_configuration(&mut self, id: peet_model::ConfigId) -> bool {
+        if !self.model.activate_configuration(id) {
+            return false;
+        }
+        self.history.seal();
         self.rebuild();
         true
     }

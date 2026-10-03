@@ -1,6 +1,6 @@
 ---
 name: peet
-description: Build, edit, inspect and export PeetCAD parts (.peet files) with the `peet` command line. Read before running peet. More with `peet skills sketching`, `selectors`, `solids`, `sheet-metal`.
+description: Build, edit, inspect and export PeetCAD parts (.peet files) with the `peet` command line. Read before running peet. More with `peet skills sketching`, `selectors`, `solids`, `sheet-metal`, `configurations`.
 ---
 
 # peet
@@ -78,3 +78,6 @@ Done when `status` shows `"failures": []` and `bodies` has the sizes that were a
   shell, patterns, freeform faces, bodies from a STEP file): `peet skills solids`.
 - **Sheet metal** (base flange, flanges, cuts, converting a solid to sheet metal, flat
   pattern, DXF, materials, checks): `peet skills sheet-metal`.
+- **Several versions of one part in one file** (sizes, with and without features;
+  `status` shows a `configuration` other than `Default`, or `suppress` and
+  `set_parameter` should apply to some versions only): `peet skills configurations`.

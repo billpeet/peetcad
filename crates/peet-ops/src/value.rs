@@ -761,3 +761,72 @@ impl GeomSel {
         }
     }
 }
+
+/// The configurations a change applies to: in JSON `"this"` (the active one, and what is
+/// meant if the field is left out), `"all"`, a configuration's name, or a list of names.
+/// A configuration that happens to be called "this" or "all" is named in a list.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum Configs {
+    /// The active configuration.
+    #[default]
+    This,
+    /// Every configuration: the value no longer differs between them.
+    All,
+    /// The configurations with these names.
+    Named(Vec<String>),
+}
+
+impl Configs {
+    pub(crate) fn parse(v: &Value) -> Result<Self, String> {
+        match v {
+            Value::String(s) if s == "this" => Ok(Self::This),
+            Value::String(s) if s == "all" => Ok(Self::All),
+            Value::String(s) => Ok(Self::Named(vec![s.clone()])),
+            Value::Array(names) => names
+                .iter()
+                .map(|n| {
+                    n.as_str()
+                        .map(str::to_owned)
+                        .ok_or_else(|| format!("expected a configuration's name, not {n}"))
+                })
+                .collect::<Result<Vec<_>, _>>()
+                .map(Self::Named),
+            other => Err(format!(
+                "expected \"this\", \"all\", a configuration's name or a list of names, not {other}"
+            )),
+        }
+    }
+
+    /// The scope this means in `doc`, or which name is not a configuration.
+    pub fn resolve(&self, doc: &Document) -> Result<peet_model::Scope, String> {
+        Ok(match self {
+            Self::This => peet_model::Scope::This,
+            Self::All => peet_model::Scope::All,
+            Self::Named(names) => peet_model::Scope::Only(
+                names
+                    .iter()
+                    .map(|n| configuration(doc, n))
+                    .collect::<Result<_, _>>()?,
+            ),
+        })
+    }
+}
+
+/// The configuration called `name`, or which ones there are.
+pub(crate) fn configuration(doc: &Document, name: &str) -> Result<peet_model::ConfigId, String> {
+    doc.model
+        .configuration_named(name)
+        .map(|c| c.id)
+        .ok_or_else(|| {
+            let names: Vec<&str> = doc
+                .model
+                .configurations()
+                .iter()
+                .map(|c| c.name.as_str())
+                .collect();
+            format!(
+                "There is no configuration called '{name}'. The configurations are: {}.",
+                names.join(", ")
+            )
+        })
+}

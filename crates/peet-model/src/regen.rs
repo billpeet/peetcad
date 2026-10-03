@@ -15,6 +15,10 @@
 //! and how to fix it, the bodies pass through it unchanged, and the features below still
 //! build. Features that refer to a failed one fail too, naming it.
 //!
+//! **Suppression.** A suppressed feature is skipped, as if it were not there, and so is
+//! every feature that uses it: what is built on a suppressed feature is suppressed with
+//! it, and comes back with it.
+//!
 //! **Write-back.** A sketch's solved positions and its resolved plane are stored back
 //! into the model, so a saved file opens with every sketch where it was, the solver always
 //! starts from the last solution, and a sketch whose plane is lost can still be shown.
@@ -65,6 +69,9 @@ pub enum Status {
     /// Not built; the message says why and what to do.
     Failed(String),
     Suppressed,
+    /// Skipped because this feature, which it uses, is suppressed (or is itself skipped
+    /// for that reason).
+    SuppressedBy(FeatureId),
     /// Below the rollback bar.
     RolledBack,
 }
@@ -84,6 +91,11 @@ impl Status {
 
     pub fn is_failed(&self) -> bool {
         matches!(self, Self::Failed(_))
+    }
+
+    /// Whether the feature is skipped: suppressed itself, or through a feature it uses.
+    pub fn is_suppressed(&self) -> bool {
+        matches!(self, Self::Suppressed | Self::SuppressedBy(_))
     }
 }
 
@@ -206,7 +218,13 @@ impl Engine {
             } else if feature.suppressed {
                 Some(Status::Suppressed)
             } else {
-                None
+                // What it uses, in tree order, so the message names the first.
+                let mut parents = feature.kind.dependencies();
+                parents.sort_by_key(|p| model.index_of(*p));
+                parents
+                    .into_iter()
+                    .find(|p| run.states.get(p).is_some_and(|s| s.status.is_suppressed()))
+                    .map(Status::SuppressedBy)
             };
             if let Some(status) = skipped {
                 let output = match &feature.kind {
@@ -1007,7 +1025,9 @@ impl<'m> Ctx<'m, '_> {
                 Status::Failed(_) => {
                     Err(format!("{what} ({name}) failed to rebuild. Fix it first."))
                 }
-                Status::Suppressed => Err(format!("{what} ({name}) is suppressed. Unsuppress it.")),
+                Status::Suppressed | Status::SuppressedBy(_) => {
+                    Err(format!("{what} ({name}) is suppressed. Unsuppress it."))
+                }
                 Status::RolledBack => Err(format!("{what} ({name}) is rolled back.")),
             },
         }

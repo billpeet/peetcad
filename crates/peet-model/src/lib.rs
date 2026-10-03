@@ -12,12 +12,15 @@
 //!   draft; the hole wizard; bodies imported from other CAD systems.
 //! - [`naming`]: persistent names for faces, edges and vertices, so references survive
 //!   upstream edits.
+//! - [`config`]: configurations, named versions of the part that differ in what is
+//!   suppressed and in the parameters' values.
 //! - [`DependencyGraph`]: which feature uses which.
 //! - [`Engine`]: incremental regeneration into bodies, with per-feature status.
 //! - [`History`]: undo and redo.
 //!
 //! The crate has no UI or GPU dependency: everything here runs headless.
 
+pub mod config;
 mod convert;
 mod dressup;
 mod extrude;
@@ -38,6 +41,7 @@ pub mod sheet;
 mod sweep;
 mod units;
 
+pub use config::{ConfigId, Configuration, Scope};
 pub use convert::ConvertToSheetFeature;
 pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
 pub use extrude::{
@@ -54,7 +58,7 @@ pub use history::History;
 pub use hole::{HoleEnd, HoleFeature, HoleFit, HoleKind, HoleSizes, METRIC, MetricSize};
 pub use import::{ImportFeature, ImportedSolid};
 pub use loft::{LoftFeature, LoftInput, apply_loft};
-pub use model::{Datum, DependencyGraph, Model};
+pub use model::{Datum, DependencyGraph, Model, ModelV4};
 pub use naming::{Body, EdgeRef, FaceName, FaceOrigin, FaceRef, FaceRole, Found, VertexRef};
 pub use placement::face_sketch_plane;
 pub use regen::{Engine, Evaluation, FeatureState, Output, SketchStatus, Stats, Status};

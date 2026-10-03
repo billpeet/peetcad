@@ -7,6 +7,7 @@
 mod app;
 mod bodies;
 pub mod commands;
+mod configs_ui;
 mod document;
 mod features_ui;
 mod files;

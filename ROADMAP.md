@@ -273,7 +273,7 @@ Known limits of the freeform stage: a boolean that involves a freeform face take
 - Scripting and agent access: in progress, see [docs/scripting-plan.md](docs/scripting-plan.md). A scripting language (Rust plugins and/or embedded Python or Lua) comes on top of it
 - Installable Progressive Web App (offline use in the browser)
 - Share-by-link: open a read-only model from a URL in the web build
-- Configurations / design tables (part families)
+- Configurations / design tables (part families): in progress, see [docs/configurations-plan.md](docs/configurations-plan.md). Stage 1 is done: named configurations that differ in suppressed features and parameter values
 - Nesting of flat patterns on sheet stock
 - CAM for laser/plasma toolpaths, press brake bend sequencing
 - Collaboration and version control friendly workflows (using the RON/JSON dump for diffs)
@@ -343,6 +343,7 @@ Benchmarks (`criterion`) run in CI for the solver, kernel operations and regener
 | Sheet metal | Native and flat first: a layout of flanges and bends in flat coordinates; the folded and flat solids share their topology, so unfolding is exact ([ADR 0004](docs/adr/0004-native-sheet-metal.md)) |
 | Regeneration and undo | Content-hashed keys per feature decide what to rebuild; undo stores model snapshots that share unchanged features ([ADR 0002](docs/adr/0002-incremental-regeneration.md)) |
 | Sheet metal features | Flanges are profiles of bends and flats; sketched bends split a flange in place; corners are declared and resolved at build time; forms are square-walled and present in both solids; patterns copy features, not geometry ([ADR 0005](docs/adr/0005-sheet-metal-phase-5.md)) |
+| Configurations | The model holds the active configuration; what differs between configurations is kept on the side and swapped in on activation; edits carry a scope ([ADR 0009](docs/adr/0009-configurations.md)) |
 | General solid modelling | Analytic first: cones, spheres and tori as surfaces of revolution with poles at vertices; fillets and chamfers as boolean tools; shell and draft by solving the same topology on new surfaces; imported bodies as features. NURBS are one more kind of surface, with marched intersections ([ADR 0006](docs/adr/0006-general-solid-modelling.md), [ADR 0008](docs/adr/0008-freeform-geometry.md)) |
 
 ## Open questions

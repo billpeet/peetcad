@@ -444,13 +444,19 @@ fn every_script_in_the_skills_runs_and_builds() {
                     assert_eq!(made["status"], "ok", "{name}: {reply}");
                 }
                 if let Some(feature) = reply.get("feature") {
-                    assert_eq!(feature["status"], "ok", "{name}: {reply}");
+                    // A feature that was just suppressed is suppressed, not built.
+                    let wanted = if reply["op"] == "suppress" {
+                        "suppressed"
+                    } else {
+                        "ok"
+                    };
+                    assert_eq!(feature["status"], wanted, "{name}: {reply}");
                 }
                 assert_ne!(reply["definition"], "over_defined", "{name}: {reply}");
             }
         }
     }
-    assert!(count >= 5, "each skill has a script");
+    assert!(count >= 6, "each skill has a script");
 }
 
 #[test]
