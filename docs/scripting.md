@@ -5,11 +5,10 @@ list of them, or one per line (blank lines and lines starting with `#` or `//` a
 skipped). `{"op": "help"}` returns this reference as data, with every field of every
 feature.
 
-> JSON operations are applied with `peet_ops::apply_json`. Rust code builds the same
-> operations as typed values (`peet_ops::Op`) and applies them with `peet_ops::apply`, so
-> the compiler checks their fields. The command line and live attach to a running session
-> are stages 4 and 5 of [the plan](scripting-plan.md); the design is in
-> [ADR 0007](adr/0007-operations.md).
+> From a terminal, `peet` applies them to a part file: see [The command line](#the-command-line).
+> Rust code builds the same operations as typed values (`peet_ops::Op`) and applies them
+> with `peet_ops::apply`, so the compiler checks their fields; JSON goes through
+> `peet_ops::apply_json`. The design is in [ADR 0007](adr/0007-operations.md).
 
 ## Example
 
@@ -31,6 +30,59 @@ feature.
 ```
 
 (Shown wrapped; in a line-per-operation script each operation is on one line.)
+
+## The command line
+
+`peet` applies operations to a part without a window.
+
+```sh
+peet run [SCRIPT...] [options]     # the operations of scripts (- or none: standard input)
+peet op JSON... [options]          # operations given as JSON
+peet OPERATION [field=value...]    # one operation, by name
+peet ops [OPERATION]               # the operations, or one with its fields
+peet new PART.peet                 # an empty part file
+peet dump PART.peet [OUT.ron]      # a part as readable text
+peet pack IN.ron PART.peet         # and back
+```
+
+| Option | |
+|---|---|
+| `-f`, `--file PART.peet` | the part to work on. Without it: a new, empty part, in memory |
+| `-o`, `--out PART.peet` | save the result here, not over `--file` |
+| `--new` | start from an empty part even if `--file` exists (it is overwritten) |
+| `--no-save` | don't save the part, even if it changed |
+| `--no-caches` | save without the geometry caches (smaller; the application rebuilds on open) |
+| `--keep-going` | carry on after an operation that can't be applied |
+| `--strict` | fail if the part ends with features that can't be built |
+| `--materials CSV` | use these material and gauge tables, not the built-in ones |
+| `--pretty` | indent the replies |
+| `-q`, `--quiet` | say nothing on standard error |
+
+- **Replies** go to standard output, one line of JSON per operation, in order. What was
+  saved, and problems outside an operation, go to standard error.
+- **A field** written `field=value` is JSON if it reads as JSON (`depth=8`, `flip=true`,
+  `edge={"between":[[0,0,8],[80,0,8]]}`) and text otherwise (`value=2mm`,
+  `sketch=Sketch1`, `path=flat.dxf`). To pass text that reads as JSON, quote it as JSON:
+  `name="8"`.
+- **Saving.** The part is saved to `--out`, or else back to `--file`, if it changed and
+  every operation was applied. If an operation was not applied, nothing is saved, even
+  with `--keep-going`. A script can also save and export where it likes with the `save`
+  and `export` operations.
+- **Features that can't be built** are not failed operations: the reply lists them under
+  `failures` and the part is saved. `--strict` makes them a failure.
+- **Material tables and check limits** are the built-in ones (or `--materials`), and
+  changes to them last for the run. The command line does not read or change the
+  application's settings.
+
+| Exit code | |
+|---|---|
+| 0 | every operation was applied |
+| 1 | an operation was not applied, or `--strict` found features that can't be built. Nothing was saved |
+| 2 | the command line or a file was the problem. Nothing was applied |
+
+The application's own operations (`view`, `toggle`, `window`, …) need a running PeetCAD,
+so `peet` refuses them. Applying operations to a part that is open in the application is
+stage 5 of [the plan](scripting-plan.md).
 
 ## Replies
 

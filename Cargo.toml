@@ -14,6 +14,7 @@ authors = ["PeetCAD contributors"]
 [workspace.dependencies]
 peet-document = { path = "crates/peet-document" }
 peet-io = { path = "crates/peet-io" }
+peet-cli = { path = "crates/peet-cli" }
 peet-kernel = { path = "crates/peet-kernel" }
 peet-math = { path = "crates/peet-math" }
 peet-model = { path = "crates/peet-model" }

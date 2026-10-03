@@ -80,8 +80,10 @@ jobs:
       - uses: actions/checkout@v5
       - run: rustup show
       - uses: Swatinem/rust-cache@v2
-      - run: cargo build --release -p peetcad
+      - run: cargo build --release -p peetcad -p peet-cli
       - uses: actions/upload-artifact@v4
         with:
           name: peetcad-windows-x86_64
-          path: target/release/peetcad.exe
+          path: |
+            target/release/peetcad.exe
+            target/release/peet.exe

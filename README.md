@@ -164,11 +164,30 @@ Bracket** opens a 20-feature example. Unsaved work is autosaved and offered back
 crash. In the browser, files are opened with the browser's file picker, saved as
 downloads, and autosaved to the browser's storage.
 
+## Command line
+
+`peet` builds, edits, asks about and exports parts without a window, for scripts and
+agents. It applies the same operations the application uses
+([docs/scripting.md](docs/scripting.md)), and prints one JSON reply per operation.
+
+```sh
+cargo build --release -p peet-cli        # target/release/peet
+
+peet run build.jsonl --new --file bracket.peet    # build a part from a script
+peet set_parameter name=thickness value=2mm --file bracket.peet
+peet features --file bracket.peet                 # what is in it
+peet export path=flat.dxf --file bracket.peet
+peet ops                                          # every operation and its fields
+```
+
+The part is saved if it changed and every operation was applied. The exit code is 0, 1
+if an operation was not applied, or 2 if the command line or a file was the problem.
+
 For diffs and debugging, a part can be turned into readable text and back:
 
 ```sh
-peetcad dump part.peet part.ron
-peetcad pack part.ron part.peet
+peet dump part.peet part.ron
+peet pack part.ron part.peet
 ```
 
 ## Layout
@@ -186,6 +205,7 @@ crates/
   peet-document/  the open document, headless: model, rebuilds, undo and bodies, shared by the app and scripts
   peet-ops/       operations: everything a user can do as typed values or JSON, with selectors, queries and replies (docs/scripting.md)
   peet-ui/        egui application shell: panels, commands, viewport interaction
+  peet-cli/       peet, the command line: operations on a part without a window
   peetcad/        the application binary (native main and web entry point)
 ```
 
