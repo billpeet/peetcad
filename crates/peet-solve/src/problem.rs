@@ -5,7 +5,7 @@
 //! `dx = Jᵀ (J Jᵀ + μD)⁻¹ (-f)` with `D = diag(J Jᵀ)` (Marquardt scaling, which amounts to
 //! equilibrating the rows). As `μ → 0` this is the minimum norm Gauss–Newton step, and
 //! since `dx` is always in the row space of `J`, geometry the equations leave free does
-//! not drift at all: under-constrained sketches move as little as possible.
+//! not drift at all: under-constrained geometry moves as little as possible.
 //!
 //! Redundant equations make `J Jᵀ` singular, and away from the solution their
 //! linearisations are inconsistent (to second order), which would blow the step up. The
@@ -17,31 +17,31 @@
 //! `(JᵀJ + μ max(D) I) dx = -Jᵀf`, whose right-hand side is always consistent: that gives the
 //! true weighted least squares compromise between constraints and targets.
 //!
-//! The Jacobian is sparse (at most eight entries per row), so the Gram matrix is factorised
-//! by the cached sparse Cholesky in [`super::sparse`].
+//! The Jacobian is sparse (a handful of entries per row), so the Gram matrix is factorised
+//! by the cached sparse Cholesky in [`crate::sparse`].
 
 use std::collections::HashMap;
 
-use super::equations::{Eq, MAX_SLOTS, NONE};
-use super::sparse::{Damping, Gram};
+use crate::sparse::{Damping, Gram};
+use crate::{Equation, MAX_SLOTS, NONE};
 
 /// Stop iterating once every residual is below this (mm or radians).
-pub(crate) const TARGET: f64 = 1e-11;
+pub const TARGET: f64 = 1e-11;
 /// A solve counts as converged (and its result is kept) when every residual is within the
 /// model tolerance. Regular configurations converge quadratically to [`TARGET`]; this only
 /// matters for singular ones (for example constraints that meet tangentially), where
 /// Newton-type methods converge slowly and stall somewhere below it.
-pub(crate) const CONVERGED: f64 = peet_math::tolerance::LINEAR;
+pub const CONVERGED: f64 = peet_math::tolerance::LINEAR;
 /// Clusters whose residuals are all below this are considered solved and left alone.
 /// Anything that does get solved goes on to [`TARGET`]; but re-solving a singular cluster
 /// that stalled within tolerance would only nudge its (then poorly determined) geometry.
-pub(crate) const SKIP: f64 = CONVERGED;
+pub const SKIP: f64 = CONVERGED;
 /// Below this, rejected steps are rounding noise: stop instead of raising the damping.
 const ROUNDING: f64 = 1e-10;
 /// Iterations over which LM (and dogleg) must at least halve the cost to keep going.
 const STALL_WINDOW: usize = 10;
 /// Damping floor (relative to each diagonal entry) in equation space. Far below
-/// [`super::sparse::DROP`], so dependent rows are recognised and dropped.
+/// [`crate::sparse::DROP`], so dependent rows are recognised and dropped.
 const MU_FLOOR_EQ: f64 = 1e-15;
 /// Damping floor in variable space. Above `DROP`, so no variable is ever dropped; it keeps
 /// the null space drift of under-determined drag steps around `ε/μ ≈ 1e-7` of the step.
@@ -58,15 +58,16 @@ const MU_START_RESIDUAL: f64 = 1e-2;
 
 /// Which Gram matrix a problem factorises.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Space {
+pub enum Space {
     /// `J Jᵀ` (one row per equation): minimum norm steps.
     Equations,
     /// `JᵀJ` (one row per variable): weighted least squares steps.
     Variables,
 }
 
+/// How to solve a [`Problem`].
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Options {
+pub struct Options {
     pub max_iter: usize,
     /// Hard equations only: stop at [`TARGET`] and report convergence. Otherwise (soft
     /// drag targets present) iterate to a least squares minimum.
@@ -75,15 +76,20 @@ pub(crate) struct Options {
     pub dogleg: bool,
 }
 
+/// What a solve came to.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct Outcome {
+pub struct Outcome {
     pub iterations: usize,
     pub converged: bool,
     pub max_residual: f64,
 }
 
+/// A set of equations and the slots that are unknown in them, with everything needed to
+/// solve them again and again: the sparsity pattern of the Jacobian, the symbolic
+/// factorisation and the work vectors. Build one per system and keep it while the
+/// equations read the same slots.
 #[derive(Debug)]
-pub(crate) struct Problem {
+pub struct Problem {
     /// Variable slots (local index = position).
     pub vars: Vec<u32>,
     /// Equation indices (row = position).
@@ -106,7 +112,9 @@ pub(crate) struct Problem {
 }
 
 impl Problem {
-    pub fn new(vars: Vec<u32>, eqs: Vec<u32>, all: &[Eq], space: Space) -> Self {
+    /// The problem of the equations `eqs` (indices into `all`) in the unknowns `vars`
+    /// (slots of the value array). Every other slot the equations read is a constant.
+    pub fn new<E: Equation>(vars: Vec<u32>, eqs: Vec<u32>, all: &[E], space: Space) -> Self {
         let local: HashMap<u32, u32> = vars
             .iter()
             .enumerate()
@@ -178,14 +186,14 @@ impl Problem {
     }
 
     /// Residuals and Jacobian at `vals`.
-    fn eval_jac(&mut self, all: &[Eq], vals: &[f64]) {
+    fn eval_jac<E: Equation>(&mut self, all: &[E], vals: &[f64]) {
         let mut g = [0.0; MAX_SLOTS];
         self.jv.fill(0.0);
         for (r, &e) in self.eqs.iter().enumerate() {
             let eq = &all[e as usize];
             self.f[r] = eq.eval(vals, &mut g);
             let map = &self.slot_entry[r];
-            for k in 0..eq.n as usize {
+            for k in 0..eq.slots().len() {
                 if map[k] != NONE {
                     self.jv[map[k] as usize] += g[k];
                 }
@@ -193,14 +201,14 @@ impl Problem {
         }
     }
 
-    fn eval_f(eqs: &[u32], all: &[Eq], vals: &[f64], out: &mut [f64]) {
+    fn eval_f<E: Equation>(eqs: &[u32], all: &[E], vals: &[f64], out: &mut [f64]) {
         for (r, &e) in eqs.iter().enumerate() {
             out[r] = all[e as usize].residual(vals);
         }
     }
 
     /// Residuals at `vals` (rows in problem order).
-    pub fn residuals(&self, all: &[Eq], vals: &[f64], out: &mut Vec<f64>) {
+    pub fn residuals<E: Equation>(&self, all: &[E], vals: &[f64], out: &mut Vec<f64>) {
         out.resize(self.eqs.len(), 0.0);
         Self::eval_f(&self.eqs, all, vals, out);
     }
@@ -314,7 +322,12 @@ impl Problem {
 
     /// The minimum norm Gauss–Newton step at `vals` (lightly damped), written to `dx`
     /// (one entry per problem variable). Returns false if no finite step was found.
-    pub fn gauss_newton_step(&mut self, all: &[Eq], vals: &[f64], dx: &mut Vec<f64>) -> bool {
+    pub fn gauss_newton_step<E: Equation>(
+        &mut self,
+        all: &[E],
+        vals: &[f64],
+        dx: &mut Vec<f64>,
+    ) -> bool {
         dx.clear();
         dx.resize(self.vars.len(), 0.0);
         if self.eqs.is_empty() {
@@ -333,7 +346,7 @@ impl Problem {
     }
 
     /// Solves the problem, updating the variables in `vals` in place.
-    pub fn solve(&mut self, all: &[Eq], vals: &mut [f64], opts: Options) -> Outcome {
+    pub fn solve<E: Equation>(&mut self, all: &[E], vals: &mut [f64], opts: Options) -> Outcome {
         let mut out = Outcome::default();
         if self.eqs.is_empty() {
             out.converged = true;
@@ -423,7 +436,7 @@ impl Problem {
     }
 
     /// Powell's dogleg trust-region method, from the current point. Returns iterations.
-    fn dogleg(&mut self, all: &[Eq], vals: &mut [f64], max_iter: usize) -> usize {
+    fn dogleg<E: Equation>(&mut self, all: &[E], vals: &mut [f64], max_iter: usize) -> usize {
         self.eval_jac(all, vals);
         let mut cost = half_sq(&self.f);
         let mut delta = 0.1 * self.x_scale(vals);
@@ -524,7 +537,8 @@ fn half_sq(f: &[f64]) -> f64 {
     0.5 * f.iter().map(|x| x * x).sum::<f64>()
 }
 
-pub(crate) fn max_abs(f: &[f64]) -> f64 {
+/// The largest absolute value in `f` (infinite if any is not a number).
+pub fn max_abs(f: &[f64]) -> f64 {
     f.iter().fold(0.0, |m, x| {
         if x.is_nan() {
             f64::INFINITY

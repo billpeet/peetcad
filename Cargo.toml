@@ -23,6 +23,7 @@ peet-platform = { path = "crates/peet-platform" }
 peet-render = { path = "crates/peet-render" }
 peet-sheetmetal = { path = "crates/peet-sheetmetal" }
 peet-sketch = { path = "crates/peet-sketch" }
+peet-solve = { path = "crates/peet-solve" }
 peet-ui = { path = "crates/peet-ui" }
 
 eframe = { version = "0.36", default-features = false }

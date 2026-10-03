@@ -1,7 +1,7 @@
 //! Sparse symmetric positive definite factorisation for Gram matrices `G = M Mᵀ + λI`.
 //!
 //! The solver forms `J Jᵀ + λI` (one row/column per equation) every iteration. The
-//! sparsity pattern only depends on the sketch topology, so everything structural is
+//! sparsity pattern only depends on which equations read which variables, so everything structural is
 //! computed once and cached in a [`Gram`]:
 //!
 //! - a minimum degree ordering (to keep fill low),
@@ -13,7 +13,7 @@
 
 /// Structure and workspace for factorising `G = Σ_records r rᵀ` (with damping).
 #[derive(Clone, Debug)]
-pub(crate) struct Gram {
+pub struct Gram {
     dim: usize,
     /// `perm[new] = old`.
     perm: Vec<u32>,
@@ -38,7 +38,7 @@ pub(crate) struct Gram {
 
 /// How the damping `μ` is added to the diagonal.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Damping {
+pub enum Damping {
     /// `μ diag(G)`: scale invariant per row (Marquardt).
     Scaled,
     /// `μ max(diag(G)) I`: damps every direction, including null space ones (Levenberg).
@@ -46,7 +46,7 @@ pub(crate) enum Damping {
 }
 
 /// A pivot below this fraction of its row's damped diagonal marks the row as dependent.
-pub(crate) const DROP: f64 = 1e-13;
+pub const DROP: f64 = 1e-13;
 
 impl Gram {
     /// Builds the structure for a Gram matrix of dimension `dim`. Each record lists

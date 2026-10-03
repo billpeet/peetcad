@@ -2639,9 +2639,17 @@ name = "peet-sketch"
 version = "0.1.0"
 dependencies = [
  "peet-math",
+ "peet-solve",
  "proptest",
  "ron",
  "serde",
+]
+
+[[package]]
+name = "peet-solve"
+version = "0.1.0"
+dependencies = [
+ "peet-math",
 ]
 
 [[package]]

@@ -17,8 +17,9 @@ use std::collections::HashMap;
 
 use peet_math::DVec2;
 
-use super::equations::{self, NONE, SlotMap};
-use super::problem::Problem;
+use peet_solve::{Equation, NONE, Problem};
+
+use super::equations::{self, SlotMap};
 use crate::sketch::{ConstraintKind, Entity, EntityId, Geometry, Sketch};
 
 /// A set of points merged by coincidence, sharing two slots.
