@@ -16,8 +16,10 @@ use crate::commands::{CommandId, CommandState};
 use crate::document::{Document, FileLocation, ItemId, Persistent, SketchItem};
 use crate::features_ui::{self, ERROR, PICKING, Picked, Slot};
 use crate::files::{self, AfterDiscard, FileState};
+use crate::icons::{self, Icon};
 use crate::palette::CommandPalette;
 use crate::perf::{PerfInfo, PerfMonitor};
+use crate::ribbon;
 use crate::settings::{MousePreset, OrbitChoice, STORAGE_KEY, Settings, ThemeChoice};
 use crate::sketch_ui::{self, SketchEditor};
 use crate::tree::{TreeAction, TreeView, tree_ui};
@@ -25,6 +27,18 @@ use crate::viewport::{Viewport, ViewportParams};
 
 pub const APP_NAME: &str = "PeetCAD";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// The ribbon's tabs. Sketch only shows while a sketch is open.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum RibbonTab {
+    File,
+    #[default]
+    Model,
+    Sketch,
+    SheetMetal,
+    View,
+    Help,
+}
 
 #[derive(Default)]
 struct OpenWindows {
@@ -84,6 +98,7 @@ pub struct PeetApp {
     /// The window title last set, so it is only sent when it changes.
     title: String,
     flange_drag: Option<FlangeDrag>,
+    ribbon_tab: RibbonTab,
 }
 
 impl PeetApp {
@@ -155,6 +170,7 @@ impl PeetApp {
             quit_requested: false,
             title: String::new(),
             flange_drag: None,
+            ribbon_tab: RibbonTab::default(),
         }
     }
 
@@ -376,6 +392,7 @@ impl PeetApp {
             status,
         };
         self.sketch = Some(SketchEditor::new(ItemId::Feature(id), &mut work));
+        self.ribbon_tab = RibbonTab::Sketch;
         self.sketch_work = Some(work);
         self.selected = Some(ItemId::Feature(id));
         self.selected_geom.clear();
@@ -389,6 +406,9 @@ impl PeetApp {
 
     /// Ends sketch editing, writing the sketch back to the model as one undo step.
     fn close_sketch(&mut self) {
+        if self.ribbon_tab == RibbonTab::Sketch {
+            self.ribbon_tab = RibbonTab::Model;
+        }
         let (Some(editor), Some(work)) = (self.sketch.take(), self.sketch_work.take()) else {
             return;
         };
@@ -407,6 +427,9 @@ impl PeetApp {
     }
 
     fn close_sketch_discarding(&mut self) {
+        if self.ribbon_tab == RibbonTab::Sketch {
+            self.ribbon_tab = RibbonTab::Model;
+        }
         self.sketch = None;
         self.sketch_work = None;
     }
@@ -1196,246 +1219,338 @@ impl PeetApp {
 
     // ---- Panels ----
 
-    fn menu_bar(&self, ui: &mut Ui, pending: &mut Vec<CommandId>) {
-        egui::MenuBar::new().ui(ui, |ui| {
-            let mut item = |ui: &mut Ui, cmd: CommandId| {
-                if cmd.available() && menu_button(ui, cmd, self.command_state(cmd)) {
+    fn toolbar(&self, ui: &mut Ui, pending: &mut Vec<CommandId>, tab: &mut RibbonTab) {
+        use ribbon::Size::{Icon as IconOnly, Large, Small};
+        let tool =
+            |ui: &mut Ui, pending: &mut Vec<CommandId>, cmd: CommandId, label: &str, size| {
+                if cmd.available() && ribbon::command(ui, cmd, label, self.command_state(cmd), size)
+                {
+                    pending.push(cmd);
+                }
+            };
+        let menu = |ui: &mut Ui, pending: &mut Vec<CommandId>, cmds: &[CommandId]| {
+            for &cmd in cmds {
+                if menu_button(ui, cmd, self.command_state(cmd)) {
                     pending.push(cmd);
                     ui.close();
                 }
-            };
-            ui.menu_button("File", |ui| {
-                item(ui, CommandId::NewDocument);
-                item(ui, CommandId::OpenDocument);
-                item(ui, CommandId::OpenSample);
-                item(ui, CommandId::OpenSampleEnclosure);
-                ui.separator();
-                item(ui, CommandId::SaveDocument);
-                item(ui, CommandId::SaveDocumentAs);
-                ui.separator();
-                item(ui, CommandId::ExportStl);
-                item(ui, CommandId::ExportDxf);
-                ui.separator();
-                item(ui, CommandId::Settings);
-                if CommandId::Quit.available() {
-                    ui.separator();
-                    item(ui, CommandId::Quit);
-                }
-            });
-            ui.menu_button("Edit", |ui| {
-                let undo = self.doc.undo_label().filter(|_| self.sketch.is_none());
-                if let Some(label) = undo {
-                    ui.weak(format!("Undo: {label}"));
-                }
-                if let Some(label) = self.doc.redo_label().filter(|_| self.sketch.is_none()) {
-                    ui.weak(format!("Redo: {label}"));
-                }
-                item(ui, CommandId::Undo);
-                item(ui, CommandId::Redo);
-                ui.separator();
-                item(ui, CommandId::DeleteSelection);
-                item(ui, CommandId::ToggleSuppress);
-                item(ui, CommandId::RollToEnd);
-            });
-            ui.menu_button("Sketch", |ui| {
-                item(ui, CommandId::NewSketch);
-                item(ui, CommandId::EditSketch);
-                item(ui, CommandId::ExitSketch);
-                ui.separator();
-                for cmd in SKETCH_TOOLS {
-                    item(ui, cmd);
-                }
-                ui.separator();
-                for cmd in SKETCH_EDITS {
-                    item(ui, cmd);
-                }
-                ui.menu_button("Relations", |ui| {
-                    for cmd in RELATIONS {
-                        item(ui, cmd);
-                    }
-                });
-                ui.separator();
-                item(ui, CommandId::ToggleConstruction);
-                item(ui, CommandId::ToggleRelations);
-            });
-            ui.menu_button("Features", |ui| {
-                item(ui, CommandId::Extrude);
-                item(ui, CommandId::CutExtrude);
-                ui.separator();
-                ui.menu_button("Sheet Metal", |ui| {
-                    for cmd in SHEET_METAL {
-                        item(ui, cmd);
-                    }
-                });
-                ui.separator();
-                ui.menu_button("Reference Geometry", |ui| {
-                    for cmd in REFERENCES {
-                        item(ui, cmd);
-                    }
-                });
-            });
-            ui.menu_button("Tools", |ui| {
-                item(ui, CommandId::Parameters);
-            });
-            ui.menu_button("View", |ui| {
-                ui.menu_button("Standard Views", |ui| {
-                    for cmd in [
-                        CommandId::ViewIsometric,
-                        CommandId::ViewFront,
-                        CommandId::ViewTop,
-                        CommandId::ViewRight,
-                        CommandId::ViewBack,
-                        CommandId::ViewBottom,
-                        CommandId::ViewLeft,
-                    ] {
-                        item(ui, cmd);
-                    }
-                });
-                item(ui, CommandId::ZoomToFit);
-                ui.separator();
-                item(ui, CommandId::ToggleProjection);
-                item(ui, CommandId::ToggleGrid);
-                item(ui, CommandId::ToggleReferencePlanes);
-                item(ui, CommandId::ToggleViewCube);
-                ui.separator();
-                item(ui, CommandId::FlatPattern);
-            });
-            ui.menu_button("Window", |ui| {
-                item(ui, CommandId::ToggleFeatureTree);
-                item(ui, CommandId::ToggleProperties);
-                item(ui, CommandId::TogglePerfOverlay);
-            });
-            ui.menu_button("Help", |ui| {
-                item(ui, CommandId::CommandPalette);
-                item(ui, CommandId::KeyboardShortcuts);
-                ui.separator();
-                item(ui, CommandId::About);
-            });
-        });
-    }
-
-    fn toolbar(&self, ui: &mut Ui, pending: &mut Vec<CommandId>) {
-        if self.sketch.is_some() {
-            self.sketch_toolbar(ui, pending);
-            return;
+            }
+        };
+        let sketching = self.sketch.is_some();
+        if *tab == RibbonTab::Sketch && !sketching {
+            *tab = RibbonTab::Model;
         }
+
+        // Quick-access buttons, the tabs, and the command search.
         ui.horizontal(|ui| {
-            let tool = |ui: &mut Ui, pending: &mut Vec<CommandId>, cmd: CommandId, label: &str| {
-                if tool_button(ui, cmd, label, self.command_state(cmd)) {
-                    pending.push(cmd);
-                }
+            ui.spacing_mut().item_spacing.x = 1.0;
+            tool(ui, pending, CommandId::SaveDocument, "Save", IconOnly);
+            // In sketch mode undo works on the sketch, whose steps have no labels here.
+            let history = |label: Option<&str>, verb: &str| match label {
+                Some(l) if !sketching => format!("{verb} {l}"),
+                _ => verb.to_owned(),
             };
-            tool(ui, pending, CommandId::SaveDocument, "Save");
-            tool(ui, pending, CommandId::Undo, "Undo");
-            tool(ui, pending, CommandId::Redo, "Redo");
-            ui.separator();
-            ui.weak("View");
-            tool(ui, pending, CommandId::ViewIsometric, "Iso");
-            tool(ui, pending, CommandId::ViewFront, "Front");
-            tool(ui, pending, CommandId::ViewTop, "Top");
-            tool(ui, pending, CommandId::ViewRight, "Right");
-            tool(ui, pending, CommandId::ZoomToFit, "Fit");
-            ui.separator();
-            tool(ui, pending, CommandId::ToggleProjection, "Perspective");
-            tool(ui, pending, CommandId::ToggleGrid, "Grid");
-            tool(ui, pending, CommandId::ToggleReferencePlanes, "Planes");
-            ui.separator();
-            ui.weak("Sketch");
-            tool(ui, pending, CommandId::NewSketch, "New Sketch");
-            tool(ui, pending, CommandId::EditSketch, "Edit");
-            tool(ui, pending, CommandId::Parameters, "Parameters");
-            ui.separator();
-            ui.weak("Features");
-            tool(ui, pending, CommandId::Extrude, "Extrude");
-            tool(ui, pending, CommandId::CutExtrude, "Cut");
-            ui.menu_button("Reference", |ui| {
-                for cmd in REFERENCES {
-                    if menu_button(ui, cmd, self.command_state(cmd)) {
-                        pending.push(cmd);
-                        ui.close();
-                    }
-                }
-            });
-            ui.separator();
-            ui.weak("Sheet Metal");
-            tool(ui, pending, CommandId::BaseFlange, "Base Flange");
-            tool(ui, pending, CommandId::EdgeFlange, "Edge Flange");
-            tool(ui, pending, CommandId::FlatPattern, "Flat");
-            tool(ui, pending, CommandId::BendTable, "Bends");
-            tool(ui, pending, CommandId::ExportDxf, "DXF");
-            ui.separator();
-            tool(ui, pending, CommandId::ExportStl, "Export STL");
+            let undo = history(self.doc.undo_label(), "Undo");
+            let redo = history(self.doc.redo_label(), "Redo");
+            tool(ui, pending, CommandId::Undo, &undo, IconOnly);
+            tool(ui, pending, CommandId::Redo, &redo, IconOnly);
+            ui.add_space(10.0);
+            let mut tabs = vec![
+                ribbon::Tab {
+                    id: RibbonTab::File,
+                    label: "File",
+                    contextual: None,
+                },
+                ribbon::Tab {
+                    id: RibbonTab::Model,
+                    label: "Model",
+                    contextual: None,
+                },
+            ];
+            if sketching {
+                tabs.push(ribbon::Tab {
+                    id: RibbonTab::Sketch,
+                    label: "Sketch",
+                    contextual: Some(icons::Category::Sketch),
+                });
+            }
+            tabs.extend([
+                ribbon::Tab {
+                    id: RibbonTab::SheetMetal,
+                    label: "Sheet Metal",
+                    contextual: None,
+                },
+                ribbon::Tab {
+                    id: RibbonTab::View,
+                    label: "View",
+                    contextual: None,
+                },
+                ribbon::Tab {
+                    id: RibbonTab::Help,
+                    label: "Help",
+                    contextual: None,
+                },
+            ]);
+            ribbon::tab_bar(ui, &tabs, tab);
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let palette = CommandId::CommandPalette;
                 let label = format!(
-                    "Commands  {}",
+                    "Search commands  {}",
                     ui.ctx()
                         .format_shortcut(&palette.info().shortcut.expect("has shortcut"))
                 );
-                if ui
-                    .button(label)
-                    .on_hover_text(palette.info().description)
-                    .clicked()
-                {
-                    pending.push(palette);
-                }
+                tool(ui, pending, palette, &label, Small);
             });
         });
-    }
 
-    fn sketch_toolbar(&self, ui: &mut Ui, pending: &mut Vec<CommandId>) {
-        ui.horizontal_wrapped(|ui| {
-            let tool = |ui: &mut Ui, pending: &mut Vec<CommandId>, cmd: CommandId, label: &str| {
-                if tool_button(ui, cmd, label, self.command_state(cmd)) {
-                    pending.push(cmd);
-                }
-            };
-            tool(ui, pending, CommandId::ExitSketch, "✔ Exit Sketch");
-            tool(ui, pending, CommandId::Extrude, "Extrude");
-            tool(ui, pending, CommandId::CutExtrude, "Cut");
-            tool(ui, pending, CommandId::BaseFlange, "Base Flange");
-            ui.separator();
-            for (cmd, label) in [
-                (CommandId::SketchSelect, "Select"),
-                (CommandId::SketchLine, "Line"),
-                (CommandId::SketchRectangle, "Rectangle"),
-                (CommandId::SketchCenterRectangle, "Ctr Rect"),
-                (CommandId::SketchCircle, "Circle"),
-                (CommandId::SketchArc, "Arc"),
-                (CommandId::SketchSlot, "Slot"),
-                (CommandId::SketchPolygon, "Polygon"),
-                (CommandId::SketchPoint, "Point"),
-            ] {
-                tool(ui, pending, cmd, label);
-            }
-            ui.separator();
-            tool(ui, pending, CommandId::SmartDimension, "Dimension");
-            ui.separator();
-            for (cmd, label) in [
-                (CommandId::SketchTrim, "Trim"),
-                (CommandId::SketchExtend, "Extend"),
-                (CommandId::SketchFillet, "Fillet"),
-                (CommandId::SketchOffset, "Offset"),
-                (CommandId::SketchMirror, "Mirror"),
-            ] {
-                tool(ui, pending, cmd, label);
-            }
-            ui.separator();
-            tool(ui, pending, CommandId::ToggleConstruction, "Construction");
-            ui.menu_button("Relations", |ui| {
-                for cmd in RELATIONS {
-                    if menu_button(ui, cmd, self.command_state(cmd)) {
-                        pending.push(cmd);
-                        ui.close();
+        // The current tab's commands.
+        egui::Frame::new()
+            .fill(ui.visuals().faint_bg_color)
+            .corner_radius(6)
+            .inner_margin(egui::Margin::symmetric(6, 2))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
+                    match *tab {
+                        RibbonTab::File => {
+                            ribbon::group(ui, "Document", |ui| {
+                                tool(ui, pending, CommandId::NewDocument, "New", Large);
+                                tool(ui, pending, CommandId::OpenDocument, "Open", Large);
+                                tool(ui, pending, CommandId::SaveDocument, "Save", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::SaveDocumentAs, "Save As", Small);
+                                });
+                            });
+                            ribbon::group(ui, "Samples", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::OpenSample, "Bracket", Small);
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::OpenSampleEnclosure,
+                                        "Enclosure Panel",
+                                        Small,
+                                    );
+                                });
+                            });
+                            ribbon::group(ui, "Export", |ui| {
+                                tool(ui, pending, CommandId::ExportStl, "STL", Large);
+                                tool(ui, pending, CommandId::ExportDxf, "DXF", Large);
+                            });
+                            ribbon::group(ui, "Application", |ui| {
+                                tool(ui, pending, CommandId::Settings, "Settings", Large);
+                                tool(ui, pending, CommandId::Quit, "Quit", Large);
+                            });
+                        }
+                        RibbonTab::Model => {
+                            ribbon::group(ui, "Sketch", |ui| {
+                                tool(ui, pending, CommandId::NewSketch, "New Sketch", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::EditSketch, "Edit Sketch", Small);
+                                    tool(ui, pending, CommandId::Parameters, "Parameters", Small);
+                                });
+                            });
+                            ribbon::group(ui, "Features", |ui| {
+                                tool(ui, pending, CommandId::Extrude, "Extrude", Large);
+                                tool(ui, pending, CommandId::CutExtrude, "Cut", Large);
+                                ribbon::dropdown(
+                                    ui,
+                                    Icon::Reference,
+                                    "Reference",
+                                    "Add a reference plane, axis, point or coordinate system.",
+                                    Large,
+                                    |ui| menu(ui, pending, &REFERENCES),
+                                );
+                            });
+                            ribbon::group(ui, "History", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::DeleteSelection, "Delete", Small);
+                                    tool(ui, pending, CommandId::ToggleSuppress, "Suppress", Small);
+                                    tool(ui, pending, CommandId::RollToEnd, "Roll to End", Small);
+                                });
+                            });
+                            ribbon::group(ui, "View", |ui| {
+                                tool(ui, pending, CommandId::ZoomToFit, "Fit", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::ViewIsometric, "Iso", Small);
+                                    tool(ui, pending, CommandId::ViewFront, "Front", Small);
+                                    tool(ui, pending, CommandId::ViewTop, "Top", Small);
+                                });
+                            });
+                        }
+                        RibbonTab::Sketch => {
+                            ribbon::group(ui, "Sketch", |ui| {
+                                tool(ui, pending, CommandId::ExitSketch, "Exit Sketch", Large);
+                            });
+                            ribbon::group(ui, "Features", |ui| {
+                                tool(ui, pending, CommandId::Extrude, "Extrude", Large);
+                                tool(ui, pending, CommandId::CutExtrude, "Cut", Large);
+                                tool(ui, pending, CommandId::BaseFlange, "Base Flange", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::SheetCut, "Sheet Cut", Small);
+                                });
+                            });
+                            ribbon::group(ui, "Draw", |ui| {
+                                tool(ui, pending, CommandId::SketchSelect, "Select", Large);
+                                tool(ui, pending, CommandId::SketchLine, "Line", Large);
+                                tool(ui, pending, CommandId::SketchRectangle, "Rectangle", Large);
+                                tool(ui, pending, CommandId::SketchCircle, "Circle", Large);
+                                tool(ui, pending, CommandId::SketchArc, "Arc", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::SketchCenterRectangle,
+                                        "Center Rect",
+                                        Small,
+                                    );
+                                    tool(ui, pending, CommandId::SketchSlot, "Slot", Small);
+                                    tool(ui, pending, CommandId::SketchPolygon, "Polygon", Small);
+                                });
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::SketchPoint, "Point", Small);
+                                });
+                            });
+                            ribbon::group(ui, "Constrain", |ui| {
+                                tool(ui, pending, CommandId::SmartDimension, "Dimension", Large);
+                                ribbon::dropdown(
+                                    ui,
+                                    Icon::Relations,
+                                    "Relations",
+                                    "Add a geometric relation between the selected sketch items.",
+                                    Large,
+                                    |ui| menu(ui, pending, &RELATIONS),
+                                );
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::ToggleConstruction,
+                                        "Construction",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::ToggleRelations,
+                                        "Show Relations",
+                                        Small,
+                                    );
+                                });
+                            });
+                            ribbon::group(ui, "Modify", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::SketchTrim, "Trim", Small);
+                                    tool(ui, pending, CommandId::SketchExtend, "Extend", Small);
+                                    tool(ui, pending, CommandId::SketchFillet, "Fillet", Small);
+                                });
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::SketchOffset, "Offset", Small);
+                                    tool(ui, pending, CommandId::SketchMirror, "Mirror", Small);
+                                    tool(ui, pending, CommandId::ZoomToFit, "Fit", Small);
+                                });
+                            });
+                        }
+                        RibbonTab::SheetMetal => {
+                            ribbon::group(ui, "Flanges", |ui| {
+                                tool(ui, pending, CommandId::BaseFlange, "Base Flange", Large);
+                                tool(ui, pending, CommandId::EdgeFlange, "Edge Flange", Large);
+                                tool(ui, pending, CommandId::SheetCut, "Sheet Cut", Large);
+                            });
+                            ribbon::group(ui, "Flat Pattern", |ui| {
+                                tool(ui, pending, CommandId::FlatPattern, "Flatten", Large);
+                                tool(ui, pending, CommandId::BendTable, "Bend Table", Large);
+                            });
+                            ribbon::group(ui, "Export", |ui| {
+                                tool(ui, pending, CommandId::ExportDxf, "DXF", Large);
+                            });
+                        }
+                        RibbonTab::View => {
+                            ribbon::group(ui, "Orientation", |ui| {
+                                tool(ui, pending, CommandId::ZoomToFit, "Fit", Large);
+                                tool(ui, pending, CommandId::ViewIsometric, "Isometric", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::ViewFront, "Front", Small);
+                                    tool(ui, pending, CommandId::ViewTop, "Top", Small);
+                                    tool(ui, pending, CommandId::ViewRight, "Right", Small);
+                                });
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::ViewBack, "Back", Small);
+                                    tool(ui, pending, CommandId::ViewBottom, "Bottom", Small);
+                                    tool(ui, pending, CommandId::ViewLeft, "Left", Small);
+                                });
+                            });
+                            ribbon::group(ui, "Display", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::ToggleProjection,
+                                        "Perspective",
+                                        Small,
+                                    );
+                                    tool(ui, pending, CommandId::ToggleGrid, "Grid", Small);
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::ToggleReferencePlanes,
+                                        "Planes",
+                                        Small,
+                                    );
+                                });
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::ToggleViewCube,
+                                        "View Cube",
+                                        Small,
+                                    );
+                                });
+                            });
+                            ribbon::group(ui, "Panels", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::ToggleFeatureTree,
+                                        "Feature Tree",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::ToggleProperties,
+                                        "Properties",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::TogglePerfOverlay,
+                                        "Performance",
+                                        Small,
+                                    );
+                                });
+                            });
+                        }
+                        RibbonTab::Help => {
+                            ribbon::group(ui, "Help", |ui| {
+                                tool(ui, pending, CommandId::CommandPalette, "Commands", Large);
+                                tool(
+                                    ui,
+                                    pending,
+                                    CommandId::KeyboardShortcuts,
+                                    "Shortcuts",
+                                    Large,
+                                );
+                                tool(ui, pending, CommandId::About, "About", Large);
+                            });
+                        }
                     }
-                }
+                });
             });
-            ui.separator();
-            tool(ui, pending, CommandId::Undo, "Undo");
-            tool(ui, pending, CommandId::Redo, "Redo");
-            ui.separator();
-            tool(ui, pending, CommandId::ZoomToFit, "Fit");
-        });
     }
 
     fn status_bar(&self, ui: &mut Ui) {
@@ -2314,33 +2429,6 @@ fn capitalized(s: &str) -> String {
         .unwrap_or_default()
 }
 
-const SKETCH_TOOLS: [CommandId; 13] = [
-    CommandId::SketchSelect,
-    CommandId::SketchLine,
-    CommandId::SketchRectangle,
-    CommandId::SketchCenterRectangle,
-    CommandId::SketchCircle,
-    CommandId::SketchArc,
-    CommandId::SketchSlot,
-    CommandId::SketchPolygon,
-    CommandId::SketchPoint,
-    CommandId::SmartDimension,
-    CommandId::SketchTrim,
-    CommandId::SketchExtend,
-    CommandId::SketchFillet,
-];
-
-const SKETCH_EDITS: [CommandId; 2] = [CommandId::SketchOffset, CommandId::SketchMirror];
-
-const SHEET_METAL: [CommandId; 6] = [
-    CommandId::BaseFlange,
-    CommandId::EdgeFlange,
-    CommandId::SheetCut,
-    CommandId::FlatPattern,
-    CommandId::BendTable,
-    CommandId::ExportDxf,
-];
-
 const REFERENCES: [CommandId; 4] = [
     CommandId::RefPlane,
     CommandId::RefAxis,
@@ -2578,25 +2666,6 @@ fn menu_button(ui: &mut Ui, cmd: CommandId, state: CommandState) -> bool {
 }
 
 /// A compact toolbar button for a command. Returns true if clicked.
-fn tool_button(ui: &mut Ui, cmd: CommandId, label: &str, state: CommandState) -> bool {
-    let info = cmd.info();
-    let button = match state.checked {
-        Some(checked) => egui::Button::selectable(checked, label),
-        None => egui::Button::new(label),
-    };
-    let tip = match info.shortcut {
-        Some(sc) => format!(
-            "{}\n\nShortcut: {}",
-            info.description,
-            ui.ctx().format_shortcut(&sc)
-        ),
-        None => info.description.to_owned(),
-    };
-    ui.add_enabled(state.enabled, button)
-        .on_hover_text(tip)
-        .clicked()
-}
-
 impl eframe::App for PeetApp {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.perf.begin_frame();
@@ -2629,12 +2698,13 @@ impl eframe::App for PeetApp {
         }
         self.hovered = None;
 
-        egui::Panel::top("menu_bar").show(ui, |ui| self.menu_bar(ui, &mut pending));
+        let mut tab = self.ribbon_tab;
         egui::Panel::top("toolbar").show(ui, |ui| {
-            ui.add_space(2.0);
-            self.toolbar(ui, &mut pending);
-            ui.add_space(2.0);
+            ui.add_space(3.0);
+            self.toolbar(ui, &mut pending, &mut tab);
+            ui.add_space(3.0);
         });
+        self.ribbon_tab = tab;
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
         if self.settings.show_feature_tree {
             egui::Panel::left("feature_tree")
