@@ -13,6 +13,7 @@
 
 use std::marker::PhantomData;
 
+use crate::value::{HoleStandard, RevolveAxis};
 use peet_document::Document;
 use peet_model::feature::{AxisDef, CoordSystemDef, FeatureKind, PatternDef, PlaneDef, PointDef};
 use peet_model::{
@@ -21,6 +22,10 @@ use peet_model::{
     JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, Operation, PatternFeature,
     PlaneRef, PointRef, RegionSelection, Scalar, ScalarKind, SheetCutFeature, SheetSettingsDef,
     SketchFeature, SketchedBendFeature, StdAxis, StdPlane, VertexRef,
+};
+use peet_model::{
+    BlendFeature, BlendKind, DraftFeature, HoleEnd, HoleFeature, HoleFit, HoleKind, METRIC,
+    RevolveAxisRef, RevolveFeature, ShellFeature, SweepFeature,
 };
 use peet_sheetmetal::corner::{CornerKind, CornerRelief};
 use peet_sheetmetal::{
@@ -203,8 +208,22 @@ words!(
     JogDimension,
     CornerKind,
     CornerRelief,
-    FormKind
+    FormKind,
+    HoleKind,
+    HoleFit
 );
+
+impl Words for BlendKind {
+    fn all() -> &'static [Self] {
+        &[BlendKind::Fillet, BlendKind::Chamfer]
+    }
+}
+
+impl Words for HoleEnd {
+    fn all() -> &'static [Self] {
+        &[HoleEnd::ThroughAll, HoleEnd::Blind]
+    }
+}
 
 impl Words for Operation {
     fn all() -> &'static [Self] {
@@ -422,6 +441,91 @@ read: |b, doc| match b {
         json!({ "deduction": scalar_out(s, ScalarKind::Length, doc) })
     }
 });
+
+reference_field!(SomeFaces, Vec<FaceSel>, Vec<FaceRef>, true, "list of faces",
+    parse: |v| each(list(v)?, FaceSel::parse),
+    assign: |a, doc| {
+        if a.is_empty() {
+            return Err("expected at least one face".to_owned());
+        }
+        each(a, |f| select::face_ref(doc, f))
+    },
+    read: |f, doc| f.iter().map(|f| face_out(f, doc)).collect());
+reference_field!(OptPlane, PlaneSel, Option<PlaneRef>, true, "plane",
+    parse: PlaneSel::parse,
+    assign: |a, doc| Ok(Some(select::plane(doc, a)?.0)),
+    read: |p, doc| p.as_ref().map_or(Value::Null, |p| plane_out(p, doc)));
+reference_field!(OptSketch, FeatureSel, Option<FeatureId>, true, "sketch (name or id)",
+    parse: FeatureSel::parse,
+    assign: |a, doc| {
+        let id = a.resolve(doc)?;
+        if doc.model.sketch(id).is_some() {
+            Ok(Some(id))
+        } else {
+            Err(format!("{} is not a sketch", doc.model.name_of(id)))
+        }
+    },
+    read: |id, doc| id.map_or(Value::Null, |id| json!(doc.model.name_of(id))));
+reference_field!(RevolveAxisF, RevolveAxis, RevolveAxisRef, false,
+"sketch_x | sketch_y | {\"line\": id of a line of the sketch} | axis (default: the sketch's first construction line, else sketch_y)",
+parse: RevolveAxis::parse,
+assign: |a, doc| Ok(match a {
+    RevolveAxis::SketchX => RevolveAxisRef::SketchX,
+    RevolveAxis::SketchY => RevolveAxisRef::SketchY,
+    RevolveAxis::SketchLine(id) => RevolveAxisRef::SketchLine(*id),
+    RevolveAxis::Axis(axis) => RevolveAxisRef::Axis(select::axis(doc, axis)?),
+}),
+read: |a, doc| match a {
+    RevolveAxisRef::SketchX => json!("sketch_x"),
+    RevolveAxisRef::SketchY => json!("sketch_y"),
+    RevolveAxisRef::SketchLine(id) => json!({ "line": id.0 }),
+    RevolveAxisRef::Axis(axis) => axis_out(axis, doc),
+});
+
+fn metric(name: &str) -> Result<&'static peet_model::MetricSize, String> {
+    METRIC
+        .iter()
+        .find(|m| m.name.eq_ignore_ascii_case(name))
+        .ok_or_else(|| {
+            let names: Vec<&str> = METRIC.iter().map(|m| m.name).collect();
+            format!("'{name}' is not a standard size: use {}", names.join(", "))
+        })
+}
+
+reference_field!(StandardF, HoleStandard, Option<(String, HoleFit)>, false,
+"{\"size\": \"M6\", \"fit\": close | normal | loose | tapped}: sets every size of the hole from a standard screw size",
+parse: HoleStandard::parse,
+// The sizes themselves are set by `FeatureArgs::prepare`, before the other fields.
+assign: |a, _| Ok(Some((metric(&a.size)?.name.to_owned(), a.fit))),
+read: |s, _| s.as_ref().map_or(Value::Null, |(size, fit)| {
+    json!({ "size": size, "fit": fit.word() })
+}));
+
+/// Text that can be absent.
+pub(crate) struct OptText;
+
+impl Field for OptText {
+    type Arg = Option<String>;
+    type Target = Option<String>;
+    const NULLABLE: bool = true;
+    fn describe() -> String {
+        "text, or null for none".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        if v.is_null() {
+            Ok(None)
+        } else {
+            text(v).map(|t| Some(t.to_owned()))
+        }
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, _: &Document) -> Result<(), String> {
+        target.clone_from(arg);
+        Ok(())
+    }
+    fn read(target: &Self::Target, _: &Document) -> Value {
+        json!(target)
+    }
+}
 
 fn second_direction() -> LinearDirection {
     LinearDirection {
@@ -845,6 +949,101 @@ feature_args! {
     }
 }
 
+feature_args! {
+    /// A sketch's closed regions turned about an axis.
+    Revolve: FeatureKind::Revolve(f) => &mut **f,
+        RevolveFeature { sketch, axis, angle, symmetric, reverse, operation, regions } => {
+    sketch: FeatureSel as SketchF = sketch,
+    /// The sketch's first construction line if absent, else its vertical axis.
+    axis: RevolveAxis as RevolveAxisF = axis,
+    /// Degrees: 360 is all the way round.
+    angle: Input as Angle = angle,
+    symmetric: bool as Flag = symmetric,
+    reverse: bool as Flag = reverse,
+    operation: Operation as Choice<Operation> = operation,
+    regions: Regions as RegionsF = regions,
+    }
+}
+
+feature_args! {
+    /// A fillet or a chamfer along edges.
+    Blend: FeatureKind::Blend(f) => &mut **f, BlendFeature { kind, edges, size, chain } => {
+    kind: BlendKind as Choice<BlendKind> = kind,
+    edges: Vec<EdgeSel> as Edges = edges,
+    /// The fillet's radius, or how far the chamfer is set back on both faces.
+    size: Input as Length = size,
+    /// Carry on along the edges that continue each edge smoothly.
+    chain: bool as Flag = chain,
+    }
+}
+
+feature_args! {
+    /// Bodies hollowed, leaving walls of one thickness.
+    Shell: FeatureKind::Shell(f) => &mut **f, ShellFeature { open, thickness } => {
+    /// The faces to remove, opening the hollow. None: closed hollows.
+    open: Vec<FaceSel> as Faces = open,
+    thickness: Input as Length = thickness,
+    }
+}
+
+feature_args! {
+    /// Flat faces tapered about the lines where they cross a neutral plane.
+    Draft: FeatureKind::Draft(f) => &mut **f, DraftFeature { faces, neutral, angle, flip } => {
+    faces: Vec<FaceSel> as SomeFaces = faces,
+    /// The part keeps its size in this plane; its normal is the direction of pull.
+    neutral: PlaneSel as OptPlane = neutral,
+    angle: Input as Angle = angle,
+    flip: bool as Flag = flip,
+    }
+}
+
+feature_args! {
+    /// Holes at the points of a sketch.
+    Hole: FeatureKind::Hole(f) => &mut **f,
+        HoleFeature {
+            sketch,
+            kind,
+            diameter,
+            end,
+            depth,
+            tip_angle,
+            counterbore_diameter,
+            counterbore_depth,
+            countersink_diameter,
+            countersink_angle,
+            reverse,
+            thread,
+            standard,
+        } => {
+    sketch: FeatureSel as SketchF = sketch,
+    /// Sets every size from a standard screw size; sizes given as well win.
+    standard: HoleStandard as StandardF = standard,
+    kind: HoleKind as Choice<HoleKind> = kind,
+    diameter: Input as Length = diameter,
+    end: HoleEnd as Choice<HoleEnd> = end,
+    /// Blind holes: the depth of the full diameter.
+    depth: Input as Length = depth,
+    tip_angle: Input as Angle = tip_angle,
+    counterbore_diameter: Input as Length = counterbore_diameter,
+    counterbore_depth: Input as Length = counterbore_depth,
+    countersink_diameter: Input as Length = countersink_diameter,
+    countersink_angle: Input as Angle = countersink_angle,
+    reverse: bool as Flag = reverse,
+    /// A cosmetic thread's designation ("M6x1").
+    thread: Option<String> as OptText = thread,
+    }
+}
+
+feature_args! {
+    /// A sketch's closed regions swept along the path drawn in another sketch.
+    Sweep: FeatureKind::Sweep(f) => &mut **f, SweepFeature { profile, path, operation, regions } => {
+    profile: FeatureSel as SketchF = profile,
+    path: FeatureSel as OptSketch = path,
+    operation: Operation as Choice<Operation> = operation,
+    regions: Regions as RegionsF = regions,
+    }
+}
+
 // ---- New features ----
 
 fn no_plane() -> PlaneRef {
@@ -884,6 +1083,26 @@ fn pattern(def: PatternDef) -> FeatureKind {
         seeds: Vec::new(),
         def,
     }))
+}
+
+fn revolve(operation: Operation) -> FeatureKind {
+    FeatureKind::Revolve(Box::new(RevolveFeature {
+        sketch: NO_SKETCH,
+        axis: RevolveAxisRef::SketchY,
+        angle: Scalar::new(360.0),
+        symmetric: false,
+        reverse: false,
+        operation,
+        regions: RegionSelection::Auto,
+    }))
+}
+
+fn blend(kind: BlendKind) -> FeatureKind {
+    FeatureKind::Blend(Box::new(BlendFeature::new(kind, Vec::new())))
+}
+
+fn sweep(operation: Operation) -> FeatureKind {
+    FeatureKind::Sweep(Box::new(SweepFeature::new(NO_SKETCH, None, operation)))
 }
 
 /// Declares the kinds of feature operations add: the variant, its arguments, its word in
@@ -935,20 +1154,6 @@ macro_rules! feature_ops {
                     $( $word => Some($args::from_args(a).map(Self::$variant)), )*
                     _ => None,
                 }
-            }
-
-            /// Reads the arguments that fit `kind` from a JSON operation (for an edit).
-            pub(crate) fn parse_for(
-                kind: &mut FeatureKind,
-                a: &mut Args,
-                doc: &Document,
-            ) -> Result<Self, String> {
-                $(
-                    if $args::get(kind, doc).is_some() {
-                        return $args::from_args(a).map(Self::$variant);
-                    }
-                )*
-                Err("That feature has no fields to edit.".to_owned())
             }
 
             /// The fields of `kind` as JSON, in the form an edit takes them (references
@@ -1074,12 +1279,123 @@ feature_ops! {
             seeds: Vec::new(),
             plane: no_plane(),
         }))),
+    Revolve(Revolve) "revolve"
+        "Turn a sketch's closed regions about an axis: a new body, or added to the bodies it touches."
+        => Some(revolve(Operation::Add)),
+    CutRevolve(Revolve) "cut_revolve"
+        "Cut a sketch's closed regions, turned about an axis, out of the bodies."
+        => Some(revolve(Operation::Cut)),
+    Sweep(Sweep) "sweep"
+        "Sweep a sketch's closed regions along the lines and arcs of another sketch."
+        => Some(sweep(Operation::Add)),
+    CutSweep(Sweep) "cut_sweep"
+        "Cut a sketch's closed regions, swept along a path, out of the bodies."
+        => Some(sweep(Operation::Cut)),
+    Fillet(Blend) "fillet"
+        "Round edges with a radius ('size')."
+        => Some(blend(BlendKind::Fillet)),
+    Chamfer(Blend) "chamfer"
+        "Bevel edges, set back by 'size' on both faces."
+        => Some(blend(BlendKind::Chamfer)),
+    Shell(Shell) "shell"
+        "Hollow the bodies, leaving walls of one thickness; 'open' faces are removed."
+        => Some(FeatureKind::Shell(Box::new(ShellFeature::new(Vec::new())))),
+    Draft(Draft) "draft"
+        "Taper flat faces about a neutral plane."
+        => Some(FeatureKind::Draft(Box::new(DraftFeature::new(Vec::new(), None)))),
+    Hole(Hole) "hole"
+        "Drill a hole at every point of a sketch: plain, counterbored or countersunk, to a standard size or given ones."
+        => Some(FeatureKind::Hole(Box::new(HoleFeature::new(NO_SKETCH)))),
     SketchPlane(SketchPlane) "sketch_plane"
         "Move a sketch to another plane (an edit only: sketches are added with 'sketch')."
         => None,
 }
 
+/// The word of the arguments that fit a feature. Every kind of feature is listed, so a
+/// new kind doesn't compile until it is given arguments here (or is said to have none).
+fn word_of(kind: &FeatureKind) -> Option<&'static str> {
+    Some(match kind {
+        FeatureKind::Sketch(_) => "sketch_plane",
+        FeatureKind::Extrude(_) => "extrude",
+        FeatureKind::Plane(PlaneDef::Offset { .. }) => "plane.offset",
+        FeatureKind::Plane(PlaneDef::Angled { .. }) => "plane.angled",
+        FeatureKind::Plane(PlaneDef::Midplane { .. }) => "plane.midplane",
+        FeatureKind::Axis(AxisDef::Edge(_)) => "axis.edge",
+        FeatureKind::Axis(AxisDef::Cylinder(_)) => "axis.cylinder",
+        FeatureKind::Axis(AxisDef::TwoPlanes(..)) => "axis.planes",
+        FeatureKind::Point(PointDef::Vertex(_)) => "point.vertex",
+        FeatureKind::Point(PointDef::Coordinates { .. }) => "point.coordinates",
+        FeatureKind::CoordSystem(_) => "coordinate_system",
+        FeatureKind::BaseFlange(_) => "base_flange",
+        FeatureKind::EdgeFlange(_) => "edge_flange",
+        FeatureKind::SheetCut(_) => "sheet_cut",
+        FeatureKind::Hem(_) => "hem",
+        FeatureKind::SketchedBend(_) => "sketched_bend",
+        FeatureKind::Jog(_) => "jog",
+        FeatureKind::MiterFlange(_) => "miter_flange",
+        FeatureKind::Corner(_) => "corner",
+        FeatureKind::Form(_) => "dimple",
+        FeatureKind::Pattern(p) => match p.def {
+            PatternDef::Linear { .. } => "linear_pattern",
+            PatternDef::Circular { .. } => "circular_pattern",
+        },
+        FeatureKind::Mirror(_) => "mirror",
+        FeatureKind::Revolve(_) => "revolve",
+        FeatureKind::Blend(_) => "fillet",
+        FeatureKind::Shell(_) => "shell",
+        FeatureKind::Draft(_) => "draft",
+        FeatureKind::Hole(_) => "hole",
+        FeatureKind::Sweep(_) => "sweep",
+        // An imported body is what its file says: it has nothing to set.
+        FeatureKind::Import(_) => return None,
+    })
+}
+
 impl FeatureArgs {
+    /// Reads the arguments that fit `kind` from a JSON operation (for an edit).
+    pub(crate) fn parse_for(kind: &FeatureKind, a: &mut Args) -> Result<Self, String> {
+        word_of(kind)
+            .and_then(|word| Self::parse(word, a))
+            .unwrap_or_else(|| Err("That feature has no fields to edit.".to_owned()))
+    }
+
+    /// What must happen before the fields are set: a hole's standard size sets its other
+    /// sizes, a new revolve turns about its sketch's centreline, and the first body of a
+    /// part is a new body.
+    pub(crate) fn prepare(
+        &self,
+        kind: &mut FeatureKind,
+        doc: &Document,
+        creating: bool,
+    ) -> Result<(), String> {
+        let first_body = creating && doc.evaluation().bodies.is_empty();
+        match (self, kind) {
+            (Self::Hole(args), FeatureKind::Hole(hole)) => {
+                if let Some(standard) = &args.standard {
+                    hole.set_standard(metric(&standard.size)?, standard.fit);
+                }
+            }
+            (Self::Revolve(args) | Self::CutRevolve(args), FeatureKind::Revolve(r)) if creating => {
+                let sketch = args.sketch.as_ref().and_then(|s| s.resolve(doc).ok());
+                if args.axis.is_none()
+                    && let Some(s) = sketch.and_then(|id| doc.model.sketch(id))
+                {
+                    r.axis = peet_model::default_axis(&s.sketch);
+                }
+                if first_body && args.operation.is_none() && r.operation == Operation::Add {
+                    r.operation = Operation::NewBody;
+                }
+            }
+            (Self::Sweep(args) | Self::CutSweep(args), FeatureKind::Sweep(s))
+                if first_body && args.operation.is_none() && s.operation == Operation::Add =>
+            {
+                s.operation = Operation::NewBody;
+            }
+            _ => {}
+        }
+        Ok(())
+    }
+
     /// The word of the kind a JSON operation means: `plane`, `axis` and `point` have
     /// several forms, told apart by the fields given.
     pub(crate) fn word_for(op: &str, a: &Args) -> String {

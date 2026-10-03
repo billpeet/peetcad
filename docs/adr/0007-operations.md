@@ -39,7 +39,9 @@ where it is stored. A macro turns the table into the typed arguments (`EdgeFlang
 above), reading them from JSON, creating the feature, editing it, reading it back and
 `help`. There is no second copy of a feature's fields to keep in step. Each table
 destructures its feature exhaustively, so a field added to a feature in `peet-model` does
-not compile until it is listed (or left out on purpose).
+not compile until it is listed (or left out on purpose). Every kind of feature is likewise
+matched in one place, so a new kind does not compile until it is given a table (or is said
+to have no fields, as an imported body is).
 
 The same arguments serve creating and editing: every field is optional, and one left out
 keeps its default in a new feature and its value in an edit.

@@ -98,6 +98,11 @@ fn side_matches(role: FaceRole, side: Side) -> bool {
         Side::Bottom => matches!(role, FaceRole::SheetBottom(_)),
         Side::Bend => matches!(role, FaceRole::BendTop(_) | FaceRole::BendBottom(_)),
         Side::Wall => matches!(role, FaceRole::Wall(..)),
+        Side::Blend => matches!(
+            role,
+            FaceRole::Blend(_) | FaceRole::BlendEnd(_) | FaceRole::BlendCorner(_)
+        ),
+        Side::Inner => role == FaceRole::Inner,
     }
 }
 
@@ -355,6 +360,16 @@ fn find_vertex_query(doc: &Document, q: &VertexQuery) -> Result<(usize, VertexId
             point3_out(bodies(doc)[b].solid.vertex(*id).point, units)
         )
     })
+}
+
+/// The vertex a selector means, in the part as it is now: `(body, vertex)`.
+pub(crate) fn vertex(doc: &Document, sel: &VertexSel) -> Result<(usize, VertexId), String> {
+    match sel {
+        VertexSel::Find(q) => find_vertex_query(doc, q),
+        VertexSel::Ref(r) => find_vertex(bodies(doc), r)
+            .map(|f| (f.body, f.id))
+            .ok_or_else(|| "That vertex no longer exists.".to_owned()),
+    }
 }
 
 pub(crate) fn vertex_ref(doc: &Document, sel: &VertexSel) -> Result<VertexRef, String> {

@@ -11,6 +11,8 @@ use serde_json::{Map, Value, json};
 use crate::args::{direction_out, length_out, point2_out, point3_out, round};
 use crate::fields::FeatureArgs;
 use crate::select;
+use crate::value::GeomSel;
+use peet_document::GeomRef;
 
 fn status_word(status: Option<&Status>) -> &'static str {
     match status {
@@ -311,6 +313,15 @@ pub fn faces(doc: &Document, body: Option<usize>) -> Result<Value, String> {
                     m.insert("radius".to_owned(), length_out(c.radius, units));
                     m.insert("axis".to_owned(), direction_out(c.axis()));
                 }
+                Surface::Cone(_) => {
+                    m.insert("surface".to_owned(), json!("cone"));
+                }
+                Surface::Sphere(_) => {
+                    m.insert("surface".to_owned(), json!("sphere"));
+                }
+                Surface::Torus(_) => {
+                    m.insert("surface".to_owned(), json!("torus"));
+                }
             }
             m.insert("center".to_owned(), point3_out(center, units));
             m.insert(
@@ -457,4 +468,130 @@ pub fn status(doc: &Document) -> Value {
         m.insert("redo".to_owned(), json!(l));
     }
     Value::Object(m)
+}
+
+fn mass_out(
+    volume: f64,
+    area: f64,
+    centroid: peet_math::DVec3,
+    moments: [f64; 3],
+    bounds: &peet_math::Aabb,
+    doc: &Document,
+) -> Map<String, Value> {
+    let units = &doc.model.parameters.units;
+    let mut m = Map::new();
+    m.insert("volume_mm3".to_owned(), json!(round(volume)));
+    m.insert("area_mm2".to_owned(), json!(round(area)));
+    m.insert("center_of_gravity".to_owned(), point3_out(centroid, units));
+    m.insert(
+        "principal_moments_mm5".to_owned(),
+        json!(moments.map(round)),
+    );
+    m.insert("min".to_owned(), point3_out(bounds.min, units));
+    m.insert("max".to_owned(), point3_out(bounds.max, units));
+    m
+}
+
+/// Mass properties for a density of 1: of one body, or of each and of all together.
+pub fn mass(doc: &Document, body: Option<usize>) -> Result<Value, String> {
+    let mut parts = Vec::new();
+    let mut list = Vec::new();
+    for bi in body_arg(doc, body)? {
+        let b = &doc.evaluation().bodies[bi];
+        let p = peet_kernel::query::mass_properties(&b.solid)
+            .map_err(|e| format!("Body {bi} can't be measured: {e}"))?;
+        let mut m = mass_out(
+            p.volume,
+            p.area,
+            p.centroid,
+            p.principal_moments,
+            &p.bounds,
+            doc,
+        );
+        m.insert("body".to_owned(), json!(bi));
+        m.insert("made_by".to_owned(), json!(doc.model.name_of(b.origin)));
+        list.push(Value::Object(m));
+        parts.push(p);
+    }
+    let mut out = Map::new();
+    out.insert("bodies".to_owned(), json!(list));
+    if let Some(t) = peet_document::MassTotal::of(&parts) {
+        out.insert(
+            "total".to_owned(),
+            Value::Object(mass_out(
+                t.volume,
+                t.area,
+                t.centroid,
+                t.principal_moments,
+                &t.bounds,
+                doc,
+            )),
+        );
+    }
+    Ok(Value::Object(out))
+}
+
+fn geom(doc: &Document, sel: &GeomSel) -> Result<GeomRef, String> {
+    Ok(match sel {
+        GeomSel::Face(f) => {
+            let (body, face) = select::face(doc, f)?;
+            GeomRef::Face { body, face }
+        }
+        GeomSel::Edge(e) => {
+            let (body, edge) = select::edge(doc, e)?;
+            GeomRef::Edge { body, edge }
+        }
+        GeomSel::Vertex(v) => {
+            let (body, vertex) = select::vertex(doc, v)?;
+            GeomRef::Vertex { body, vertex }
+        }
+    })
+}
+
+/// The exact measurements of a face, an edge or a vertex, or the distance and the angle
+/// between two.
+pub fn measure(doc: &Document, a: &GeomSel, b: Option<&GeomSel>) -> Result<Value, String> {
+    use peet_kernel::query::Description;
+    let units = &doc.model.parameters.units;
+    let gone = || "That can't be measured in the part as it is shown.".to_owned();
+    let a = geom(doc, a)?;
+    let mut m = Map::new();
+    let Some(b) = b else {
+        match doc.describe(a).ok_or_else(gone)? {
+            Description::Vertex { point } => {
+                m.insert("vertex".to_owned(), point3_out(point, units));
+            }
+            Description::Edge {
+                length,
+                radius,
+                center,
+            } => {
+                m.insert("length".to_owned(), length_out(length, units));
+                if let Some(r) = radius {
+                    m.insert("radius".to_owned(), length_out(r, units));
+                }
+                if let Some(c) = center {
+                    m.insert("center".to_owned(), point3_out(c, units));
+                }
+            }
+            Description::Face { area, radius } => {
+                m.insert("area_mm2".to_owned(), json!(round(area)));
+                if let Some(r) = radius {
+                    m.insert("radius".to_owned(), length_out(r, units));
+                }
+            }
+        }
+        return Ok(Value::Object(m));
+    };
+    let between = doc.measure_between(a, geom(doc, b)?).ok_or_else(gone)?;
+    if let Some((distance, from, to)) = between.distance {
+        m.insert("distance".to_owned(), length_out(distance, units));
+        m.insert("from".to_owned(), point3_out(from, units));
+        m.insert("to".to_owned(), point3_out(to, units));
+    }
+    if let Some(angle) = between.angle {
+        m.insert("angle".to_owned(), json!(round(angle.to_degrees())));
+    }
+    m.insert("measured".to_owned(), json!(between.note));
+    Ok(Value::Object(m))
 }

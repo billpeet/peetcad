@@ -11,7 +11,7 @@ use serde_json::{Map, Value};
 use crate::args::{Args, integer, list, text};
 use crate::fields::FeatureArgs;
 use crate::sketch::{self, DrawItem};
-use crate::value::{EdgeSel, FeatureSel, Input, PlaneSel};
+use crate::value::{EdgeSel, FeatureSel, GeomSel, Input, PlaneSel};
 
 /// A feature to add: its kind and fields, and optionally its name.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +66,17 @@ pub enum Query {
     /// Manufacturing checks of a sheet metal body.
     Checks {
         body: Option<usize>,
+    },
+    /// Mass properties for a density of 1: volume, area, centre of gravity, principal
+    /// moments of inertia. Of one body, or of all (each, and together).
+    Mass {
+        body: Option<usize>,
+    },
+    /// The exact measurements of a face, an edge or a vertex; with `b`, the distance and
+    /// the angle between the two.
+    Measure {
+        a: Box<GeomSel>,
+        b: Option<Box<GeomSel>>,
     },
 }
 
@@ -141,6 +152,11 @@ pub enum Op {
     SetUnits {
         length: LengthUnit,
     },
+    /// Add the solids of a STEP file as bodies, in one feature named after the file.
+    /// Always its own undo step.
+    ImportStep {
+        path: PathBuf,
+    },
     Undo,
     Redo,
     Query(Query),
@@ -186,6 +202,7 @@ impl Op {
             Self::SetParameter { .. } => "set_parameter",
             Self::DeleteParameter { .. } => "delete_parameter",
             Self::SetUnits { .. } => "set_units",
+            Self::ImportStep { .. } => "import_step",
             Self::Undo => "undo",
             Self::Redo => "redo",
             Self::Query(q) => match q {
@@ -199,6 +216,8 @@ impl Op {
                 Query::Edges { .. } => "edges",
                 Query::BendTable { .. } => "bend_table",
                 Query::Checks { .. } => "checks",
+                Query::Mass { .. } => "mass",
+                Query::Measure { .. } => "measure",
             },
             Self::Save { .. } => "save",
             Self::Export { .. } => "export",
@@ -278,7 +297,7 @@ fn new_features(op: &str, a: &mut Args) -> Result<Vec<New>, String> {
 
 /// The operations that aren't feature kinds, with their fields, for `help` and for the
 /// message about an unknown operation.
-pub(crate) const OTHER_OPS: [(&str, &str, &str); 26] = [
+pub(crate) const OTHER_OPS: [(&str, &str, &str); 29] = [
     (
         "sketch",
         "on (plane), name, draw (list)",
@@ -376,6 +395,21 @@ pub(crate) const OTHER_OPS: [(&str, &str, &str); 26] = [
         "Manufacturing checks of a sheet metal body.",
     ),
     (
+        "mass",
+        "body",
+        "Mass properties for a density of 1: volume, area, centre of gravity, principal moments of inertia.",
+    ),
+    (
+        "measure",
+        "a, b (each {\"face\": selector}, {\"edge\": selector} or {\"vertex\": selector}; b is optional)",
+        "The exact size of a face, an edge or a vertex, or the distance and angle between two.",
+    ),
+    (
+        "import_step",
+        "path",
+        "Add the solids of a STEP file as bodies, in one feature named after the file.",
+    ),
+    (
         "save",
         "path, caches (default true)",
         "Save the part (to the file it came from if no path is given).",
@@ -399,6 +433,17 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "edges" => Op::Query(Query::Edges { body: body(a)? }),
         "bend_table" => Op::Query(Query::BendTable { body: body(a)? }),
         "checks" => Op::Query(Query::Checks { body: body(a)? }),
+        "mass" => Op::Query(Query::Mass { body: body(a)? }),
+        "measure" => Op::Query(Query::Measure {
+            a: Box::new(a.required("a", GeomSel::parse)?),
+            b: a.parsed("b", GeomSel::parse)?.map(Box::new),
+        }),
+        "import_step" => Op::ImportStep {
+            path: a
+                .string("path")?
+                .map(PathBuf::from)
+                .ok_or_else(|| "'import_step' needs a 'path' field.".to_owned())?,
+        },
         "undo" => Op::Undo,
         "redo" => Op::Redo,
         "save" => Op::Save {
@@ -442,13 +487,13 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "edit" => {
             let target = feature(a, "feature")?;
             let id = target.resolve(doc)?;
-            let mut kind = doc
+            let kind = doc
                 .feature(id)
-                .map(|f| f.kind.clone())
+                .map(|f| &f.kind)
                 .ok_or_else(|| "The feature no longer exists.".to_owned())?;
             Op::Edit {
                 feature: target,
-                fields: FeatureArgs::parse_for(&mut kind, a, doc)?,
+                fields: FeatureArgs::parse_for(kind, a)?,
             }
         }
         "rename" => Op::Rename {

@@ -9,6 +9,7 @@
 //! Coordinates are in document units, as they are in a script.
 
 use peet_document::Document;
+use peet_model::HoleFit;
 use peet_model::{
     AxisRef, EdgeRef, FaceRef, FeatureId, PlaneRef, PointRef, Scalar, ScalarKind, StdAxis,
     StdPlane, VertexRef,
@@ -161,10 +162,16 @@ pub enum Side {
     Bottom,
     Bend,
     Wall,
+    /// A fillet's or a chamfer's own faces.
+    Blend,
+    /// The inside of a shell.
+    Inner,
 }
 
 impl Side {
-    pub const ALL: [(Self, &str); 7] = [
+    pub const ALL: [(Self, &str); 9] = [
+        (Self::Blend, "blend"),
+        (Self::Inner, "inner"),
         (Self::Start, "start"),
         (Self::End, "end"),
         (Self::Side, "side"),
@@ -182,7 +189,7 @@ impl Side {
             .map(|(s, _)| *s)
             .ok_or_else(|| {
                 format!(
-                    "'{word}' is not a side. Sides are: start, end, side (extrusions); top, bottom, bend, wall (sheet metal)."
+                    "'{word}' is not a side. Sides are: start, end, side (extrusions, revolves, sweeps, holes); top, bottom, bend, wall (sheet metal); blend (fillets, chamfers); inner (shells)."
                 )
             })
     }
@@ -663,6 +670,84 @@ impl Bend {
             "allowance" => Ok(Self::Allowance(input)),
             "deduction" => Ok(Self::Deduction(input)),
             other => Err(format!("'{other}' is not k_factor, allowance or deduction")),
+        }
+    }
+}
+
+/// What a revolve turns about.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RevolveAxis {
+    /// The sketch's horizontal axis.
+    SketchX,
+    /// The sketch's vertical axis.
+    SketchY,
+    /// A line of the revolve's own sketch, by its entity id: usually a construction line.
+    SketchLine(peet_sketch::EntityId),
+    /// A standard axis, a reference axis or a straight edge lying in the sketch plane.
+    Axis(AxisSel),
+}
+
+impl RevolveAxis {
+    pub(crate) fn parse(v: &Value) -> Result<Self, String> {
+        match v.as_str() {
+            Some("sketch_x") => return Ok(Self::SketchX),
+            Some("sketch_y") => return Ok(Self::SketchY),
+            _ => {}
+        }
+        if let Some(m) = v.as_object().filter(|m| m.len() == 1)
+            && let Some(line) = m.get("line")
+        {
+            return Ok(Self::SketchLine(peet_sketch::EntityId(integer(line)?)));
+        }
+        AxisSel::parse(v).map(Self::Axis)
+    }
+}
+
+/// A standard screw size for a hole (`"M6"`) and how the hole fits it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HoleStandard {
+    pub size: String,
+    pub fit: HoleFit,
+}
+
+impl HoleStandard {
+    pub(crate) fn parse(v: &Value) -> Result<Self, String> {
+        let map = fields(v, "A standard size", &["size", "fit"])?;
+        let size = field(map, "size", |s| text(s).map(str::to_owned))?
+            .ok_or_else(|| "it needs a 'size', such as \"M6\"".to_owned())?;
+        let fit = field(map, "fit", |f| match text(f)? {
+            "close" => Ok(HoleFit::Close),
+            "normal" => Ok(HoleFit::Normal),
+            "loose" => Ok(HoleFit::Loose),
+            "tapped" => Ok(HoleFit::Tapped),
+            other => Err(format!("'{other}' is not close, normal, loose or tapped")),
+        })?
+        .unwrap_or(HoleFit::Normal);
+        Ok(Self { size, fit })
+    }
+}
+
+/// A face, an edge or a vertex, for measuring.
+#[derive(Clone, Debug, PartialEq)]
+pub enum GeomSel {
+    Face(FaceSel),
+    Edge(EdgeSel),
+    Vertex(VertexSel),
+}
+
+impl GeomSel {
+    pub(crate) fn parse(v: &Value) -> Result<Self, String> {
+        let entry = v
+            .as_object()
+            .filter(|m| m.len() == 1)
+            .and_then(|m| m.iter().next());
+        match entry {
+            Some((key, sel)) if key == "face" => FaceSel::parse(sel).map(Self::Face),
+            Some((key, sel)) if key == "edge" => EdgeSel::parse(sel).map(Self::Edge),
+            Some((key, sel)) if key == "vertex" => VertexSel::parse(sel).map(Self::Vertex),
+            _ => Err(format!(
+                "expected {{\"face\": selector}}, {{\"edge\": selector}} or {{\"vertex\": selector}}, not {v}"
+            )),
         }
     }
 }

@@ -52,16 +52,16 @@ pub mod sketch;
 mod value;
 
 pub use fields::{
-    AngledPlane, BaseFlange, CircularPattern, CoordinateSystem, CoordinatesPoint, Corner,
-    CylinderAxis, EdgeAxis, EdgeFlange, Extrude, FeatureArgs, Form, Hem, Jog, LinearPattern,
-    MidPlane, Mirror, MiterFlange, OffsetPlane, PlanesAxis, SheetCut, SketchPlane, SketchedBend,
-    VertexPoint,
+    AngledPlane, BaseFlange, Blend, CircularPattern, CoordinateSystem, CoordinatesPoint, Corner,
+    CylinderAxis, Draft, EdgeAxis, EdgeFlange, Extrude, FeatureArgs, Form, Hem, Hole, Jog,
+    LinearPattern, MidPlane, Mirror, MiterFlange, OffsetPlane, PlanesAxis, Revolve, SheetCut,
+    Shell, SketchPlane, SketchedBend, Sweep, VertexPoint,
 };
 pub use op::{Format, New, Op, Place, Query};
 pub use sketch::{Draw, DrawItem, Ent, Measure, Relation};
 pub use value::{
-    AxisSel, Bend, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, Input, PlaneSel,
-    PointSel, Regions, Side, VertexQuery, VertexSel,
+    AxisSel, Bend, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel, HoleStandard,
+    Input, PlaneSel, PointSel, Regions, RevolveAxis, Side, VertexQuery, VertexSel,
 };
 
 use peet_document::Document;
@@ -144,7 +144,7 @@ fn check_copies(doc: &Document, kind: &FeatureKind) -> Result<(), String> {
     for id in seeds {
         if doc.feature(*id).is_some_and(|f| !f.kind.can_be_copied()) {
             return Err(format!(
-                "{} can't be copied: patterns and mirrors copy extrusions, cuts, sheet metal cuts and forms.",
+                "{} can't be copied: patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts and forms.",
                 doc.model.name_of(*id)
             ));
         }
@@ -158,15 +158,21 @@ fn add(doc: &Document, model: &mut Model, new: &[New]) -> Result<Vec<FeatureId>,
         let mut kind = n.feature.blank().ok_or_else(|| {
             "A sketch is added with the 'sketch' operation, which also places it.".to_owned()
         })?;
+        n.feature.prepare(&mut kind, doc, true)?;
         if let Some(result) = n.feature.set(&mut kind, doc, true) {
             result?;
         }
         check_copies(doc, &kind)?;
-        let source = kind.sketch();
+        // The sketches a feature is made from are hidden, as in the application.
+        let mut sources: Vec<FeatureId> = kind.sketch().into_iter().collect();
+        if let FeatureKind::Sweep(sweep) = &kind {
+            sources.extend(sweep.path);
+        }
         let id = model.add(kind);
-        // A sketch used by a feature is hidden, as in the application.
-        if let Some(s) = source.and_then(|s| model.feature_mut(s)) {
-            s.visible = false;
+        for source in sources {
+            if let Some(s) = model.feature_mut(source) {
+                s.visible = false;
+            }
         }
         if let Some(name) = &n.name {
             rename(model, id, name)?;
@@ -239,6 +245,8 @@ fn query(doc: &Document, q: &Query) -> Result<Map<String, Value>, String> {
         Query::Edges { body } => object(query::edges(doc, *body)?),
         Query::BendTable { body } => object(query::bend_table(doc, *body)?),
         Query::Checks { body } => object(query::checks(doc, *body)?),
+        Query::Mass { body } => object(query::mass(doc, *body)?),
+        Query::Measure { a, b } => object(query::measure(doc, a, b.as_deref())?),
     })
 }
 
@@ -261,6 +269,20 @@ fn run(doc: &mut Document, op: &Op) -> Result<Done, String> {
         }
         Op::Save { path, caches } => {
             done.data = export::save(doc, path.as_ref(), *caches)?;
+            return Ok(done);
+        }
+        Op::ImportStep { path } => {
+            let text = std::fs::read_to_string(path)
+                .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+            let imported = doc.import_step(&path.to_string_lossy(), &text)?;
+            done.changed = true;
+            done.created.push(imported.feature);
+            done.data
+                .insert("bodies".to_owned(), json!(imported.bodies));
+            if !imported.warnings.is_empty() {
+                done.data
+                    .insert("warnings".to_owned(), json!(imported.warnings));
+            }
             return Ok(done);
         }
         Op::Undo | Op::Redo => {
@@ -287,6 +309,7 @@ fn run(doc: &mut Document, op: &Op) -> Result<Done, String> {
             let Some(f) = model.feature_mut(id) else {
                 return Err("The feature no longer exists.".to_owned());
             };
+            fields.prepare(&mut f.kind, doc, false)?;
             match fields.set(&mut f.kind, doc, false) {
                 Some(result) => result?,
                 None => {

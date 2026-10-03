@@ -70,7 +70,8 @@ the candidates. All the fields given must match.
 | edge | `{"between": [[x,y,z],[x,y,z]]}` its ends · `{"at": [x,y,z]}` a point on it · `{"faces": [face, face]}` where two faces meet · `{"body": 0, "index": 7}` from `edges` |
 | vertex | `{"at": [x,y,z]}` · `{"body": 0, "index": 2}` |
 
-Sides: `start`, `end`, `side` for extrusions; `top`, `bottom`, `bend`, `wall` for sheet
+Sides: `start`, `end`, `side` for extrusions, revolves, sweeps and holes; `blend` for a
+fillet's or chamfer's own faces; `inner` for the inside of a shell; `top`, `bottom`, `bend`, `wall` for sheet
 metal. A point on an edge is on two faces: add `normal` to say which. Indices are only
 valid until the part changes; every other selector is stored as a reference that follows
 the geometry through later edits.
@@ -117,7 +118,8 @@ and the `feature` query give the ids.
 Each adds a feature and takes `name` plus the feature's own fields (`help` lists them all
 with their defaults' types):
 
-`extrude`, `cut`, `plane`, `axis`, `point`, `coordinate_system`, `base_flange`,
+`extrude`, `cut`, `revolve`, `cut_revolve`, `sweep`, `cut_sweep`, `hole`, `fillet`,
+`chamfer`, `shell`, `draft`, `plane`, `axis`, `point`, `coordinate_system`, `base_flange`,
 `edge_flange`, `sheet_cut`, `hem`, `sketched_bend`, `jog`, `miter_flange`, `corner`,
 `dimple`, `emboss`, `louver`, `linear_pattern`, `circular_pattern`, `mirror`.
 
@@ -127,6 +129,14 @@ with their defaults' types):
   or `vertex`.
 - `edge_flange` and `hem` take `edges` to make one feature per edge.
 - `linear_pattern` becomes a grid with `direction2`, `spacing2`, `count2`.
+- `revolve` takes `axis`: `"sketch_x"`, `"sketch_y"`, `{"line": id}` (a line of its sketch)
+  or an axis selector. Left out, it is the sketch's first construction line, else
+  `sketch_y`.
+- `sweep` takes `profile` and `path` (two sketches).
+- `hole` drills at every point of its sketch. `standard` (`{"size": "M6", "fit": "close"
+  | "normal" | "loose" | "tapped"}`) sets every size; sizes given as well win.
+- `fillet` and `chamfer` take `edges` and `size`; `shell` takes `open` (faces to remove)
+  and `thickness`; `draft` takes `faces`, `neutral` (a plane) and `angle`.
 
 | Operation | Fields |
 |---|---|
@@ -158,6 +168,8 @@ with their defaults' types):
 | `faces`, `edges` (`body`) | what made each face, normals, centres; edge ends and the faces they join |
 | `bend_table` (`body`) | flat size, area, and each bend |
 | `checks` (`body`) | manufacturing checks |
+| `mass` (`body`) | for a density of 1: volume, area, centre of gravity, principal moments; each body and the total |
+| `measure` (`a`, `b`) | the exact size of a face, edge or vertex, or with `b` the distance and angle between two. Each is `{"face": selector}`, `{"edge": selector}` or `{"vertex": selector}` |
 | `help` | this reference as data |
 
 ### Files
@@ -165,4 +177,5 @@ with their defaults' types):
 | Operation | Fields |
 |---|---|
 | `save` | `path` (optional once the part has a file), `caches` (default true) |
+| `import_step` | `path`: the file's solids become bodies, in one feature named after the file |
 | `export` | `path`, `format` (`stl`, `dxf`, `step`; taken from the path if absent), `body`, `schema` (`ap214`, `ap242`) |
