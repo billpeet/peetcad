@@ -49,6 +49,22 @@ pub(crate) fn save(
     Ok(out)
 }
 
+/// The format a file name asks for, by its extension.
+pub(crate) fn format_of(path: &Path) -> Result<Format, String> {
+    let extension = path
+        .extension()
+        .map(|e| e.to_string_lossy().to_lowercase())
+        .unwrap_or_default();
+    match extension.as_str() {
+        "stl" => Ok(Format::Stl),
+        "dxf" => Ok(Format::Dxf),
+        "step" | "stp" => Ok(Format::Step),
+        other => Err(format!(
+            "'{other}' is not a format to export: use stl, dxf or step (or a path ending in one)."
+        )),
+    }
+}
+
 /// Writes the bodies as STL or STEP, or a sheet metal body's flat pattern as DXF.
 pub(crate) fn export(
     doc: &Document,
@@ -59,23 +75,23 @@ pub(crate) fn export(
 ) -> Result<Map<String, Value>, String> {
     let format = match format {
         Some(f) => f,
-        None => {
-            let extension = path
-                .extension()
-                .map(|e| e.to_string_lossy().to_lowercase())
-                .unwrap_or_default();
-            match extension.as_str() {
-                "stl" => Format::Stl,
-                "dxf" => Format::Dxf,
-                "step" | "stp" => Format::Step,
-                other => {
-                    return Err(format!(
-                        "'{other}' is not a format to export: use stl, dxf or step (or a path ending in one)."
-                    ));
-                }
-            }
-        }
+        None => format_of(path)?,
     };
+    let (bytes, mut out) = export_bytes(doc, format, body, schema)?;
+    peet_platform::write_file(path, &bytes)?;
+    out.extend(written(path, bytes.len()));
+    Ok(out)
+}
+
+/// The contents of an export, with what to say about it: the bodies as STL or STEP, or a
+/// sheet metal body's flat pattern as DXF. For a host that writes the file itself (a
+/// save dialog, a download).
+pub fn export_bytes(
+    doc: &Document,
+    format: Format,
+    body: Option<usize>,
+    schema: StepSchema,
+) -> Result<(Vec<u8>, Map<String, Value>), String> {
     let bodies = &doc.evaluation().bodies;
     if let Some(b) = body
         && b >= bodies.len()
@@ -140,8 +156,6 @@ pub(crate) fn export(
             (peet_io::step::write(&solids, &options).into_bytes(), "step")
         }
     };
-    peet_platform::write_file(path, &bytes)?;
     out.insert("format".to_owned(), json!(word));
-    out.extend(written(path, bytes.len()));
-    Ok(out)
+    Ok((bytes, out))
 }

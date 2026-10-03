@@ -2,6 +2,7 @@
 //! read into one.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use peet_document::Document;
 use peet_io::step::StepSchema;
@@ -60,6 +61,76 @@ pub enum DxfTarget {
     Sketch(FeatureSel),
     /// A new sketch on a plane or a flat face.
     New { on: PlaneSel, name: Option<String> },
+}
+
+/// A file to read: where it is, or what was already read from it (the application's file
+/// dialogs, and the browser, hand over the contents).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Source {
+    /// The file's name, for messages and for naming what comes out of it.
+    pub name: String,
+    /// Where it is, if it is on disk.
+    pub path: Option<PathBuf>,
+    /// Its contents, if they have been read already.
+    pub bytes: Option<Arc<Vec<u8>>>,
+}
+
+impl Source {
+    /// A file on disk, read when the operation is applied.
+    pub fn path(path: impl Into<PathBuf>) -> Self {
+        let path = path.into();
+        Self {
+            name: path.file_name().map_or_else(
+                || path.to_string_lossy().into_owned(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+            path: Some(path),
+            bytes: None,
+        }
+    }
+
+    /// A file whose contents have been read already.
+    pub fn loaded(name: impl Into<String>, path: Option<PathBuf>, bytes: Vec<u8>) -> Self {
+        Self {
+            name: name.into(),
+            path,
+            bytes: Some(Arc::new(bytes)),
+        }
+    }
+
+    /// The file for messages: its path, or its name.
+    pub(crate) fn shown(&self) -> String {
+        self.path
+            .as_ref()
+            .map_or_else(|| self.name.clone(), |p| p.display().to_string())
+    }
+
+    pub(crate) fn read(&self) -> Result<Arc<Vec<u8>>, String> {
+        match (&self.bytes, &self.path) {
+            (Some(bytes), _) => Ok(bytes.clone()),
+            (None, Some(path)) => std::fs::read(path)
+                .map(Arc::new)
+                .map_err(|e| format!("Couldn't read {}: {e}", path.display())),
+            (None, None) => Err(format!("There is nothing to read {} from.", self.name)),
+        }
+    }
+}
+
+impl From<PathBuf> for Source {
+    fn from(path: PathBuf) -> Self {
+        Self::path(path)
+    }
+}
+
+/// Where the rollback bar goes.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RollTo {
+    /// Below every feature: everything is built.
+    End,
+    /// Above every feature: nothing is built.
+    Start,
+    /// Below this feature: it is the last one built.
+    After(FeatureSel),
 }
 
 /// A feature to add: its kind and fields, and optionally its name.
@@ -192,7 +263,13 @@ pub enum Op {
     },
     /// Put the rollback bar after a feature (`None`: at the end).
     Rollback {
-        to: Option<FeatureSel>,
+        to: RollTo,
+    },
+    /// Replace what is drawn in a sketch: how the sketch editor commits its work. A
+    /// script draws with `Draw`.
+    SetSketch {
+        sketch: FeatureSel,
+        content: Box<peet_sketch::Sketch>,
     },
     /// Add or change a named value usable in every expression.
     SetParameter {
@@ -208,11 +285,11 @@ pub enum Op {
     /// Add the solids of a STEP file as bodies, in one feature named after the file.
     /// Always its own undo step.
     ImportStep {
-        path: PathBuf,
+        file: Source,
     },
     /// Bring the lines, arcs, circles and polylines of a DXF file into a sketch.
     ImportDxf {
-        path: PathBuf,
+        file: Source,
         into: DxfTarget,
         /// The file's unit, if it doesn't say (or says wrong).
         unit: Option<LengthUnit>,
@@ -246,7 +323,7 @@ pub enum Op {
     },
     /// Replace the material tables with those of a CSV file.
     ImportMaterials {
-        path: PathBuf,
+        file: Source,
     },
     ExportMaterials {
         path: PathBuf,
@@ -266,7 +343,7 @@ pub enum Op {
     },
     /// Open a part from a `.peet` file.
     Open {
-        path: PathBuf,
+        file: Source,
         discard: bool,
     },
     OpenSample {
@@ -317,6 +394,7 @@ impl Op {
             Self::Delete { .. } => "delete",
             Self::Move { .. } => "move",
             Self::Rollback { .. } => "rollback",
+            Self::SetSketch { .. } => "set_sketch",
             Self::SetParameter { .. } => "set_parameter",
             Self::DeleteParameter { .. } => "delete_parameter",
             Self::SetUnits { .. } => "set_units",
@@ -421,8 +499,8 @@ fn new_features(op: &str, a: &mut Args) -> Result<Vec<New>, String> {
         .map(|edge| {
             let mut feature = args.clone();
             match &mut feature {
-                FeatureArgs::EdgeFlange(f) => f.edge = Some(edge),
-                FeatureArgs::Hem(h) => h.edge = Some(edge),
+                FeatureArgs::EdgeFlange(f) => f.edge = Some(Some(edge)),
+                FeatureArgs::Hem(h) => h.edge = Some(Some(edge)),
                 _ => {}
             }
             New {
@@ -475,7 +553,7 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "rollback",
-        "to (a feature, or \"end\")",
+        "to (a feature, \"end\" or \"start\")",
         "Put the rollback bar after a feature: later features are not built, and new ones are added there.",
     ),
     (
@@ -643,7 +721,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             discard: a.flag("discard", false)?,
         },
         "open" => Op::Open {
-            path: path(a, "open")?,
+            file: Source::path(path(a, "open")?),
             discard: a.flag("discard", false)?,
         },
         "open_sample" => Op::OpenSample {
@@ -673,7 +751,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
                 },
             };
             Op::ImportDxf {
-                path: file,
+                file: Source::path(file),
                 into,
                 unit: a.parsed("unit", units)?,
                 placement: a
@@ -693,7 +771,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             gauge: a.string("gauge")?,
         },
         "import_materials" => Op::ImportMaterials {
-            path: path(a, "import_materials")?,
+            file: Source::path(path(a, "import_materials")?),
         },
         "export_materials" => Op::ExportMaterials {
             path: path(a, "export_materials")?,
@@ -710,10 +788,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             b: a.parsed("b", GeomSel::parse)?.map(Box::new),
         }),
         "import_step" => Op::ImportStep {
-            path: a
-                .string("path")?
-                .map(PathBuf::from)
-                .ok_or_else(|| "'import_step' needs a 'path' field.".to_owned())?,
+            file: Source::path(path(a, "import_step")?),
         },
         "undo" => Op::Undo,
         "redo" => Op::Redo,
@@ -817,12 +892,10 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             }
         }
         "rollback" => Op::Rollback {
-            to: a.required("to", |v| {
-                if v.as_str() == Some("end") {
-                    Ok(None)
-                } else {
-                    FeatureSel::parse(v).map(Some)
-                }
+            to: a.required("to", |v| match v.as_str() {
+                Some("end") => Ok(RollTo::End),
+                Some("start") => Ok(RollTo::Start),
+                _ => FeatureSel::parse(v).map(RollTo::After),
             })?,
         },
         "set_parameter" => Op::SetParameter {

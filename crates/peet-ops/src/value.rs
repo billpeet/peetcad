@@ -24,6 +24,10 @@ use crate::args::{coordinates, integer, list, number, text};
 pub enum Input {
     Number(f64),
     Expr(String),
+    /// A plain value in base units (mm, or degrees), exactly as a feature stores it. The
+    /// application passes values it already holds this way, so that nothing is lost in
+    /// converting to document units and back.
+    Base(f64),
 }
 
 impl From<f64> for Input {
@@ -62,7 +66,7 @@ impl Input {
     /// The value as the text a user would type.
     pub(crate) fn text(&self) -> String {
         match self {
-            Self::Number(n) => n.to_string(),
+            Self::Number(n) | Self::Base(n) => n.to_string(),
             Self::Expr(e) => e.clone(),
         }
     }
@@ -71,7 +75,10 @@ impl Input {
     pub(crate) fn scalar(&self, kind: ScalarKind, doc: &Document) -> Result<Scalar, String> {
         let params = &doc.model.parameters;
         match self {
-            Self::Number(n) if !n.is_finite() => Err("the value is not a finite number".to_owned()),
+            Self::Number(n) | Self::Base(n) if !n.is_finite() => {
+                Err("the value is not a finite number".to_owned())
+            }
+            Self::Base(n) => Ok(Scalar::new(*n)),
             Self::Number(n) => Ok(Scalar::new(match kind {
                 ScalarKind::Length => params.units.to_mm(*n),
                 ScalarKind::Angle | ScalarKind::Number => *n,
@@ -631,6 +638,8 @@ pub enum Regions {
     Auto,
     /// The regions containing these sketch points (document units).
     Points(Vec<[f64; 2]>),
+    /// The same, in mm, exactly as a feature stores them.
+    PointsMm(Vec<peet_math::DVec2>),
 }
 
 impl Regions {

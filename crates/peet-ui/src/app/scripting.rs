@@ -9,6 +9,7 @@
 
 use peet_ops::{
     AppCommand, Host, Op, Query, Reply, SketchTool, Toggle, Undo, View, Window, apply_in,
+    apply_model,
 };
 use peet_sheetmetal::{CheckRules, MaterialLibrary};
 use serde_json::{Map, Value, json};
@@ -198,6 +199,33 @@ pub fn command_for(command: &AppCommand) -> CommandId {
     }
 }
 
+/// The operations the application has applied to the part.
+#[derive(Default)]
+pub struct Journal {
+    ops: Vec<Op>,
+    untranslated: Vec<String>,
+    keys: u64,
+}
+
+impl Journal {
+    /// How many operations are kept: the oldest are dropped beyond this.
+    const LIMIT: usize = 10_000;
+
+    fn record(&mut self, ops: impl IntoIterator<Item = Op>) {
+        self.ops.extend(ops);
+        if self.ops.len() > Self::LIMIT {
+            let extra = self.ops.len() - Self::LIMIT;
+            self.ops.drain(..extra);
+        }
+    }
+
+    /// An undo key no other change uses (drags use small keys of their own).
+    fn fresh_key(&mut self) -> u64 {
+        self.keys += 1;
+        (1 << 63) | self.keys
+    }
+}
+
 /// The user's material tables and check limits, for operations on the open document.
 struct SettingsHost<'a> {
     materials: &'a mut MaterialLibrary,
@@ -232,6 +260,7 @@ impl PeetApp {
                     Reply {
                         ok: true,
                         changed: false,
+                        created: Vec::new(),
                         replaced: false,
                         json: Value::Object(out),
                     }
@@ -251,8 +280,86 @@ impl PeetApp {
             ),
             _ => self.apply_to_document(op, undo),
         };
+        if reply.ok && !matches!(op, Op::Query(_)) {
+            self.journal.record([op.clone()]);
+        }
         ctx.request_repaint();
         reply
+    }
+
+    /// Applies an operation the user asked for through the interface, and shows why if
+    /// it couldn't be applied.
+    pub(super) fn perform(&mut self, op: Op) -> Reply {
+        let reply = self.perform_quietly(op);
+        if let Some(e) = reply.json["error"].as_str().filter(|_| !reply.ok) {
+            self.error(e.to_owned());
+        }
+        reply
+    }
+
+    /// [`PeetApp::perform`], leaving it to the caller to say what went wrong.
+    pub(super) fn perform_quietly(&mut self, op: Op) -> Reply {
+        let reply = self.apply_to_document(&op, Undo::Step);
+        if reply.ok {
+            self.journal.record([op]);
+        }
+        reply
+    }
+
+    /// Makes a change to the model that one of the application's tools worked out (it
+    /// edits a copy of the model), as one undo step called `label`. The change is applied
+    /// as the operations that express it, so everything the application does to a part
+    /// is something a script can do, and is in the journal.
+    ///
+    /// Changes with the same `merge` key, one after the other, are one undo step (a
+    /// drag): seal the history when they end. Returns whether the part changed.
+    pub(super) fn change_model(
+        &mut self,
+        label: &str,
+        merge: Option<u64>,
+        f: impl FnOnce(&mut peet_model::Model),
+    ) -> bool {
+        let mut new = self.doc.model.clone();
+        f(&mut new);
+        if new == self.doc.model {
+            return false;
+        }
+        let kept: Vec<Persistent> = self
+            .selected_geom
+            .iter()
+            .filter_map(|g| self.doc.persist(*g))
+            .collect();
+        let key = merge.unwrap_or_else(|| self.journal.fresh_key());
+        let mut host = SettingsHost {
+            materials: &mut self.settings.materials,
+            check_rules: &mut self.settings.check_rules,
+        };
+        let done = apply_model(&mut host, &mut self.doc, new, label, key);
+        if merge.is_none() {
+            self.doc.seal_history();
+        }
+        if let Some(reason) = &done.untranslated {
+            // The part is as the tool asked, but the operations can't express it yet.
+            log::error!("\"{label}\" was not made by operations: {reason}");
+            self.journal.untranslated.push(format!("{label}: {reason}"));
+        }
+        self.journal.record(done.ops);
+        if done.changed {
+            self.restore_selection(&kept);
+        }
+        done.changed
+    }
+
+    /// The operations applied to the part since the application started, oldest first:
+    /// what the user did, as a script would do it.
+    pub fn journal(&self) -> &[Op] {
+        &self.journal.ops
+    }
+
+    /// Changes the application made that the operations could not express (each with the
+    /// reason): gaps in the operations. Empty when all is well.
+    pub fn untranslated(&self) -> &[String] {
+        &self.journal.untranslated
     }
 
     fn apply_to_document(&mut self, op: &Op, undo: Undo) -> Reply {
@@ -509,5 +616,92 @@ mod tests {
             Undo::Step,
         );
         assert!(typed.ok && typed.changed, "{}", typed.json);
+    }
+
+    #[test]
+    fn the_applications_own_commands_change_the_part_by_operations() {
+        use crate::document::ItemId;
+        use crate::files::AfterDiscard;
+        use peet_document::GeomRef;
+        use peet_math::DVec2;
+        use peet_model::{Datum, StdPlane};
+
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        let kinds =
+            |app: &PeetApp| -> Vec<&'static str> { app.journal().iter().map(Op::word).collect() };
+
+        // New Sketch on the top plane, a rectangle drawn in the editor, then Extrude,
+        // which finishes the sketch first.
+        app.selected = Some(ItemId::Datum(Datum::Plane(StdPlane::Top)));
+        app.execute(&ctx, CommandId::NewSketch);
+        assert!(app.sketch.is_some());
+        let work = app.sketch_work.as_mut().expect("the sketch being edited");
+        peet_sketch::shapes::rectangle(&mut work.sketch, DVec2::ZERO, DVec2::new(60.0, 40.0));
+        app.execute(&ctx, CommandId::Extrude);
+        assert!(app.sketch.is_none());
+        assert_eq!(app.doc.bodies.len(), 1);
+        assert_eq!(kinds(&app), ["sketch", "set_sketch", "extrude"]);
+        assert_eq!(app.doc.undo_label(), Some("Add Extrude"));
+
+        // The properties panel edits a copy of the feature; the change is an edit.
+        let extrude = app
+            .selected
+            .and_then(ItemId::feature)
+            .expect("the extrusion");
+        app.change("Edit Extrude1", |m| {
+            if let Some(e) = m.feature_mut(extrude).and_then(|f| f.extrude_mut()) {
+                e.params.depth = peet_model::Scalar::new(25.0);
+            }
+        });
+        assert!(matches!(app.journal().last(), Some(Op::Edit { .. })));
+
+        // Tree and menu commands on the selection.
+        app.execute(&ctx, CommandId::ToggleSuppress);
+        app.execute(&ctx, CommandId::ToggleSuppress);
+        app.execute(&ctx, CommandId::ToggleReferencePlanes);
+        app.execute(&ctx, CommandId::Undo);
+        app.execute(&ctx, CommandId::Redo);
+        app.selected = None;
+        app.execute(&ctx, CommandId::RefPlane);
+        let plane = app.selected.and_then(ItemId::feature).expect("the plane");
+        assert_eq!(app.doc.model.name_of(plane), "Plane1");
+
+        // A fillet on a picked edge: the commands of general solid modelling build
+        // their operations themselves.
+        let edge = app.doc.bodies[0].solid.edge_ids().next().expect("an edge");
+        app.picking = None;
+        app.selected = None;
+        app.selected_geom = vec![GeomRef::Edge { body: 0, edge }];
+        app.execute(&ctx, CommandId::Fillet);
+        let fillet = app.selected.and_then(ItemId::feature).expect("the fillet");
+        assert_eq!(app.doc.model.name_of(fillet), "Fillet1");
+        assert_eq!(app.doc.undo_label(), Some("Add Fillet1"));
+        app.execute(&ctx, CommandId::DeleteSelection);
+        assert!(app.doc.feature(fillet).is_none());
+
+        // A sample, and its flat pattern.
+        app.after_discard(AfterDiscard::SampleEnclosure);
+        assert!(app.doc.has_sheet_metal());
+        app.execute(&ctx, CommandId::FlatPattern);
+        assert!(app.doc.is_flat());
+
+        let all = kinds(&app);
+        for word in [
+            "edit",
+            "suppress",
+            "show",
+            "undo",
+            "redo",
+            "plane",
+            "fillet",
+            "delete",
+            "open_sample",
+            "flat_pattern",
+        ] {
+            assert!(all.contains(&word), "{word} is not in {all:?}");
+        }
+        // Nothing the application did was beyond the operations.
+        assert_eq!(app.untranslated(), &[] as &[String]);
     }
 }

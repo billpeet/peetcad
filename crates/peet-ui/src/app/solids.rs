@@ -12,9 +12,11 @@ use peet_math::DVec3;
 use peet_model::{BlendKind, FeatureId, Operation};
 use peet_sketch::expr::{LengthUnit, Units};
 
+use peet_ops::{Blend, Draft, FeatureArgs, Hole, Op, Revolve, Shell, Source, Sweep};
+
 use super::PeetApp;
 use crate::bodies::GeomRef;
-use crate::document::{Document, ItemId, Persistent};
+use crate::document::ItemId;
 use crate::features_ui::{self, Slot};
 
 /// Something the user has to read and dismiss: what an import left out, or why it failed.
@@ -169,20 +171,10 @@ fn mass_rows(
 }
 
 impl PeetApp {
-    /// Runs something that may change the document, keeping the face and edge selection
-    /// through the rebuild.
-    fn edit_document<T>(&mut self, f: impl FnOnce(&mut Document) -> T) -> T {
-        let kept: Vec<Persistent> = self
-            .selected_geom
-            .iter()
-            .filter_map(|g| self.doc.persist(*g))
-            .collect();
-        let revision = self.doc.revision;
-        let out = f(&mut self.doc);
-        if self.doc.revision != revision {
-            self.restore_selection(&kept);
-        }
-        out
+    /// Adds one feature by an operation. Returns it, or shows why it couldn't be added.
+    fn add_by_operation(&mut self, feature: FeatureArgs) -> Option<FeatureId> {
+        let reply = self.perform(Op::add(feature));
+        reply.created.first().copied()
     }
 
     /// Shows a new feature's properties.
@@ -199,7 +191,17 @@ impl PeetApp {
             return;
         };
         self.close_sketch();
-        let id = self.edit_document(|d| d.add_revolve(sketch, operation));
+        // The operation picks the axis (the sketch's centreline) and, for the first body
+        // of a part, makes it a new body.
+        let revolve = Revolve {
+            sketch: Some(sketch.into()),
+            ..Default::default()
+        };
+        let id = self.add_by_operation(if operation == Operation::Cut {
+            FeatureArgs::CutRevolve(revolve)
+        } else {
+            FeatureArgs::Revolve(revolve)
+        });
         self.select_new(id);
         if id.is_some() {
             self.show_in_3d(sketch, 1.0);
@@ -214,7 +216,17 @@ impl PeetApp {
         };
         let path = self.selected_sketch().filter(|s| *s != profile);
         self.close_sketch();
-        let id = self.edit_document(|d| d.add_sweep(profile, path, operation));
+        let sweep = Sweep {
+            profile: Some(profile.into()),
+            // No path yet: it is chosen afterwards.
+            path: Some(path.map(Into::into)),
+            ..Default::default()
+        };
+        let id = self.add_by_operation(if operation == Operation::Cut {
+            FeatureArgs::CutSweep(sweep)
+        } else {
+            FeatureArgs::Sweep(sweep)
+        });
         self.select_new(id);
         let Some(id) = id else {
             return;
@@ -233,7 +245,14 @@ impl PeetApp {
     pub(super) fn start_blend(&mut self, kind: BlendKind) {
         let edges = self.doc.edge_refs(&self.selected_geom);
         let pick = edges.is_empty();
-        let id = self.edit_document(|d| d.add_blend(kind, edges));
+        let blend = Blend {
+            edges: Some(edges.into_iter().map(Into::into).collect()),
+            ..Default::default()
+        };
+        let id = self.add_by_operation(match kind {
+            BlendKind::Fillet => FeatureArgs::Fillet(blend),
+            BlendKind::Chamfer => FeatureArgs::Chamfer(blend),
+        });
         self.select_new(id);
         if pick && let Some(id) = id {
             self.picking = Some((id, Slot::BlendEdge));
@@ -245,7 +264,10 @@ impl PeetApp {
     pub(super) fn start_shell(&mut self) {
         let open = self.doc.face_refs(&self.selected_geom, false);
         let closed = open.is_empty();
-        let id = self.edit_document(|d| d.add_shell(open));
+        let id = self.add_by_operation(FeatureArgs::Shell(Shell {
+            open: Some(open.into_iter().map(Into::into).collect()),
+            ..Default::default()
+        }));
         self.select_new(id);
         if closed && id.is_some() {
             self.info("The body is now a closed hollow. To open it, use Add faces in the properties and click the faces to remove.");
@@ -266,7 +288,12 @@ impl PeetApp {
         } else {
             Slot::DraftNeutral
         };
-        let id = self.edit_document(|d| d.add_draft(faces, None));
+        let id = self.add_by_operation(FeatureArgs::Draft(Draft {
+            faces: Some(faces.into_iter().map(Into::into).collect()),
+            // The neutral plane is picked next.
+            neutral: Some(None),
+            ..Default::default()
+        }));
         self.select_new(id);
         if let Some(id) = id {
             self.picking = Some((id, first));
@@ -287,7 +314,10 @@ impl PeetApp {
         };
         self.close_sketch();
         let holes = self.doc.hole_count(sketch);
-        let id = self.edit_document(|d| d.add_hole(sketch));
+        let id = self.add_by_operation(FeatureArgs::Hole(Hole {
+            sketch: Some(sketch.into()),
+            ..Default::default()
+        }));
         self.select_new(id);
         if id.is_some() && holes == 0 {
             self.error("The sketch has no points to drill at. Edit the sketch and place a point (or a circle) where each hole goes.");
@@ -297,29 +327,48 @@ impl PeetApp {
     /// Adds the solids of an opened STEP file as bodies.
     pub(super) fn finish_step_import(&mut self, file: &peet_platform::OpenedFile) {
         self.close_sketch();
-        let text = String::from_utf8_lossy(&file.bytes);
-        match self.edit_document(|d| d.import_step(&file.name, &text)) {
-            Ok(done) => {
-                self.select_new(Some(done.feature));
+        let reply = self.perform_quietly(Op::ImportStep {
+            file: Source::loaded(file.name.clone(), file.path.clone(), file.bytes.clone()),
+        });
+        let imported = match reply.created.first() {
+            Some(id) if reply.ok => Ok(*id),
+            _ => Err(reply.json["error"]
+                .as_str()
+                .unwrap_or("Nothing was imported.")
+                .to_owned()),
+        };
+        match imported {
+            Ok(feature) => {
+                self.select_new(Some(feature));
                 let bounds = self.doc.visible_bounds();
                 let animate = self.settings.animate_views;
                 if let Some(vp) = &mut self.viewport {
                     vp.zoom_to_fit(&bounds, animate);
                 }
-                let what = if done.bodies == 1 {
+                let bodies = reply.json["bodies"].as_u64().unwrap_or(0);
+                let what = if bodies == 1 {
                     "1 body".to_owned()
                 } else {
-                    format!("{} bodies", done.bodies)
+                    format!("{bodies} bodies")
                 };
                 self.info(format!(
                     "Imported {what} from {} as {}",
-                    file.name, done.name
+                    file.name,
+                    self.doc.model.name_of(feature)
                 ));
-                if !done.warnings.is_empty() {
+                let warnings: Vec<String> = reply.json["warnings"]
+                    .as_array()
+                    .map(|w| {
+                        w.iter()
+                            .filter_map(|x| x.as_str().map(str::to_owned))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                if !warnings.is_empty() {
                     self.notice = Some(Notice {
                         title: "Import STEP".to_owned(),
                         heading: format!("{} was imported ({what}), with these notes:", file.name),
-                        lines: done.warnings,
+                        lines: warnings,
                         error: false,
                     });
                 }

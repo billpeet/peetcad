@@ -96,7 +96,7 @@ Stages 1, 2 and 4 give headless builds; stage 5 adds live update.
 
 - [x] Stage 1: headless session crate (`peet-document`: `Document` moved out of `peet-ui`; bodies are tessellated on demand, so a run that only edits and saves does no display work; the GPU mesh conversion stays in `peet-ui`)
 - [x] Stage 2: operation vocabulary, selectors, queries (`peet-ops`: a typed `Op` with JSON as one way of writing it; [reference](scripting.md), [ADR 0007](adr/0007-operations.md)). Every command of the application has an operation: `peet_ui::coverage` is checked by the compiler and by a test
-- [ ] Stage 3: UI routed through operations. Done so far: `PeetApp::apply_op` applies any operation to the running application, including the application's own commands (views, toggles, windows, sketch editing). Still to do: the application's buttons call the operations
+- [x] Stage 3: UI routed through operations. Every change the application makes to a part is applied as operations: its tools still work out the change on a copy of the model, and `peet_ops::apply_model` translates it (the solid modelling commands, undo, the flat pattern, new, open and the samples build their operations directly). `PeetApp::journal` holds the operations applied. Left: the tools building their operations themselves, so the translation can go; writing the journal out as a script (operations can be read from JSON, not yet written); and saving, STL export and the material tables window, which still act directly
 - [ ] Stage 4: headless command line
 - [ ] Stage 5: live attach. `PeetApp::apply_op` is the entry point; what is missing is the transport (the pipe and the registry). The "sketch open for editing" rule is already enforced there
 - [ ] Stage 6: scripting language, MCP, screenshots
