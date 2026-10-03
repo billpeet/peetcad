@@ -97,15 +97,29 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
                 component: c.id.into(),
                 change,
             };
+            // The patterns that are gone, first: their copies go with them.
+            let edit_pattern =
+                |p: &peet_model::ComponentPattern, change| Op::EditComponentPattern {
+                    pattern: p.id.into(),
+                    change,
+                };
+            for p in before.patterns() {
+                // (A pattern whose originals were all deleted went with them.)
+                let originals = p.seeds.iter().any(|s| after.component(*s).is_some());
+                if after.pattern(p.id).is_none() && originals {
+                    ops.push(edit_pattern(p, crate::PatternChange::Delete));
+                }
+            }
             for c in before.components() {
-                if after.component(c.id).is_none() {
+                // A pattern's copy goes with its pattern, its original or a lower count.
+                if after.component(c.id).is_none() && c.pattern.is_none() {
                     ops.push(component(c, ComponentChange::Delete));
                 }
             }
             // New ones in the order they were made, so that they get the same ids.
             let mut added: Vec<&peet_model::Component> = after
                 .components()
-                .filter(|c| before.component(c.id).is_none())
+                .filter(|c| before.component(c.id).is_none() && c.pattern.is_none())
                 .collect();
             added.sort_by_key(|c| c.id);
             for c in added {
@@ -146,13 +160,14 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
                 if o.name != c.name {
                     ops.push(component(c, ComponentChange::Rename(c.name.clone())));
                 }
-                if o.placement != c.placement {
+                // (A pattern's copy is placed by its pattern.)
+                if o.placement != c.placement && c.pattern.is_none() {
                     ops.push(component(
                         c,
                         ComponentChange::Place(Placing::Frame(c.placement)),
                     ));
                 }
-                if o.fixed != c.fixed {
+                if o.fixed != c.fixed && c.pattern.is_none() {
                     ops.push(component(c, ComponentChange::Fix(c.fixed)));
                 }
                 if o.suppressed != c.suppressed {
@@ -163,6 +178,33 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
                 }
                 if o.color != c.color {
                     ops.push(component(c, ComponentChange::Color(c.color)));
+                }
+            }
+            // The patterns: new ones (which make their copies), and changed ones.
+            let mut new_patterns: Vec<&peet_model::ComponentPattern> = after
+                .patterns()
+                .filter(|p| before.pattern(p.id).is_none())
+                .collect();
+            new_patterns.sort_by_key(|p| p.id);
+            for p in new_patterns {
+                ops.push(Op::ComponentPattern {
+                    components: p.seeds.iter().map(|c| (*c).into()).collect(),
+                    kind: crate::PatternSpec::Exact(p.kind.clone()),
+                    name: Some(p.name.clone()),
+                });
+            }
+            for p in after.patterns() {
+                let Some(o) = before.pattern(p.id) else {
+                    continue;
+                };
+                if o.name != p.name {
+                    ops.push(edit_pattern(
+                        p,
+                        crate::PatternChange::Rename(p.name.clone()),
+                    ));
+                }
+                if o.kind != p.kind {
+                    ops.push(edit_pattern(p, crate::PatternChange::Set(p.kind.clone())));
                 }
             }
             // The exploded view's steps. What a deleted component took with it (itself

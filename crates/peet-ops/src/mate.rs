@@ -93,7 +93,7 @@ pub enum MateEndSel {
 }
 
 impl MateEndSel {
-    fn parse(v: &Value) -> Result<Self, String> {
+    pub(crate) fn parse(v: &Value) -> Result<Self, String> {
         let wrong = || {
             format!(
                 "expected {{\"component\": name, \"face\": selector}} (or \"edge\", or \"vertex\"; or the component alone, for fasten), not {v}"
@@ -120,7 +120,7 @@ impl MateEndSel {
     }
 
     /// The end as a mate stores it, with the component it is on.
-    fn resolve(&self, doc: &Document) -> Result<MateEnd, String> {
+    pub(crate) fn resolve(&self, doc: &Document) -> Result<MateEnd, String> {
         let (component, geom) = match self {
             Self::Ref(end) => return Ok(end.clone()),
             Self::Find { component, geom } => (component, geom),
@@ -425,6 +425,8 @@ pub(crate) fn add(
             .ok_or_else(|| "A mate's component is not in the assembly.".to_owned())
     };
     let (ca, cb) = (component(&a)?, component(&b)?);
+    crate::pattern::placed_by_pattern(assembly, ca, "mated")?;
+    crate::pattern::placed_by_pattern(assembly, cb, "mated")?;
     if ca == cb {
         return Err(format!(
             "Both ends are on {}: a mate joins two components.",

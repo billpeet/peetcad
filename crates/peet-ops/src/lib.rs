@@ -54,6 +54,7 @@ mod library;
 mod links;
 mod mate;
 mod op;
+mod pattern;
 mod query;
 pub mod select;
 mod session;
@@ -76,6 +77,9 @@ pub use links::{PartSel, linked_files};
 pub use mate::{MateChange, MateEndSel, MateSel, MateType};
 pub use op::{
     DatumSel, DxfPlacement, DxfTarget, Format, New, Op, Place, Query, RollTo, Sample, Source,
+};
+pub use pattern::{
+    PatternChange, PatternEdit, PatternLineSel, PatternSel, PatternSpec, PatternStepSpec,
 };
 pub use session::{DocSel, SessionCommand, apply_session, apply_session_json};
 pub use sketch::{Draw, DrawItem, Ent, Measure, Relation};
@@ -136,6 +140,8 @@ struct Done {
     mate: Option<peet_model::MateId>,
     /// A step of the exploded view the operation was about.
     explode_step: Option<peet_model::ExplodeId>,
+    /// A component pattern the operation was about, reported with its copies.
+    pattern: Option<peet_model::PatternId>,
     /// A pull on a component to solve the assembly with, and its undo label.
     drag: Option<(peet_model::Drag, String)>,
     data: Map<String, Value>,
@@ -259,6 +265,7 @@ fn help() -> Map<String, Value> {
         .chain(mate::MATE_OPS.iter().map(|o| ("mate", o)))
         .chain(links::LINK_OPS.iter().map(|o| ("part", o)))
         .chain(explode::EXPLODE_OPS.iter().map(|o| ("explode_step", o)))
+        .chain(pattern::PATTERN_OPS.iter().map(|o| ("pattern", o)))
     {
         // Words a feature has too (rename, delete): the component's and the mate's
         // forms beside it.
@@ -446,6 +453,28 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 );
             } else {
                 done.mate = Some(id);
+            }
+            label
+        }
+        Op::ComponentPattern {
+            components,
+            kind,
+            name,
+        } => {
+            let (id, label) = pattern::add(doc, &mut model, components, kind, name.as_deref())?;
+            done.pattern = Some(id);
+            label
+        }
+        Op::EditComponentPattern { pattern, change } => {
+            let id = pattern.resolve(doc)?;
+            let label = pattern::change(doc, &mut model, id, change)?;
+            if *change == PatternChange::Delete {
+                done.data.insert(
+                    "deleted".to_owned(),
+                    json!([label.trim_start_matches("Delete ")]),
+                );
+            } else {
+                done.pattern = Some(id);
             }
             label
         }
@@ -1104,6 +1133,9 @@ pub(crate) fn apply_with(
     }
     if let Some(id) = done.mate {
         out.insert("mate".to_owned(), mate::mate_out(doc, id));
+    }
+    if let Some(id) = done.pattern {
+        out.insert("pattern".to_owned(), pattern::pattern_out(doc, id));
     }
     if let Some(id) = done.explode_step {
         out.insert("explode_step".to_owned(), explode::step_out(doc, id));

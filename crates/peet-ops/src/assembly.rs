@@ -436,6 +436,8 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
             | Op::Drag { .. }
             | Op::Mate { .. }
             | Op::EditMate { .. }
+            | Op::ComponentPattern { .. }
+            | Op::EditComponentPattern { .. }
             | Op::ExplodeStep { .. }
             | Op::EditExplodeStep { .. }
             | Op::Explode { .. }
@@ -561,6 +563,10 @@ pub(crate) fn component_out(doc: &Document, id: CompId) -> Value {
     if let Some(color) = c.color {
         m.insert("color".to_owned(), crate::library::color_out(color));
     }
+    // A copy made by a pattern, which places it.
+    if let Some(pattern) = assembly.pattern_of(id) {
+        m.insert("pattern".to_owned(), json!(pattern.name));
+    }
     m.insert("status".to_owned(), json!(status_word(status)));
     if let Some(message) = status.and_then(Status::message) {
         m.insert("message".to_owned(), json!(message));
@@ -587,6 +593,7 @@ pub(crate) fn problems(doc: &Document) -> Vec<Value> {
         })
         .map(|c| component_out(doc, c.id))
         .chain(crate::mate::failures(doc))
+        .chain(crate::pattern::failures(doc))
         .collect()
 }
 
@@ -624,6 +631,13 @@ pub(crate) fn components(doc: &Document) -> Result<Map<String, Value>, String> {
     let mut out = Map::new();
     out.insert("components".to_owned(), json!(list));
     out.insert("parts".to_owned(), json!(parts));
+    if assembly.patterns().len() > 0 {
+        let patterns: Vec<Value> = assembly
+            .patterns()
+            .map(|p| crate::pattern::pattern_out(doc, p.id))
+            .collect();
+        out.insert("patterns".to_owned(), json!(patterns));
+    }
     out.insert("mates".to_owned(), json!(assembly.mates().count()));
     out.insert("freedom".to_owned(), json!(doc.evaluation().freedom));
     Ok(out)
@@ -736,6 +750,17 @@ pub(crate) fn change(
 ) -> Result<String, String> {
     let units = doc.model.parameters.units;
     let was = the_assembly(doc)?.name_of(id).to_owned();
+    // A copy a pattern made is the pattern's to place and to remove.
+    let refused = match change {
+        ComponentChange::Place(_) => Some("placed"),
+        ComponentChange::Fix(_) => Some("fixed or let go"),
+        ComponentChange::Replace(_) => Some("replaced"),
+        ComponentChange::Delete => Some("deleted"),
+        _ => None,
+    };
+    if let Some(what) = refused {
+        crate::pattern::placed_by_pattern(the_assembly(doc)?, id, what)?;
+    }
     // Read what is to be inserted before anything changes.
     let replacement = match change {
         ComponentChange::Replace(from) => {
@@ -878,6 +903,7 @@ pub(crate) fn drag(
     let c = the_assembly(doc)?
         .component(id)
         .ok_or_else(|| "The component no longer exists.".to_owned())?;
+    crate::pattern::placed_by_pattern(the_assembly(doc)?, id, "dragged")?;
     if c.fixed {
         return Err(format!(
             "{name} is fixed, so it stays where it is: drag another component, or let it go first with {{\"op\": \"fix\", \"component\": \"{name}\", \"on\": false}}.",

@@ -223,13 +223,14 @@ pub fn chassis() -> (Model, Engine) {
         def.settings.radius = Scalar::new(cs::RADIUS);
     }
 
-    // The rim: a wall and a lip, drawn on the base's front end face at the right-hand
-    // corner, run along the right, back and left edges.
+    // The rim: a wall and a lip, drawn on the base's front end face at the left-hand
+    // corner (which stays where it is when the base is made wider, so the rim follows
+    // the width), run along the left, back and right edges.
     let end = b.face(-DVec3::Y, DVec3::new(w / 2.0, 0.0, t / 2.0));
     let profile = b.sketch_at(end, |s, to| {
-        let p0 = to(DVec3::new(w, 0.0, 0.0));
-        let p1 = to(DVec3::new(w, 0.0, cs::WALL));
-        let p2 = to(DVec3::new(w - cs::LIP, 0.0, cs::WALL));
+        let p0 = to(DVec3::new(0.0, 0.0, 0.0));
+        let p1 = to(DVec3::new(0.0, 0.0, cs::WALL));
+        let p2 = to(DVec3::new(cs::LIP, 0.0, cs::WALL));
         let wall = s.add_line(p0, p1);
         let lip = s.add_line(p1, p2);
         if let (Some((_, wall_end)), Some((lip_start, _))) = (s.endpoints(wall), s.endpoints(lip)) {
@@ -239,10 +240,10 @@ pub fn chassis() -> (Model, Engine) {
         let _ = s.add_dimension(ConstraintKind::Length(lip), cs::LIP);
     });
     let corners = [
-        DVec3::new(w, 0.0, t),
-        DVec3::new(w, d, t),
-        DVec3::new(0.0, d, t),
         DVec3::new(0.0, 0.0, t),
+        DVec3::new(0.0, d, t),
+        DVec3::new(w, d, t),
+        DVec3::new(w, 0.0, t),
     ];
     let edges = (0..3).map(|i| b.edge(corners[i], corners[i + 1])).collect();
     b.model.add_miter_flange(profile, edges);
@@ -444,6 +445,413 @@ pub fn bracket_volume(width: f64) -> f64 {
         - 20.0 * 4.0 * 15.0 // slot in the end face
         + pi * 25.0 * 5.0 // boss
         - pi * 4.0 * 13.0 // hole through the boss and the plate
+}
+
+// ---- The Phase 7 exit assembly ----
+
+/// Sizes of the parts made for [`enclosure_assembly`], for its tests.
+pub mod enclosure_size {
+    /// The cover: a flat sheet the size of the chassis, with an opening for the shaft
+    /// and holes for the housing's bolts.
+    pub const COVER_T: f64 = 1.5;
+    pub const COVER_OPENING_R: f64 = 16.0;
+    pub const COVER_HOLE_R: f64 = 4.5;
+    /// A socket head screw: (thread radius, length under the head, head radius, head
+    /// height, socket across flats, socket depth).
+    pub const M8: (f64, f64, f64, f64, f64, f64) = (4.0, 8.0, 6.5, 8.0, 6.0, 4.0);
+    pub const M4: (f64, f64, f64, f64, f64, f64) = (2.0, 8.0, 3.5, 4.0, 3.0, 2.0);
+    /// Where the housing's axis is on the cover, from the cover's corner.
+    pub const HOUSING_AT: (f64, f64) = (120.0, 80.0);
+    /// The chassis's mounting holes: the first, and the steps to the others.
+    pub const MOUNT_AT: (f64, f64) = (20.0, 25.0);
+    pub const MOUNT_STEP: (f64, f64) = (200.0, 110.0);
+    /// Densities, kg/m³.
+    pub const STEEL: f64 = 7850.0;
+    pub const ALUMINIUM: f64 = 2700.0;
+}
+
+/// The cover of [`enclosure_assembly`]: a sheet of the chassis's size and thickness
+/// with an opening for the housing's shaft and a hole for each of its bolts.
+pub fn cover() -> (Model, Engine) {
+    use chassis_size as cs;
+    use enclosure_size as es;
+    use housing_size as hs;
+    let mut b = Builder {
+        model: Model::new(),
+        engine: Engine::new(),
+    };
+    b.model.name = "Cover".to_owned();
+    let base = b.sketch(PlaneRef::Standard(StdPlane::Top), |s| {
+        let shape = shapes::rectangle(s, DVec2::ZERO, DVec2::new(cs::WIDTH, cs::DEPTH));
+        let (bottom, right) = (shape.curves[0], shape.curves[1]);
+        let corner = s.endpoints(bottom).expect("a line").0;
+        let _ = s.add_constraint(ConstraintKind::Coincident(corner, Sketch::ORIGIN));
+        let _ = s.add_dimension(ConstraintKind::Length(bottom), cs::WIDTH);
+        let _ = s.add_dimension(ConstraintKind::Length(right), cs::DEPTH);
+    });
+    let flange = b.model.add_base_flange(base);
+    if let Some(f) = b.model.feature_mut(flange)
+        && let FeatureKind::BaseFlange(def) = &mut f.kind
+    {
+        def.settings.thickness = Scalar::new(es::COVER_T);
+    }
+    let (cx, cy) = es::HOUSING_AT;
+    let top = b.face(DVec3::Z, DVec3::new(1.0, 1.0, es::COVER_T));
+    let holes = b.sketch_at(top, |s, to| {
+        s.add_circle(to(DVec3::new(cx, cy, es::COVER_T)), es::COVER_OPENING_R);
+        for i in 0..hs::BOLTS {
+            let a = std::f64::consts::TAU * f64::from(i) / f64::from(hs::BOLTS);
+            let at = DVec3::new(
+                cx + hs::BOLT_CIRCLE_R * a.cos(),
+                cy + hs::BOLT_CIRCLE_R * a.sin(),
+                es::COVER_T,
+            );
+            s.add_circle(to(at), es::COVER_HOLE_R);
+        }
+    });
+    b.model.add_sheet_cut(holes);
+    b.engine.regenerate(&mut b.model);
+    (b.model, b.engine)
+}
+
+/// The cover's volume, from its sizes.
+pub fn cover_volume() -> f64 {
+    use chassis_size as cs;
+    use enclosure_size as es;
+    let pi = std::f64::consts::PI;
+    let holes = pi * es::COVER_OPENING_R * es::COVER_OPENING_R
+        + f64::from(housing_size::BOLTS) * pi * es::COVER_HOLE_R * es::COVER_HOLE_R;
+    (cs::WIDTH * cs::DEPTH - holes) * es::COVER_T
+}
+
+/// A socket head screw standing on the top plane: its head above (its underside at
+/// z = 0), its thread below, a hexagon socket in the top of the head. `size` is as
+/// [`enclosure_size::M8`].
+pub fn socket_screw(name: &str, size: (f64, f64, f64, f64, f64, f64)) -> (Model, Engine) {
+    let (thread_r, length, head_r, head_h, socket, socket_depth) = size;
+    let mut b = Builder {
+        model: Model::new(),
+        engine: Engine::new(),
+    };
+    name.clone_into(&mut b.model.name);
+    let head = b.sketch(PlaneRef::Standard(StdPlane::Top), |s| {
+        s.add_circle(DVec2::ZERO, head_r);
+    });
+    b.extrude(head, Operation::Add, |e| e.depth = Scalar::new(head_h));
+    let under = b.face(-DVec3::Z, DVec3::ZERO);
+    let thread = b.sketch(under, |s| {
+        s.add_circle(DVec2::ZERO, thread_r);
+    });
+    b.extrude(thread, Operation::Add, |e| e.depth = Scalar::new(length));
+    let top = b.face(DVec3::Z, DVec3::new(0.0, 0.0, head_h));
+    let hexagon = b.sketch_at(top, |s, to| {
+        // Across flats `socket`: corners at this radius, a flat square to x.
+        let r = socket / 3f64.sqrt();
+        let corner = |i: u32| {
+            let a = std::f64::consts::TAU * (f64::from(i) + 0.5) / 6.0;
+            to(DVec3::new(r * a.cos(), r * a.sin(), head_h))
+        };
+        for i in 0..6 {
+            s.add_line(corner(i), corner(i + 1));
+        }
+    });
+    b.extrude(hexagon, Operation::Cut, |e| {
+        e.depth = Scalar::new(socket_depth)
+    });
+    b.engine.regenerate(&mut b.model);
+    (b.model, b.engine)
+}
+
+/// A socket screw's volume, from its sizes.
+pub fn socket_screw_volume(size: (f64, f64, f64, f64, f64, f64)) -> f64 {
+    let (thread_r, length, head_r, head_h, socket, socket_depth) = size;
+    let pi = std::f64::consts::PI;
+    // A hexagon across flats s has the area (√3 / 2) s².
+    pi * head_r * head_r * head_h + pi * thread_r * thread_r * length
+        - 3f64.sqrt() / 2.0 * socket * socket * socket_depth
+}
+
+/// The faces of a built part, for mates.
+struct Faces(std::sync::Arc<crate::Body>);
+
+impl Faces {
+    fn of(model: &Model) -> Self {
+        let mut model = model.clone();
+        let body = Engine::new()
+            .regenerate(&mut model)
+            .bodies
+            .first()
+            .cloned()
+            .unwrap_or_else(|| panic!("{} has no body", model.name));
+        Self(body)
+    }
+
+    /// The flat face with the outward normal `n` whose plane goes through `at`.
+    fn flat(&self, n: DVec3, at: DVec3) -> crate::MateGeom {
+        let solid = &self.0.solid;
+        let found = solid.face_ids().find(|f| {
+            matches!(solid.face(*f).surface, Surface::Plane(p)
+                if solid.face_normal_at(*f, at).dot(n) > 0.999 && p.signed_distance(at).abs() < 1e-9)
+        });
+        let found = found.unwrap_or_else(|| panic!("no flat face {n} through {at}"));
+        crate::MateGeom::Face(self.0.face_ref(found))
+    }
+
+    /// The round face of this radius whose axis goes through `on`.
+    fn round(&self, radius: f64, on: DVec3) -> crate::MateGeom {
+        let solid = &self.0.solid;
+        let found = solid.face_ids().find(|f| {
+            matches!(&solid.face(*f).surface, Surface::Cylinder(c)
+                if (c.radius - radius).abs() < 1e-9
+                    && (on - c.axis_origin()).cross(c.axis()).length() < 1e-9)
+        });
+        let found = found.unwrap_or_else(|| panic!("no round face of radius {radius} at {on}"));
+        crate::MateGeom::Face(self.0.face_ref(found))
+    }
+}
+
+/// The Phase 7 exit assembly: the chassis with a cover on its rim, the bearing housing
+/// bolted to the cover over an opening for its shaft, and screws in the chassis's
+/// mounting holes. Thirteen components of five parts, each with a material. The
+/// chassis is fixed and everything else is held by mates to it, to the cover or to
+/// the housing: nothing is left free. The housing's six bolts are one bolt and a
+/// circular pattern round the housing's axis; the four mounting screws one screw and
+/// a pattern in two directions taken from the chassis's walls. Three explode steps take
+/// it apart.
+pub fn enclosure_assembly() -> (Model, Engine) {
+    use std::sync::Arc;
+
+    use chassis_size as cs;
+    use enclosure_size as es;
+    use housing_size as hs;
+    use peet_math::Frame;
+
+    use crate::{
+        CompId, MateEnd, MateGeom, MateKind, Material, PatternKind, PatternLine, PatternStep,
+    };
+
+    let with = |mut part: Model, material: &str, density: f64| {
+        part.material = Material::new(material, density).ok();
+        Arc::new(part)
+    };
+    let chassis = with(chassis().0, "Mild steel", es::STEEL);
+    let cover = with(cover().0, "Mild steel", es::STEEL);
+    let housing = with(housing().0, "Aluminium 6061", es::ALUMINIUM);
+    let bolt = with(socket_screw("Bolt M8", es::M8).0, "Alloy steel", es::STEEL);
+    let screw = with(socket_screw("Screw M4", es::M4).0, "Alloy steel", es::STEEL);
+    let faces = [&chassis, &cover, &housing, &bolt, &screw].map(|part| Faces::of(part));
+    let [f_chassis, f_cover, f_housing, f_bolt, f_screw] = &faces;
+
+    let mut model = Model::new_assembly();
+    model.name = "Enclosure".to_owned();
+    let at = |x: f64, y: f64, z: f64| Frame {
+        origin: DVec3::new(x, y, z),
+        ..Frame::WORLD
+    };
+    let (hx, hy) = es::HOUSING_AT;
+    let (mx, my) = es::MOUNT_AT;
+    let t = cs::THICKNESS;
+    // The floor of the housing's counterbores: an M8 counterbore is 8.6 deep.
+    let seat = hs::FLANGE_T - 8.6;
+    let a = model.assembly_mut().expect("an assembly");
+    // Near where the mates will have them: a solve goes to the nearest answer.
+    let place = |a: &mut crate::Assembly, part: &Arc<Model>, frame, name: &str| -> CompId {
+        let definition = a.define(part.clone());
+        let id = a
+            .insert(definition, frame)
+            .expect("the part was just defined");
+        if let Some(c) = a.component_mut(id) {
+            name.clone_into(&mut c.name);
+        }
+        id
+    };
+    let c_chassis = place(a, &chassis, Frame::WORLD, "Chassis");
+    let c_cover = place(a, &cover, at(0.0, 0.0, cs::WALL), "Cover");
+    let c_housing = place(a, &housing, at(hx, hy, cs::WALL + es::COVER_T), "Housing");
+    let c_bolt = place(
+        a,
+        &bolt,
+        at(hx + hs::BOLT_CIRCLE_R, hy, cs::WALL + es::COVER_T + seat),
+        "Bolt-1",
+    );
+    let c_screw = place(a, &screw, at(mx, my, t), "Screw-1");
+
+    let end = |component: CompId, geom: MateGeom| MateEnd {
+        path: vec![component],
+        geom: Some(geom),
+    };
+    let mate = |a: &mut crate::Assembly, kind: MateKind, x: MateEnd, y: MateEnd, flip: bool| {
+        let id = a.add_mate(kind, x, y);
+        if let Some(m) = a.mate_mut(id) {
+            m.flip = flip;
+        }
+    };
+    let (x, y, z) = (DVec3::X, DVec3::Y, DVec3::Z);
+    let right_wall = f_chassis.flat(x, DVec3::new(cs::WIDTH, cs::DEPTH / 2.0, cs::WALL / 2.0));
+    let back_wall = f_chassis.flat(y, DVec3::new(cs::WIDTH / 2.0, cs::DEPTH, 4.0));
+
+    // The cover: on the rim, flush with the right and the back walls.
+    mate(
+        a,
+        MateKind::Coincident,
+        end(
+            c_chassis,
+            f_chassis.flat(z, DVec3::new(cs::WIDTH - 6.0, cs::DEPTH / 2.0, cs::WALL)),
+        ),
+        end(c_cover, f_cover.flat(-z, DVec3::ZERO)),
+        false,
+    );
+    mate(
+        a,
+        MateKind::Coincident,
+        end(c_chassis, right_wall.clone()),
+        end(c_cover, f_cover.flat(x, DVec3::new(cs::WIDTH, 1.0, 0.5))),
+        true,
+    );
+    mate(
+        a,
+        MateKind::Coincident,
+        end(c_chassis, back_wall.clone()),
+        end(c_cover, f_cover.flat(y, DVec3::new(1.0, cs::DEPTH, 0.5))),
+        true,
+    );
+
+    // The housing: on the cover, over the opening, a bolt hole over a hole.
+    let hole = DVec3::new(hs::BOLT_CIRCLE_R, 0.0, 0.0);
+    mate(
+        a,
+        MateKind::Coincident,
+        end(c_cover, f_cover.flat(z, DVec3::new(1.0, 1.0, es::COVER_T))),
+        end(
+            c_housing,
+            f_housing.flat(-z, DVec3::new(hs::FLANGE_R - 1.0, 0.0, 0.0)),
+        ),
+        false,
+    );
+    mate(
+        a,
+        MateKind::Concentric,
+        end(
+            c_cover,
+            f_cover.round(es::COVER_OPENING_R, DVec3::new(hx, hy, 0.0)),
+        ),
+        end(c_housing, f_housing.round(hs::BORE_R, DVec3::ZERO)),
+        false,
+    );
+    mate(
+        a,
+        MateKind::Concentric,
+        end(
+            c_cover,
+            f_cover.round(es::COVER_HOLE_R, DVec3::new(hx, hy, 0.0) + hole),
+        ),
+        end(c_housing, f_housing.round(4.5, hole)),
+        false,
+    );
+
+    // A screw: in its hole, its head down on its seat, and a flat of its socket square
+    // to the right wall so that it can't spin.
+    let fasten = |a: &mut crate::Assembly,
+                  screw: CompId,
+                  f: &Faces,
+                  size: (f64, f64, f64, f64, f64, f64),
+                  hole: MateEnd,
+                  seat: MateEnd| {
+        mate(
+            a,
+            MateKind::Concentric,
+            hole,
+            end(screw, f.round(size.0, DVec3::ZERO)),
+            false,
+        );
+        mate(
+            a,
+            MateKind::Coincident,
+            seat,
+            end(screw, f.flat(-z, DVec3::ZERO)),
+            false,
+        );
+        mate(
+            a,
+            MateKind::Parallel,
+            end(c_chassis, right_wall.clone()),
+            end(
+                screw,
+                f.flat(-x, DVec3::new(size.4 / 2.0, 0.0, size.3 - 0.5)),
+            ),
+            false,
+        );
+    };
+    fasten(
+        a,
+        c_bolt,
+        f_bolt,
+        es::M8,
+        end(c_housing, f_housing.round(4.5, hole)),
+        end(c_housing, f_housing.flat(z, hole + z * seat)),
+    );
+    fasten(
+        a,
+        c_screw,
+        f_screw,
+        es::M4,
+        end(
+            c_chassis,
+            f_chassis.round(cs::HOLE_RADIUS, DVec3::new(mx, my, 0.0)),
+        ),
+        end(c_chassis, f_chassis.flat(z, DVec3::new(mx + 10.0, my, t))),
+    );
+
+    // The other bolts round the housing's axis; the other screws along the walls.
+    let bolts = a.add_pattern(
+        &[c_bolt],
+        PatternKind::Circular {
+            axis: PatternLine::Geom(end(c_housing, f_housing.round(hs::BORE_R, DVec3::ZERO))),
+            angle: Scalar::new(360.0),
+            count: hs::BOLTS,
+            flip: false,
+        },
+    );
+    let along = |wall: &MateGeom, spacing: f64| PatternStep {
+        direction: PatternLine::Geom(end(c_chassis, wall.clone())),
+        spacing: Scalar::new(spacing),
+        count: 2,
+        flip: false,
+    };
+    let screws = a.add_pattern(
+        &[c_screw],
+        PatternKind::Linear {
+            first: along(&right_wall, es::MOUNT_STEP.0),
+            second: Some(along(&back_wall, es::MOUNT_STEP.1)),
+        },
+    );
+    for (pattern, name) in [(bolts, "Bolts"), (screws, "Screws")] {
+        if let Some(p) = pattern.and_then(|id| a.pattern_mut(id)) {
+            name.clone_into(&mut p.name);
+        }
+    }
+
+    // Taken apart: the cover with what is on it, then the housing, then the bolts.
+    let copies = |a: &crate::Assembly, pattern: Option<crate::PatternId>, seed: CompId| {
+        let mut all = vec![seed];
+        if let Some(p) = pattern.and_then(|id| a.pattern(id)) {
+            all.extend(p.instances.iter().map(|i| i.component));
+        }
+        all
+    };
+    let all_bolts = copies(a, bolts, c_bolt);
+    let mut lifted = vec![c_cover, c_housing];
+    lifted.extend(&all_bolts);
+    a.add_explode_step(&lifted, DVec3::new(0.0, 0.0, 60.0));
+    lifted.remove(0);
+    a.add_explode_step(&lifted, DVec3::new(0.0, 0.0, 40.0));
+    a.add_explode_step(&all_bolts, DVec3::new(0.0, 0.0, 30.0));
+    let all_screws = copies(a, screws, c_screw);
+    a.add_explode_step(&all_screws, DVec3::new(0.0, 0.0, 30.0));
+
+    let mut engine = Engine::new();
+    engine.regenerate(&mut model);
+    (model, engine)
 }
 
 struct Builder {

@@ -2220,3 +2220,303 @@ fn the_applications_colours_and_explode_steps_are_made_by_operations() {
     });
     assert_eq!(ops.len(), 1, "{ops:?}");
 }
+
+#[test]
+fn components_are_patterned_and_the_copies_follow_the_original() {
+    let dir = temp("pattern");
+    let (plate, pin) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "path": plate}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "at": [5, 5, 5]}),
+    );
+
+    // Three along x and two along y: five copies of the pin, components of its part.
+    let made = ok(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["pin-1"], "type": "linear",
+            "direction": "x", "spacing": 10, "count": 3,
+            "second": {"direction": [0, 1, 0], "spacing": 20, "count": 2}}),
+    );
+    let pattern = &made["pattern"];
+    assert_eq!(pattern["name"], "LPattern1");
+    assert_eq!(pattern["type"], "linear");
+    assert_eq!(pattern["components"], json!(["pin-1"]));
+    assert_eq!(
+        pattern["copies"],
+        json!(["pin-2", "pin-3", "pin-4", "pin-5", "pin-6"])
+    );
+    assert_eq!(pattern["direction"], json!([1.0, 0.0, 0.0]));
+    assert_eq!(pattern["second"]["spacing"], 20.0);
+    assert_eq!(pattern["status"], "ok");
+    assert_eq!(doc.undo_label(), Some("Add LPattern1"));
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    let components = listed["components"].as_array().unwrap();
+    assert_eq!(components.len(), 7);
+    assert_eq!(components[6]["at"], json!([25.0, 25.0, 5.0]));
+    assert_eq!(components[6]["pattern"], "LPattern1");
+    assert_eq!(components[6]["freedom"], 0);
+    assert!(components[1].get("pattern").is_none());
+    assert_eq!(listed["patterns"][0]["name"], "LPattern1");
+    assert_eq!(listed["parts"][1]["components"], 6);
+    // Counted and weighed like any component.
+    let bom = ok(&mut doc, json!({"op": "bom"}));
+    assert_eq!(bom["rows"][1]["quantity"], 6);
+
+    // The original is moved: every copy goes with it.
+    let moved = ok(
+        &mut doc,
+        json!({"op": "place", "component": "pin-1", "at": [0, 0, 5]}),
+    );
+    assert_eq!(moved["moved"].as_array().unwrap().len(), 5, "{moved}");
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(listed["components"][6]["at"], json!([20.0, 20.0, 5.0]));
+
+    // A copy is the pattern's: it can't be moved, mated or deleted by itself.
+    for op in [
+        json!({"op": "place", "component": "pin-3", "at": [0, 0, 0]}),
+        json!({"op": "delete", "component": "pin-3"}),
+        json!({"op": "fix", "component": "pin-3"}),
+        json!({"op": "drag", "component": "pin-3", "to": [0, 0, 0]}),
+        json!({"op": "mate", "type": "fasten", "a": "plate-1", "b": "pin-3"}),
+        json!({"op": "component_pattern", "components": ["pin-3"], "type": "linear", "direction": "z", "spacing": 5, "count": 2}),
+    ] {
+        let e = error(&mut doc, op);
+        assert!(
+            e.contains("copy made by LPattern1") && e.contains("pin-1"),
+            "{e}"
+        );
+    }
+    // But it can be hidden, coloured and renamed.
+    ok(
+        &mut doc,
+        json!({"op": "show", "component": "pin-3", "on": false}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "rename", "component": "pin-3", "name": "Middle"}),
+    );
+
+    // Changed: copies come and go, and the ones that stay keep their names.
+    let fewer = ok(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": "LPattern1", "count": 2, "spacing": 15, "second": null}),
+    );
+    assert_eq!(fewer["pattern"]["copies"], json!(["pin-2"]));
+    assert_eq!(doc.undo_label(), Some("Edit LPattern1"));
+    assert_eq!(doc.model.assembly().unwrap().components().count(), 3);
+    let more = ok(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": 1, "count": 3, "flip": true}),
+    );
+    assert_eq!(more["pattern"]["copies"].as_array().unwrap().len(), 2);
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(listed["components"][3]["at"], json!([-30.0, 0.0, 5.0]));
+    ok(
+        &mut doc,
+        json!({"op": "rename", "pattern": "LPattern1", "name": "Row"}),
+    );
+    let gone = ok(&mut doc, json!({"op": "delete", "pattern": "Row"}));
+    assert_eq!(gone["deleted"], json!(["Row"]));
+    assert_eq!(doc.model.assembly().unwrap().components().count(), 2);
+    ok(&mut doc, json!({"op": "undo"}));
+    assert_eq!(doc.model.assembly().unwrap().components().count(), 4);
+    ok(&mut doc, json!({"op": "redo"}));
+
+    // Round the hole of the plate (its axis, taken from the part): four pins. The
+    // pin is put 10 to the right of the hole, on the plate.
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "pin-1", "at": [30, 15, 5]}),
+    );
+    let ring = ok(
+        &mut doc,
+        json!({"op": "component_pattern", "components": "pin-1", "type": "circular",
+            "axis": {"component": "plate-1", "face": {"at": [24, 15, 2.5]}}, "count": 4, "name": "Ring"}),
+    );
+    assert_eq!(
+        ring["pattern"]["axis"],
+        json!({"component": "plate-1", "on": "face"})
+    );
+    assert_eq!(ring["pattern"]["angle"], 360.0);
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    let at: Vec<&Value> = listed["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .skip(2)
+        .map(|c| &c["at"])
+        .collect();
+    assert_eq!(
+        at,
+        [
+            &json!([20.0, 25.0, 5.0]),
+            &json!([10.0, 15.0, 5.0]),
+            &json!([20.0, 5.0, 5.0])
+        ]
+    );
+    // An axis of the assembly itself, not through its origin; over half a turn.
+    ok(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": "Ring", "count": 3, "angle": 180,
+            "axis": {"origin": [30, 0, 0], "direction": "z"}}),
+    );
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(listed["components"][3]["at"], json!([30.0, -15.0, 5.0]));
+
+    // Saved and opened: the same pattern, the same places.
+    let file = dir.join("patterned.peet").to_string_lossy().into_owned();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let mut opened = Document::default();
+    ok(&mut opened, json!({"op": "open", "path": file}));
+    assert_eq!(opened.model, doc.model);
+    assert_eq!(ok(&mut opened, json!({"op": "components"})), listed);
+
+    // Deleting the original takes the pattern and its copies with it.
+    let deleted = ok(&mut doc, json!({"op": "delete", "component": "pin-1"}));
+    assert_eq!(deleted["deleted"], json!(["pin-1"]));
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(listed["components"].as_array().unwrap().len(), 1);
+    assert!(listed.get("patterns").is_none());
+    ok(&mut doc, json!({"op": "undo"}));
+
+    // Mistakes.
+    let e = error(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["plate-1"], "type": "linear", "direction": "x", "spacing": 50, "count": 1}),
+    );
+    assert!(e.contains("at least 2"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["plate-1"], "type": "grid", "direction": "x", "spacing": 50, "count": 2}),
+    );
+    assert!(e.contains("linear") && e.contains("circular"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["plate-1"], "type": "linear", "direction": [0, 0, 0], "spacing": 50, "count": 2}),
+    );
+    assert!(e.contains("no length"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["plate-1"], "type": "linear", "direction": {"component": "plate-1"}, "spacing": 50, "count": 2}),
+    );
+    assert!(e.contains("edge or a face"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["plate-1"], "type": "circular", "count": 3}),
+    );
+    assert!(e.contains("axis"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": "Ring", "spacing": 5}),
+    );
+    assert!(e.contains("circular pattern"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": "Ring"}),
+    );
+    assert!(e.contains("something to change"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": "Row", "count": 2}),
+    );
+    assert!(e.contains("Ring"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": "Ring", "count": 5000}),
+    );
+    assert!(e.contains("1 to 1000"), "{e}");
+    // A direction that can't be one is not a failed operation: the pattern says so.
+    let flat = ok(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["plate-1"], "type": "linear",
+            "direction": {"component": "plate-1", "face": {"normal": [0, 0, 1]}}, "spacing": 8, "count": 2}),
+    );
+    assert_eq!(flat["pattern"]["status"], "ok");
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    let last = listed["components"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["at"], json!([0.0, 0.0, 8.0]));
+    let mut part = Document::default();
+    let e = error(
+        &mut part,
+        json!({"op": "component_pattern", "components": ["a"], "type": "linear", "direction": "x", "spacing": 5, "count": 2}),
+    );
+    assert!(e.contains("works on an assembly"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn the_applications_patterns_are_made_by_operations() {
+    use peet_model::{PatternKind, PatternLine, PatternStep, Scalar};
+    let mut host = Headless::default();
+    let mut direct = Document::from_model(Model::new_assembly(), None);
+    let mut through = Document::from_model(Model::new_assembly(), None);
+    let bracket = Arc::new(peet_model::samples::bracket().0);
+    let mut key = 200;
+    let mut change = |label: &str, f: &dyn Fn(&mut Model)| {
+        direct.change(label, f);
+        let mut new = through.model.clone();
+        f(&mut new);
+        key += 1;
+        let done = apply_model(&mut host, &mut through, new, label, key);
+        through.seal_history();
+        assert_eq!(done.untranslated, None, "{label}: {:?}", done.ops);
+        assert_eq!(through.model, direct.model, "{label}");
+        assert_eq!(through.bodies.len(), direct.bodies.len(), "{label}");
+        done.ops
+    };
+    let row = |count| PatternKind::Linear {
+        first: PatternStep {
+            direction: PatternLine::Fixed {
+                origin: DVec3::ZERO,
+                direction: DVec3::X,
+            },
+            spacing: Scalar::new(150.0),
+            count,
+            flip: false,
+        },
+        second: None,
+    };
+    let one = peet_model::CompId(1);
+    change("Insert", &|m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.define(bracket.clone());
+        a.insert(d, Frame::WORLD);
+    });
+    // The copies are the pattern's doing: one operation, not an insert for each.
+    let ops = change("Pattern", &|m| {
+        m.assembly_mut().unwrap().add_pattern(&[one], row(4));
+    });
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    let pattern = peet_model::PatternId(1);
+    let ops = change("Fewer, renamed", &|m| {
+        let a = m.assembly_mut().unwrap();
+        a.set_pattern_kind(pattern, row(2));
+        a.pattern_mut(pattern).unwrap().name = "Row".to_owned();
+    });
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    // The original moved: its copy follows by itself.
+    let ops = change("Move", &|m| {
+        let c = m.assembly_mut().unwrap().component_mut(one).unwrap();
+        c.placement.origin.y = 40.0;
+    });
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    let ops = change("Delete pattern", &|m| {
+        m.assembly_mut().unwrap().remove_pattern(pattern);
+    });
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    change("Pattern again", &|m| {
+        m.assembly_mut().unwrap().add_pattern(&[one], row(3));
+    });
+    // The original deleted: the pattern and its copies go with it, in one operation.
+    let ops = change("Delete original", &|m| {
+        m.assembly_mut().unwrap().remove(one);
+    });
+    assert_eq!(ops.len(), 1, "{ops:?}");
+}

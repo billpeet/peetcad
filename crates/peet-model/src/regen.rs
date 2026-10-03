@@ -154,6 +154,7 @@ pub struct Evaluation {
     states: HashMap<FeatureId, FeatureState>,
     components: HashMap<CompId, Status>,
     mates: HashMap<MateId, Status>,
+    patterns: HashMap<crate::PatternId, Status>,
     /// For an assembly: how many ways its components can still move (six for each that
     /// is not fixed, less what the mates hold).
     pub freedom: usize,
@@ -181,6 +182,19 @@ impl Evaluation {
     /// The mates that don't hold, with why.
     pub fn mate_failures(&self) -> impl Iterator<Item = (MateId, &str)> {
         self.mates.iter().filter_map(|(id, s)| match s {
+            Status::Failed(m) => Some((*id, m.as_str())),
+            _ => None,
+        })
+    }
+
+    /// How a component pattern of an assembly came out.
+    pub fn pattern_status(&self, id: crate::PatternId) -> Option<&Status> {
+        self.patterns.get(&id)
+    }
+
+    /// The component patterns that can't be worked out, with why.
+    pub fn pattern_failures(&self) -> impl Iterator<Item = (crate::PatternId, &str)> {
+        self.patterns.iter().filter_map(|(id, s)| match s {
             Status::Failed(m) => Some((*id, m.as_str())),
             _ => None,
         })
@@ -229,6 +243,7 @@ struct Assembled {
     instances: Vec<Instance>,
     components: HashMap<CompId, Status>,
     mates: HashMap<MateId, Status>,
+    patterns: HashMap<crate::PatternId, Status>,
     freedom: usize,
     component_freedom: HashMap<CompId, usize>,
 }
@@ -335,6 +350,7 @@ impl Engine {
             states: run.states,
             components: assembled.components,
             mates: assembled.mates,
+            patterns: assembled.patterns,
             freedom: assembled.freedom,
             component_freedom: assembled.component_freedom,
             stats: run.stats,
@@ -381,35 +397,45 @@ impl Engine {
         // ---- The mates ----
         // Solved from where the components are, with the bodies of their parts (and, for
         // a sub-assembly, of the parts in it) to find the mates' faces in.
+        let parts = &self.parts;
+        let place = |c: &crate::Component, frame: Frame| -> Option<mate::Placed> {
+            let built = parts.get(&c.definition)?.engine.evaluation();
+            let bodies = built
+                .bodies
+                .iter()
+                .map(|b| (Vec::new(), b.clone(), Frame::WORLD))
+                .chain(
+                    built
+                        .instances
+                        .iter()
+                        .map(|i| (i.path.clone(), i.body.clone(), i.frame)),
+                )
+                .collect();
+            Some(mate::Placed {
+                id: c.id,
+                name: c.name.clone(),
+                frame,
+                // A pattern's copy is where its pattern puts it: the mates don't move it.
+                fixed: c.fixed || c.pattern.is_some(),
+                bodies,
+            })
+        };
         let placed: Vec<mate::Placed> = assembly
             .components()
             .filter(|c| !c.suppressed)
-            .filter_map(|c| {
-                let built = self.parts.get(&c.definition)?.engine.evaluation();
-                let bodies = built
-                    .bodies
-                    .iter()
-                    .map(|b| (Vec::new(), b.clone(), Frame::WORLD))
-                    .chain(
-                        built
-                            .instances
-                            .iter()
-                            .map(|i| (i.path.clone(), i.body.clone(), i.frame)),
-                    )
-                    .collect();
-                Some(mate::Placed {
-                    id: c.id,
-                    name: c.name.clone(),
-                    frame: c.placement,
-                    fixed: c.fixed,
-                    bodies,
-                })
-            })
+            .filter_map(|c| place(c, c.placement))
             .collect();
         let mates: Vec<&crate::Mate> = assembly.mates().collect();
         let structure: Vec<(CompId, DefId, bool, bool)> = assembly
             .components()
-            .map(|c| (c.id, c.definition, c.fixed, c.suppressed))
+            .map(|c| {
+                (
+                    c.id,
+                    c.definition,
+                    c.fixed || c.pattern.is_some(),
+                    c.suppressed,
+                )
+            })
             .collect();
         let key = hash::of(&(&mates, structure, &model.parameters));
         let drag = self.drag.take();
@@ -421,10 +447,137 @@ impl Engine {
             &mut self.mates,
             drag,
         );
+        // ---- The patterns ----
+        // After the mates: each copy goes where its original now is, moved by its place
+        // in the pattern. A copy whose original is suppressed is left out with it.
+        let mut frames = solved.frames;
+        let mut patterns = HashMap::new();
+        let mut left_out: Vec<CompId> = Vec::new();
+        for pattern in assembly.patterns() {
+            let located = |line: &crate::PatternLine| -> Result<(DVec3, DVec3), String> {
+                let (origin, direction) = match line {
+                    crate::PatternLine::Fixed { origin, direction } => (*origin, *direction),
+                    crate::PatternLine::Geom(end) => {
+                        let gone = || {
+                            "The component its direction is taken from is gone or suppressed: edit the pattern to pick another."
+                                .to_owned()
+                        };
+                        let c = end
+                            .component()
+                            .and_then(|id| assembly.component(id))
+                            .filter(|c| !c.suppressed)
+                            .ok_or_else(gone)?;
+                        let frame = frames.get(&c.id).copied().unwrap_or(c.placement);
+                        let on = place(c, frame).ok_or_else(gone)?;
+                        match mate::locate(end, &on)? {
+                            mate::Located::Line(p, d) | mate::Located::Plane(p, d) => (p, d),
+                            mate::Located::Point(_) => {
+                                return Err(
+                                    "A corner has no direction: pick a straight edge, a round face or edge (its axis), or a flat face (its normal)."
+                                        .to_owned(),
+                                );
+                            }
+                        }
+                    }
+                };
+                let direction = direction.try_normalize().ok_or_else(|| {
+                    "The direction has no length: give one such as [1, 0, 0].".to_owned()
+                })?;
+                Ok((origin, direction))
+            };
+            let length = |s: &crate::Scalar, kind| s.evaluate(kind, &model.parameters);
+            // How each place moves a component from where the original is.
+            let moves = (|| -> Result<Vec<([u32; 2], Frame)>, String> {
+                let places = pattern.kind.places();
+                Ok(match &pattern.kind {
+                    crate::PatternKind::Linear { first, second } => {
+                        let step = |s: &crate::PatternStep| -> Result<DVec3, String> {
+                            let (_, direction) = located(&s.direction)?;
+                            let spacing = length(&s.spacing, crate::ScalarKind::Length)?;
+                            Ok(direction * spacing * if s.flip { -1.0 } else { 1.0 })
+                        };
+                        let a = step(first)?;
+                        let b = second
+                            .as_ref()
+                            .map(step)
+                            .transpose()?
+                            .unwrap_or(DVec3::ZERO);
+                        places
+                            .into_iter()
+                            .map(|place| {
+                                let origin = a * f64::from(place[0]) + b * f64::from(place[1]);
+                                (
+                                    place,
+                                    Frame {
+                                        origin,
+                                        ..Frame::WORLD
+                                    },
+                                )
+                            })
+                            .collect()
+                    }
+                    crate::PatternKind::Circular {
+                        axis,
+                        angle,
+                        count,
+                        flip,
+                    } => {
+                        let (origin, direction) = located(axis)?;
+                        let angle = length(angle, crate::ScalarKind::Angle)?;
+                        // All the way round: evenly spaced. Else from the first to the
+                        // last over the angle.
+                        let step = if (angle.abs() - 360.0).abs() < 1e-9 {
+                            angle / f64::from((*count).max(1))
+                        } else {
+                            angle / f64::from(count.saturating_sub(1).max(1))
+                        }
+                        .to_radians()
+                            * if *flip { -1.0 } else { 1.0 };
+                        places
+                            .into_iter()
+                            .map(|place| {
+                                let rotation = peet_math::DQuat::from_axis_angle(
+                                    direction,
+                                    step * f64::from(place[0]),
+                                );
+                                (
+                                    place,
+                                    Frame {
+                                        origin: origin - rotation * origin,
+                                        rotation,
+                                    },
+                                )
+                            })
+                            .collect()
+                    }
+                })
+            })();
+            match moves {
+                Ok(moves) => {
+                    for instance in &pattern.instances {
+                        let seed = assembly.component(instance.seed);
+                        let Some(seed) = seed.filter(|s| !s.suppressed) else {
+                            left_out.push(instance.component);
+                            continue;
+                        };
+                        let from = frames.get(&seed.id).copied().unwrap_or(seed.placement);
+                        if let Some((_, by)) = moves.iter().find(|(p, _)| *p == instance.place) {
+                            let mut to = by.compose(&from);
+                            to.rotation = to.rotation.normalize();
+                            frames.insert(instance.component, to);
+                        }
+                    }
+                    patterns.insert(pattern.id, Status::Ok);
+                }
+                Err(why) => {
+                    patterns.insert(pattern.id, Status::Failed(why));
+                }
+            }
+        }
         let moved: Vec<(CompId, Frame)> = assembly
             .components()
             .filter_map(|c| {
-                let frame = *solved.frames.get(&c.id)?;
+                let frame = *frames.get(&c.id)?;
                 (frame != c.placement).then_some((c.id, frame))
             })
             .collect();
@@ -433,14 +586,14 @@ impl Engine {
         let mut instances = Vec::new();
         let mut components = HashMap::new();
         for c in assembly.components() {
-            if c.suppressed {
+            if c.suppressed || left_out.contains(&c.id) {
                 components.insert(c.id, Status::Suppressed);
                 continue;
             }
             let Some(part) = self.parts.get(&c.definition) else {
                 continue;
             };
-            let placement = solved.frames.get(&c.id).copied().unwrap_or(c.placement);
+            let placement = frames.get(&c.id).copied().unwrap_or(c.placement);
             let built = part.engine.evaluation();
             let before = instances.len();
             for body in &built.bodies {
@@ -504,6 +657,7 @@ impl Engine {
             instances,
             components,
             mates: solved.statuses,
+            patterns,
             freedom: solved.freedom,
             component_freedom: solved.component_freedom,
         }

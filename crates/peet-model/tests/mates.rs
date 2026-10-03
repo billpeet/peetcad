@@ -963,3 +963,233 @@ fn a_hinge_leaves_one_way_to_move() {
     assert!(built.mate_status(clash).unwrap().is_failed());
     assert_eq!(built.component_freedom(arm), Some(1));
 }
+
+// ---- Component patterns ----
+
+fn origin(model: &Model, id: CompId) -> DVec3 {
+    frame(model, id).origin
+}
+
+fn near(a: DVec3, b: DVec3) -> bool {
+    a.distance(b) < 1e-9
+}
+
+#[test]
+fn components_are_patterned_in_rows_and_round_an_axis() {
+    use peet_model::{PatternKind, PatternLine, PatternStep};
+    let plate = Arc::new(plate("Plate", 40.0, 30.0, 5.0, 4.0));
+    let pin = Arc::new(pin(4.0, 20.0));
+    let mut model = Model::new_assembly();
+    let (base, screw) = {
+        let a = model.assembly_mut().unwrap();
+        let (plate, pin) = (a.define(plate.clone()), a.define(pin.clone()));
+        (
+            a.insert(plate, Frame::WORLD).unwrap(),
+            a.insert(pin, at(10.0, 0.0, 5.0)).unwrap(),
+        )
+    };
+    let along = |direction: DVec3, spacing: f64, count| PatternStep {
+        direction: PatternLine::Fixed {
+            origin: DVec3::ZERO,
+            direction,
+        },
+        spacing: Scalar::new(spacing),
+        count,
+        flip: false,
+    };
+    // Three along x, two along y: five copies, each a component of the pin's part.
+    let grid = model
+        .assembly_mut()
+        .unwrap()
+        .add_pattern(
+            &[screw],
+            PatternKind::Linear {
+                first: along(DVec3::X, 10.0, 3),
+                second: Some(along(DVec3::Y, 15.0, 2)),
+            },
+        )
+        .unwrap();
+    let mut engine = Engine::new();
+    let built = engine.regenerate(&mut model).clone();
+    let a = model.assembly().unwrap();
+    let pattern = a.pattern(grid).unwrap().clone();
+    assert_eq!(pattern.name, "LPattern1");
+    assert_eq!(pattern.instances.len(), 5);
+    assert_eq!(a.components().len(), 7);
+    assert_eq!(
+        a.definitions().len(),
+        2,
+        "copies share the part of the original"
+    );
+    assert_eq!(built.pattern_status(grid), Some(&Status::Ok));
+    assert_eq!(built.instances.len(), 7);
+    for i in &pattern.instances {
+        let c = a.component(i.component).unwrap();
+        assert_eq!(c.pattern, Some(grid));
+        let expected = DVec3::new(
+            10.0 + 10.0 * f64::from(i.place[0]),
+            15.0 * f64::from(i.place[1]),
+            5.0,
+        );
+        assert!(
+            near(c.placement.origin, expected),
+            "{:?}: {}",
+            i.place,
+            c.placement.origin
+        );
+        // Where its pattern puts it, so nothing is left to move.
+        assert_eq!(built.component_freedom(i.component), Some(0));
+    }
+    assert_eq!(
+        a.component(pattern.instances[0].component).unwrap().name,
+        "Pin-2"
+    );
+    // Built again, nothing changes.
+    let before = model.clone();
+    engine.regenerate(&mut model);
+    assert_eq!(model, before);
+
+    // The original moves (here by a mate into the hole of the plate): its copies follow.
+    let hole = end(base, face(&plate, DVec3::ZERO));
+    let shaft = end(screw, face(&pin, DVec3::ZERO));
+    mate(&mut model, MateKind::Concentric, hole, shaft);
+    engine.regenerate(&mut model);
+    let seed = origin(&model, screw);
+    assert!(
+        (seed.x - 20.0).abs() < 1e-9 && (seed.y - 15.0).abs() < 1e-9,
+        "{seed}"
+    );
+    let last = pattern.instances.last().unwrap();
+    assert!(near(
+        origin(&model, last.component),
+        seed + DVec3::new(20.0, 15.0, 0.0)
+    ));
+
+    // Fewer places: the components of the others go. More: they come.
+    let a = model.assembly_mut().unwrap();
+    a.set_pattern_kind(
+        grid,
+        PatternKind::Linear {
+            first: along(DVec3::X, 10.0, 2),
+            second: None,
+        },
+    );
+    assert_eq!(a.components().len(), 3);
+    assert_eq!(
+        a.pattern(grid).unwrap().instances[0].component,
+        pattern.instances[0].component
+    );
+    // A spacing can be an expression of the parameters of the assembly.
+    model.parameters.set("pitch", "12mm").unwrap();
+    let mut step = along(DVec3::X, 10.0, 2);
+    step.spacing.expression = Some("pitch * 2".to_owned());
+    step.flip = true;
+    model.assembly_mut().unwrap().set_pattern_kind(
+        grid,
+        PatternKind::Linear {
+            first: step,
+            second: None,
+        },
+    );
+    engine.regenerate(&mut model);
+    let copy = model.assembly().unwrap().pattern(grid).unwrap().instances[0].component;
+    assert!(near(origin(&model, copy), seed - DVec3::X * 24.0));
+
+    // Round an axis taken from the hole of the plate: four pins a quarter turn apart,
+    // and the pattern follows the plate when it moves.
+    let a = model.assembly_mut().unwrap();
+    a.remove_pattern(grid).unwrap();
+    assert_eq!(a.components().len(), 2);
+    let mates: Vec<MateId> = a.mates().map(|m| m.id).collect();
+    for m in mates {
+        a.remove_mate(m);
+    }
+    a.component_mut(screw).unwrap().placement = at(30.0, 15.0, 5.0);
+    let round = |component, angle: f64| PatternKind::Circular {
+        axis: PatternLine::Geom(end(component, face(&plate, DVec3::ZERO))),
+        angle: Scalar::new(angle),
+        count: 4,
+        flip: false,
+    };
+    let ring = a.add_pattern(&[screw], round(base, 360.0)).unwrap();
+    assert_eq!(a.pattern(ring).unwrap().name, "CirPattern1");
+    let built = engine.regenerate(&mut model).clone();
+    assert_eq!(built.pattern_status(ring), Some(&Status::Ok));
+    let copies: Vec<CompId> = model
+        .assembly()
+        .unwrap()
+        .pattern(ring)
+        .unwrap()
+        .instances
+        .iter()
+        .map(|i| i.component)
+        .collect();
+    // The hole is at (20, 15): the pin 10 to its right goes above, left and below.
+    let expected = [(20.0, 25.0), (10.0, 15.0), (20.0, 5.0)];
+    for (copy, (x, y)) in copies.iter().zip(expected) {
+        let at = origin(&model, *copy);
+        assert!(near(at, DVec3::new(x, y, 5.0)), "{at}");
+    }
+    // Each is turned with its place.
+    let turned = frame(&model, copies[0]).vector_to_world(DVec3::X);
+    assert!(near(turned, DVec3::Y), "{turned}");
+    // Over a quarter turn, not all the way round: the angle is from first to last.
+    model
+        .assembly_mut()
+        .unwrap()
+        .set_pattern_kind(ring, round(base, 90.0));
+    engine.regenerate(&mut model);
+    assert!(near(origin(&model, copies[2]), DVec3::new(20.0, 25.0, 5.0)));
+    model
+        .assembly_mut()
+        .unwrap()
+        .set_pattern_kind(ring, round(base, 360.0));
+    // (The base is fixed: moved by hand, the pins go round its hole where it is now.)
+    let a = model.assembly_mut().unwrap();
+    a.component_mut(base).unwrap().placement = at(100.0, 0.0, 0.0);
+    a.component_mut(screw).unwrap().placement = at(130.0, 15.0, 5.0);
+    engine.regenerate(&mut model);
+    assert!(near(
+        origin(&model, copies[1]),
+        DVec3::new(110.0, 15.0, 5.0)
+    ));
+
+    // A suppressed original takes its copies out with it.
+    let suppress = |model: &mut Model, on| {
+        let a = model.assembly_mut().unwrap();
+        a.component_mut(screw).unwrap().suppressed = on;
+    };
+    suppress(&mut model, true);
+    let built = engine.regenerate(&mut model).clone();
+    assert_eq!(built.instances.len(), 1);
+    assert_eq!(built.component_status(copies[0]), Some(&Status::Suppressed));
+    suppress(&mut model, false);
+
+    // A direction that is gone: the pattern says so, and its copies stay put.
+    model
+        .assembly_mut()
+        .unwrap()
+        .set_pattern_kind(ring, round(CompId(99), 360.0));
+    let built = engine.regenerate(&mut model).clone();
+    let why = built
+        .pattern_failures()
+        .next()
+        .expect("the pattern fails")
+        .1;
+    assert!(why.contains("gone or suppressed"), "{why}");
+    assert!(near(
+        origin(&model, copies[1]),
+        DVec3::new(110.0, 15.0, 5.0)
+    ));
+
+    // Checked as a file is: nothing to repair. Deleting the original deletes the
+    // pattern and its copies.
+    let mut read = model.clone();
+    read.validate().unwrap();
+    assert_eq!(read, model);
+    let a = model.assembly_mut().unwrap();
+    a.remove(screw).unwrap();
+    assert_eq!(a.patterns().len(), 0);
+    assert_eq!(a.components().len(), 1);
+    assert_eq!(a.definitions().len(), 1);
+}

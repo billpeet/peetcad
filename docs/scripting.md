@@ -258,7 +258,7 @@ with their defaults' types):
 |---|---|
 | `new` | `discard` |
 | `open` | `path`, `discard` |
-| `open_sample` | `sample` (`bracket`, `enclosure`, `chassis`, `housing`), `discard` |
+| `open_sample` | `sample` (`bracket`, `enclosure`, `chassis`, `housing`, `cover`, `bolt`, `screw`, or `assembly`: an assembly of the last five, mated), `discard` |
 | `save` | `path` (optional once the part has a file), `caches` (default true: a part's file keeps its built bodies and their display meshes, so it opens without rebuilding; an assembly's keeps the display meshes the application has drawn) |
 | `import_step` | `path`. In a part: the file's solids become bodies, in one feature named after the file. In an assembly: the file's parts and assemblies become parts and sub-assemblies, placed as components where the file has them (fixed); replies `components`, `parts`, `bodies` |
 | `import_dxf` | `path`, and `sketch` (an existing one) or `on` with `name` (a new one; default the top plane); `unit`, `placement` (`keep`, `centred`, `lower_left`) |
@@ -309,6 +309,9 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `fix` | `component`, `on` (default true) |
 | `replace` | `component`, and `path`, `sample` or `part`: another part, in the same place |
 | `rename`, `suppress`, `show`, `delete` | `component` in place of `feature` |
+| `component_pattern` | `components` (the originals), `type` (`linear`, `circular`), `name`. Linear: `direction`, `spacing`, `count` (the original included), `flip`, `second` (`{direction, spacing, count, flip}`). Circular: `axis`, `angle` (default 360), `count`, `flip`. A direction or axis is `"x"`, `"y"`, `"z"`, `[x, y, z]`, `{"origin": …, "direction": …}`, or `{"component": …, "edge" or "face": selector}` |
+| `edit_component_pattern` | `pattern`, and any of `count`, `spacing`, `angle`, `flip`, `direction`, `axis`, `second` (`null` removes it) |
+| `rename`, `delete` | `pattern` in place of `feature` |
 | `set_color` with `component` | `color` (`"#rrggbb"`, `[r, g, b]`, or `null` for its part's): a colour for that component alone |
 | `show_all` | shows every hidden component; replies `shown` |
 | `isolate` | `components` (names or ids): shows these and hides every other; replies `hidden` |
@@ -328,6 +331,17 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `bom` | `level` (`parts`, the default: every part, through sub-assemblies; `top`: a sub-assembly is one line): `rows`, each with `item`, `part`, `quantity`, `material`, `volume_mm3`, `mass_kg`, `total_mass_kg`, the `components`, and for sheet metal `thickness`, `flat_size`, `bends`; the total `quantity` and `mass_kg`, or `without_mass` |
 | `mass` | in an assembly: each component's `volume_mm3`, `mass_kg` and `center_of_gravity`, and the `total` (with `center_of_gravity_of`: `mass` if every part has a material, else `volume`; `principal_moments_kg_mm2` or `principal_moments_mm5`); `without_material` |
 | `export` to a `.csv` | the bill of materials (every part) as a table: `item`, `part`, `quantity`, `material`, `mass_kg`, `total_mass_kg`, `thickness_`, `flat_width_`, `flat_height_` (with the document's unit), `bends`, `components` |
+
+**Component patterns** copy components in rows (one direction or two) or round an axis.
+The copies are components of the same part, and `components` lists each with the
+`pattern` that made it, and the patterns themselves under `patterns` (`id`, `name`,
+`type`, `components`, `copies`, and the fields above, `status`, `message`). A copy is
+placed by its pattern after the mates are solved: where its original is, moved by its
+place in the pattern. So it has no freedom, and `place`, `drag`, `fix`, `mate`,
+`replace` and `delete` on it are refused; hiding, colouring, renaming and suppressing
+it are not. A direction or axis taken from a component's geometry follows that
+component. Changing a pattern's count adds and removes copies; deleting a pattern
+deletes its copies; deleting an original deletes its pattern.
 
 **Visibility and the exploded view** change what is drawn, not the assembly. A hidden
 component is still mated, checked, counted, weighed and exported (a suppressed one is

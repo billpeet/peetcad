@@ -6,10 +6,13 @@
 
 use egui::{RichText, Ui};
 use peet_math::{DQuat, DVec3};
-use peet_model::{CompId, ExplodeId, MateEnd, MateGeom, MateId, MateKind, ScalarKind, Status};
+use peet_model::{
+    CompId, ExplodeId, MateEnd, MateGeom, MateId, MateKind, PatternId, PatternKind, PatternLine,
+    PatternStep, Scalar, ScalarKind, Status,
+};
 use peet_ops::{
     CompSel, ComponentChange, ExplodeChange, Input, InsertSource, MateChange, MateEndSel, MateType,
-    Op, Placing, Point3, Source,
+    Op, PatternChange, PatternLineSel, PatternSpec, PatternStepSpec, Placing, Point3, Source,
 };
 
 use crate::bodies::GeomRef;
@@ -25,6 +28,7 @@ const MOVE_KEY: u64 = 0x636f_6d70_6d6f_7665;
 /// The same for a component's colour and for an explode step's distance.
 const COLOR_KEY: u64 = 0x636f_6d70_636f_6c72;
 const EXPLODE_KEY: u64 = 0x6578_706c_6f64_6562;
+const PATTERN_KEY: u64 = 0x636f_6d70_7061_7474;
 /// How long the assembly takes to come apart and go together again, in seconds.
 const EXPLODE_TIME: f64 = 0.4;
 
@@ -163,6 +167,8 @@ enum TreeAction {
     ShowAll,
     SelectExplode(ExplodeId),
     ChangeExplode(ExplodeId, ExplodeChange),
+    SelectPattern(PatternId),
+    DeletePattern(PatternId),
 }
 
 /// What to say about how a component can still move.
@@ -194,6 +200,7 @@ pub(super) fn works_in_assembly(cmd: CommandId) -> bool {
                     | "materials"
                     | "insert"
                     | "import_step"
+                    | "component_pattern"
                     | "show_all"
                     | "isolate"
                     | "explode_step"
@@ -227,6 +234,8 @@ pub(super) fn needs_assembly(cmd: CommandId) -> bool {
             | CommandId::MateDistance
             | CommandId::MateAngle
             | CommandId::MateFasten
+            | CommandId::LinearComponentPattern
+            | CommandId::CircularComponentPattern
             | CommandId::ShowAllComponents
             | CommandId::IsolateComponent
             | CommandId::AddExplodeStep
@@ -241,11 +250,301 @@ impl PeetApp {
         self.doc.model.assembly()?.component(id).map(|c| c.id)
     }
 
+    /// The selected component pattern, if the document is an assembly that still has
+    /// it and nothing else was selected since.
+    pub(super) fn selected_pattern(&self) -> Option<PatternId> {
+        let id = self.selected_pattern?;
+        if self.selected_component.is_some() || self.selected_mate.is_some() {
+            return None;
+        }
+        self.doc.model.assembly()?.pattern(id).map(|p| p.id)
+    }
+
+    /// Makes the pattern a reply is about the selection.
+    fn select_new_pattern(&mut self, reply: &serde_json::Value) {
+        let pattern = &reply["pattern"];
+        self.selected_pattern = pattern["id"].as_u64().map(|i| PatternId(i as u32));
+        self.selected_component = None;
+        self.selected_mate = None;
+        self.selected_explode = None;
+        self.selected_geom.clear();
+        let copies = pattern["copies"].as_array().map_or(0, Vec::len);
+        self.info(format!(
+            "Added {} ({copies} {}). Set how many and how far apart in its properties.",
+            pattern["name"].as_str().unwrap_or("the pattern"),
+            if copies == 1 { "copy" } else { "copies" }
+        ));
+    }
+
+    /// Copies the selected component in a row along the assembly's X: a start, changed
+    /// in the pattern's properties.
+    pub(super) fn add_linear_pattern(&mut self) {
+        let Some(id) = self.selected_component() else {
+            return self.error("Select the component to copy first.");
+        };
+        // A little more than the component is wide, so the copies stand clear.
+        let size = self.doc.component_bounds(id).size().x;
+        let spacing = if size.is_finite() && size > 0.0 {
+            (size * 1.25).ceil()
+        } else {
+            50.0
+        };
+        let reply = self.perform(Op::ComponentPattern {
+            components: vec![CompSel::Id(id)],
+            kind: PatternSpec::Linear {
+                first: PatternStepSpec {
+                    direction: PatternLineSel::Fixed {
+                        origin: Point3::Mm(DVec3::ZERO),
+                        direction: DVec3::X,
+                    },
+                    spacing: Input::Base(spacing),
+                    count: 3,
+                    flip: false,
+                },
+                second: None,
+            },
+            name: None,
+        });
+        if reply.ok {
+            self.select_new_pattern(&reply.json);
+        }
+    }
+
+    /// Copies a component round an axis: the component of the first thing picked,
+    /// round the round face (or along the straight edge) picked second.
+    pub(super) fn add_circular_pattern(&mut self) {
+        let Some((a, b)) = self.mate_ends() else {
+            return self.error(
+                "Click a face of the component to copy, then Shift-click a round face (or a straight edge) of another component for the axis.",
+            );
+        };
+        let Some(component) = a.component() else {
+            return;
+        };
+        let reply = self.perform(Op::ComponentPattern {
+            components: vec![CompSel::Id(component)],
+            kind: PatternSpec::Circular {
+                axis: PatternLineSel::Geom(MateEndSel::Ref(b)),
+                angle: None,
+                count: 4,
+                flip: false,
+            },
+            name: None,
+        });
+        if !reply.ok {
+            return;
+        }
+        let message = reply.json["pattern"]["message"].as_str().map(str::to_owned);
+        self.select_new_pattern(&reply.json);
+        if let Some(message) = message {
+            self.error(message);
+        }
+    }
+
+    pub(super) fn change_pattern(&mut self, id: PatternId, change: PatternChange) {
+        let deleted = change == PatternChange::Delete;
+        let reply = self.perform(Op::EditComponentPattern {
+            pattern: id.into(),
+            change,
+        });
+        if reply.ok && deleted && self.selected_pattern == Some(id) {
+            self.selected_pattern = None;
+        }
+    }
+
+    /// The properties of a component pattern: how many copies, how far apart, which
+    /// way.
+    pub(super) fn pattern_properties(&mut self, ui: &mut Ui, id: PatternId) {
+        let Some(assembly) = self.doc.model.assembly() else {
+            return;
+        };
+        let Some(pattern) = assembly.pattern(id).cloned() else {
+            return;
+        };
+        let units = self.doc.model.parameters.units;
+        let params = self.doc.model.parameters.clone();
+        let status = self.doc.evaluation().pattern_status(id).cloned();
+        let originals: Vec<&str> = pattern.seeds.iter().map(|c| assembly.name_of(*c)).collect();
+        let describe = |line: &PatternLine| match line {
+            PatternLine::Fixed { .. } => None,
+            PatternLine::Geom(end) => Some(format!(
+                "{} of {}",
+                match &end.geom {
+                    Some(MateGeom::Face(_)) => "A face",
+                    Some(MateGeom::Edge(_)) => "An edge",
+                    _ => "Geometry",
+                },
+                end.component().map_or("?", |c| assembly.name_of(c))
+            )),
+        };
+        let originals = originals.join(", ");
+        let copies = pattern.instances.len();
+        let mut kind = pattern.kind.clone();
+        let mut done = false;
+        let mut delete = false;
+        // A direction of the assembly is picked from its axes; one taken from a part
+        // is named.
+        let direction_ui = |ui: &mut Ui, line: &mut PatternLine, salt: &str| {
+            if let Some(text) = describe(line) {
+                ui.label(text);
+                return;
+            }
+            let PatternLine::Fixed { direction, .. } = line else {
+                return;
+            };
+            let axes = [("X", DVec3::X), ("Y", DVec3::Y), ("Z", DVec3::Z)];
+            let current = axes
+                .iter()
+                .find(|(_, a)| a.abs_diff_eq(*direction, 1e-9))
+                .map_or("Other", |(name, _)| name);
+            egui::ComboBox::from_id_salt(salt)
+                .selected_text(current)
+                .show_ui(ui, |ui| {
+                    for (name, axis) in axes {
+                        if ui.selectable_label(current == name, name).clicked() {
+                            *direction = axis;
+                        }
+                    }
+                });
+        };
+        // A length or an angle: a number, unless it is an expression (shown, not edited).
+        let value_ui = |ui: &mut Ui, s: &mut Scalar, kind: ScalarKind, done: &mut bool| {
+            if let Some(expression) = &s.expression {
+                ui.label(expression);
+                return;
+            }
+            let (scale, suffix) = match kind {
+                ScalarKind::Length => (units.from_mm(1.0), format!(" {}", units.length.suffix())),
+                _ => (1.0, "°".to_owned()),
+            };
+            let mut shown = s.evaluate(kind, &params).unwrap_or(s.value) * scale;
+            let r = ui.add(
+                egui::DragValue::new(&mut shown)
+                    .speed(0.5)
+                    .max_decimals(4)
+                    .suffix(suffix),
+            );
+            if r.changed() {
+                s.value = shown / scale;
+            }
+            *done |= r.drag_stopped() || r.lost_focus();
+        };
+        let count_ui = |ui: &mut Ui, count: &mut u32| {
+            ui.add(egui::DragValue::new(count).range(1..=200).speed(0.1));
+        };
+        let step_ui = |ui: &mut Ui, s: &mut PatternStep, salt: &str, done: &mut bool| {
+            ui.label("Direction");
+            direction_ui(ui, &mut s.direction, salt);
+            ui.end_row();
+            ui.label("Spacing");
+            value_ui(ui, &mut s.spacing, ScalarKind::Length, done);
+            ui.end_row();
+            ui.label("Count")
+                .on_hover_text("How many there are, the original included.");
+            count_ui(ui, &mut s.count);
+            ui.end_row();
+            ui.label("Flip");
+            ui.checkbox(&mut s.flip, "");
+            ui.end_row();
+        };
+        ui.strong(&pattern.name);
+        ui.weak(format!(
+            "{copies} {} of {originals}. They follow the original: mate or move it, not them.",
+            if copies == 1 { "copy" } else { "copies" }
+        ));
+        egui::Grid::new("pattern_props")
+            .num_columns(2)
+            .spacing([8.0, 6.0])
+            .show(ui, |ui| match &mut kind {
+                PatternKind::Linear { first, second } => {
+                    step_ui(ui, first, "pattern_first", &mut done);
+                    let mut two = second.is_some();
+                    ui.label("Second direction");
+                    ui.checkbox(&mut two, "");
+                    ui.end_row();
+                    match (two, second.is_some()) {
+                        (true, false) => {
+                            // A start: square to the first, as far apart, two rows.
+                            *second = Some(PatternStep {
+                                direction: PatternLine::Fixed {
+                                    origin: DVec3::ZERO,
+                                    direction: DVec3::Y,
+                                },
+                                spacing: first.spacing.clone(),
+                                count: 2,
+                                flip: false,
+                            });
+                        }
+                        (false, true) => *second = None,
+                        _ => {}
+                    }
+                    if let Some(second) = second {
+                        step_ui(ui, second, "pattern_second", &mut done);
+                    }
+                }
+                PatternKind::Circular {
+                    axis,
+                    angle,
+                    count,
+                    flip,
+                } => {
+                    ui.label("Axis");
+                    direction_ui(ui, axis, "pattern_axis");
+                    ui.end_row();
+                    ui.label("Angle").on_hover_text(
+                        "From the first to the last; 360 spaces them evenly all the way round.",
+                    );
+                    value_ui(ui, angle, ScalarKind::Angle, &mut done);
+                    ui.end_row();
+                    ui.label("Count")
+                        .on_hover_text("How many there are, the original included.");
+                    count_ui(ui, count);
+                    ui.end_row();
+                    ui.label("Flip");
+                    ui.checkbox(flip, "");
+                    ui.end_row();
+                }
+            });
+        if let Some(message) = status.as_ref().and_then(Status::message) {
+            ui.add_space(6.0);
+            ui.horizontal_wrapped(|ui| {
+                ui.colored_label(ERROR, "⚠");
+                ui.label(message);
+            });
+        }
+        ui.add_space(6.0);
+        delete |= ui
+            .button("Delete Pattern")
+            .on_hover_text("Delete the pattern and its copies. The original stays.")
+            .clicked();
+
+        if kind != pattern.kind && !kind.places().is_empty() {
+            self.change_model(
+                &format!("Edit {}", pattern.name),
+                Some(PATTERN_KEY ^ u64::from(id.0)),
+                |m| {
+                    if let Some(a) = m.assembly_mut() {
+                        a.set_pattern_kind(id, kind);
+                    }
+                },
+            );
+        }
+        if done {
+            self.doc.seal_history();
+        }
+        if delete {
+            self.change_pattern(id, PatternChange::Delete);
+        }
+    }
+
     /// The selected step of the exploded view, if the document is an assembly that
     /// still has it and nothing else was selected since.
     pub(super) fn selected_explode(&self) -> Option<ExplodeId> {
         let id = self.selected_explode?;
-        if self.selected_component.is_some() || self.selected_mate.is_some() {
+        if self.selected_component.is_some()
+            || self.selected_mate.is_some()
+            || self.selected_pattern.is_some()
+        {
             return None;
         }
         self.doc.model.assembly()?.explode_step(id).map(|s| s.id)
@@ -275,6 +574,7 @@ impl PeetApp {
         }
         let step = &reply.json["explode_step"];
         self.selected_explode = step["id"].as_u64().map(|i| ExplodeId(i as u32));
+        self.selected_pattern = None;
         self.selected_component = None;
         self.selected_mate = None;
         self.selected_geom.clear();
@@ -1045,6 +1345,7 @@ impl PeetApp {
         let mut actions = Vec::new();
         let any_hidden = assembly.components().any(|c| !c.visible);
         let selected_explode = self.selected_explode();
+        let selected_pattern = self.selected_pattern();
         for c in assembly.components() {
             let status = self.doc.evaluation().component_status(c.id);
             // As in other CAD systems: (f) fixed, (-) can still move.
@@ -1059,7 +1360,12 @@ impl PeetApp {
                     ""
                 },
                 c.name,
-                if c.visible { "" } else { "  (hidden)" }
+                match (c.visible, c.pattern.is_some()) {
+                    (true, false) => "",
+                    (true, true) => "  (pattern)",
+                    (false, false) => "  (hidden)",
+                    (false, true) => "  (pattern, hidden)",
+                }
             ));
             text = match status {
                 Some(Status::Failed(_)) => text.color(ERROR),
@@ -1173,6 +1479,36 @@ impl PeetApp {
                 pick(ui, "Delete", MateChange::Delete);
             });
         }
+        if assembly.patterns().len() > 0 {
+            ui.add_space(6.0);
+            ui.strong("Patterns");
+        }
+        for p in assembly.patterns() {
+            let status = self.doc.evaluation().pattern_status(p.id);
+            let names: Vec<&str> = p.seeds.iter().map(|c| assembly.name_of(*c)).collect();
+            let mut text = RichText::new(format!(
+                "{} ({}, {} more)",
+                p.name,
+                names.join(", "),
+                p.instances.len()
+            ));
+            if matches!(status, Some(Status::Failed(_))) {
+                text = text.color(ERROR);
+            }
+            let mut r = ui.selectable_label(selected_pattern == Some(p.id), text);
+            if let Some(message) = status.and_then(Status::message) {
+                r = r.on_hover_text(message);
+            }
+            if r.clicked() {
+                actions.push(TreeAction::SelectPattern(p.id));
+            }
+            r.context_menu(|ui| {
+                if ui.button("Delete").clicked() {
+                    actions.push(TreeAction::DeletePattern(p.id));
+                    ui.close();
+                }
+            });
+        }
         if assembly.explode_steps().len() > 0 {
             ui.add_space(6.0);
             ui.strong("Exploded view");
@@ -1203,8 +1539,18 @@ impl PeetApp {
                 TreeAction::ShowAll => {
                     self.perform(Op::ShowAll);
                 }
+                TreeAction::SelectPattern(id) => {
+                    self.selected_pattern = Some(id);
+                    self.selected_explode = None;
+                    self.selected_component = None;
+                    self.selected_mate = None;
+                    self.selected = None;
+                    self.selected_geom.clear();
+                }
+                TreeAction::DeletePattern(id) => self.change_pattern(id, PatternChange::Delete),
                 TreeAction::SelectExplode(id) => {
                     self.selected_explode = Some(id);
+                    self.selected_pattern = None;
                     self.selected_component = None;
                     self.selected_mate = None;
                     self.selected = None;
@@ -1350,6 +1696,9 @@ impl PeetApp {
         };
         let mut origin = c.placement.origin.to_array().map(|v| units.from_mm(v));
         let mut fixed = c.fixed;
+        // A copy a pattern made is where the pattern puts it.
+        let by_pattern = assembly.pattern_of(id).map(|p| p.name.clone());
+        let own = by_pattern.is_none();
         let mut visible = c.visible;
         // A colour of its own, or its part's.
         let part_color = assembly
@@ -1405,7 +1754,8 @@ impl PeetApp {
                     ui.label(*axis).on_hover_text(
                         "Where the part's origin is in the assembly.",
                     );
-                    let r = ui.add(
+                    let r = ui.add_enabled(
+                        own,
                         egui::DragValue::new(value)
                             .speed(units.from_mm(1.0))
                             .max_decimals(4)
@@ -1415,11 +1765,18 @@ impl PeetApp {
                     move_done |= r.drag_stopped() || r.lost_focus();
                     ui.end_row();
                 }
+                if let Some(pattern) = &by_pattern {
+                    ui.label("Pattern").on_hover_text(
+                        "A copy made by a pattern is where the pattern puts it: move or mate the original, or change the pattern.",
+                    );
+                    ui.label(pattern);
+                    ui.end_row();
+                }
                 ui.label("Turn")
                     .on_hover_text("A quarter turn about an axis of the assembly, through the part's origin.");
                 ui.horizontal(|ui| {
                     for (label, axis) in [("X 90°", DVec3::X), ("Y 90°", DVec3::Y), ("Z 90°", DVec3::Z)] {
-                        if ui.small_button(label).clicked() {
+                        if ui.add_enabled(own, egui::Button::new(label).small()).clicked() {
                             turn = Some(axis);
                         }
                     }
@@ -1428,7 +1785,7 @@ impl PeetApp {
                 ui.label("Fixed").on_hover_text(
                     "A fixed component stays where it is; mates move the others to it.",
                 );
-                ui.checkbox(&mut fixed, "");
+                ui.add_enabled(own, egui::Checkbox::new(&mut fixed, ""));
                 ui.end_row();
                 ui.label("Shown").on_hover_text(
                     "A hidden component is not drawn, but is still part of the assembly: counted, weighed and exported.",
@@ -2023,6 +2380,123 @@ mod tests {
         assert!(app.selected_explode().is_none());
         assert!(!app.command_state(CommandId::ExplodeView).enabled);
         assert_eq!(app.doc.placed[1].shown, app.doc.placed[1].frame);
+        draw(&mut app, &ctx);
+    }
+
+    #[test]
+    fn components_are_patterned_from_the_selection() {
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        for cmd in [
+            CommandId::LinearComponentPattern,
+            CommandId::CircularComponentPattern,
+        ] {
+            assert!(!app.command_state(cmd).enabled, "{cmd:?} in a part");
+        }
+        // The sample assembly: opened by its command, fully mated, with two patterns.
+        assert!(app.command_state(CommandId::OpenSampleAssembly).enabled);
+        app.execute(&ctx, CommandId::OpenSampleAssembly);
+        assert!(app.doc.is_assembly());
+        assert_eq!(app.doc.bodies.len(), 13);
+        assert_eq!(app.doc.evaluation().freedom, 0);
+        let assembly = app.doc.model.assembly().unwrap();
+        let names: Vec<&str> = assembly.patterns().map(|p| p.name.as_str()).collect();
+        assert_eq!(names, ["Bolts", "Screws"]);
+        let (bolts, housing) = {
+            let bolts = assembly.patterns().next().unwrap();
+            let housing = assembly.components().find(|c| c.name == "Housing").unwrap();
+            (bolts.clone(), housing.id)
+        };
+        draw(&mut app, &ctx);
+
+        // A pattern's properties: more bolts, as its count field asks.
+        app.selected_pattern = Some(bolts.id);
+        assert_eq!(app.selected_pattern(), Some(bolts.id));
+        draw(&mut app, &ctx);
+        let PatternKind::Circular { axis, angle, .. } = bolts.kind.clone() else {
+            panic!("the bolts are a circular pattern");
+        };
+        let changed = app.change_model("Edit Bolts", Some(1), |m| {
+            m.assembly_mut().unwrap().set_pattern_kind(
+                bolts.id,
+                PatternKind::Circular {
+                    axis,
+                    angle,
+                    count: 8,
+                    flip: false,
+                },
+            );
+        });
+        assert!(changed);
+        assert_eq!(app.doc.bodies.len(), 15);
+        app.execute(&ctx, CommandId::Undo);
+        assert_eq!(app.doc.bodies.len(), 13);
+
+        // A copy is the pattern's: it is not patterned again, and deleting it is refused
+        // with the reason.
+        let copy = bolts.instances[0].component;
+        app.selected_component = Some(copy);
+        assert!(!app.command_state(CommandId::LinearComponentPattern).enabled);
+        draw(&mut app, &ctx);
+        app.execute(&ctx, CommandId::DeleteSelection);
+        assert_eq!(app.doc.bodies.len(), 13);
+        assert!(app.doc.model.assembly().unwrap().component(copy).is_some());
+
+        // A row of housings from the selected one, and its pattern is then selected.
+        app.selected_component = Some(housing);
+        assert!(app.command_state(CommandId::LinearComponentPattern).enabled);
+        app.execute(&ctx, CommandId::LinearComponentPattern);
+        let row = app.selected_pattern().expect("the new pattern is selected");
+        assert!(app.selected_component().is_none());
+        let assembly = app.doc.model.assembly().unwrap();
+        assert_eq!(assembly.pattern(row).unwrap().instances.len(), 2);
+        assert_eq!(app.doc.bodies.len(), 15);
+        draw(&mut app, &ctx);
+        app.change_pattern(row, PatternChange::Delete);
+        assert!(app.selected_pattern().is_none());
+        assert_eq!(app.doc.bodies.len(), 13);
+
+        // Round an axis: a component and a round face of another, picked as for a mate.
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "new", "assembly": true, "discard": true}),
+        );
+        ok(&mut app, &ctx, json!({"op": "insert", "sample": "housing"}));
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "insert", "sample": "bolt", "at": [40, 0, 3.4]}),
+        );
+        assert!(
+            !app.command_state(CommandId::CircularComponentPattern)
+                .enabled
+        );
+        let pick = |app: &PeetApp, body: usize, round: bool| {
+            let solid = &app.doc.bodies[body].solid;
+            let face = solid.face_ids().find(|f| {
+                matches!(solid.face(*f).surface, peet_kernel::Surface::Cylinder(c) if (c.radius - 15.0).abs() < 1e-9)
+                    == round
+            });
+            GeomRef::Face {
+                body,
+                face: face.expect("a face"),
+            }
+        };
+        app.selected_geom = vec![pick(&app, 1, false), pick(&app, 0, true)];
+        assert!(
+            app.command_state(CommandId::CircularComponentPattern)
+                .enabled
+        );
+        app.execute(&ctx, CommandId::CircularComponentPattern);
+        let ring = app.selected_pattern().expect("the new pattern is selected");
+        let assembly = app.doc.model.assembly().unwrap();
+        let pattern = assembly.pattern(ring).unwrap();
+        assert_eq!(pattern.name, "CirPattern1");
+        assert_eq!(pattern.instances.len(), 3);
+        // Opposite the original, across the bore.
+        let opposite = assembly.component(pattern.instances[1].component).unwrap();
+        assert!((opposite.placement.origin - DVec3::new(-40.0, 0.0, 3.4)).length() < 1e-9);
         draw(&mut app, &ctx);
     }
 

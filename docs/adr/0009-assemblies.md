@@ -342,6 +342,46 @@ which no released version writes, without another version number.
   frame on an RTX 4070 Super, drawn and waited for; deciding what to draw takes under
   1 ms for 1,000 bodies in an unoptimised build.
 
+## Component patterns and the exit assembly
+
+- **A pattern's copies are components.** `ComponentPattern` (in `Assembly`) has its
+  originals, a `PatternKind` (linear in one or two directions, or circular) and its
+  instances: for each original and each place, the component that is the copy. The
+  copies are made and removed when the pattern is added or changed (`sync_pattern`),
+  so everything that works on components (the tree, the bill of materials, mass,
+  interference, STEP, visibility, explode steps) works on them with no code of its own.
+  The alternative, instances that exist only in the evaluation, would have needed each
+  of those to learn about patterns.
+- **A copy is placed after the mates are solved.** The solver treats a copy as fixed;
+  once the mates are solved, each pattern works out its moves (a translation per
+  place, or a rotation about the axis) and puts each copy where its original now is,
+  moved. A direction or axis is fixed in the assembly or is geometry of a component
+  (resolved by the mates' own code, `mate::locate`), so a pattern follows a component
+  that moves or a part that changes. Because a copy's place is only known after the
+  solve, a mate onto a copy would see it a rebuild late: mating, placing, dragging,
+  fixing, replacing and deleting a copy are refused, with the pattern and the original
+  named.
+- **The exit assembly** (`samples::enclosure_assembly`, **Open Sample Assembly**,
+  `open_sample` with `assembly`): the chassis (fixed), a cover on its rim flush with
+  the right and back walls, the housing on the cover over an opening for its shaft,
+  an M8 socket screw in a counterbore patterned round the housing's bore (six), and an
+  M4 screw in a mounting hole patterned along the walls (four). Twelve mates; a
+  parallel mate on a flat of each screw's socket stops it spinning, so nothing is
+  left free. The housing sits on the cover because the chassis's floor is covered in
+  louvers and dimples: there is no flat 100 mm circle on it.
+- `crates/peet-ops/tests/enclosure_exit.rs` checks the criteria: every mate holds and
+  the freedom is 0; no interference (screws in their holes and heads on their seats
+  only touch); the bill of materials is 1 + 1 + 1 + 6 + 4 with masses from the sizes
+  (the cover, the housing by Pappus, the screws as two cylinders less a hexagon
+  socket; the chassis from its own measured volume) and flat sizes (the chassis's
+  333.572 × 215.876 blank, the cover's 240 × 160); and making the chassis 40 wider
+  moves the cover, the housing and its six bolts 40 with the wall they hang on, while
+  the screws stay in the mounting holes, which are measured from the left.
+- The chassis sample's rim profile is now sketched at the left corner of the base
+  instead of the right: at the right it was at a fixed position, so the part could
+  not be made wider. Its solid, flat pattern and STEP file are unchanged (the Phase 5
+  tests pass as they were).
+
 ## Consequences
 
 - A machine whose graphics can't draw instanced geometry can't run the viewport (WebGL2

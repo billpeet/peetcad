@@ -142,6 +142,8 @@ pub struct PeetApp {
     selected_mate: Option<peet_model::MateId>,
     /// In an assembly: the selected step of the exploded view.
     selected_explode: Option<peet_model::ExplodeId>,
+    /// In an assembly: the selected component pattern.
+    selected_pattern: Option<peet_model::PatternId>,
     /// How far exploded the assembly is on its way to being shown (0 or 1).
     explode_target: Option<f64>,
     /// In an assembly: a component being dragged in the view.
@@ -223,6 +225,7 @@ impl PeetApp {
             component_name: None,
             selected_mate: None,
             selected_explode: None,
+            selected_pattern: None,
             explode_target: None,
             component_drag: None,
             interference: None,
@@ -330,6 +333,7 @@ impl PeetApp {
         self.component_name = None;
         self.selected_mate = None;
         self.selected_explode = None;
+        self.selected_pattern = None;
         self.explode_target = None;
         self.component_drag = None;
     }
@@ -977,6 +981,14 @@ impl PeetApp {
                 });
                 self.info("Opened the sample housing: a revolve with a fillet, chamfers and a bolt circle of counterbored holes. Mass on the Model tab weighs it.");
             }
+            AfterDiscard::SampleAssembly => {
+                self.perform(Op::OpenSample {
+                    sample: peet_ops::Sample::Assembly,
+                    discard: true,
+                    keep: false,
+                });
+                self.info("Opened the sample assembly: a chassis, its cover, a housing bolted to the cover and screws, fully mated. Explode (on the File tab) takes it apart; Bill of Materials lists it.");
+            }
             AfterDiscard::Quit => {
                 self.files.discard_autosave();
                 self.doc.mark_saved(None);
@@ -1173,6 +1185,14 @@ impl PeetApp {
             CommandId::EditComponent | CommandId::IsolateComponent | CommandId::AddExplodeStep => {
                 enabled(self.selected_component().is_some())
             }
+            // A copy a pattern made is not patterned itself.
+            CommandId::LinearComponentPattern => {
+                enabled(self.selected_component().is_some_and(|id| {
+                    let assembly = self.doc.model.assembly();
+                    assembly.is_some_and(|a| a.pattern_of(id).is_none())
+                }))
+            }
+            CommandId::CircularComponentPattern => enabled(self.mate_ends().is_some()),
             CommandId::ShowAllComponents => enabled(
                 self.doc
                     .model
@@ -1265,6 +1285,7 @@ impl PeetApp {
             | CommandId::OpenSampleEnclosure
             | CommandId::OpenSampleChassis
             | CommandId::OpenSampleHousing
+            | CommandId::OpenSampleAssembly
             | CommandId::SaveDocument
             | CommandId::SaveDocumentAs => enabled(true),
             CommandId::ViewIsometric
@@ -1473,6 +1494,9 @@ impl PeetApp {
             CommandId::OpenSampleEnclosure => self.guard_unsaved(AfterDiscard::SampleEnclosure),
             CommandId::OpenSampleChassis => self.guard_unsaved(AfterDiscard::SampleChassis),
             CommandId::OpenSampleHousing => self.guard_unsaved(AfterDiscard::SampleHousing),
+            CommandId::OpenSampleAssembly => self.guard_unsaved(AfterDiscard::SampleAssembly),
+            CommandId::LinearComponentPattern => self.add_linear_pattern(),
+            CommandId::CircularComponentPattern => self.add_circular_pattern(),
             CommandId::SaveDocument => self.save(false),
             CommandId::SaveDocumentAs => self.save(true),
             CommandId::CommandPalette => self.palette.toggle(),
@@ -1885,6 +1909,24 @@ impl PeetApp {
                                     tool(ui, pending, CommandId::MateFasten, "Fasten", Small);
                                 });
                             });
+                            ribbon::group(ui, "Pattern", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::LinearComponentPattern,
+                                        "Linear",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::CircularComponentPattern,
+                                        "Circular",
+                                        Small,
+                                    );
+                                });
+                            });
                             ribbon::group(ui, "Show", |ui| {
                                 ribbon::stack(ui, |ui| {
                                     tool(
@@ -1937,6 +1979,13 @@ impl PeetApp {
                                         pending,
                                         CommandId::OpenSampleHousing,
                                         "Housing",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::OpenSampleAssembly,
+                                        "Assembly",
                                         Small,
                                     );
                                 });
@@ -2437,6 +2486,10 @@ impl PeetApp {
         }
         if let Some(id) = self.selected_explode() {
             egui::ScrollArea::vertical().show(ui, |ui| self.explode_properties(ui, id));
+            return;
+        }
+        if let Some(id) = self.selected_pattern() {
+            egui::ScrollArea::vertical().show(ui, |ui| self.pattern_properties(ui, id));
             return;
         }
         if self.doc.is_assembly() {
@@ -3604,6 +3657,7 @@ impl eframe::App for PeetApp {
                 self.selected_component = component_at(events.clicked_geom);
                 self.selected_mate = None;
                 self.selected_explode = None;
+                self.selected_pattern = None;
             }
             let handles = self.sketch.is_none()
                 && self.picking.is_none()

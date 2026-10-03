@@ -276,6 +276,26 @@ fn element(end: &MateEnd, component: &Placed) -> Result<Element, String> {
     })
 }
 
+/// What an end is in the assembly: for a component pattern's direction or axis.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum Located {
+    /// A point of a plane and its outward normal.
+    Plane(DVec3, DVec3),
+    /// A point of a line and its direction.
+    Line(DVec3, DVec3),
+    Point(DVec3),
+}
+
+/// The geometry of `end`, which is on `component`, where the component is.
+pub(crate) fn locate(end: &MateEnd, component: &Placed) -> Result<Located, String> {
+    let f = &component.frame;
+    Ok(match element(end, component)? {
+        Element::Plane(p, n) => Located::Plane(f.to_world(p), f.vector_to_world(n)),
+        Element::Line(p, d) => Located::Line(f.to_world(p), f.vector_to_world(d)),
+        Element::Point(p) => Located::Point(f.to_world(p)),
+    })
+}
+
 // ---- Equations ----
 
 #[derive(Clone, Copy, Debug, PartialEq)]

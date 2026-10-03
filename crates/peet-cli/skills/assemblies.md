@@ -1,6 +1,6 @@
 ---
 name: assemblies
-description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
+description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
 ---
 
 # Assemblies
@@ -148,6 +148,59 @@ far as its mates let it. Use it to open a lid, swing an arm, or slide a part alo
 - A fixed component can't be dragged: drag another, or `fix` it with `"on": false`.
 - Prefer a mate when the position is meant to be kept (an `angle` mate holds a lid open
   at 30 degrees; a drag only leaves it there until something else moves it).
+
+## Component patterns
+
+A pattern copies components in rows or round an axis. Use it for fasteners and anything
+else that repeats: **mate the original once, and the copies are in place**.
+
+```jsonl
+{"op": "new", "assembly": true}
+{"op": "insert", "sample": "chassis", "name": "Chassis"}
+{"op": "insert", "sample": "cover", "name": "Cover", "at": [0, 0, 40]}
+{"op": "mate", "type": "coincident", "a": {"component": "Chassis", "face": {"at": [234, 80, 40]}}, "b": {"component": "Cover", "face": {"at": [10, 10, 0]}}}
+{"op": "mate", "type": "coincident", "flip": true, "a": {"component": "Chassis", "face": {"at": [240, 80, 20]}}, "b": {"component": "Cover", "face": {"at": [240, 80, 0.75]}}}
+{"op": "mate", "type": "coincident", "flip": true, "a": {"component": "Chassis", "face": {"at": [200, 160, 4]}}, "b": {"component": "Cover", "face": {"at": [120, 160, 0.75]}}}
+{"op": "insert", "sample": "screw", "name": "Screw", "at": [20, 25, 1.5]}
+{"op": "mate", "type": "concentric", "a": {"component": "Chassis", "face": {"at": [20, 27.25, 0.75]}}, "b": {"component": "Screw", "face": {"at": [0, 2, -4]}}}
+{"op": "mate", "type": "coincident", "a": {"component": "Chassis", "face": {"at": [30, 25, 1.5]}}, "b": {"component": "Screw", "face": {"at": [0, 3, 0]}}}
+{"op": "component_pattern", "components": ["Screw"], "type": "linear", "direction": {"component": "Chassis", "face": {"at": [240, 80, 20]}}, "spacing": 200, "count": 2, "second": {"direction": "y", "spacing": 110, "count": 2}, "name": "Screws"}
+{"op": "components"}
+```
+
+- **`count` includes the original**: `"count": 2` with a second direction of 2 makes
+  three copies. A linear pattern takes `direction`, `spacing`, `count` (and `flip`),
+  and the same again under `second` for rows and columns. A circular one takes `axis`,
+  `count` and `angle` (left out: 360, evenly all the way round; less: from the first to
+  the last).
+- **A direction or an axis** is one of the assembly's own (`"x"`, `"y"`, `"z"`,
+  `[x, y, z]`, or for an axis that is not through the origin
+  `{"origin": [x, y, z], "direction": "z"}`), or geometry of a component:
+  `{"component": ..., "edge": selector}` for a straight edge, `"face"` for a round
+  face (its axis) or a flat face (its normal), the selector in the part's own
+  coordinates as for a mate. Take it from a component when the pattern should follow
+  that component: bolts round a housing use the housing's bore, so they stay on its
+  bolt circle wherever the housing goes.
+- **The copies are components** of the original's part: `components` lists them (with
+  `"pattern": name`), the bill of materials counts them, and they are weighed,
+  checked for interference and exported. A copy can be hidden, coloured, renamed or
+  suppressed like any other.
+- **But a copy is the pattern's to place**: `place`, `drag`, `fix`, `mate`, `replace`
+  and `delete` on a copy fail and say which pattern made it and which component is
+  its original. Move or mate the original, or change the pattern.
+- `edit_component_pattern` (`pattern`, and any of `count`, `spacing`, `angle`, `flip`,
+  `direction`, `axis`, `second`; `"second": null` takes the second direction away)
+  adds and removes copies to match, and the ones that stay keep their names. `rename`
+  and `delete` take `pattern` in place of `feature`; deleting a pattern deletes its
+  copies and leaves the original, and deleting the original deletes its pattern.
+- A pattern whose direction can't be found (the face it was taken from is gone, the
+  component is suppressed) is not a failed operation: it is listed under `failures`
+  with the reason, and its copies stay where they are.
+- `{"op": "open_sample", "sample": "assembly"}` opens a finished example: the chassis,
+  a cover, the housing on the cover with six bolts (a circular pattern round the
+  housing's bore) and four screws (a linear pattern along the chassis's walls), every
+  component held, with an exploded view. The parts are samples too: `chassis`,
+  `cover`, `housing`, `bolt`, `screw`.
 
 ## Changing components
 

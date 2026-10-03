@@ -730,6 +730,82 @@ fn what_the_assemblies_skill_says_about_showing_and_exploding_is_true() {
 }
 
 #[test]
+fn what_the_assemblies_skill_says_about_patterns_is_true() {
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "assemblies")
+        .map(|(_, text)| *text)
+        .unwrap();
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"component_pattern\""))
+        .expect("the script that patterns a component");
+    // "place ... on a copy fails and says which pattern made it and its original."
+    let script = format!(
+        "{script}{{\"op\": \"bom\"}}\n{{\"op\": \"place\", \"component\": \"Screw M4-1\", \"at\": [0, 0, 0]}}\n"
+    );
+    let ran = peet_with(&["run", "-q"], &script);
+    let n = ran.replies.len();
+    let (pattern, listed, bom, refused) = (
+        &ran.replies[n - 4],
+        &ran.replies[n - 3],
+        &ran.replies[n - 2],
+        &ran.replies[n - 1],
+    );
+    // "count 2 with a second direction of 2 makes three copies."
+    assert_eq!(pattern["pattern"]["name"], "Screws");
+    assert_eq!(pattern["pattern"]["copies"].as_array().unwrap().len(), 3);
+    assert_eq!(pattern["pattern"]["status"], "ok");
+    // Mated once: the original is in its hole, and the copies are in the other three.
+    let components = listed["components"].as_array().unwrap();
+    assert_eq!(components.len(), 6);
+    let at: Vec<&serde_json::Value> = components.iter().skip(2).map(|c| &c["at"]).collect();
+    assert_eq!(
+        at,
+        [
+            &json!([20.0, 25.0, 1.5]),
+            &json!([220.0, 25.0, 1.5]),
+            &json!([20.0, 135.0, 1.5]),
+            &json!([220.0, 135.0, 1.5])
+        ]
+    );
+    assert_eq!(components[1]["at"], json!([0.0, 0.0, 40.0]));
+    for copy in &components[3..] {
+        assert_eq!(copy["pattern"], "Screws");
+        assert_eq!(copy["status"], "ok");
+    }
+    assert_eq!(listed["patterns"][0]["direction"]["component"], "Chassis");
+    // "The bill of materials counts them."
+    let screws = bom["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["part"] == "Screw M4")
+        .expect("a line for the screws");
+    assert_eq!(screws["quantity"], 4);
+    assert_eq!(refused["ok"], false);
+    let why = refused["error"].as_str().unwrap();
+    assert!(why.contains("Screws") && why.contains("Screw"), "{why}");
+
+    // The finished example opens fully held.
+    let dir = Folder::new("sample-assembly");
+    let file = dir.path("enclosure.peet");
+    let made = peet(&[
+        "op",
+        r#"{"op": "open_sample", "sample": "assembly"}"#,
+        r#"{"op": "components"}"#,
+        "--new",
+        "-f",
+        &file,
+    ]);
+    assert_eq!(made.code, OK, "{}", made.err);
+    assert_eq!(made.replies[1]["freedom"], 0);
+    assert_eq!(made.replies[1]["components"].as_array().unwrap().len(), 13);
+    let again = peet(&["interference", "-f", &file]);
+    assert_eq!(again.replies[0]["clear"], true);
+}
+
+#[test]
 fn what_the_assemblies_skill_says_about_checking_is_true() {
     let skill = peet_cli::SKILLS
         .iter()

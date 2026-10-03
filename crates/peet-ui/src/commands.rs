@@ -133,6 +133,9 @@ pub enum CommandId {
     IsolateComponent,
     AddExplodeStep,
     ExplodeView,
+    LinearComponentPattern,
+    CircularComponentPattern,
+    OpenSampleAssembly,
 }
 
 /// Static description of a command.
@@ -161,7 +164,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 124] = [
+    pub const ALL: [Self; 127] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -286,6 +289,9 @@ impl CommandId {
         Self::IsolateComponent,
         Self::AddExplodeStep,
         Self::ExplodeView,
+        Self::LinearComponentPattern,
+        Self::CircularComponentPattern,
+        Self::OpenSampleAssembly,
     ];
 
     pub fn info(self) -> CommandInfo {
@@ -974,6 +980,24 @@ impl CommandId {
                 "Explode",
                 "Assembly",
                 "Show the assembly exploded (every explode step taken), or as it is put together.",
+                None,
+            ),
+            Self::LinearComponentPattern => (
+                "Linear Component Pattern",
+                "Assembly",
+                "Copy the selected component in a row (and, from its properties, in a second direction). The copies follow the original, so mate the original and they are all in place.",
+                None,
+            ),
+            Self::CircularComponentPattern => (
+                "Circular Component Pattern",
+                "Assembly",
+                "Copy a component round an axis. Click a face of the component to copy, then Shift-click a round face (or a straight edge) of another component for the axis.",
+                None,
+            ),
+            Self::OpenSampleAssembly => (
+                "Open Sample Assembly",
+                "File",
+                "Open an assembly: the chassis with a cover, the housing bolted to the cover and screws in the mounting holes, fully mated, with two component patterns and an exploded view.",
                 None,
             ),
             Self::OpenSampleHousing => (

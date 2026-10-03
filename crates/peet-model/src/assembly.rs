@@ -19,6 +19,7 @@ use peet_math::{DVec3, Frame};
 use serde::{Deserialize, Serialize};
 
 use crate::Model;
+use crate::feature::Scalar;
 use crate::mate::{Mate, MateEnd, MateId, MateKind};
 
 /// Identifies a definition within its assembly. Ids are not reused.
@@ -180,6 +181,104 @@ pub struct Component {
     /// sub-assembly's goes for everything in it.
     #[serde(default)]
     pub color: Option<[u8; 3]>,
+    /// The pattern that made this component and places it, if one did: it is then where
+    /// the pattern puts it, and goes when the pattern does.
+    #[serde(default)]
+    pub pattern: Option<PatternId>,
+}
+
+/// Identifies a component pattern within its assembly. Ids are not reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct PatternId(pub u32);
+
+/// A direction, or an axis, for a component pattern.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PatternLine {
+    /// In the assembly's own coordinates: a direction (and, for an axis, a point on it).
+    Fixed { origin: DVec3, direction: DVec3 },
+    /// Geometry of a component's part: a straight edge (along it), a round face or edge
+    /// (its axis), or a flat face (its normal). The pattern follows it when the
+    /// component moves or its part changes.
+    Geom(MateEnd),
+}
+
+/// One direction of a linear component pattern.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PatternStep {
+    pub direction: PatternLine,
+    /// From one instance to the next (mm).
+    pub spacing: Scalar,
+    /// How many, the original included.
+    pub count: u32,
+    /// The other way along the direction.
+    pub flip: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PatternKind {
+    /// Rows along a direction, and columns along a second if there is one.
+    Linear {
+        first: PatternStep,
+        second: Option<PatternStep>,
+    },
+    /// Around an axis: `count` (the original included) over `angle` degrees; 360 spaces
+    /// them evenly all the way round.
+    Circular {
+        axis: PatternLine,
+        angle: Scalar,
+        count: u32,
+        flip: bool,
+    },
+}
+
+impl PatternKind {
+    /// The kind in one word, for names and messages.
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Linear { .. } => "linear",
+            Self::Circular { .. } => "circular",
+        }
+    }
+
+    /// The places of the pattern besides the original's: for a linear pattern the step
+    /// along each direction, for a circular one the step round the axis (and 0).
+    pub fn places(&self) -> Vec<[u32; 2]> {
+        let (first, second) = match self {
+            Self::Linear { first, second } => (first.count, second.as_ref().map_or(1, |s| s.count)),
+            Self::Circular { count, .. } => (*count, 1),
+        };
+        let (first, second) = (first.clamp(1, MAX_PATTERN), second.clamp(1, MAX_PATTERN));
+        (0..second)
+            .flat_map(|j| (0..first).map(move |i| [i, j]))
+            .filter(|place| *place != [0, 0])
+            .take(MAX_PATTERN as usize)
+            .collect()
+    }
+}
+
+/// Most instances a pattern makes (along one direction, and altogether).
+pub const MAX_PATTERN: u32 = 1000;
+
+/// A component a pattern made: which original it is a copy of, and its place.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PatternInstance {
+    pub seed: CompId,
+    pub place: [u32; 2],
+    pub component: CompId,
+}
+
+/// Copies of components in a pattern. The copies are components of their own (counted,
+/// weighed, exported), but where they are is the pattern's doing: each follows its
+/// original.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ComponentPattern {
+    pub id: PatternId,
+    /// Unique in the assembly: "LPattern1".
+    pub name: String,
+    /// The originals.
+    pub seeds: Vec<CompId>,
+    pub kind: PatternKind,
+    pub instances: Vec<PatternInstance>,
 }
 
 /// Identifies a step of an assembly's exploded view.
@@ -218,6 +317,11 @@ pub struct Assembly {
     explode: Vec<Arc<ExplodeStep>>,
     #[serde(default)]
     next_explode: u32,
+    /// The component patterns, in the order they were added.
+    #[serde(default)]
+    patterns: Vec<Arc<ComponentPattern>>,
+    #[serde(default)]
+    next_pattern: u32,
 }
 
 impl Assembly {
@@ -269,6 +373,19 @@ impl Assembly {
     pub fn mates_of(&self, id: CompId) -> impl Iterator<Item = &Mate> {
         self.mates()
             .filter(move |m| m.a.component() == Some(id) || m.b.component() == Some(id))
+    }
+
+    pub fn patterns(&self) -> impl ExactSizeIterator<Item = &ComponentPattern> {
+        self.patterns.iter().map(|p| &**p)
+    }
+
+    pub fn pattern(&self, id: PatternId) -> Option<&ComponentPattern> {
+        self.patterns.iter().find(|p| p.id == id).map(|p| &**p)
+    }
+
+    /// The pattern that made a component and places it, if one did.
+    pub fn pattern_of(&self, id: CompId) -> Option<&ComponentPattern> {
+        self.pattern(self.component(id)?.pattern?)
     }
 
     pub fn explode_steps(&self) -> impl ExactSizeIterator<Item = &ExplodeStep> {
@@ -375,6 +492,7 @@ impl Assembly {
             visible: true,
             suppressed: false,
             color: None,
+            pattern: None,
         }));
         Some(id)
     }
@@ -414,6 +532,142 @@ impl Assembly {
             .iter_mut()
             .find(|m| m.id == id)
             .map(Arc::make_mut)
+    }
+
+    /// Adds a pattern of `seeds` (those that are components of this assembly and not
+    /// themselves made by a pattern), with an automatic name (`LPattern1`,
+    /// `CirPattern1`), and makes its components. `None` if no seed is left.
+    pub fn add_pattern(&mut self, seeds: &[CompId], kind: PatternKind) -> Option<PatternId> {
+        let mut own = Vec::new();
+        for c in seeds {
+            if self.component(*c).is_some_and(|c| c.pattern.is_none()) && !own.contains(c) {
+                own.push(*c);
+            }
+        }
+        if own.is_empty() {
+            return None;
+        }
+        self.next_pattern += 1;
+        let id = PatternId(self.next_pattern);
+        let prefix = match kind {
+            PatternKind::Linear { .. } => "LPattern",
+            PatternKind::Circular { .. } => "CirPattern",
+        };
+        let name = (1..)
+            .map(|n| format!("{prefix}{n}"))
+            .find(|name| !self.patterns.iter().any(|p| p.name == *name))
+            .unwrap_or_default();
+        self.patterns.push(Arc::new(ComponentPattern {
+            id,
+            name,
+            seeds: own,
+            kind,
+            instances: Vec::new(),
+        }));
+        self.sync_pattern(id);
+        Some(id)
+    }
+
+    /// Changes what a pattern is: its components are made and removed to match.
+    pub fn set_pattern_kind(&mut self, id: PatternId, kind: PatternKind) -> bool {
+        let Some(p) = self.patterns.iter_mut().find(|p| p.id == id) else {
+            return false;
+        };
+        if p.kind != kind {
+            Arc::make_mut(p).kind = kind;
+            self.sync_pattern(id);
+        }
+        true
+    }
+
+    /// The pattern, for renaming it. Other snapshots of the assembly are not affected.
+    pub fn pattern_mut(&mut self, id: PatternId) -> Option<&mut ComponentPattern> {
+        self.patterns
+            .iter_mut()
+            .find(|p| p.id == id)
+            .map(Arc::make_mut)
+    }
+
+    /// Removes a pattern and the components it made. Its originals stay.
+    pub fn remove_pattern(&mut self, id: PatternId) -> Option<ComponentPattern> {
+        let index = self.patterns.iter().position(|p| p.id == id)?;
+        let removed = Arc::unwrap_or_clone(self.patterns.remove(index));
+        for instance in &removed.instances {
+            self.remove_component(instance.component);
+        }
+        self.prune_explode();
+        self.prune();
+        Some(removed)
+    }
+
+    /// Makes a pattern's components be those its originals and its places ask for:
+    /// what is missing is added (where its original is, until the next rebuild puts it
+    /// in its place), and what is no longer asked for is removed.
+    fn sync_pattern(&mut self, id: PatternId) {
+        let Some(pattern) = self.pattern(id) else {
+            return;
+        };
+        let places = pattern.kind.places();
+        let seeds = pattern.seeds.clone();
+        let mut instances = pattern.instances.clone();
+        let wanted = |i: &PatternInstance| seeds.contains(&i.seed) && places.contains(&i.place);
+        let gone: Vec<CompId> = instances
+            .iter()
+            .filter(|i| !wanted(i))
+            .map(|i| i.component)
+            .collect();
+        instances.retain(wanted);
+        for component in gone {
+            self.remove_component(component);
+        }
+        for seed in &seeds {
+            let Some((definition, placement)) =
+                self.component(*seed).map(|c| (c.definition, c.placement))
+            else {
+                continue;
+            };
+            for place in &places {
+                if instances
+                    .iter()
+                    .any(|i| i.seed == *seed && i.place == *place)
+                {
+                    continue;
+                }
+                if let Some(component) = self.insert(definition, placement) {
+                    if let Some(c) = self.component_mut(component) {
+                        c.pattern = Some(id);
+                        c.fixed = false;
+                    }
+                    instances.push(PatternInstance {
+                        seed: *seed,
+                        place: *place,
+                        component,
+                    });
+                }
+            }
+        }
+        // In the order of the originals, then of the places.
+        instances.sort_by_key(|i| {
+            (
+                seeds.iter().position(|s| *s == i.seed),
+                i.place[1],
+                i.place[0],
+            )
+        });
+        if let Some(p) = self.pattern_mut(id) {
+            p.instances = instances;
+        }
+        self.prune_explode();
+        self.prune();
+    }
+
+    /// Takes a component out, with its mates. Nothing else is tidied.
+    fn remove_component(&mut self, id: CompId) -> Option<Component> {
+        let index = self.components.iter().position(|c| c.id == id)?;
+        let removed = self.components.remove(index);
+        self.mates
+            .retain(|m| m.a.component() != Some(id) && m.b.component() != Some(id));
+        Some(Arc::unwrap_or_clone(removed))
     }
 
     /// Adds a step to the exploded view, with an automatic name (`Explode1`). The
@@ -472,14 +726,32 @@ impl Assembly {
     }
 
     /// Removes a component, with its mates, and its definition if nothing else uses it.
+    /// The original of a pattern takes its copies with it (and the pattern, if it was
+    /// the only original); a copy leaves its place in its pattern empty.
     pub fn remove(&mut self, id: CompId) -> Option<Component> {
-        let index = self.components.iter().position(|c| c.id == id)?;
-        let removed = self.components.remove(index);
-        self.mates
-            .retain(|m| m.a.component() != Some(id) && m.b.component() != Some(id));
+        let removed = self.remove_component(id)?;
+        let mut copies = Vec::new();
+        for p in &mut self.patterns {
+            if !p.seeds.contains(&id) && !p.instances.iter().any(|i| i.component == id) {
+                continue;
+            }
+            let p = Arc::make_mut(p);
+            p.seeds.retain(|s| *s != id);
+            copies.extend(
+                p.instances
+                    .iter()
+                    .filter(|i| i.seed == id)
+                    .map(|i| i.component),
+            );
+            p.instances.retain(|i| i.seed != id && i.component != id);
+        }
+        for copy in copies {
+            self.remove_component(copy);
+        }
+        self.patterns.retain(|p| !p.seeds.is_empty());
         self.prune_explode();
         self.prune();
-        Some(Arc::unwrap_or_clone(removed))
+        Some(removed)
     }
 
     /// Makes a component an instance of another definition, where it is.
@@ -592,6 +864,38 @@ impl Assembly {
         self.next_explode = self
             .next_explode
             .max(max(&mut self.explode.iter().map(|s| s.id.0)));
+        let mut seen = std::collections::HashSet::new();
+        for p in &self.patterns {
+            if !seen.insert(p.id.0) {
+                return Err(format!(
+                    "The assembly is damaged: two patterns have the id {}.",
+                    p.id.0
+                ));
+            }
+            let known = |id: CompId| self.component(id).is_some();
+            if !p.seeds.iter().all(|s| known(*s)) || !p.instances.iter().all(|i| known(i.component))
+            {
+                return Err(format!(
+                    "The assembly is damaged: {} is of components that are not in the file.",
+                    p.name
+                ));
+            }
+        }
+        // A component is placed by a pattern exactly if that pattern lists it.
+        let made: std::collections::HashMap<CompId, PatternId> = self
+            .patterns
+            .iter()
+            .flat_map(|p| p.instances.iter().map(|i| (i.component, p.id)))
+            .collect();
+        for c in &mut self.components {
+            let by = made.get(&c.id).copied();
+            if c.pattern != by {
+                Arc::make_mut(c).pattern = by;
+            }
+        }
+        self.next_pattern = self
+            .next_pattern
+            .max(max(&mut self.patterns.iter().map(|p| p.id.0)));
         for d in &mut self.definitions {
             let mut model = (*d.model).clone();
             model.validate()?;

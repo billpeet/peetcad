@@ -54,9 +54,12 @@ pub fn coverage(cmd: CommandId) -> Coverage {
         C::ExplodeView => Op("explode"),
         C::OpenDocument => Op("open"),
         C::SaveDocument | C::SaveDocumentAs => Op("save"),
-        C::OpenSample | C::OpenSampleEnclosure | C::OpenSampleChassis | C::OpenSampleHousing => {
-            Op("open_sample")
-        }
+        C::LinearComponentPattern | C::CircularComponentPattern => Op("component_pattern"),
+        C::OpenSample
+        | C::OpenSampleEnclosure
+        | C::OpenSampleChassis
+        | C::OpenSampleHousing
+        | C::OpenSampleAssembly => Op("open_sample"),
         C::ExportStl | C::ExportDxf | C::ExportStep => Op("export"),
         C::ImportDxf => Op("import_dxf"),
         C::ImportStep => Op("import_step"),

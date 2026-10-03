@@ -89,7 +89,10 @@ fn documents_are_started_opened_and_guarded() {
     );
     assert!(e.contains("Couldn't read"), "{e}");
     let e = error(&mut doc, json!({"op": "open_sample", "sample": "gearbox"}));
-    assert!(e.contains("bracket, enclosure, chassis, housing"), "{e}");
+    assert!(
+        e.contains("bracket, enclosure, chassis, housing, cover, bolt, screw, assembly"),
+        "{e}"
+    );
     std::fs::remove_dir_all(&dir).ok();
 }
 

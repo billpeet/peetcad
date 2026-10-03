@@ -44,7 +44,8 @@ mod sweep;
 mod units;
 
 pub use assembly::{
-    Assembly, CompId, Component, DefId, Definition, ExplodeId, ExplodeStep, Link, relative_to,
+    Assembly, CompId, Component, ComponentPattern, DefId, Definition, ExplodeId, ExplodeStep, Link,
+    MAX_PATTERN, PatternId, PatternInstance, PatternKind, PatternLine, PatternStep, relative_to,
 };
 pub use convert::ConvertToSheetFeature;
 pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};

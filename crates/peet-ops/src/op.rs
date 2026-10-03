@@ -30,6 +30,14 @@ word_enum! {
         Chassis = "chassis",
         /// A revolved housing with a bolt circle.
         Housing = "housing",
+        /// A flat sheet metal cover for the chassis, with holes for the housing.
+        Cover = "cover",
+        /// An M8 socket head screw, for the housing's counterbores.
+        Bolt = "bolt",
+        /// An M4 socket head screw, for the chassis's mounting holes.
+        Screw = "screw",
+        /// An assembly: the chassis, the cover, the housing and their screws, mated.
+        Assembly = "assembly",
     }
 }
 
@@ -41,6 +49,16 @@ impl Sample {
             Self::Enclosure => peet_model::samples::enclosure().0,
             Self::Chassis => peet_model::samples::chassis().0,
             Self::Housing => peet_model::samples::housing().0,
+            Self::Cover => peet_model::samples::cover().0,
+            Self::Bolt => {
+                use peet_model::samples::{enclosure_size, socket_screw};
+                socket_screw("Bolt M8", enclosure_size::M8).0
+            }
+            Self::Screw => {
+                use peet_model::samples::{enclosure_size, socket_screw};
+                socket_screw("Screw M4", enclosure_size::M4).0
+            }
+            Self::Assembly => peet_model::samples::enclosure_assembly().0,
         }
     }
 }
@@ -469,6 +487,19 @@ pub enum Op {
         mate: MateSel,
         change: MateChange,
     },
+    /// Copy components of an assembly in rows or round an axis.
+    ComponentPattern {
+        /// The originals.
+        components: Vec<CompSel>,
+        kind: crate::pattern::PatternSpec,
+        /// An automatic name (`LPattern1`, `CirPattern1`) if absent.
+        name: Option<String>,
+    },
+    /// Change a component pattern of an assembly.
+    EditComponentPattern {
+        pattern: crate::pattern::PatternSel,
+        change: crate::pattern::PatternChange,
+    },
     /// Add a step to an assembly's exploded view: components shown moved by a distance.
     ExplodeStep {
         components: Vec<CompSel>,
@@ -570,6 +601,8 @@ impl Op {
             Self::Drag { .. } => "drag",
             Self::Mate { .. } => "mate",
             Self::EditMate { change, .. } => change.word(),
+            Self::ComponentPattern { .. } => "component_pattern",
+            Self::EditComponentPattern { change, .. } => change.word(),
             Self::ExplodeStep { .. } => "explode_step",
             Self::EditExplodeStep { change, .. } => change.word(),
             Self::Explode { .. } => "explode",
@@ -867,7 +900,7 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "open_sample",
-        "sample (bracket, enclosure, chassis, housing), discard (default false), keep (default false)",
+        "sample (bracket, enclosure, chassis, housing, cover, bolt, screw; assembly: an assembly of the last five), discard (default false), keep (default false)",
         "Open one of the sample parts: in place of the one that is open, or with keep beside it.",
     ),
     (
@@ -883,6 +916,9 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
 ];
 
 fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
+    if let Some(found) = crate::pattern::parse(op, a) {
+        return found;
+    }
     if let Some(found) = crate::explode::parse(op, a) {
         return found;
     }
@@ -1167,6 +1203,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             all.extend(crate::mate::MATE_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::links::LINK_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::explode::EXPLODE_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::pattern::PATTERN_OPS.iter().map(|(n, ..)| *n));
             all.sort_unstable();
             all.dedup();
             return Err(format!(
