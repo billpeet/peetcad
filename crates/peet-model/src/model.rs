@@ -151,6 +151,11 @@ impl Model {
                         _ => "edge face",
                     },
                     FaceRole::Instance(_) => "copy",
+                    FaceRole::Blend(_) => "blend face",
+                    FaceRole::BlendEnd(_) => "blend's end face",
+                    FaceRole::BlendCorner(_) => "rounded corner",
+                    FaceRole::Inner => "inside",
+                    FaceRole::Imported(_) => "face",
                 };
                 format!("the {role} of {}", self.name_of(o.feature))
             })
@@ -218,6 +223,80 @@ impl Model {
             s.visible = false;
         }
         id
+    }
+
+    /// Adds a revolve of `sketch` about its centreline (its first construction line), or
+    /// about its vertical axis if it has none. The sketch is then hidden.
+    pub fn add_revolve(&mut self, sketch: FeatureId, operation: Operation) -> FeatureId {
+        let def = match self.sketch(sketch) {
+            Some(s) => crate::RevolveFeature::new(sketch, &s.sketch, operation),
+            None => crate::RevolveFeature::new(sketch, &Sketch::new(), operation),
+        };
+        let id = self.add(FeatureKind::Revolve(Box::new(def)));
+        self.hide(sketch);
+        id
+    }
+
+    /// Adds a fillet or a chamfer on `edges` (or waiting for edges to be picked).
+    pub fn add_blend(
+        &mut self,
+        kind: crate::BlendKind,
+        edges: Vec<crate::naming::EdgeRef>,
+    ) -> FeatureId {
+        self.add(FeatureKind::Blend(Box::new(crate::BlendFeature::new(
+            kind, edges,
+        ))))
+    }
+
+    /// Adds a shell that opens `faces` (a closed hollow if there are none).
+    pub fn add_shell(&mut self, faces: Vec<crate::naming::FaceRef>) -> FeatureId {
+        self.add(FeatureKind::Shell(Box::new(crate::ShellFeature::new(
+            faces,
+        ))))
+    }
+
+    /// Adds a draft of `faces` about `neutral`.
+    pub fn add_draft(
+        &mut self,
+        faces: Vec<crate::naming::FaceRef>,
+        neutral: Option<PlaneRef>,
+    ) -> FeatureId {
+        self.add(FeatureKind::Draft(Box::new(crate::DraftFeature::new(
+            faces, neutral,
+        ))))
+    }
+
+    /// Adds holes at the points of `sketch`, which is then hidden.
+    pub fn add_hole(&mut self, sketch: FeatureId) -> FeatureId {
+        let id = self.add(FeatureKind::Hole(Box::new(crate::HoleFeature::new(sketch))));
+        self.hide(sketch);
+        id
+    }
+
+    /// Adds a sweep of `profile` along `path` (or waiting for the path to be picked). Both
+    /// sketches are then hidden.
+    pub fn add_sweep(
+        &mut self,
+        profile: FeatureId,
+        path: Option<FeatureId>,
+        operation: Operation,
+    ) -> FeatureId {
+        let id = self.add(FeatureKind::Sweep(Box::new(crate::SweepFeature::new(
+            profile, path, operation,
+        ))));
+        self.hide(profile);
+        if let Some(path) = path {
+            self.hide(path);
+        }
+        id
+    }
+
+    /// Adds bodies imported from a file.
+    pub fn add_import(&mut self, source: String, solids: Vec<crate::ImportedSolid>) -> FeatureId {
+        self.add(FeatureKind::Import(Box::new(crate::ImportFeature {
+            source,
+            solids,
+        })))
     }
 
     /// Adds a base flange (a new sheet metal body) from `sketch`, which is then hidden.

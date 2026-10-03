@@ -10,8 +10,8 @@ use peet_model::{
     AxisDef, AxisRef, BaseFlangeFeature, BendModelDef, CoordSystemDef, CornerFeature,
     EdgeFlangeFeature, EdgeRef, EndCondition, FaceRef, FeatureId, FeatureKind, FormFeature,
     HemFeature, JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, Operation,
-    PatternDef, PatternFeature, PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind,
-    SheetSettingsDef, SketchedBendFeature, StdAxis, VertexRef,
+    PatternDef, PatternFeature, PlaneDef, PlaneRef, PointDef, PointRef, RevolveAxisRef, Scalar,
+    ScalarKind, SheetSettingsDef, SketchedBendFeature, StdAxis, VertexRef,
 };
 use peet_sheetmetal::corner::{CornerKind, CornerRelief};
 use peet_sheetmetal::{
@@ -57,6 +57,18 @@ pub enum Slot {
     PatternAxis2,
     /// The plane of a mirror.
     MirrorPlane,
+    /// What a revolve turns about, as an edge or a reference axis.
+    RevolveAxis,
+    /// Another edge for a fillet or a chamfer.
+    BlendEdge,
+    /// Another face for a shell to open.
+    ShellFace,
+    /// Another face to draft.
+    DraftFace,
+    /// A draft's neutral plane.
+    DraftNeutral,
+    /// The sketch a sweep's path is drawn in.
+    SweepPath,
 }
 
 impl Slot {
@@ -86,7 +98,31 @@ impl Slot {
                 "Click a straight edge for the direction (or a round edge for an axis through its centre)."
             }
             Self::MirrorPlane => "Click a flat face or a plane to mirror across.",
+            Self::RevolveAxis => {
+                "Click a straight edge in the sketch's plane to revolve about (or a reference axis in the feature tree)."
+            }
+            Self::BlendEdge => {
+                "Click the edges to round or chamfer, one after the other. Esc when done."
+            }
+            Self::ShellFace => {
+                "Click the faces to remove, opening the hollow, one after the other. Esc when done."
+            }
+            Self::DraftFace => {
+                "Click the flat faces to taper, one after the other (a picked face again to take it out). Esc when done."
+            }
+            Self::DraftNeutral => {
+                "Click a flat face or a plane for the neutral plane: the faces keep their size where they cross it."
+            }
+            Self::SweepPath => {
+                "Click the sketch of the path in the feature tree: lines and arcs joined smoothly, starting on the profile's plane."
+            }
         }
+    }
+
+    /// Whether picking carries on after a click, to pick several things in a row (until
+    /// Esc or Done).
+    pub fn repeats(self) -> bool {
+        matches!(self, Self::BlendEdge | Self::ShellFace | Self::DraftFace)
     }
 }
 
@@ -102,6 +138,10 @@ pub enum Picked {
     Vertex(VertexRef),
     /// A standard or reference plane.
     Plane(PlaneRef),
+    /// A reference axis.
+    Axis(AxisRef),
+    /// A sketch, clicked in the feature tree.
+    Sketch(FeatureId),
 }
 
 impl Picked {
@@ -114,6 +154,16 @@ impl Picked {
             Self::Face { .. } => Err("That face isn't flat: pick a flat face or a plane.".into()),
             _ => Err("Pick a flat face or a plane.".into()),
         }
+    }
+}
+
+/// Adds `item` to a list of picks, or takes it out if it is there already.
+fn toggle<T: PartialEq>(list: &mut Vec<T>, item: T) {
+    match list.iter().position(|x| *x == item) {
+        Some(i) => {
+            list.remove(i);
+        }
+        None => list.push(item),
     }
 }
 
@@ -206,6 +256,43 @@ pub fn apply_pick(kind: &mut FeatureKind, slot: Slot, picked: Picked) -> Result<
             }
         }
         (FeatureKind::Mirror(m), Slot::MirrorPlane) => m.plane = picked.plane()?,
+        (FeatureKind::Revolve(r), Slot::RevolveAxis) => match picked {
+            Picked::Edge(e) => r.axis = RevolveAxisRef::Axis(AxisRef::Edge(e)),
+            Picked::Axis(a) => r.axis = RevolveAxisRef::Axis(a),
+            _ => {
+                return Err(
+                    "Pick a straight edge that lies in the sketch's plane, or a reference axis in the feature tree."
+                        .into(),
+                );
+            }
+        },
+        (FeatureKind::Blend(b), Slot::BlendEdge) => match picked {
+            Picked::Edge(e) => toggle(&mut b.edges, e),
+            _ => return Err("Pick an edge of a body, not a face or a vertex.".into()),
+        },
+        (FeatureKind::Shell(s), Slot::ShellFace) => match picked {
+            Picked::Face { face, .. } => toggle(&mut s.open, face),
+            _ => return Err("Pick a face of the body to remove.".into()),
+        },
+        (FeatureKind::Draft(d), Slot::DraftFace) => match picked {
+            Picked::Face {
+                face, planar: true, ..
+            } => toggle(&mut d.faces, face),
+            Picked::Face { .. } => {
+                return Err("Only flat faces can be drafted: pick a flat face.".into());
+            }
+            _ => return Err("Pick a flat face of the body to taper.".into()),
+        },
+        (FeatureKind::Draft(d), Slot::DraftNeutral) => d.neutral = Some(picked.plane()?),
+        (FeatureKind::Sweep(s), Slot::SweepPath) => match picked {
+            Picked::Sketch(id) if id == s.profile => {
+                return Err(
+                    "That sketch is the profile. The path is drawn in another sketch.".into(),
+                );
+            }
+            Picked::Sketch(id) => s.path = Some(id),
+            _ => return Err("Pick the sketch of the path in the feature tree.".into()),
+        },
         _ => return Err("That can't be used here.".into()),
     }
     Ok(())
@@ -218,6 +305,8 @@ pub struct PanelResult {
     pub pick: Option<Slot>,
     /// A value field finished editing (ends merging of undo steps).
     pub committed: bool,
+    /// Stop picking (the Done button of a list of picks).
+    pub stop_pick: bool,
 }
 
 /// An editable value that accepts expressions. Applies the input when the field loses
@@ -283,8 +372,21 @@ pub fn scalar_field(
     changed
 }
 
+/// A label that long descriptions don't widen the whole panel with: shortened, with the
+/// full text on hover.
+pub(crate) fn short_label(ui: &mut Ui, text: String) {
+    const MAX: usize = 28;
+    if text.chars().count() > MAX {
+        let short: String = text.chars().take(MAX - 1).collect();
+        ui.label(format!("{}…", short.trim_end()))
+            .on_hover_text(text);
+    } else {
+        ui.label(text);
+    }
+}
+
 /// A reference shown as text with a button to pick it again.
-fn reference_row(
+pub(crate) fn reference_row(
     ui: &mut Ui,
     label: &str,
     text: String,
@@ -297,15 +399,7 @@ fn reference_row(
         if picking == Some(slot) {
             ui.colored_label(PICKING, "click it…");
         } else {
-            // Long descriptions would widen the whole panel: shorten, full text on hover.
-            const MAX: usize = 28;
-            if text.chars().count() > MAX {
-                let short: String = text.chars().take(MAX - 1).collect();
-                ui.label(format!("{}…", short.trim_end()))
-                    .on_hover_text(text);
-            } else {
-                ui.label(text);
-            }
+            short_label(ui, text);
         }
         if ui
             .small_button("Pick")
@@ -318,11 +412,11 @@ fn reference_row(
     ui.end_row();
 }
 
-fn plane_text(doc: &Document, r: &PlaneRef) -> String {
+pub(crate) fn plane_text(doc: &Document, r: &PlaneRef) -> String {
     doc.plane_name(r)
 }
 
-fn axis_text(doc: &Document, r: &AxisRef) -> String {
+pub(crate) fn axis_text(doc: &Document, r: &AxisRef) -> String {
     match r {
         AxisRef::Standard(a) => a.label().to_owned(),
         AxisRef::Feature(id) => doc.model.name_of(*id).to_owned(),
@@ -665,7 +759,14 @@ pub fn reference_panel(
             | FeatureKind::Corner(_)
             | FeatureKind::Form(_)
             | FeatureKind::Pattern(_)
-            | FeatureKind::Mirror(_) => {}
+            | FeatureKind::Mirror(_)
+            | FeatureKind::Revolve(_)
+            | FeatureKind::Blend(_)
+            | FeatureKind::Shell(_)
+            | FeatureKind::Draft(_)
+            | FeatureKind::Hole(_)
+            | FeatureKind::Import(_)
+            | FeatureKind::Sweep(_) => {}
         });
     out
 }
@@ -917,7 +1018,7 @@ pub fn edge_flange_panel(
 
 /// A row with a label and a value field.
 #[allow(clippy::too_many_arguments)]
-fn value_row(
+pub(crate) fn value_row(
     ui: &mut Ui,
     label: &str,
     tip: &str,
@@ -964,7 +1065,7 @@ fn radius_row(
     }
 }
 
-fn edge_text(doc: &Document, edge: &EdgeRef) -> String {
+pub(crate) fn edge_text(doc: &Document, edge: &EdgeRef) -> String {
     let names: Vec<String> = edge
         .faces
         .iter()
@@ -1668,7 +1769,7 @@ pub fn pattern_panel(
             }
         });
     ui.add_space(6.0);
-    ui.weak("Copies extrusions, cuts, sheet metal cuts and forms. Sheet metal copies stay on the face their original is sketched on.");
+    ui.weak("Copies extrusions, cuts, revolves, holes, sheet metal cuts and forms. Sheet metal copies stay on the face their original is sketched on.");
     out
 }
 
@@ -1696,7 +1797,7 @@ pub fn mirror_panel(
             );
         });
     ui.add_space(6.0);
-    ui.weak("Copies extrusions, cuts, sheet metal cuts and forms. For sheet metal, the plane must be square to the face the original is sketched on.");
+    ui.weak("Copies extrusions, cuts, revolves, holes, sheet metal cuts and forms. For sheet metal, the plane must be square to the face the original is sketched on.");
     out
 }
 

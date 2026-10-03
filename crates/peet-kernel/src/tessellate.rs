@@ -23,7 +23,7 @@ use std::f64::consts::TAU;
 
 use peet_math::{DVec2, DVec3, tolerance};
 
-use crate::geom::{Curve3, Surface, unwrap_angle};
+use crate::geom::{Curve3, Surface, pole_exit};
 use crate::{EdgeId, FaceId, KernelError, Solid};
 
 pub use silhouette::Silhouettes;
@@ -157,15 +157,110 @@ fn max_step(curve: &Curve3, tolerance: f64) -> f64 {
     chord.clamp(TAU / MAX_SEGMENTS_PER_TURN, MAX_ANGLE)
 }
 
+/// Largest angle step on a circle of `radius` within `tolerance`.
+fn arc_step(radius: f64, tolerance: f64) -> f64 {
+    max_step(
+        &Curve3::Circle(crate::geom::Circle3 {
+            frame: peet_math::Frame::WORLD,
+            radius,
+        }),
+        tolerance,
+    )
+}
+
+/// How a face on a surface of revolution is laid out for triangulation.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Chart {
+    /// Millimetres per radian of `u`, and per unit of `v`.
+    pub scale: DVec2,
+    /// Largest step in `u` (radians) a facet may span.
+    pub max_du: f64,
+    /// Largest step in `v` a facet may span, where the meridian is curved.
+    pub max_dv: Option<f64>,
+}
+
+/// The chart of a curved face (`None` for planes).
+pub(crate) fn face_chart(solid: &Solid, face: FaceId, tolerance: f64) -> Option<Chart> {
+    let f = solid.face(face);
+    Some(match &f.surface {
+        Surface::Plane(_) => return None,
+        Surface::Cylinder(c) => Chart {
+            scale: DVec2::new(c.radius, 1.0),
+            max_du: arc_step(c.radius, tolerance),
+            max_dv: None,
+        },
+        Surface::Cone(c) => {
+            // The widest the face gets decides how fine it must be around the axis.
+            let mut reach = 0.0_f64;
+            for &l in &f.loops {
+                for co in solid.loop_coedges(l) {
+                    let e = solid.edge(solid.coedge(co).edge);
+                    for k in [0.0, 0.5, 1.0] {
+                        let q = c.frame.to_local(e.point_at_fraction(k));
+                        reach = reach.max(q.x.hypot(q.y));
+                    }
+                }
+            }
+            let reach = if reach > tolerance::LINEAR {
+                reach
+            } else {
+                1.0
+            };
+            Chart {
+                scale: DVec2::new(reach, 1.0),
+                max_du: arc_step(reach, tolerance),
+                max_dv: None,
+            }
+        }
+        Surface::Sphere(s) => Chart {
+            scale: DVec2::splat(s.radius),
+            max_du: arc_step(s.radius, tolerance),
+            max_dv: Some(arc_step(s.radius, tolerance)),
+        },
+        Surface::Torus(t) => Chart {
+            scale: DVec2::new(t.major + t.minor, t.minor),
+            max_du: arc_step(t.major + t.minor, tolerance),
+            max_dv: Some(arc_step(t.minor, tolerance)),
+        },
+    })
+}
+
+/// Whether `curve` is a circle around the axis of the surface of revolution `surface`.
+fn is_latitude(curve: &Curve3, surface: &Surface) -> bool {
+    let (Curve3::Circle(c), Some(frame)) = (curve, surface.revolution_frame()) else {
+        return false;
+    };
+    let axis = frame.z_axis();
+    let offset = c.frame.origin - frame.origin;
+    tolerance::directions_parallel(c.frame.z_axis(), axis)
+        && (offset - axis * offset.dot(axis)).length() <= tolerance::LINEAR
+}
+
 /// Samples every edge once, within `tolerance`.
 pub(crate) fn sample_edges(solid: &Solid, tolerance: f64) -> Vec<EdgeSamples> {
+    let charts: Vec<Option<Chart>> = solid
+        .face_ids()
+        .map(|f| face_chart(solid, f, tolerance))
+        .collect();
     solid
         .edges
         .iter()
         .map(|e| {
             let span = e.t1 - e.t0;
+            let mut step = max_step(&e.curve, tolerance);
+            // A circle around the axis of a cone, sphere or torus face is stepped as
+            // finely as the face's widest part needs, so facets can run from it straight
+            // across the face.
+            for &c in &e.coedges {
+                let face = solid.coedge_face(c);
+                if let Some(chart) = &charts[face.index()]
+                    && is_latitude(&e.curve, &solid.face(face).surface)
+                {
+                    step = step.min(chart.max_du);
+                }
+            }
             let n = if span.is_finite() && span > 0.0 {
-                (span / max_step(&e.curve, tolerance)).ceil().max(1.0) as usize
+                (span / step).ceil().max(1.0) as usize
             } else {
                 1
             };
@@ -196,64 +291,139 @@ pub(crate) struct FaceBoundary {
     pub loops: Vec<std::ops::Range<usize>>,
     /// The `u` axis is mirrored (faces whose outward normal opposes the surface normal).
     pub mirrored: bool,
+    /// Millimetres per unit of `(u, v)` (1 for planes).
+    pub scale: DVec2,
 }
 
-/// Maps a face's loops to its parameter space (see [`FaceBoundary`]).
-pub(crate) fn face_boundary(solid: &Solid, face: FaceId, samples: &[EdgeSamples]) -> FaceBoundary {
+/// Maps a face's loops to its parameter space (see [`FaceBoundary`]), lifted as described
+/// in [`crate::geom`]: where a loop passes a pole it runs along the pole's line, in steps
+/// of at most `chart.max_du`, with every point of that run at the pole itself.
+pub(crate) fn face_boundary(
+    solid: &Solid,
+    face: FaceId,
+    samples: &[EdgeSamples],
+    tolerance: f64,
+) -> FaceBoundary {
     let f = solid.face(face);
     let mirror = if f.reversed { -1.0 } else { 1.0 };
+    let chart = face_chart(solid, face, tolerance);
+    let scale = chart.map_or(DVec2::ONE, |c| c.scale);
+    let max_du = chart.map_or(MAX_ANGLE, |c| c.max_du);
     let mut out = FaceBoundary {
         param: Vec::new(),
         positions: Vec::new(),
         loops: Vec::with_capacity(f.loops.len()),
         mirrored: f.reversed,
+        scale,
+    };
+    let push = |out: &mut FaceBoundary, uv: DVec2, p: DVec3| {
+        out.param
+            .push(DVec2::new(uv.x * scale.x * mirror, uv.y * scale.y));
+        out.positions.push(p);
+    };
+    // The run along a pole's line from `from` to the `u` of `to`, without its last point.
+    let pole_run = |out: &mut FaceBoundary, from: DVec2, to: f64, p: DVec3| {
+        let n = ((to - from.x).abs() / max_du).ceil().max(1.0) as usize;
+        for i in 0..n {
+            let u = from.x + (to - from.x) * i as f64 / n as f64;
+            push(out, DVec2::new(u, from.y), p);
+        }
     };
     for &l in &f.loops {
         let start = out.param.len();
-        let mut theta: Option<f64> = None;
+        // Lifted parameters where the previous coedge ended, and where the loop began.
+        let mut at: Option<DVec2> = None;
+        let mut first = DVec2::ZERO;
+        let mut end_pole: Option<(crate::geom::Pole, DVec3)> = None;
         for c in solid.loop_coedges(l) {
             let co = solid.coedge(c);
+            let e = solid.edge(co.edge);
             let s = &samples[co.edge.index()];
             let n = s.points.len();
-            // Every point but the last (the next coedge's first).
+            let (ta, tb) = if co.reversed {
+                (e.t1, e.t0)
+            } else {
+                (e.t0, e.t1)
+            };
+            let Surface::Plane(pl) = &f.surface else {
+                let (raw, pole) = f.surface.param_toward(&e.curve, ta, tb);
+                let mut uv = match (at, pole) {
+                    (None, _) => {
+                        first = raw;
+                        raw
+                    }
+                    (Some(prev), Some(pole)) => {
+                        let exit = pole_exit(prev.x, raw.x, pole.top, !f.reversed);
+                        let p = s.points[if co.reversed { n - 1 } else { 0 }];
+                        pole_run(&mut out, prev, exit, p);
+                        DVec2::new(exit, pole.v)
+                    }
+                    (Some(prev), None) => prev,
+                };
+                // Every point but the last (the next coedge's first).
+                for k in 0..n - 1 {
+                    let k = if co.reversed { n - 1 - k } else { k };
+                    let p = s.points[k];
+                    if k != if co.reversed { n - 1 } else { 0 } {
+                        uv = f.surface.param_near(f.surface.param(p), uv);
+                    }
+                    push(&mut out, uv, p);
+                }
+                let (raw, pole) = f.surface.param_toward(&e.curve, tb, ta);
+                at = Some(f.surface.param_near(raw, uv));
+                end_pole = pole.map(|pole| (pole, s.points[if co.reversed { 0 } else { n - 1 }]));
+                continue;
+            };
             for k in 0..n - 1 {
                 let k = if co.reversed { n - 1 - k } else { k };
-                let p = s.points[k];
-                let uv = match &f.surface {
-                    Surface::Plane(pl) => pl.to_plane_coords(p),
-                    Surface::Cylinder(cy) => {
-                        let q = cy.frame.to_local(p);
-                        let raw = q.y.atan2(q.x);
-                        let th = theta.map_or(raw, |prev| unwrap_angle(raw, prev));
-                        theta = Some(th);
-                        DVec2::new(th * cy.radius, q.z)
-                    }
-                };
-                out.param.push(DVec2::new(uv.x * mirror, uv.y));
-                out.positions.push(p);
+                push(&mut out, pl.to_plane_coords(s.points[k]), s.points[k]);
             }
+        }
+        if let (Some(prev), Some((pole, p))) = (at, end_pole) {
+            let exit = pole_exit(prev.x, first.x, pole.top, !f.reversed);
+            pole_run(&mut out, prev, exit, p);
         }
         out.loops.push(start..out.param.len());
     }
-    // Shift cylinder holes by whole turns into the outer loop's angular range.
-    if let Surface::Cylinder(cy) = &f.surface
-        && out.loops.len() > 1
-    {
-        let turn = TAU * cy.radius;
+    // Shift holes by whole turns into the outer loop's range.
+    if out.loops.len() > 1 {
         let mid = |r: &std::ops::Range<usize>, param: &[DVec2]| {
-            let (lo, hi) = param[r.clone()]
-                .iter()
-                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
-                    (lo.min(p.x), hi.max(p.x))
-                });
+            let (lo, hi) = param[r.clone()].iter().fold(
+                (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+                |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+            );
             0.5 * (lo + hi)
         };
+        let turn = DVec2::new(
+            if f.surface.is_periodic_u() {
+                TAU * scale.x
+            } else {
+                0.0
+            },
+            if f.surface.is_periodic_v() {
+                TAU * scale.y
+            } else {
+                0.0
+            },
+        );
         let outer_mid = mid(&out.loops[0], &out.param);
         for r in out.loops[1..].iter().cloned() {
-            let shift = ((outer_mid - mid(&r, &out.param)) / turn).round() * turn;
-            if shift != 0.0 {
+            let gap = outer_mid - mid(&r, &out.param);
+            let shift = DVec2::new(
+                if turn.x > 0.0 {
+                    (gap.x / turn.x).round() * turn.x
+                } else {
+                    0.0
+                },
+                if turn.y > 0.0 {
+                    (gap.y / turn.y).round() * turn.y
+                } else {
+                    0.0
+                },
+            );
+            if shift != DVec2::ZERO {
                 for p in &mut out.param[r] {
-                    p.x += shift;
+                    *p += shift;
                 }
             }
         }
@@ -282,7 +452,8 @@ fn tessellate_face(
             face.0
         )));
     }
-    let boundary = face_boundary(solid, face, samples);
+    let boundary = face_boundary(solid, face, samples, tolerance);
+    let scale = boundary.scale;
     let mut param = boundary.param;
     let mut positions = boundary.positions;
     let loops = boundary.loops;
@@ -305,25 +476,32 @@ fn tessellate_face(
             mesh.delaunay(|_, _| true);
             vec![pl.normal() * sign; mesh.points.len()]
         }
-        Surface::Cylinder(cy) => {
-            let r = cy.radius;
+        _ => {
+            let chart = face_chart(solid, face, tolerance).expect("a curved face has a chart");
             // A little slack: boundary steps are often exactly the limit (an arc that
             // divides evenly), and rounding must not make those facets look too wide.
-            let max_dx = (1.0 + FACET_SLACK)
-                * r
-                * max_step(
-                    &Curve3::Circle(crate::geom::Circle3 {
-                        frame: cy.frame,
-                        radius: r,
-                    }),
-                    tolerance,
-                );
+            // No facet can be narrower than the widest step of the boundary it stands on
+            // (an ellipse on a cone is stepped by its own angle, not the cone's).
+            let mut widest = DVec2::ZERO;
+            for r in &loops {
+                let pts = &mesh.points[r.clone()];
+                for i in 0..pts.len() {
+                    widest = widest.max((pts[(i + 1) % pts.len()] - pts[i]).abs());
+                }
+            }
+            let max_dx = (1.0 + FACET_SLACK) * (scale.x * chart.max_du).max(widest.x);
+            let max_dy = chart.max_dv.map_or(f64::INFINITY, |dv| {
+                (1.0 + FACET_SLACK) * (scale.y * dv).max(widest.y)
+            });
             mesh.delaunay(|_, _| true);
-            mesh.split_long_x(max_dx, MAX_STEINER_POINTS);
-            mesh.delaunay(|a, b| (a.x - b.x).abs() <= max_dx);
+            mesh.split_long(0, max_dx, MAX_STEINER_POINTS);
+            if max_dy.is_finite() {
+                mesh.split_long(1, max_dy, MAX_STEINER_POINTS);
+            }
+            mesh.delaunay(|a, b| (a.x - b.x).abs() <= max_dx && (a.y - b.y).abs() <= max_dy);
             // Interior points are new: place them on the surface.
             let unmirror = if f.reversed != flip { -1.0 } else { 1.0 };
-            let to_uv = |p: DVec2| DVec2::new(p.x * unmirror / r, p.y);
+            let to_uv = |p: DVec2| DVec2::new(p.x * unmirror / scale.x, p.y / scale.y);
             for p in &mesh.points[positions.len()..] {
                 positions.push(f.surface.point(to_uv(*p)));
             }
@@ -334,6 +512,15 @@ fn tessellate_face(
         }
     };
     let mut triangles = mesh.tris;
+    // The run along a pole's line is one point in space: its triangles have no area.
+    let bits = |i: u32| {
+        let p = positions[i as usize];
+        [p.x.to_bits(), p.y.to_bits(), p.z.to_bits()]
+    };
+    triangles.retain(|t| {
+        let [a, b, c] = t.map(bits);
+        a != b && b != c && a != c
+    });
     if flip {
         for t in &mut triangles {
             t.swap(1, 2);
@@ -354,6 +541,7 @@ mod tests {
 
     use super::*;
     use crate::extrude::extrude;
+    use crate::geom::unwrap_angle;
     use crate::topo::test_shapes::cuboid;
     use crate::validate::{assert_valid, measure};
     use peet_math::Plane;

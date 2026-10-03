@@ -103,15 +103,7 @@ pub(crate) mod shapes {
             };
         }
         for f in &mut s.faces {
-            f.surface = match f.surface {
-                Surface::Plane(p) => Surface::Plane(Plane {
-                    frame: frame.compose(&p.frame),
-                }),
-                Surface::Cylinder(c) => Surface::Cylinder(Cylinder {
-                    frame: frame.compose(&c.frame),
-                    radius: c.radius,
-                }),
-            };
+            f.surface = crate::transform::surface(&f.surface, frame);
         }
         s
     }

@@ -23,6 +23,7 @@ pub enum AfterDiscard {
     Sample,
     SampleEnclosure,
     SampleChassis,
+    SampleHousing,
     Quit,
 }
 

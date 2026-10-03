@@ -123,23 +123,23 @@ pub fn extrude_traced(
 
 /// A loop edge after cleaning: geometry plus traversal direction.
 #[derive(Clone, Copy, Debug)]
-struct Piece {
-    curve: Curve,
-    reversed: bool,
+pub(crate) struct Piece {
+    pub curve: Curve,
+    pub reversed: bool,
     /// Index of the edge in the loop as given.
-    source: usize,
+    pub source: usize,
 }
 
 impl Piece {
     /// Start and end in loop order.
-    fn ends(&self) -> (DVec2, DVec2) {
+    pub fn ends(&self) -> (DVec2, DVec2) {
         let (a, b) = (self.curve.start(), self.curve.end());
         if self.reversed { (b, a) } else { (a, b) }
     }
 }
 
 /// A cleaned loop.
-enum PreparedLoop {
+pub(crate) enum PreparedLoop {
     /// A general loop of lines and arcs, at least two pieces.
     Pieces(Vec<Piece>),
     /// A full circle; `reversed` means clockwise. `start_angle` is where the seam goes.
@@ -155,7 +155,7 @@ enum PreparedLoop {
 
 /// Drops degenerate pieces, detects full circles and fixes the winding (counter-clockwise
 /// for outer loops, clockwise for holes). Errors describe the problem for the user.
-fn prepare_loop(edges: &[LoopEdge], outer: bool) -> Result<PreparedLoop, String> {
+pub(crate) fn prepare_loop(edges: &[LoopEdge], outer: bool) -> Result<PreparedLoop, String> {
     let mut pieces: Vec<Piece> = edges
         .iter()
         .enumerate()

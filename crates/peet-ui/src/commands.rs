@@ -101,6 +101,18 @@ pub enum CommandId {
     GaugeTables,
     ExportStep,
     ImportDxf,
+    Revolve,
+    CutRevolve,
+    Fillet,
+    Chamfer,
+    Shell,
+    Draft,
+    Hole,
+    ImportStep,
+    MassProperties,
+    OpenSampleHousing,
+    Sweep,
+    CutSweep,
 }
 
 /// Static description of a command.
@@ -129,7 +141,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 92] = [
+    pub const ALL: [Self; 104] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -222,6 +234,18 @@ impl CommandId {
         Self::GaugeTables,
         Self::ExportStep,
         Self::ImportDxf,
+        Self::Revolve,
+        Self::CutRevolve,
+        Self::Fillet,
+        Self::Chamfer,
+        Self::Shell,
+        Self::Draft,
+        Self::Hole,
+        Self::ImportStep,
+        Self::MassProperties,
+        Self::OpenSampleHousing,
+        Self::Sweep,
+        Self::CutSweep,
     ];
 
     pub fn info(self) -> CommandInfo {
@@ -687,19 +711,19 @@ impl CommandId {
             Self::LinearPattern => (
                 "Linear Pattern",
                 "Features",
-                "Copy the selected feature (an extrusion, a cut, a sheet metal cut or a form) in a row or a grid.",
+                "Copy the selected feature (an extrusion, a cut, a revolve, a hole, a sheet metal cut or a form) in a row or a grid.",
                 None,
             ),
             Self::CircularPattern => (
                 "Circular Pattern",
                 "Features",
-                "Copy the selected feature (an extrusion, a cut, a sheet metal cut or a form) around an axis.",
+                "Copy the selected feature (an extrusion, a cut, a revolve, a hole, a sheet metal cut or a form) around an axis.",
                 None,
             ),
             Self::MirrorFeature => (
                 "Mirror",
                 "Features",
-                "Make a mirror image of the selected feature (an extrusion, a cut, a sheet metal cut or a form) across a plane.",
+                "Make a mirror image of the selected feature (an extrusion, a cut, a revolve, a hole, a sheet metal cut or a form) across a plane.",
                 None,
             ),
             Self::SheetChecks => (
@@ -724,6 +748,78 @@ impl CommandId {
                 "Import DXF…",
                 "File",
                 "Bring the lines, arcs and circles of a DXF drawing into the open sketch, or into a new sketch on the top plane (or the selected plane or face).",
+                None,
+            ),
+            Self::Revolve => (
+                "Revolve",
+                "Features",
+                "Turn the selected (or open) sketch about an axis into a solid. Draw a construction line in the sketch for the axis; without one, the sketch's vertical axis is used.",
+                None,
+            ),
+            Self::CutRevolve => (
+                "Cut-Revolve",
+                "Features",
+                "Turn the selected (or open) sketch about an axis and cut the result out of the bodies.",
+                None,
+            ),
+            Self::Fillet => (
+                "Fillet",
+                "Features",
+                "Round the selected edges of a body with a constant radius (or pick the edges).",
+                None,
+            ),
+            Self::Chamfer => (
+                "Chamfer",
+                "Features",
+                "Cut the selected edges of a body back by the same distance on both faces (or pick the edges).",
+                None,
+            ),
+            Self::Shell => (
+                "Shell",
+                "Features",
+                "Hollow the bodies, leaving walls of one thickness. The selected faces are removed to open the hollow; with none, the body becomes a closed hollow.",
+                None,
+            ),
+            Self::Draft => (
+                "Draft",
+                "Features",
+                "Taper the selected flat faces by an angle, keeping their size where they cross a neutral plane.",
+                None,
+            ),
+            Self::Hole => (
+                "Hole",
+                "Features",
+                "Drill a hole at every point of the selected (or open) sketch, drawn on a face of a body: standard metric sizes, counterbore or countersink, cosmetic threads.",
+                None,
+            ),
+            Self::ImportStep => (
+                "Import STEP…",
+                "File",
+                "Bring the solids of a STEP file (.step, .stp) from another CAD system into the part as bodies.",
+                None,
+            ),
+            Self::MassProperties => (
+                "Mass Properties…",
+                "Tools",
+                "Volume, surface area, mass, centre of gravity and moments of inertia of every body.",
+                None,
+            ),
+            Self::Sweep => (
+                "Sweep",
+                "Features",
+                "Carry the selected (or open) sketch along a path drawn in another sketch: lines and arcs joined smoothly, starting on the profile's plane and square to it.",
+                None,
+            ),
+            Self::CutSweep => (
+                "Cut-Sweep",
+                "Features",
+                "Carry the selected (or open) sketch along a path drawn in another sketch and cut the result out of the bodies.",
+                None,
+            ),
+            Self::OpenSampleHousing => (
+                "Open Sample Housing",
+                "File",
+                "Open a turned bearing housing: a revolve, a fillet, chamfers and a counterbored hole patterned into a bolt circle.",
                 None,
             ),
         };
@@ -822,6 +918,20 @@ mod tests {
                 let key = format!("{:?}{:?}", s.logical_key, s.modifiers);
                 assert!(seen.insert(key), "duplicate shortcut on {cmd:?}");
             }
+        }
+    }
+
+    #[test]
+    fn every_command_has_a_label_and_a_description() {
+        for cmd in CommandId::ALL {
+            let info = cmd.info();
+            assert!(!info.label.trim().is_empty(), "{cmd:?} has no label");
+            assert!(!info.category.is_empty(), "{cmd:?} has no category");
+            assert!(
+                info.description.ends_with('.'),
+                "{cmd:?}: {}",
+                info.description
+            );
         }
     }
 

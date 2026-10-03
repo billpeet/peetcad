@@ -4,6 +4,7 @@
 use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
+use peet_kernel::query::{MassProperties, mass_properties};
 use peet_kernel::tessellate::{Silhouettes, SolidMesh, tessellate};
 use peet_kernel::{EdgeId, FaceId, VertexId};
 
@@ -43,6 +44,8 @@ pub struct BodyView {
     /// Showing the flat pattern.
     pub flat: bool,
     display: OnceLock<Display>,
+    /// The mass properties of `source`, worked out the first time they are asked for.
+    mass: OnceLock<Result<MassProperties, String>>,
 }
 
 impl Deref for BodyView {
@@ -109,6 +112,7 @@ impl BodyView {
             flat: false,
             body,
             display,
+            mass: OnceLock::new(),
         }
     }
 
@@ -146,5 +150,22 @@ impl BodyView {
     /// Whether the body has been tessellated yet.
     pub fn is_tessellated(&self) -> bool {
         self.display.get().is_some()
+    }
+
+    /// Volume, area, centre of gravity and inertia of the model's body (the folded part,
+    /// also while its flat pattern is shown), for a density of 1 and in millimetres.
+    /// Worked out on first use and kept: views are reused for as long as the body's stamp
+    /// stays the same, so a body is measured once per change to it. It can take a tenth
+    /// of a second for a curved body.
+    pub fn mass_properties(&self) -> Result<&MassProperties, &str> {
+        self.mass
+            .get_or_init(|| mass_properties(&self.source.solid).map_err(|e| e.to_string()))
+            .as_ref()
+            .map_err(String::as_str)
+    }
+
+    /// Whether [`BodyView::mass_properties`] has its answer already.
+    pub fn is_measured(&self) -> bool {
+        self.mass.get().is_some()
     }
 }

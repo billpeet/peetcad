@@ -29,9 +29,13 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 ///   patterns and mirrors; axes along edges; the copy role in face names. Version 1 and 2
 ///   models decode unchanged (every addition is a new variant at the end of its enum).
 /// - B-rep 3 (Phase 5): the copy role in face names.
+/// - Model 4 (Phase 6): revolves, fillets and chamfers, shells, draft, holes and imported
+///   bodies. Earlier models decode unchanged (new variants at the end of the feature enum).
+/// - B-rep 4 (Phase 6): cones, spheres and tori as surfaces; blend, shell and import roles
+///   in face names. Earlier caches decode unchanged.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 3;
-pub const BREP_SCHEMA: u16 = 3;
+pub const MODEL_SCHEMA: u16 = 4;
+pub const BREP_SCHEMA: u16 = 4;
 pub const MESH_SCHEMA: u16 = 1;
 
 /// The file extension, without the dot.

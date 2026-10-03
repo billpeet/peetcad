@@ -155,7 +155,7 @@ fn try_merge(
             .copied()
             .filter(|h| Some(h.0) == keep || !shared.contains(&h.0))
             .collect();
-        let half_edges = prune_dangling(&half_edges, edges);
+        let half_edges = prune_dangling(&half_edges, edges, &a.domain(), points);
         if half_edges.is_empty() {
             return None;
         }
@@ -247,7 +247,10 @@ fn pair_edge_uses(patches: &mut [Patch], edges: &mut Vec<GEdge>) -> Result<(), S
                     into_face.dot(e2).atan2(into_face.dot(e1)),
                     // Faces tangent to each other along the edge (a cylinder touching a
                     // plane) are told apart by how the surface curves away from it.
-                    section_curvature(&patches[pi].surface, at, into_face).dot(ccw),
+                    patches[pi]
+                        .surface
+                        .section_curvature(at, into_face)
+                        .dot(ccw),
                     n.dot(ccw) < 0.0,
                     pi,
                     fwd,
@@ -310,6 +313,13 @@ fn merge_edges(patches: &mut [Patch], edges: &mut Vec<GEdge>, points: &[DVec3]) 
             }
             let (e1, e2) = (list[0].min(list[1]), list[0].max(list[1]));
             if touched.contains(&e1) || touched.contains(&e2) {
+                continue;
+            }
+            // A pole of a face's surface stays a vertex: an edge never runs through one.
+            let at_pole = uses[&e1]
+                .iter()
+                .any(|&(p, _)| patches[p].surface.pole_at(points[v as usize]).is_some());
+            if at_pole {
                 continue;
             }
             let (g1, g2) = (&edges[e1 as usize], &edges[e2 as usize]);
@@ -536,18 +546,6 @@ fn split_vertex_fans(solid: &mut Solid) {
                     edge.start = copy;
                 }
             }
-        }
-    }
-}
-
-/// Curvature vector of the surface's normal section at `p` in the unit tangent direction
-/// `dir`: a point moving that way along the surface accelerates by this.
-fn section_curvature(surface: &Surface, p: DVec3, dir: DVec3) -> DVec3 {
-    match surface {
-        Surface::Plane(_) => DVec3::ZERO,
-        Surface::Cylinder(c) => {
-            let around = 1.0 - dir.dot(c.axis()).powi(2);
-            -surface.normal_at(p) * (around / c.radius)
         }
     }
 }

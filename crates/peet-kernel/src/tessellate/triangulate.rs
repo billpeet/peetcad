@@ -384,9 +384,21 @@ impl Mesh2 {
     /// vertices of both adjacent triangles lie between the edge's ends in `x` (their edges
     /// are no longer than it), so every new edge is at most half as long and the process
     /// terminates; splitting in arbitrary order can chase its own midpoints forever.
-    /// This needs boundary edges no longer than `max_dx`, which edge sampling guarantees.
-    pub fn split_long_x(&mut self, max_dx: f64, max_points: usize) {
-        let dx = |m: &Self, a: u32, b: u32| (m.p(a).x - m.p(b).x).abs();
+    /// This needs boundary edges no longer than `max_dx`, which edge sampling guarantees
+    /// for circles around the axis and for meridians. Where another kind of boundary edge
+    /// is longer, the triangle on it can't be brought within the limit, so the edges of
+    /// that triangle are left alone rather than split without end.
+    ///
+    /// `axis` selects the coordinate measured: 0 for `x`, 1 for `y`.
+    pub fn split_long(&mut self, axis: usize, max_dx: f64, max_points: usize) {
+        let dx = |m: &Self, a: u32, b: u32| (m.p(a)[axis] - m.p(b)[axis]).abs();
+        let boundary_too_long = |m: &Self, t: usize| {
+            let tri = m.tris[t];
+            (0..3).any(|k| {
+                let (u, v) = (tri[k], tri[(k + 1) % 3]);
+                !m.edges.contains_key(&(v, u)) && dx(m, u, v) > max_dx
+            })
+        };
         // Non-negative floats order like their bit patterns.
         let mut heap: std::collections::BinaryHeap<(u64, u32, u32)> = self
             .edges
@@ -403,6 +415,9 @@ impl Mesh2 {
             let (Some(&t1), Some(&t2)) = (self.edges.get(&(a, b)), self.edges.get(&(b, a))) else {
                 continue; // a boundary edge, or one that no longer exists
             };
+            if boundary_too_long(self, t1) || boundary_too_long(self, t2) {
+                continue;
+            }
             let c = self.opposite(t1, a, b);
             let d = self.opposite(t2, b, a);
             let (pa, pb) = (self.p(a), self.p(b));
@@ -552,7 +567,7 @@ mod tests {
         assert_eq!(tris.len(), len - 2);
         let mut mesh = Mesh2::new(pts, tris);
         mesh.delaunay(|_, _| true);
-        mesh.split_long_x(1.0, 1000);
+        mesh.split_long(0, 1.0, 1000);
         mesh.delaunay(|a, b| (a.x - b.x).abs() <= 1.0);
         assert!((area(&mesh.points, &mesh.tris) - 60.0).abs() < 1e-9);
         for t in &mesh.tris {

@@ -518,7 +518,7 @@ impl Validator<'_> {
                 for (k, &l) in face.loops.iter().enumerate() {
                     let m = measure::loop_integrals(s, l, reference);
                     volume += m.volume;
-                    if matches!(face.surface, Surface::Cylinder(_)) {
+                    if face.surface.is_periodic_u() {
                         if k == 0 {
                             outer_range = m.theta_range;
                         } else if !fits_in_turns(m.theta_range, outer_range) {
@@ -528,9 +528,12 @@ impl Validator<'_> {
                             ));
                         }
                     }
-                    if m.winding.abs() > std::f64::consts::PI {
+                    if m.winding.abs() > std::f64::consts::PI
+                        || m.winding_v.abs() > std::f64::consts::PI
+                    {
+                        let kind = surface_name(&face.surface);
                         self.report(format!(
-                            "loop {} of face {} wraps around the cylinder; a full cylinder \
+                            "loop {} of face {} wraps around the {kind}; a full {kind} \
                              needs a seam edge",
                             l.0, f.0
                         ));
@@ -580,6 +583,7 @@ impl Validator<'_> {
         let shell_bounds = |k: usize| {
             let mut b = peet_math::Aabb::EMPTY;
             for &f in &s.shell(ShellId(k as u32)).faces {
+                b = b.union(&measure::bulge_bounds(s, f));
                 for &l in &s.face(f).loops {
                     for c in s.loop_coedges(l) {
                         let e = s.edge(s.coedge(c).edge);
@@ -629,6 +633,36 @@ fn surface_problem(s: &Surface) -> Option<String> {
         Surface::Plane(p) => (!p.origin().is_finite()).then(|| "plane is not finite".to_owned()),
         Surface::Cylinder(c) => (!(c.radius > tolerance::LINEAR && c.radius.is_finite()))
             .then(|| format!("cylinder radius {} is not positive", c.radius)),
+        Surface::Cone(c) => {
+            let angle = c.half_angle.abs();
+            (!(c.radius >= 0.0
+                && c.radius.is_finite()
+                && angle > tolerance::ANGULAR
+                && angle < std::f64::consts::FRAC_PI_2 - tolerance::ANGULAR))
+                .then(|| {
+                    format!(
+                        "cone radius {} or half angle {} is invalid",
+                        c.radius, c.half_angle
+                    )
+                })
+        }
+        Surface::Sphere(s) => (!(s.radius > tolerance::LINEAR && s.radius.is_finite()))
+            .then(|| format!("sphere radius {} is not positive", s.radius)),
+        Surface::Torus(t) => (!(t.minor > tolerance::LINEAR
+            && t.major > tolerance::LINEAR
+            && t.major.is_finite()
+            && t.minor.is_finite()))
+        .then(|| format!("torus radii {} / {} are invalid", t.major, t.minor)),
+    }
+}
+
+fn surface_name(s: &Surface) -> &'static str {
+    match s {
+        Surface::Plane(_) => "plane",
+        Surface::Cylinder(_) => "cylinder",
+        Surface::Cone(_) => "cone",
+        Surface::Sphere(_) => "sphere",
+        Surface::Torus(_) => "torus",
     }
 }
 

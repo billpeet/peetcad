@@ -226,14 +226,28 @@ Still to do: the STEP files have not been opened in another CAD system (none was
 ### Phase 6: General solid modelling
 *Goal: broaden beyond sheet metal.*
 
-- [ ] Full robust boolean operations (union, subtract, intersect) on analytic surfaces
-- [ ] Revolve, sweep (analytic cases first), hole wizard (standard sizes, counterbore/countersink, threads as cosmetic)
-- [ ] Fillet and chamfer (constant radius, edge chains). A known hard problem, so scope carefully
-- [ ] Shell, draft
-- [ ] Surface types: cone, sphere, torus, then **NURBS** curves and surfaces
-- [ ] Loft; convert solid to sheet metal (recognize bends from a shelled solid)
-- [ ] STEP import (needs NURBS for general files)
-- [ ] Measurement tools, mass properties (volume, mass, center of gravity)
+- [x] Surface types: cone, sphere, torus
+- [x] Boolean operations (union, subtract, intersect) on the analytic surfaces: every pair turned about one axis, planes against spheres, cones and tori, and equal cylinders that cross. *Curved faces that cross without a common axis are refused with a message; they need the freeform kernel.*
+- [x] Revolve, and sweep along a path of lines and arcs
+- [x] Hole wizard (standard metric sizes, counterbore/countersink, drill point, threads as cosmetic)
+- [x] Fillet and chamfer (constant radius, edge chains): straight edges between flat faces and round edges between faces turned about the edge's axis
+- [x] Shell, draft (flat faces)
+- [x] STEP import of analytic solids, with units, assemblies' placements and seams rebuilt
+- [x] Measurement tools, mass properties (volume, mass, centre of gravity, moments of inertia)
+- [ ] **NURBS** curves and surfaces
+- [ ] Loft, sweep along a general path, fillets and drafts on freeform faces (need NURBS)
+- [ ] STEP import of freeform faces (needs NURBS)
+- [ ] Convert solid to sheet metal (recognize bends from a shelled solid)
+
+**Exit criteria:** A turned and drilled part (the bearing housing sample) is modelled with these features, matches its hand-calculated volume, and goes out to STEP and comes back as the same solid.
+
+**Status:** The analytic half of the phase is implemented; the freeform half (NURBS and what depends on it) and converting solids to sheet metal are not started. The design is recorded in [ADR 0006](docs/adr/0006-general-solid-modelling.md).
+
+In `peet-kernel`: cones, spheres and tori are surfaces of revolution with one parametrisation, so areas, volumes, tessellation and booleans treat them alike; faces stay polygons in parameter space, with seams for full turns and the poles (a sphere's, a cone's apex) always at vertices. `revolve` builds turned solids directly. `blend` makes fillets and chamfers by sweeping the sliver between an edge's faces and the blend, then subtracting or adding it, with mitres where blended edges meet and a ball where three fillets meet squarely. `reshape` offsets faces, shells and drafts by giving faces new surfaces and solving the vertices and edges again on the same topology. `query` gives mass properties and measurements. In `peet-model`: revolve, sweep, hole, fillet, chamfer, shell, draft and imported-body features, with persistent names for their faces, and patterns and mirrors of revolves and holes. In `peet-io`: STEP export of the new surfaces and STEP import. In `peet-ui` and `peet-document`: commands, ribbon tools, property panels, the mass properties window and measurements in the selection panel.
+
+`crates/peet-io/tests/housing_exit.rs` builds the exit part (`samples::housing`, **File → Open Sample Housing**): a flange and hub revolved from one half section, a 4 mm fillet at the foot of the hub (a torus), 1.5 mm chamfers on the top rims (cones) and six M8 counterbored holes on a bolt circle from a circular pattern. Its volume is 124 840.83 mm³ by hand (Pappus's theorem) and in the model, to rounding; its STEP file (AP214 and AP242) reads back with the same faces, edges, volume and area; the imported body takes a further fillet; it survives save and reopen with its B-rep cache. It rebuilds from scratch in about 19 ms in a release build. The workspace gains 37 tests in `peet-kernel` (revolve and booleans on the new surfaces, blends, offset/shell/draft, mass properties, silhouettes), 14 in `peet-model/tests/phase6.rs`, 33 for STEP import and 4 in the exit test; everything from earlier phases still passes.
+
+Still to do: the new commands, panels and windows have been compile-checked and their features tested through the model, but none has been exercised by hand in the running app. STEP files from other CAD systems have only been imitated in tests (hand-written files in their styles), not read from real exports. Known limits: every edge of one fillet or chamfer takes the same size; a straight edge on a curved face, an elliptical edge, and an edge that ends on a curved face cutting across it can't be blended; fillets of different radii can't meet at a corner; three fillets meet in a ball only at square convex corners (elsewhere they mitre); shell and draft are refused when the topology would change (a wall thicker than a neighbouring fillet, a drafted wall next to a tangent round face); draft tilts flat faces only; a sweep's path must be smooth, flat and made of lines and arcs, and the profile must be square to its start; a hole can't run into another curved face off its own axis (a cross-drilled hole, a counterbore that reaches a fillet); a plane can cut a cone only square to its axis, through its apex or in an ellipse, and a torus only square to its axis or through it; threads are a designation on the hole, not drawn; the standard hole sizes should be checked against the fasteners used; the centre of gravity and inertia of curved bodies come from a fine mesh (about one part in 10⁴); imported bodies are stored in the model as they came, with no healing of loose tolerances, and a large STEP file is read on the UI thread; a sweep's path sketch can only be pre-selected while the profile sketch is open (the tree has no multi-selection).
 
 ### Phase 7: Assemblies
 - [ ] Multi-part documents, part instancing, external references
@@ -323,6 +337,7 @@ Benchmarks (`criterion`) run in CI for the solver, kernel operations and regener
 | Sheet metal | Native and flat first: a layout of flanges and bends in flat coordinates; the folded and flat solids share their topology, so unfolding is exact ([ADR 0004](docs/adr/0004-native-sheet-metal.md)) |
 | Regeneration and undo | Content-hashed keys per feature decide what to rebuild; undo stores model snapshots that share unchanged features ([ADR 0002](docs/adr/0002-incremental-regeneration.md)) |
 | Sheet metal features | Flanges are profiles of bends and flats; sketched bends split a flange in place; corners are declared and resolved at build time; forms are square-walled and present in both solids; patterns copy features, not geometry ([ADR 0005](docs/adr/0005-sheet-metal-phase-5.md)) |
+| General solid modelling | Analytic first: cones, spheres and tori as surfaces of revolution with poles at vertices; fillets and chamfers as boolean tools; shell and draft by solving the same topology on new surfaces; imported bodies as features. NURBS come later ([ADR 0006](docs/adr/0006-general-solid-modelling.md)) |
 
 ## Open questions
 

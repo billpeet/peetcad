@@ -7,6 +7,8 @@
 //! - [`sheet`]: sheet metal features (base flange, edge flange, sheet metal cut, hem,
 //!   sketched bend, jog, mitre flange, corner, forms) on top of `peet-sheetmetal`.
 //! - `pattern`: linear and circular patterns and mirrors of features.
+//! - `revolve`, `dressup`, [`hole`], `import`: revolves; fillets, chamfers, shells and
+//!   draft; the hole wizard; bodies imported from other CAD systems.
 //! - [`naming`]: persistent names for faces, edges and vertices, so references survive
 //!   upstream edits.
 //! - [`DependencyGraph`]: which feature uses which.
@@ -15,19 +17,25 @@
 //!
 //! The crate has no UI or GPU dependency: everything here runs headless.
 
+mod dressup;
 mod extrude;
 pub mod feature;
 pub mod hash;
 mod history;
+pub mod hole;
+mod import;
 mod model;
 pub mod naming;
 mod pattern;
 mod placement;
 mod regen;
+mod revolve;
 pub mod samples;
 pub mod sheet;
+mod sweep;
 mod units;
 
+pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
 pub use extrude::{
     EndCondition, Extrude, ExtrudeInput, Operation, RegionSelection, apply_extrude, default_regions,
 };
@@ -39,10 +47,16 @@ pub use feature::{
     SketchFeature, SketchedBendFeature, StdAxis, StdPlane,
 };
 pub use history::History;
+pub use hole::{HoleEnd, HoleFeature, HoleFit, HoleKind, HoleSizes, METRIC, MetricSize};
+pub use import::{ImportFeature, ImportedSolid};
 pub use model::{Datum, DependencyGraph, Model};
 pub use naming::{Body, EdgeRef, FaceName, FaceOrigin, FaceRef, FaceRole, Found, VertexRef};
 pub use placement::face_sketch_plane;
 pub use regen::{Engine, Evaluation, FeatureState, Output, SketchStatus, Stats, Status};
+pub use revolve::{
+    RevolveAxisRef, RevolveFeature, RevolveInput, apply_revolve, default_axis, sketch_axis,
+};
+pub use sweep::{SweepFeature, SweepInput, apply_sweep};
 
 /// Why a feature failed to rebuild. The message is shown next to the feature.
 #[derive(Clone, Debug, PartialEq)]
@@ -57,7 +71,8 @@ impl std::fmt::Display for FeatureError {
 impl std::error::Error for FeatureError {}
 
 impl From<peet_kernel::KernelError> for FeatureError {
+    /// The kernel's message as a sentence: it is shown next to the feature as it is.
     fn from(e: peet_kernel::KernelError) -> Self {
-        Self(e.to_string())
+        dressup::sentence(&e)
     }
 }

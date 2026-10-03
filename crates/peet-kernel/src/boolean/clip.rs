@@ -3,8 +3,8 @@
 
 use std::f64::consts::{PI, TAU};
 
-use peet_math::DVec3;
 use peet_math::tolerance::LINEAR;
+use peet_math::{DVec2, DVec3};
 
 use super::domain::{FaceGeom, Where};
 use super::roots::{Implicit, Roots, solve};
@@ -69,7 +69,16 @@ pub(crate) fn clip(curve: &Curve3, span: Span, faces: &[&FaceGeom]) -> Vec<(f64,
                 }
             }
         }
-        for &v in &f.vertices {
+        // A curve through a pole of the face's surface (a sphere's pole, a cone's apex) is
+        // cut there too: poles are always vertices, never inside an edge, so every edge
+        // has one image in the surface's parameters.
+        let poles = f
+            .surface
+            .poles()
+            .into_iter()
+            .flatten()
+            .map(|pole| f.surface.point(DVec2::new(0.0, pole.v)));
+        for v in f.vertices.iter().copied().chain(poles) {
             if curve_box.contains(v)
                 && curve.distance(v) <= LINEAR
                 && let Some(t) = place(curve.param(v))

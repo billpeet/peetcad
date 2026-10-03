@@ -228,9 +228,13 @@ fn range(input: &ExtrudeInput<'_>) -> Result<(f64, f64), FeatureError> {
     Ok((near, far))
 }
 
-/// The extruded tool solid with its face names.
-fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> {
-    let profile = find_regions(input.sketch);
+/// The regions of `sketch` a feature is made from.
+pub(crate) fn selected_regions(
+    sketch: &Sketch,
+    selection: &RegionSelection,
+    mirror: bool,
+) -> Result<Vec<Region>, FeatureError> {
+    let profile = find_regions(sketch);
     if profile.regions.is_empty() {
         let hint = if profile.open_ends.is_empty() {
             "Draw a closed shape."
@@ -241,7 +245,7 @@ fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError
             "The sketch has no closed region. {hint}"
         )));
     }
-    let indices: Vec<usize> = match &input.params.regions {
+    let indices: Vec<usize> = match selection {
         RegionSelection::Auto => default_regions(&profile),
         RegionSelection::Points(points) => {
             let mut v: Vec<usize> = points
@@ -256,11 +260,16 @@ fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError
     if indices.is_empty() {
         return Err(FeatureError("No regions are selected.".to_owned()));
     }
-    let regions: Vec<Region> = indices
+    Ok(indices
         .iter()
         .map(|&i| profile.regions[i].clone())
-        .map(|r| if input.mirror { mirrored(&r) } else { r })
-        .collect();
+        .map(|r| if mirror { mirrored(&r) } else { r })
+        .collect())
+}
+
+/// The extruded tool solid with its face names.
+fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> {
+    let regions = selected_regions(input.sketch, &input.params.regions, input.mirror)?;
     let (near, far) = range(input)?;
     let (from, to) = (near.min(far), near.max(far));
     let (solid, faces) = extrude_traced(input.plane, &regions, from, to)?;
@@ -295,7 +304,7 @@ fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError
 
 /// A region mirrored in the sketch's x axis (y to −y), its loops still running the
 /// same way round (outer counter-clockwise).
-fn mirrored(region: &Region) -> Region {
+pub(crate) fn mirrored(region: &Region) -> Region {
     use peet_sketch::Curve;
     use peet_sketch::region::{Loop, LoopEdge};
     let m = |p: DVec2| DVec2::new(p.x, -p.y);
@@ -356,7 +365,7 @@ fn mirrored(region: &Region) -> Region {
 
 /// The names of a boolean's result faces: each face takes the names of the input faces it
 /// is made of.
-fn result_names(
+pub(crate) fn result_names(
     sources: &[Vec<peet_kernel::boolean::FaceSource>],
     a: &[FaceName],
     b: &[FaceName],
@@ -385,18 +394,49 @@ pub(crate) fn stamp(seed: u64, index: usize) -> u64 {
 /// bodies. Bodies the feature doesn't touch are shared with the input, not copied.
 pub fn apply_extrude(input: &ExtrudeInput<'_>) -> Result<Vec<Arc<Body>>, FeatureError> {
     let (tool, tool_names) = tool(input)?;
+    combine(&Combine {
+        feature: input.feature,
+        bodies: input.bodies,
+        tool,
+        tool_names,
+        operation: input.params.operation,
+        stamp: input.stamp,
+        hint: "Check its direction and depth.",
+    })
+}
+
+/// A tool solid to be combined with the bodies built so far.
+pub(crate) struct Combine<'a> {
+    /// The feature being built.
+    pub feature: FeatureId,
+    pub bodies: &'a [Arc<Body>],
+    pub tool: Solid,
+    /// The name of each of the tool's faces.
+    pub tool_names: Vec<FaceName>,
+    pub operation: Operation,
+    /// Seed for the stamps of the bodies created or changed.
+    pub stamp: u64,
+    /// What to check when a cut removes nothing ("Check its direction and depth.").
+    pub hint: &'a str,
+}
+
+/// Makes the tool a new body, adds it to the bodies it touches or cuts it from them, and
+/// returns the new list of bodies. Bodies the tool doesn't touch are shared with the
+/// input, not copied.
+pub(crate) fn combine(input: &Combine<'_>) -> Result<Vec<Arc<Body>>, FeatureError> {
+    let (tool, tool_names) = (&input.tool, &input.tool_names);
     let tool_box = tool.bounds();
     let bodies = input.bodies;
     let touching: Vec<usize> = (0..bodies.len())
         .filter(|&i| overlaps(&bodies[i].solid.bounds(), &tool_box))
         .collect();
 
-    match input.params.operation {
+    match input.operation {
         Operation::NewBody => {
             let mut out = bodies.to_vec();
             out.push(Arc::new(Body {
-                solid: tool,
-                face_names: tool_names,
+                solid: tool.clone(),
+                face_names: tool_names.clone(),
                 origin: input.feature,
                 stamp: stamp(input.stamp, 0),
                 sheet: None,
@@ -404,7 +444,7 @@ pub fn apply_extrude(input: &ExtrudeInput<'_>) -> Result<Vec<Arc<Body>>, Feature
             Ok(out)
         }
         Operation::Add => {
-            let (mut solid, mut names) = (tool, tool_names);
+            let (mut solid, mut names) = (tool.clone(), tool_names.clone());
             for &i in &touching {
                 let traced = boolean_traced(&bodies[i].solid, &solid, BooleanOp::Union)?;
                 names = result_names(&traced.sources, &bodies[i].face_names, &names);
@@ -434,9 +474,10 @@ pub fn apply_extrude(input: &ExtrudeInput<'_>) -> Result<Vec<Arc<Body>>, Feature
         }
         Operation::Cut => {
             if touching.is_empty() {
-                return Err(FeatureError(
-                    "The cut doesn't reach any body. Check its direction and depth.".to_owned(),
-                ));
+                return Err(FeatureError(format!(
+                    "The cut doesn't reach any body. {}",
+                    input.hint
+                )));
             }
             // Build the new list first so a failure leaves the bodies untouched.
             let mut out = Vec::with_capacity(bodies.len());
@@ -446,7 +487,7 @@ pub fn apply_extrude(input: &ExtrudeInput<'_>) -> Result<Vec<Arc<Body>>, Feature
                     out.push(body.clone());
                     continue;
                 }
-                let traced = boolean_traced(&body.solid, &tool, BooleanOp::Subtract)?;
+                let traced = boolean_traced(&body.solid, tool, BooleanOp::Subtract)?;
                 if traced.solid.faces.is_empty() {
                     removed = true;
                     continue; // cut away completely
@@ -458,7 +499,7 @@ pub fn apply_extrude(input: &ExtrudeInput<'_>) -> Result<Vec<Arc<Body>>, Feature
                 }
                 removed = true;
                 out.push(Arc::new(Body {
-                    face_names: result_names(&traced.sources, &body.face_names, &tool_names),
+                    face_names: result_names(&traced.sources, &body.face_names, tool_names),
                     solid: traced.solid,
                     origin: body.origin,
                     stamp: stamp(input.stamp, i),
@@ -466,10 +507,10 @@ pub fn apply_extrude(input: &ExtrudeInput<'_>) -> Result<Vec<Arc<Body>>, Feature
                 }));
             }
             if !removed {
-                return Err(FeatureError(
-                    "The cut doesn't remove any material. Check its direction and depth."
-                        .to_owned(),
-                ));
+                return Err(FeatureError(format!(
+                    "The cut doesn't remove any material. {}",
+                    input.hint
+                )));
             }
             Ok(out)
         }

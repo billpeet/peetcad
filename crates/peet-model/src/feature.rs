@@ -15,8 +15,13 @@ use peet_sheetmetal::{
     BendLinePosition, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
 };
 
+use crate::dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
 use crate::extrude::Extrude;
+use crate::hole::HoleFeature;
+use crate::import::ImportFeature;
 use crate::naming::{EdgeRef, FaceRef, VertexRef};
+use crate::revolve::{RevolveAxisRef, RevolveFeature};
+use crate::sweep::SweepFeature;
 
 /// Stable identifier of a feature within its model. Never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -595,7 +600,8 @@ pub enum PatternDef {
     },
 }
 
-/// Copies of features (extrusions, cuts, sheet metal cuts, forms) in a pattern.
+/// Copies of features (extrusions, cuts, revolves, holes, sheet metal cuts, forms) in a
+/// pattern.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct PatternFeature {
     pub seeds: Vec<FeatureId>,
@@ -628,6 +634,14 @@ pub enum FeatureKind {
     Form(Box<FormFeature>),
     Pattern(Box<PatternFeature>),
     Mirror(Box<MirrorFeature>),
+    // New kinds go at the end: files store the variant's index.
+    Revolve(Box<RevolveFeature>),
+    Blend(Box<BlendFeature>),
+    Shell(Box<ShellFeature>),
+    Draft(Box<DraftFeature>),
+    Hole(Box<HoleFeature>),
+    Import(Box<ImportFeature>),
+    Sweep(Box<SweepFeature>),
 }
 
 impl FeatureKind {
@@ -658,6 +672,18 @@ impl FeatureKind {
                 PatternDef::Circular { .. } => "Circular pattern",
             },
             Self::Mirror(_) => "Mirror",
+            Self::Revolve(r) if r.operation == crate::Operation::Cut => "Cut-revolve",
+            Self::Revolve(_) => "Revolve",
+            Self::Blend(b) => match b.kind {
+                BlendKind::Fillet => "Fillet",
+                BlendKind::Chamfer => "Chamfer",
+            },
+            Self::Shell(_) => "Shell",
+            Self::Draft(_) => "Draft",
+            Self::Hole(_) => "Hole",
+            Self::Import(_) => "Imported body",
+            Self::Sweep(s) if s.operation == crate::Operation::Cut => "Cut-sweep",
+            Self::Sweep(_) => "Sweep",
         }
     }
 
@@ -689,6 +715,18 @@ impl FeatureKind {
                 PatternDef::Circular { .. } => "CirPattern",
             },
             Self::Mirror(_) => "Mirror",
+            Self::Revolve(r) if r.operation == crate::Operation::Cut => "Cut-Revolve",
+            Self::Revolve(_) => "Revolve",
+            Self::Blend(b) => match b.kind {
+                BlendKind::Fillet => "Fillet",
+                BlendKind::Chamfer => "Chamfer",
+            },
+            Self::Shell(_) => "Shell",
+            Self::Draft(_) => "Draft",
+            Self::Hole(_) => "Hole",
+            Self::Import(_) => "Imported",
+            Self::Sweep(s) if s.operation == crate::Operation::Cut => "Cut-Sweep",
+            Self::Sweep(_) => "Sweep",
         }
     }
 
@@ -708,6 +746,13 @@ impl FeatureKind {
                 | Self::Form(_)
                 | Self::Pattern(_)
                 | Self::Mirror(_)
+                | Self::Revolve(_)
+                | Self::Blend(_)
+                | Self::Shell(_)
+                | Self::Draft(_)
+                | Self::Hole(_)
+                | Self::Import(_)
+                | Self::Sweep(_)
         )
     }
 
@@ -737,13 +782,19 @@ impl FeatureKind {
             Self::Jog(j) => Some(j.sketch),
             Self::MiterFlange(m) => Some(m.sketch),
             Self::Form(f) => Some(f.sketch),
+            Self::Revolve(r) => Some(r.sketch),
+            Self::Hole(h) => Some(h.sketch),
+            Self::Sweep(s) => Some(s.profile),
             _ => None,
         }
     }
 
     /// Whether a pattern or a mirror can copy the feature.
     pub fn can_be_copied(&self) -> bool {
-        matches!(self, Self::Extrude(_) | Self::SheetCut(_) | Self::Form(_))
+        matches!(
+            self,
+            Self::Extrude(_) | Self::SheetCut(_) | Self::Form(_) | Self::Revolve(_) | Self::Hole(_)
+        )
     }
 
     /// The features this one refers to directly, without duplicates.
@@ -826,6 +877,36 @@ impl FeatureKind {
                 out.extend(&m.seeds);
                 plane_deps(&m.plane, &mut out);
             }
+            Self::Revolve(r) => {
+                out.push(r.sketch);
+                if let RevolveAxisRef::Axis(a) = &r.axis {
+                    axis_deps(a, &mut out);
+                }
+            }
+            Self::Blend(b) => {
+                for e in &b.edges {
+                    out.extend(e.features());
+                }
+            }
+            Self::Shell(s) => {
+                for f in &s.open {
+                    out.extend(f.name.features());
+                }
+            }
+            Self::Draft(d) => {
+                for f in &d.faces {
+                    out.extend(f.name.features());
+                }
+                if let Some(p) = &d.neutral {
+                    plane_deps(p, &mut out);
+                }
+            }
+            Self::Hole(h) => out.push(h.sketch),
+            Self::Import(_) => {}
+            Self::Sweep(s) => {
+                out.push(s.profile);
+                out.extend(s.path);
+            }
         }
         out.sort_unstable();
         out.dedup();
@@ -882,6 +963,20 @@ impl FeatureKind {
                 }
                 PatternDef::Circular { angle, .. } => vec![angle],
             },
+            Self::Revolve(r) => vec![&r.angle],
+            Self::Blend(b) => vec![&b.size],
+            Self::Shell(s) => vec![&s.thickness],
+            Self::Draft(d) => vec![&d.angle],
+            Self::Hole(h) => vec![
+                &h.diameter,
+                &h.depth,
+                &h.tip_angle,
+                &h.counterbore_diameter,
+                &h.counterbore_depth,
+                &h.countersink_diameter,
+                &h.countersink_angle,
+            ],
+            Self::Import(_) | Self::Sweep(_) => Vec::new(),
         }
     }
 }

@@ -90,6 +90,17 @@ pub enum Icon {
     Gauge,
     ExportStep,
     ImportDxf,
+    Revolve,
+    CutRevolve,
+    FilletEdge,
+    Chamfer,
+    Shell,
+    Draft,
+    Hole,
+    ImportStep,
+    MassProperties,
+    Sweep,
+    CutSweep,
     Search,
     Check,
     Select,
@@ -174,6 +185,17 @@ impl Icon {
             C::GaugeTables => Self::Gauge,
             C::ExportStep => Self::ExportStep,
             C::ImportDxf => Self::ImportDxf,
+            C::Revolve => Self::Revolve,
+            C::CutRevolve => Self::CutRevolve,
+            C::Fillet => Self::FilletEdge,
+            C::Chamfer => Self::Chamfer,
+            C::Shell => Self::Shell,
+            C::Draft => Self::Draft,
+            C::Hole => Self::Hole,
+            C::ImportStep => Self::ImportStep,
+            C::MassProperties => Self::MassProperties,
+            C::Sweep => Self::Sweep,
+            C::CutSweep => Self::CutSweep,
             C::CommandPalette => Self::Search,
             C::SketchSelect => Self::Select,
             C::SketchLine => Self::Line,
@@ -195,7 +217,10 @@ impl Icon {
             C::NewDocument => Self::NewDocument,
             C::OpenDocument => Self::Open,
             C::SaveDocumentAs => Self::SaveAs,
-            C::OpenSample | C::OpenSampleEnclosure | C::OpenSampleChassis => Self::Sample,
+            C::OpenSample
+            | C::OpenSampleEnclosure
+            | C::OpenSampleChassis
+            | C::OpenSampleHousing => Self::Sample,
             C::Settings => Self::Settings,
             C::Quit => Self::Quit,
             C::DeleteSelection => Self::Delete,
@@ -239,15 +264,32 @@ impl Icon {
                 peet_model::PatternDef::Circular { .. } => Self::CircularPattern,
             },
             FeatureKind::Mirror(_) => Self::MirrorFeature,
+            FeatureKind::Revolve(r) if r.operation == Operation::Cut => Self::CutRevolve,
+            FeatureKind::Revolve(_) => Self::Revolve,
+            FeatureKind::Blend(b) => match b.kind {
+                peet_model::BlendKind::Fillet => Self::FilletEdge,
+                peet_model::BlendKind::Chamfer => Self::Chamfer,
+            },
+            FeatureKind::Shell(_) => Self::Shell,
+            FeatureKind::Draft(_) => Self::Draft,
+            FeatureKind::Hole(_) => Self::Hole,
+            FeatureKind::Import(_) => Self::ImportStep,
+            FeatureKind::Sweep(s) if s.operation == Operation::Cut => Self::CutSweep,
+            FeatureKind::Sweep(_) => Self::Sweep,
         }
     }
 
     pub fn category(self) -> Category {
         use Icon as I;
         match self {
-            I::Save | I::Undo | I::Redo | I::Search | I::Parameters | I::BendTable | I::Gauge => {
-                Category::Neutral
-            }
+            I::Save
+            | I::Undo
+            | I::Redo
+            | I::Search
+            | I::Parameters
+            | I::BendTable
+            | I::Gauge
+            | I::MassProperties => Category::Neutral,
             I::Checks => Category::Confirm,
             I::LinearPattern | I::CircularPattern | I::MirrorFeature => Category::Solid,
             I::ViewIso
@@ -278,8 +320,14 @@ impl Icon {
             | I::Mirror
             | I::Construction
             | I::Relations => Category::Sketch,
-            I::Extrude => Category::Solid,
-            I::Cut => Category::Cut,
+            I::Extrude
+            | I::Revolve
+            | I::Sweep
+            | I::FilletEdge
+            | I::Chamfer
+            | I::Shell
+            | I::Draft => Category::Solid,
+            I::Cut | I::CutRevolve | I::CutSweep | I::Hole => Category::Cut,
             I::Reference | I::RefPlane | I::RefAxis | I::RefPoint | I::CoordSystem => {
                 Category::Reference
             }
@@ -295,7 +343,9 @@ impl Icon {
             | I::Dimple
             | I::Emboss
             | I::Louver => Category::SheetMetal,
-            I::ExportDxf | I::ExportStl | I::ExportStep | I::ImportDxf => Category::Export,
+            I::ExportDxf | I::ExportStl | I::ExportStep | I::ImportDxf | I::ImportStep => {
+                Category::Export
+            }
             I::Check => Category::Confirm,
             I::Delete => Category::Cut,
             I::NewDocument
@@ -750,6 +800,112 @@ impl<'a> Pen<'a> {
                 self.document();
                 self.arrow((12.0, 9.0), (12.0, 18.0), ac);
             }
+            Icon::Revolve | Icon::CutRevolve => {
+                // A half profile beside its axis, its other half where it turns to.
+                self.dashed(&[(12.0, 3.0), (12.0, 22.0)], fg);
+                self.face(&[(14.5, 8.0), (21.0, 8.0), (21.0, 19.0), (14.5, 19.0)], ac);
+                let other = [(9.5, 8.0), (3.0, 8.0), (3.0, 19.0), (9.5, 19.0)];
+                if icon == Icon::CutRevolve {
+                    self.dashed(&[other[0], other[1], other[2], other[3], other[0]], fg);
+                } else {
+                    self.closed(&other, fg);
+                }
+                self.arc((12.0, 7.0), 6.0, 1.9 * PI, 1.2 * PI, ac);
+                self.solid(&[(5.5, 4.8), (9.2, 1.4), (9.6, 5.6)], ac);
+            }
+            Icon::Sweep | Icon::CutSweep => {
+                // A profile carried round a bend: the two sides of the swept body.
+                self.face(&[(3.0, 17.0), (11.0, 17.0), (11.0, 22.0), (3.0, 22.0)], ac);
+                self.arc((21.0, 19.0), 18.0, PI, 1.5 * PI, fg);
+                self.arc((21.0, 19.0), 10.0, PI, 1.5 * PI, fg);
+                self.line(&[(21.0, 1.0), (21.0, 9.0)], fg);
+                if icon == Icon::CutSweep {
+                    self.dashed(&[(7.0, 17.0), (9.0, 11.0), (14.0, 6.5), (21.0, 5.0)], ac);
+                } else {
+                    self.arrow((9.0, 11.0), (20.0, 5.0), ac);
+                }
+            }
+            Icon::FilletEdge | Icon::Chamfer => {
+                // A block seen from the side, its top left corner rounded or cut.
+                self.line(
+                    &[
+                        (4.0, 12.0),
+                        (4.0, 20.0),
+                        (20.0, 20.0),
+                        (20.0, 4.0),
+                        (12.0, 4.0),
+                    ],
+                    fg,
+                );
+                if icon == Icon::FilletEdge {
+                    self.arc((12.0, 12.0), 8.0, PI, 1.5 * PI, ac);
+                } else {
+                    self.line(&[(4.0, 12.0), (12.0, 4.0)], ac);
+                }
+            }
+            Icon::Shell => {
+                // A cup in section: the outside, and the hollow open at the top.
+                self.line(
+                    &[
+                        (8.0, 4.0),
+                        (4.0, 4.0),
+                        (4.0, 20.0),
+                        (20.0, 20.0),
+                        (20.0, 4.0),
+                        (16.0, 4.0),
+                    ],
+                    fg,
+                );
+                self.line(&[(8.0, 4.0), (8.0, 16.0), (16.0, 16.0), (16.0, 4.0)], ac);
+            }
+            Icon::Draft => {
+                // A block with leaning sides, and the upright it leans from.
+                self.closed(&[(8.0, 5.0), (16.0, 5.0), (20.0, 20.0), (4.0, 20.0)], fg);
+                self.dashed(&[(20.0, 20.0), (20.0, 4.0)], ac);
+                self.line(&[(20.0, 20.0), (16.0, 5.0)], ac);
+            }
+            Icon::Hole => {
+                // A drilled hole in section, with the drill's point.
+                self.line(&[(2.0, 7.0), (8.0, 7.0)], fg);
+                self.line(&[(16.0, 7.0), (22.0, 7.0)], fg);
+                self.line(
+                    &[
+                        (8.0, 7.0),
+                        (8.0, 17.0),
+                        (12.0, 20.5),
+                        (16.0, 17.0),
+                        (16.0, 7.0),
+                    ],
+                    ac,
+                );
+                self.dashed(&[(12.0, 3.0), (12.0, 22.0)], fg);
+            }
+            Icon::ImportStep => {
+                self.document();
+                self.closed(
+                    &[
+                        (8.0, 15.0),
+                        (12.0, 11.0),
+                        (16.0, 13.0),
+                        (16.0, 17.0),
+                        (12.0, 19.0),
+                        (8.0, 18.0),
+                    ],
+                    ac,
+                );
+                self.arrow((12.0, 5.0), (12.0, 15.5), ac);
+            }
+            Icon::MassProperties => {
+                // A balance.
+                self.line(&[(12.0, 4.0), (12.0, 20.0)], fg);
+                self.line(&[(7.0, 20.0), (17.0, 20.0)], fg);
+                self.line(&[(5.0, 7.0), (19.0, 7.0)], fg);
+                for x in [5.0, 19.0] {
+                    self.line(&[(x - 3.0, 13.0), (x, 7.0), (x + 3.0, 13.0)], fg);
+                    self.arc((x, 13.0), 3.0, 0.0, PI, ac);
+                    self.line(&[(x - 3.0, 13.0), (x + 3.0, 13.0)], ac);
+                }
+            }
             Icon::Search => {
                 self.circle((10.0, 10.0), 6.0, fg);
                 self.line(&[(14.5, 14.5), (20.0, 20.0)], ac);
@@ -1016,4 +1172,101 @@ pub fn tile(painter: &Painter, rect: Rect, icon: Icon, dark: bool, fg: Color32, 
     );
     let inner = rect.shrink(rect.width() * 0.12);
     icon.paint(painter, inner, fg, accent);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn solid_modelling_commands_have_icons() {
+        use CommandId as C;
+        let commands = [
+            C::Revolve,
+            C::CutRevolve,
+            C::Fillet,
+            C::Chamfer,
+            C::Shell,
+            C::Draft,
+            C::Hole,
+            C::ImportStep,
+            C::MassProperties,
+            C::Sweep,
+            C::CutSweep,
+            C::OpenSampleHousing,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for cmd in commands {
+            let icon = Icon::for_command(cmd).unwrap_or_else(|| panic!("{cmd:?} has no icon"));
+            if cmd != C::OpenSampleHousing {
+                assert!(seen.insert(format!("{icon:?}")), "{cmd:?} shares its icon");
+            }
+        }
+        // The edge fillet is not the sketch fillet.
+        assert_ne!(
+            Icon::for_command(C::Fillet),
+            Icon::for_command(C::SketchFillet)
+        );
+    }
+
+    #[test]
+    fn every_ribbon_command_has_an_icon() {
+        // Relations live in a menu and the sketch tools' Select has its own: every other
+        // command is a ribbon button, which needs a picture.
+        for cmd in CommandId::ALL {
+            if cmd.info().category == "Relation" {
+                continue;
+            }
+            assert!(Icon::for_command(cmd).is_some(), "{cmd:?} has no icon");
+        }
+    }
+
+    #[test]
+    fn every_feature_kind_has_a_tree_icon() {
+        // The samples between them use nearly every kind of feature.
+        let samples = [
+            peet_model::samples::bracket().0,
+            peet_model::samples::enclosure().0,
+            peet_model::samples::chassis().0,
+            peet_model::samples::housing().0,
+        ];
+        let mut icons = std::collections::HashSet::new();
+        for model in &samples {
+            for f in model.features() {
+                icons.insert(format!("{:?}", Icon::for_feature(&f.kind)));
+            }
+        }
+        for expected in ["Revolve", "FilletEdge", "Chamfer", "Hole"] {
+            assert!(icons.contains(expected), "no sample shows {expected}");
+        }
+        // Cuts are told apart from additions.
+        let sketch = peet_sketch::Sketch::new();
+        let cut = FeatureKind::Revolve(Box::new(peet_model::RevolveFeature::new(
+            peet_model::FeatureId(1),
+            &sketch,
+            Operation::Cut,
+        )));
+        assert_eq!(Icon::for_feature(&cut), Icon::CutRevolve);
+        assert_eq!(Icon::CutRevolve.category(), Category::Cut);
+        let import = FeatureKind::Import(Box::new(peet_model::ImportFeature {
+            source: String::new(),
+            solids: Vec::new(),
+        }));
+        assert_eq!(Icon::for_feature(&import), Icon::ImportStep);
+    }
+
+    /// Drawing every icon exercises every arm of `draw` (no GPU needed).
+    #[test]
+    fn every_icon_paints() {
+        let mut harness = egui_kittest::Harness::new_ui(|ui| {
+            let rect = Rect::from_min_size(Pos2::ZERO, egui::vec2(24.0, 24.0));
+            for cmd in CommandId::ALL {
+                if let Some(icon) = Icon::for_command(cmd) {
+                    let accent = icon.category().color(true);
+                    icon.paint(ui.painter(), rect, Color32::WHITE, accent);
+                }
+            }
+        });
+        harness.step();
+    }
 }

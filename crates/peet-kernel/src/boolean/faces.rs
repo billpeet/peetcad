@@ -35,6 +35,8 @@ const MAX_STARTS: usize = 16;
 pub(crate) struct TracedLoop {
     pub half_edges: Vec<HalfEdge>,
     pub poly: Vec<DVec2>,
+    /// Index in `poly` of each half-edge's first point.
+    pub starts: Vec<usize>,
     pub area: f64,
 }
 
@@ -57,7 +59,18 @@ struct End {
 
 /// Removes edges that dangle: used in both directions with an end no other edge reaches.
 /// They cannot separate two regions. Returns the remaining half-edges.
-pub(crate) fn prune_dangling(half_edges: &[HalfEdge], edges: &[GEdge]) -> Vec<HalfEdge> {
+///
+/// An end at a pole of the surface is not loose: a seam that runs up to a sphere's pole
+/// or a cone's apex ends there, and the face wraps around that point.
+pub(crate) fn prune_dangling(
+    half_edges: &[HalfEdge],
+    edges: &[GEdge],
+    domain: &Domain,
+    points: &[DVec3],
+) -> Vec<HalfEdge> {
+    let loose = |v: u32, degree: &HashMap<u32, u32>| {
+        degree[&v] == 1 && domain.surface.pole_at(points[v as usize]).is_none()
+    };
     let mut set: Vec<HalfEdge> = half_edges.to_vec();
     set.sort_unstable();
     set.dedup();
@@ -81,7 +94,7 @@ pub(crate) fn prune_dangling(half_edges: &[HalfEdge], edges: &[GEdge]) -> Vec<Ha
             .map(|&(e, _)| e)
             .filter(|&e| {
                 let g = &edges[e as usize];
-                both(e) && g.start != g.end && (degree[&g.start] == 1 || degree[&g.end] == 1)
+                both(e) && g.start != g.end && (loose(g.start, &degree) || loose(g.end, &degree))
             })
             .collect();
         set.retain(|(e, _)| !dangling.contains(e));
@@ -172,22 +185,29 @@ pub(crate) fn trace_faces(
             }
         }
         let mut poly = Vec::new();
-        for &(e, forward) in &hes {
+        let mut starts = Vec::with_capacity(hes.len());
+        let directed = |&(e, forward): &HalfEdge| {
             let g = &edges[e as usize];
-            let (ta, tb) = if forward { (g.t0, g.t1) } else { (g.t1, g.t0) };
-            domain.trace(&g.curve, ta, tb, &mut poly);
+            if forward { (g.t0, g.t1) } else { (g.t1, g.t0) }
+        };
+        for h in &hes {
+            let (ta, tb) = directed(h);
+            domain.trace(&edges[h.0 as usize].curve, ta, tb, &mut poly);
+            starts.push(poly.len() - 1 - domain.segments(&edges[h.0 as usize].curve, tb - ta));
         }
-        // The trace returns to its start; on a cylinder it must not have gone around.
-        if let (Some(period), Some(a), Some(b)) = (domain.period(), poly.first(), poly.last())
-            && (a.x - b.x).abs() > 0.5 * period
+        // The trace returns to its start; on a curved surface it must not have gone around.
+        let (ta, tb) = directed(&hes[0]);
+        if domain
+            .close(&edges[hes[0].0 as usize].curve, ta, tb, &mut poly)
+            .is_err()
         {
-            return Err("a face boundary wraps around a cylinder without a seam".to_owned());
+            return Err("a face boundary wraps around a curved face without a seam".to_owned());
         }
-        poly.pop();
         let area = signed_area(&poly);
         loops.push(TracedLoop {
             half_edges: hes,
             poly,
+            starts,
             area,
         });
     }
@@ -203,7 +223,7 @@ pub(crate) fn trace_faces(
         .collect();
     for mut hole in holes {
         let probe = probe_point(&hole.poly);
-        let mut best: Option<(f64, usize, f64)> = None;
+        let mut best: Option<(f64, usize, DVec2)> = None;
         for (i, f) in faces.iter().enumerate() {
             // A loop sharing an edge with the hole lies on the other side of that edge:
             // it is inside the hole, not around it. (The probe is on that edge, where the
@@ -226,9 +246,8 @@ pub(crate) fn trace_faces(
                 &[0.0]
             };
             for k in turns {
-                let shift = nearest + k * period;
-                let q = DVec2::new(probe.x + shift, probe.y);
-                if polygon_winding(&f.outer.poly, q) != 0
+                let shift = nearest + DVec2::new(k * period, 0.0);
+                if polygon_winding(&f.outer.poly, probe + shift) != 0
                     && best.is_none_or(|(a, _, _)| f.outer.area < a)
                 {
                     best = Some((f.outer.area, i, shift));
@@ -240,7 +259,7 @@ pub(crate) fn trace_faces(
             return Err("a hole lies outside every face region".to_owned());
         };
         for q in &mut hole.poly {
-            q.x += shift;
+            *q += shift;
         }
         faces[i].holes.push(hole);
     }
@@ -291,20 +310,24 @@ fn probe_point(poly: &[DVec2]) -> DVec2 {
     best.1
 }
 
-/// The whole number of turns (as an `x` offset) that brings `poly` next to `target`.
-fn turn_shift(domain: &Domain, poly: &[DVec2], target: &[DVec2]) -> f64 {
-    let Some(period) = domain.period() else {
-        return 0.0;
-    };
+/// The whole number of turns (as an offset) that brings `poly` next to `target`.
+fn turn_shift(domain: &Domain, poly: &[DVec2], target: &[DVec2]) -> DVec2 {
     let center = |p: &[DVec2]| {
-        let (lo, hi) = p
-            .iter()
-            .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), q| {
-                (lo.min(q.x), hi.max(q.x))
-            });
+        let (lo, hi) = p.iter().fold(
+            (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+            |(lo, hi), q| (lo.min(*q), hi.max(*q)),
+        );
         0.5 * (lo + hi)
     };
-    ((center(target) - center(poly)) / period).round() * period
+    let gap = center(target) - center(poly);
+    let turns = |gap: f64, period: Option<f64>| match period {
+        Some(period) => (gap / period).round() * period,
+        None => 0.0,
+    };
+    DVec2::new(
+        turns(gap.x, domain.period()),
+        turns(gap.y, domain.period_y()),
+    )
 }
 
 /// Points inside a traced face, best first: as far as can be found from the face's
@@ -343,7 +366,7 @@ pub(crate) fn interior_points(
                     }
                 })
                 .collect();
-            ExactLoop::new(domain, &parts, Some(l.poly[0].x))
+            ExactLoop::new(domain, &parts, Some(l.poly[0]))
         })
         .collect();
     let mut near: Vec<u32> = loops
@@ -385,8 +408,8 @@ pub(crate) fn interior_points(
             &[0.0]
         };
         for k in turns {
-            let dx = shift + k * domain.period().unwrap_or(0.0);
-            walls.push(poly.iter().map(|q| DVec2::new(q.x + dx, q.y)).collect());
+            let by = shift + DVec2::new(k * domain.period().unwrap_or(0.0), 0.0);
+            walls.push(poly.iter().map(|q| *q + by).collect());
         }
     }
     let scale = face
@@ -400,12 +423,10 @@ pub(crate) fn interior_points(
     let mut starts: Vec<(DVec2, DVec2)> = Vec::new();
     for l in &loops {
         let poly = &l.poly;
-        let mut offset = 0;
-        for &(e, _) in &l.half_edges {
+        for (&(e, _), &start) in l.half_edges.iter().zip(&l.starts) {
             let g = &edges[e as usize];
             let n = domain.segments(&g.curve, g.t1 - g.t0);
-            let i = offset + n / 2;
-            offset += n;
+            let i = start + n / 2;
             let (a, b) = (poly[i % poly.len()], poly[(i + 1) % poly.len()]);
             let side = b - a;
             let len = side.length();

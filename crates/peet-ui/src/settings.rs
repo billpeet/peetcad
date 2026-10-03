@@ -6,6 +6,9 @@ use serde::{Deserialize, Serialize};
 
 pub const STORAGE_KEY: &str = "peetcad.settings";
 
+/// The density of mild steel, kg/m³: what a new installation weighs parts with.
+pub const STEEL_DENSITY: f64 = 7850.0;
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ThemeChoice {
     System,
@@ -207,6 +210,8 @@ pub struct Settings {
     pub materials: peet_sheetmetal::MaterialLibrary,
     /// The limits the manufacturing checks use.
     pub check_rules: peet_sheetmetal::CheckRules,
+    /// The density mass properties are worked out with, in kg/m³.
+    pub density: f64,
 }
 
 impl Default for Settings {
@@ -226,6 +231,7 @@ impl Default for Settings {
             save_caches: true,
             materials: peet_sheetmetal::MaterialLibrary::builtin(),
             check_rules: peet_sheetmetal::CheckRules::default(),
+            density: STEEL_DENSITY,
         }
     }
 }

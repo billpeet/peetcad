@@ -97,7 +97,12 @@ pub(crate) fn same_surface(a: &Surface, b: &Surface) -> bool {
             let w = d.axis_origin() - c.axis_origin();
             (w - c.axis() * w.dot(c.axis())).length() <= LINEAR
         }
-        _ => false,
+        (Surface::Plane(_) | Surface::Cylinder(_), _)
+        | (_, Surface::Plane(_) | Surface::Cylinder(_)) => false,
+        _ => matches!(
+            super::ssi::intersect(a, b, DVec3::ZERO),
+            super::ssi::Ssi::Coincident
+        ),
     }
 }
 

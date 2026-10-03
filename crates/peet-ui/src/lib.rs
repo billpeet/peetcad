@@ -16,6 +16,7 @@ mod perf;
 mod ribbon;
 pub mod settings;
 mod sketch_ui;
+mod solid_ui;
 mod tree;
 mod view_cube;
 mod viewport;

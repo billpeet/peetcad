@@ -1,20 +1,28 @@
-//! Analytic geometry: surfaces (plane, cylinder) and 3D curves (line, circle, ellipse).
+//! Analytic geometry: surfaces (plane, cylinder, cone, sphere, torus) and 3D curves (line,
+//! circle, ellipse).
 //!
 //! Everything is exact `f64` geometry in model space (mm). Topology (which part of a
 //! surface is a face, which part of a curve is an edge) lives in [`crate::topo`].
 //!
 //! **Parameters.**
 //! - Plane: `(u, v)` are the plane frame's local X/Y coordinates.
-//! - Cylinder: `u` is the angle around the axis in radians (0 along the frame's X axis,
-//!   counter-clockwise about +Z), `v` the height along the axis from the frame origin.
-//!   [`Surface::param`] returns `u` in `(-π, π]`; callers working across the seam unwrap it.
+//! - Every other surface is a surface of revolution about its frame's Z axis: `u` is the
+//!   angle around the axis in radians (0 along the frame's X axis, counter-clockwise about
+//!   +Z) and `v` runs along the meridian ([`Surface::meridian`]). [`Surface::param`]
+//!   returns `u` in `(-π, π]`; callers working across the seam unwrap it.
+//! - Cylinder and cone: `v` is the height along the axis from the frame origin.
+//! - Sphere: `v` is the latitude, from `−π/2` at the south pole to `π/2` at the north.
+//! - Torus: `v` is the angle around the tube, 0 on the outer equator, `π/2` on top.
+//!
+//! In every case `(dP/du, dP/dv, natural normal)` is right-handed, so a loop that runs
+//! counter-clockwise in `(u, v)` runs counter-clockwise seen from the natural normal side.
 //! - Line: `t` is the distance from `origin` along the unit `dir`.
 //! - Circle: `t` is the angle in radians from the frame's X axis, counter-clockwise about +Z.
 //! - Ellipse: `point(t) = center + x·a·cos t + y·b·sin t`.
 
-use std::f64::consts::TAU;
+use std::f64::consts::{FRAC_PI_2, TAU};
 
-use peet_math::{DVec2, DVec3, Frame, Plane};
+use peet_math::{DVec2, DVec3, Frame, Plane, tolerance};
 use serde::{Deserialize, Serialize};
 
 /// A right circular cylinder of infinite length. The frame's Z axis is the cylinder axis
@@ -35,28 +43,168 @@ impl Cylinder {
     }
 }
 
+/// One nappe of a right circular cone. The frame's Z axis is the cone's axis; the radius
+/// is `radius` at the frame origin and changes by `tan(half_angle)` per unit of height, so
+/// the apex is at height `−radius / tan(half_angle)`. Only the nappe with a non-negative
+/// radius is the surface.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Cone {
+    pub frame: Frame,
+    /// Radius at the frame origin (`v = 0`); zero puts the apex there.
+    pub radius: f64,
+    /// Angle between the axis and the rulings, in `(−π/2, π/2)` and not zero. Positive:
+    /// the cone widens along +Z.
+    pub half_angle: f64,
+}
+
+impl Cone {
+    pub fn axis_origin(&self) -> DVec3 {
+        self.frame.origin
+    }
+
+    pub fn axis(&self) -> DVec3 {
+        self.frame.z_axis()
+    }
+
+    /// Radius change per unit of height.
+    pub fn slope(&self) -> f64 {
+        self.half_angle.tan()
+    }
+
+    /// Radius at height `v`.
+    pub fn radius_at(&self, v: f64) -> f64 {
+        self.radius + v * self.slope()
+    }
+
+    /// Height of the apex along the axis.
+    pub fn apex_v(&self) -> f64 {
+        -self.radius / self.slope()
+    }
+
+    pub fn apex(&self) -> DVec3 {
+        self.frame.origin + self.axis() * self.apex_v()
+    }
+}
+
+/// A sphere. The frame's Z axis runs through the poles of its parametrisation.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Sphere {
+    pub frame: Frame,
+    pub radius: f64,
+}
+
+/// A torus: a circle of radius `minor` swept around the frame's Z axis at distance `major`.
+/// `major` may be smaller than `minor` (the fillet of a thin rod); the surface is then the
+/// part away from the axis, where the distance from the axis is positive.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Torus {
+    pub frame: Frame,
+    pub major: f64,
+    pub minor: f64,
+}
+
 /// An unbounded analytic surface. Its natural normal points away from the plane's front
-/// (along the frame's Z) or radially outwards from a cylinder's axis.
+/// (along the frame's Z), radially outwards from a cylinder's or cone's axis, away from a
+/// sphere's centre, or away from a torus's tube centre.
+///
+/// New kinds go at the end: the B-rep cache stores the variant's index.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Surface {
     Plane(Plane),
     Cylinder(Cylinder),
+    Cone(Cone),
+    Sphere(Sphere),
+    Torus(Torus),
+}
+
+/// A point of a surface of revolution's meridian (the curve that is turned about the
+/// axis): distance from the axis, height along it, and their derivatives by `v`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Meridian {
+    pub rho: f64,
+    pub z: f64,
+    pub drho: f64,
+    pub dz: f64,
+}
+
+/// A singular point of a surface's parametrisation: a sphere's pole or a cone's apex,
+/// where every `u` gives the same point.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pole {
+    /// The `v` of the pole.
+    pub v: f64,
+    /// Whether the surface lies below it in `v` (a sphere's north pole; the apex of a
+    /// cone that narrows along +Z).
+    pub top: bool,
 }
 
 impl Surface {
+    /// The frame of a surface of revolution (every kind but the plane): `u` is the angle
+    /// about its Z axis.
+    pub fn revolution_frame(&self) -> Option<&Frame> {
+        match self {
+            Self::Plane(_) => None,
+            Self::Cylinder(c) => Some(&c.frame),
+            Self::Cone(c) => Some(&c.frame),
+            Self::Sphere(s) => Some(&s.frame),
+            Self::Torus(t) => Some(&t.frame),
+        }
+    }
+
+    /// The meridian of a surface of revolution at `v` (`None` for planes).
+    pub fn meridian(&self, v: f64) -> Option<Meridian> {
+        Some(match self {
+            Self::Plane(_) => return None,
+            Self::Cylinder(c) => Meridian {
+                rho: c.radius,
+                z: v,
+                drho: 0.0,
+                dz: 1.0,
+            },
+            Self::Cone(c) => Meridian {
+                rho: c.radius_at(v),
+                z: v,
+                drho: c.slope(),
+                dz: 1.0,
+            },
+            Self::Sphere(s) => {
+                let (sin, cos) = v.sin_cos();
+                Meridian {
+                    rho: s.radius * cos,
+                    z: s.radius * sin,
+                    drho: -s.radius * sin,
+                    dz: s.radius * cos,
+                }
+            }
+            Self::Torus(t) => {
+                let (sin, cos) = v.sin_cos();
+                Meridian {
+                    rho: t.major + t.minor * cos,
+                    z: t.minor * sin,
+                    drho: -t.minor * sin,
+                    dz: t.minor * cos,
+                }
+            }
+        })
+    }
+
     /// The point at surface parameters `uv`.
     pub fn point(&self, uv: DVec2) -> DVec3 {
         match self {
             Self::Plane(p) => p.from_plane_coords(uv),
-            Self::Cylinder(c) => {
+            _ => {
+                let (Some(frame), Some(m)) = (self.revolution_frame(), self.meridian(uv.y)) else {
+                    unreachable!("every other surface is a surface of revolution")
+                };
                 let (s, co) = uv.x.sin_cos();
-                c.frame
-                    .to_world(DVec3::new(co * c.radius, s * c.radius, uv.y))
+                frame.to_world(DVec3::new(co * m.rho, s * m.rho, m.z))
             }
         }
     }
 
-    /// Parameters of the closest point on the surface to `p`. Cylinder `u` is in `(-π, π]`.
+    /// Parameters of the closest point on the surface to `p`. Angles are in `(-π, π]`
+    /// (`u` of every surface of revolution, `v` of a torus); a sphere's `v` is the
+    /// latitude in `[-π/2, π/2]`.
     pub fn param(&self, p: DVec3) -> DVec2 {
         match self {
             Self::Plane(pl) => pl.to_plane_coords(p),
@@ -64,20 +212,36 @@ impl Surface {
                 let l = c.frame.to_local(p);
                 DVec2::new(l.y.atan2(l.x), l.z)
             }
+            Self::Cone(c) => {
+                let l = c.frame.to_local(p);
+                let rho = l.x.hypot(l.y);
+                // The foot of the perpendicular on the ruling, in the half-plane of `p`.
+                let (sin, cos) = c.half_angle.sin_cos();
+                let slant = (rho - c.radius) * sin + l.z * cos;
+                DVec2::new(l.y.atan2(l.x), slant * cos)
+            }
+            Self::Sphere(s) => {
+                let l = s.frame.to_local(p);
+                DVec2::new(l.y.atan2(l.x), l.z.atan2(l.x.hypot(l.y)))
+            }
+            Self::Torus(t) => {
+                let l = t.frame.to_local(p);
+                DVec2::new(l.y.atan2(l.x), l.z.atan2(l.x.hypot(l.y) - t.major))
+            }
         }
     }
 
-    /// The natural (unoriented-face) normal at the surface point closest to `p`.
+    /// The natural (unoriented-face) normal at the surface point closest to `p`. At a
+    /// cone's apex, where the surface has no normal, this is the axis direction pointing
+    /// away from the cone.
     pub fn normal_at(&self, p: DVec3) -> DVec3 {
         match self {
             Self::Plane(pl) => pl.normal(),
-            Self::Cylinder(c) => {
-                let l = c.frame.to_local(p);
-                let radial = DVec3::new(l.x, l.y, 0.0)
-                    .try_normalize()
-                    .unwrap_or(DVec3::X);
-                c.frame.vector_to_world(radial)
-            }
+            Self::Cone(c) if self.pole_at(p).is_some() => -c.axis() * c.half_angle.signum(),
+            Self::Sphere(s) => (p - s.frame.origin)
+                .try_normalize()
+                .unwrap_or(s.frame.z_axis()),
+            _ => self.normal(self.param(p)),
         }
     }
 
@@ -85,21 +249,34 @@ impl Surface {
     pub fn normal(&self, uv: DVec2) -> DVec3 {
         match self {
             Self::Plane(pl) => pl.normal(),
-            Self::Cylinder(c) => {
+            _ => {
+                let (Some(frame), Some(m)) = (self.revolution_frame(), self.meridian(uv.y)) else {
+                    unreachable!("every other surface is a surface of revolution")
+                };
                 let (s, co) = uv.x.sin_cos();
-                c.frame.vector_to_world(DVec3::new(co, s, 0.0))
+                let len = m.dz.hypot(m.drho);
+                frame.vector_to_world(DVec3::new(co * m.dz, s * m.dz, -m.drho) / len)
             }
         }
     }
 
     /// Signed distance from `p`: positive on the normal side (in front of a plane,
-    /// outside a cylinder).
+    /// outside a cylinder, cone, sphere or torus tube).
     pub fn signed_distance(&self, p: DVec3) -> f64 {
         match self {
             Self::Plane(pl) => pl.signed_distance(p),
             Self::Cylinder(c) => {
                 let l = c.frame.to_local(p);
                 DVec2::new(l.x, l.y).length() - c.radius
+            }
+            Self::Cone(c) => {
+                let l = c.frame.to_local(p);
+                (l.x.hypot(l.y) - c.radius_at(l.z)) * c.half_angle.cos()
+            }
+            Self::Sphere(s) => p.distance(s.frame.origin) - s.radius,
+            Self::Torus(t) => {
+                let l = t.frame.to_local(p);
+                (l.x.hypot(l.y) - t.major).hypot(l.z) - t.minor
             }
         }
     }
@@ -109,24 +286,107 @@ impl Surface {
         self.point(self.param(p))
     }
 
-    /// Whether `u` wraps around (cylinders).
+    /// Whether `u` wraps around (every surface of revolution).
     pub fn is_periodic_u(&self) -> bool {
-        matches!(self, Self::Cylinder(_))
+        !matches!(self, Self::Plane(_))
+    }
+
+    /// Whether `v` wraps around (tori).
+    pub fn is_periodic_v(&self) -> bool {
+        matches!(self, Self::Torus(_))
+    }
+
+    /// The poles of the parametrisation: a sphere's two, a cone's apex.
+    pub fn poles(&self) -> [Option<Pole>; 2] {
+        match self {
+            Self::Sphere(_) => [
+                Some(Pole {
+                    v: -FRAC_PI_2,
+                    top: false,
+                }),
+                Some(Pole {
+                    v: FRAC_PI_2,
+                    top: true,
+                }),
+            ],
+            Self::Cone(c) => [
+                Some(Pole {
+                    v: c.apex_v(),
+                    top: c.half_angle < 0.0,
+                }),
+                None,
+            ],
+            _ => [None, None],
+        }
+    }
+
+    /// The pole `p` (a point of the surface) is at, if any.
+    pub fn pole_at(&self, p: DVec3) -> Option<Pole> {
+        let frame = match self {
+            Self::Sphere(s) => &s.frame,
+            Self::Cone(c) => &c.frame,
+            _ => return None,
+        };
+        let l = frame.to_local(p);
+        if l.x.hypot(l.y) > tolerance::LINEAR {
+            return None;
+        }
+        self.poles()
+            .into_iter()
+            .flatten()
+            .min_by(|a, b| {
+                let d = |pole: &Pole| self.point(DVec2::new(0.0, pole.v)).distance_squared(p);
+                d(a).total_cmp(&d(b))
+            })
+            .filter(|pole| {
+                self.point(DVec2::new(0.0, pole.v)).distance(p) <= 16.0 * tolerance::LINEAR
+            })
     }
 
     /// Partial derivatives `(dP/du, dP/dv)` at `uv`.
     pub fn derivatives(&self, uv: DVec2) -> (DVec3, DVec3) {
         match self {
             Self::Plane(pl) => (pl.frame.x_axis(), pl.frame.y_axis()),
-            Self::Cylinder(c) => {
+            _ => {
+                let (Some(frame), Some(m)) = (self.revolution_frame(), self.meridian(uv.y)) else {
+                    unreachable!("every other surface is a surface of revolution")
+                };
                 let (s, co) = uv.x.sin_cos();
                 (
-                    c.frame
-                        .vector_to_world(DVec3::new(-s * c.radius, co * c.radius, 0.0)),
-                    c.axis(),
+                    frame.vector_to_world(DVec3::new(-s * m.rho, co * m.rho, 0.0)),
+                    frame.vector_to_world(DVec3::new(co * m.drho, s * m.drho, m.dz)),
                 )
             }
         }
+    }
+
+    /// Curvature vector of the surface's normal section at `p` in the unit tangent
+    /// direction `dir`: a point moving that way along the surface accelerates by this.
+    pub fn section_curvature(&self, p: DVec3, dir: DVec3) -> DVec3 {
+        let Some(frame) = self.revolution_frame() else {
+            return DVec3::ZERO;
+        };
+        let uv = self.param(p);
+        let Some(m) = self.meridian(uv.y) else {
+            return DVec3::ZERO;
+        };
+        let normal = self.normal(uv);
+        let (s, co) = uv.x.sin_cos();
+        let around = frame.vector_to_world(DVec3::new(-s, co, 0.0));
+        let radial = frame.vector_to_world(DVec3::new(co, s, 0.0));
+        // Principal curvatures: around the axis, and along the meridian.
+        let k_around = if m.rho > tolerance::LINEAR {
+            normal.dot(radial) / m.rho
+        } else {
+            0.0
+        };
+        let k_meridian = match self {
+            Self::Sphere(s) => 1.0 / s.radius,
+            Self::Torus(t) => 1.0 / t.minor,
+            _ => 0.0,
+        };
+        let a = dir.dot(around);
+        -normal * (k_around * a * a + k_meridian * (1.0 - a * a).max(0.0))
     }
 }
 
@@ -270,6 +530,77 @@ impl Curve3 {
 /// Unwraps angle `a` to the representative closest to `reference` (differs by multiples of 2π).
 pub fn unwrap_angle(a: f64, reference: f64) -> f64 {
     a + ((reference - a) / TAU).round() * TAU
+}
+
+// ---- Lifting loops into parameter space ----
+//
+// A face on a surface of revolution is a region of the `(u, v)` plane once its loops are
+// followed continuously ("lifted"): each point takes the parameters closest to those of
+// the point before it. Seam edges keep full turns simply connected, and a loop through a
+// pole runs along the pole's line `v = const` there, from the `u` it arrives with to the
+// `u` it leaves with. The face lies to the left of its loops, so that run goes towards
+// smaller `u` at a top pole and towards larger `u` at a bottom pole (the other way round
+// for a face whose outward normal opposes the surface's). The boolean code, the
+// tessellation and the measurements all lift loops with the helpers below, so they agree
+// on what a face is.
+
+impl Surface {
+    /// Parameters of `curve` (which lies on the surface) at `t`. At a pole, where `u`
+    /// means nothing, `u` is its limit along the curve towards the parameter `toward`;
+    /// the pole is returned too.
+    pub fn param_toward(&self, curve: &Curve3, t: f64, toward: f64) -> (DVec2, Option<Pole>) {
+        let p = curve.point(t);
+        let Some(pole) = self.pole_at(p) else {
+            return (self.param(p), None);
+        };
+        let frame = self
+            .revolution_frame()
+            .expect("only surfaces of revolution have poles");
+        // The direction in which the curve leaves the pole.
+        let d = frame.vector_to_local(curve.derivative(t)) * (toward - t).signum();
+        let u = if d.x.hypot(d.y) > 1e-9 * d.length() {
+            d.y.atan2(d.x)
+        } else {
+            self.param(curve.point(t + (toward - t) * 1e-3)).x
+        };
+        (DVec2::new(u, pole.v), Some(pole))
+    }
+
+    /// `uv` moved by whole turns so it is as close as possible to `near`.
+    pub fn param_near(&self, uv: DVec2, near: DVec2) -> DVec2 {
+        DVec2::new(
+            if self.is_periodic_u() {
+                unwrap_angle(uv.x, near.x)
+            } else {
+                uv.x
+            },
+            if self.is_periodic_v() {
+                unwrap_angle(uv.y, near.y)
+            } else {
+                uv.y
+            },
+        )
+    }
+}
+
+/// The `u` a loop leaves a pole with, lifted: it arrived with `u_in` and leaves in the
+/// direction `u_out` (any representative). `ccw` says whether the face's loops run
+/// counter-clockwise in the coordinates used (true for `(u, v)` itself unless the face is
+/// reversed). Arriving and leaving along the same meridian (a seam) is a full turn.
+pub fn pole_exit(u_in: f64, u_out: f64, top: bool, ccw: bool) -> f64 {
+    // Angles this close are the same meridian.
+    const SAME: f64 = 1e-9;
+    let decreasing = top == ccw;
+    let delta = if decreasing {
+        u_in - u_out
+    } else {
+        u_out - u_in
+    };
+    let mut step = delta.rem_euclid(TAU);
+    if step < SAME || TAU - step < SAME {
+        step = TAU;
+    }
+    if decreasing { u_in - step } else { u_in + step }
 }
 
 #[cfg(test)]

@@ -149,7 +149,147 @@ fn surface_hits(surface: &Surface, p: DVec3, dir: DVec3) -> Vec<Option<f64>> {
             let w = reach2.sqrt();
             vec![Some(tc - w), Some(tc + w)]
         }
+        Surface::Sphere(s) => {
+            let o = p - s.frame.origin;
+            let tc = -o.dot(dir);
+            let h = (o + dir * tc).length();
+            if h > s.radius + LINEAR {
+                return Vec::new();
+            }
+            let reach2 = s.radius * s.radius - h * h;
+            if h >= s.radius * (1.0 - GRAZING * GRAZING) || reach2 <= 0.0 {
+                return if tc + reach2.max(0.0).sqrt() > LINEAR {
+                    vec![None]
+                } else {
+                    Vec::new()
+                };
+            }
+            let w = reach2.sqrt();
+            vec![Some(tc - w), Some(tc + w)]
+        }
+        Surface::Cone(c) => {
+            // The quadric x² + y² = k² z² about the apex; only the nappe with a
+            // non-negative radius is the surface.
+            let k = c.slope();
+            let apex = DVec3::new(0.0, 0.0, c.apex_v());
+            let o = c.frame.to_local(p) - apex;
+            let d = c.frame.vector_to_local(dir);
+            let qa = d.x * d.x + d.y * d.y - k * k * d.z * d.z;
+            let qb = o.x * d.x + o.y * d.y - k * k * o.z * d.z;
+            let qc = o.x * o.x + o.y * o.y - k * k * o.z * o.z;
+            // Along a ruling's direction the ray meets the cone once, far away.
+            if qa.abs() < GRAZING * GRAZING {
+                return vec![None];
+            }
+            let disc = qb * qb - qa * qc;
+            let scale = qb * qb + (qa * qc).abs();
+            if disc < -GRAZING * GRAZING * scale {
+                return Vec::new();
+            }
+            let on_nappe = |t: f64| (o.z + d.z * t) * k >= 0.0;
+            if disc <= GRAZING * GRAZING * scale {
+                let t = -qb / qa;
+                return if t > LINEAR && on_nappe(t) {
+                    vec![None]
+                } else {
+                    Vec::new()
+                };
+            }
+            let w = disc.sqrt();
+            [(-qb - w) / qa, (-qb + w) / qa]
+                .into_iter()
+                .filter(|&t| on_nappe(t))
+                .map(|t| {
+                    let shallow = surface.normal_at(p + dir * t).dot(dir).abs() < GRAZING;
+                    (!shallow).then_some(t)
+                })
+                .collect()
+        }
+        Surface::Torus(t) => torus_hits(surface, t, p, dir),
     }
+}
+
+/// Samples along the chord of a torus's bounding sphere.
+const TORUS_SAMPLES: usize = 64;
+
+/// Hits of a ray on a torus (a quartic), found numerically: the signed distance along the
+/// ray is sampled across the torus's bounding sphere, sign changes are bisected, and
+/// every dip towards the surface between samples is followed to its lowest point, so a
+/// ray that only just enters the tube is not missed. A dip that touches the surface
+/// within tolerance, or a crossing at a shallow angle, is a degenerate hit.
+fn torus_hits(
+    surface: &Surface,
+    torus: &crate::geom::Torus,
+    p: DVec3,
+    dir: DVec3,
+) -> Vec<Option<f64>> {
+    let o = p - torus.frame.origin;
+    let tc = -o.dot(dir);
+    let reach = torus.major + torus.minor + LINEAR;
+    let h2 = (o + dir * tc).length_squared();
+    if h2 > reach * reach {
+        return Vec::new();
+    }
+    let w = (reach * reach - h2).sqrt();
+    let (lo, hi) = (tc - w, tc + w);
+    let f = |t: f64| surface.signed_distance(p + dir * t);
+    let n = TORUS_SAMPLES;
+    let step = (hi - lo) / n as f64;
+    let at = |i: usize| lo + step * i as f64;
+    let values: Vec<f64> = (0..=n).map(|i| f(at(i))).collect();
+    let bisect = |mut x0: f64, mut x1: f64| {
+        let f0 = f(x0);
+        for _ in 0..70 {
+            let m = 0.5 * (x0 + x1);
+            if (f(m) < 0.0) == (f0 < 0.0) {
+                x0 = m;
+            } else {
+                x1 = m;
+            }
+        }
+        0.5 * (x0 + x1)
+    };
+    let mut hits = Vec::new();
+    let crossing = |t: f64, hits: &mut Vec<Option<f64>>| {
+        let shallow = surface.normal_at(p + dir * t).dot(dir).abs() < GRAZING;
+        hits.push((!shallow).then_some(t));
+    };
+    for i in 0..n {
+        let (a, b) = (values[i], values[i + 1]);
+        if a * b < 0.0 || (a == 0.0 && b != 0.0) {
+            crossing(bisect(at(i), at(i + 1)), &mut hits);
+            continue;
+        }
+        if i == 0 {
+            continue;
+        }
+        // The same sign on both sides: look for a dip (or a bump) towards the surface.
+        let prev = values[i - 1];
+        if prev * a < 0.0 || !(a.abs() <= prev.abs() && a.abs() <= b.abs()) {
+            continue;
+        }
+        let (mut x0, mut x1) = (at(i) - step, at(i) + step);
+        const GOLD: f64 = 0.618_033_988_749_894_8;
+        let toward = |t: f64| f(t) * a.signum();
+        for _ in 0..60 {
+            let (m0, m1) = (x1 - GOLD * (x1 - x0), x0 + GOLD * (x1 - x0));
+            if toward(m0) < toward(m1) {
+                x1 = m1;
+            } else {
+                x0 = m0;
+            }
+        }
+        let t = 0.5 * (x0 + x1);
+        let lowest = toward(t);
+        if lowest.abs() <= LINEAR {
+            hits.push(None);
+        } else if lowest < 0.0 {
+            // The ray dips through the surface and comes back between two samples.
+            crossing(bisect(at(i) - step, t), &mut hits);
+            crossing(bisect(t, at(i) + step), &mut hits);
+        }
+    }
+    hits
 }
 
 fn ray_hits_box(p: DVec3, dir: DVec3, b: &Aabb) -> bool {

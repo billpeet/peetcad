@@ -7,7 +7,7 @@
 use peet_math::{DVec3, Frame, Plane};
 
 use crate::Solid;
-use crate::geom::{Circle3, Curve3, Cylinder, Ellipse3, Line3, Surface};
+use crate::geom::{Circle3, Cone, Curve3, Cylinder, Ellipse3, Line3, Sphere, Surface, Torus};
 
 /// `surface` placed by `frame` (its coordinates are taken as local to `frame`).
 pub fn surface(s: &Surface, frame: &Frame) -> Surface {
@@ -18,6 +18,18 @@ pub fn surface(s: &Surface, frame: &Frame) -> Surface {
         Surface::Cylinder(c) => Surface::Cylinder(Cylinder {
             frame: frame.compose(&c.frame),
             radius: c.radius,
+        }),
+        Surface::Cone(c) => Surface::Cone(Cone {
+            frame: frame.compose(&c.frame),
+            ..*c
+        }),
+        Surface::Sphere(s) => Surface::Sphere(Sphere {
+            frame: frame.compose(&s.frame),
+            ..*s
+        }),
+        Surface::Torus(t) => Surface::Torus(Torus {
+            frame: frame.compose(&t.frame),
+            ..*t
         }),
     }
 }

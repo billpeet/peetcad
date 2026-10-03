@@ -22,7 +22,8 @@
 //! multi-body part is usually exported; they are not made into an assembly.
 //!
 //! **Topology.** Kernel elements map one to one: shell → `CLOSED_SHELL`, face →
-//! `ADVANCED_FACE` on a `PLANE` or `CYLINDRICAL_SURFACE`, loop → `FACE_OUTER_BOUND` (the
+//! `ADVANCED_FACE` on a `PLANE`, `CYLINDRICAL_SURFACE`, `CONICAL_SURFACE`, `SPHERICAL_SURFACE` or
+//! `TOROIDAL_SURFACE`, loop → `FACE_OUTER_BOUND` (the
 //! first loop) or `FACE_BOUND` (holes) around an `EDGE_LOOP`, coedge → `ORIENTED_EDGE`,
 //! edge → `EDGE_CURVE` on a `LINE` (with a unit `VECTOR`), `CIRCLE` or `ELLIPSE`, vertex →
 //! `VERTEX_POINT`. Edges and vertices are shared between faces exactly as in the kernel; a
@@ -279,6 +280,47 @@ impl Writer {
                     "CYLINDRICAL_SURFACE('',#{axis},{})",
                     real(c.radius)
                 ))
+            }
+            Surface::Cone(c) => {
+                // STEP wants a positive semi-angle: a cone that narrows along its axis is
+                // written about the opposite axis. Turning the frame half a turn about X
+                // negates both parameters, which keeps the natural normal.
+                let frame = if c.half_angle < 0.0 {
+                    Frame {
+                        origin: c.frame.origin,
+                        rotation: c.frame.rotation
+                            * peet_math::DQuat::from_rotation_x(std::f64::consts::PI),
+                    }
+                } else {
+                    c.frame
+                };
+                let axis = self.axis(&frame);
+                self.add(format!(
+                    "CONICAL_SURFACE('',#{axis},{},{})",
+                    real(c.radius),
+                    real(c.half_angle.abs())
+                ))
+            }
+            Surface::Sphere(s) => {
+                let axis = self.axis(&s.frame);
+                self.add(format!("SPHERICAL_SURFACE('',#{axis},{})", real(s.radius)))
+            }
+            Surface::Torus(t) => {
+                let axis = self.axis(&t.frame);
+                if t.major > t.minor {
+                    self.add(format!(
+                        "TOROIDAL_SURFACE('',#{axis},{},{})",
+                        real(t.major),
+                        real(t.minor)
+                    ))
+                } else {
+                    // The tube overlaps itself around the axis; the kernel uses its outer part.
+                    self.add(format!(
+                        "DEGENERATE_TOROIDAL_SURFACE('',#{axis},{},{},.T.)",
+                        real(t.major),
+                        real(t.minor)
+                    ))
+                }
             }
         }
     }

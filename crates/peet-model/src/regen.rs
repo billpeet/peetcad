@@ -22,7 +22,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use peet_kernel::{Curve3, Surface};
+use peet_kernel::Curve3;
 use peet_math::{DQuat, DVec3, Frame, Plane};
 use peet_sketch::solver::Solver;
 use peet_sketch::{Sketch, expr};
@@ -624,6 +624,169 @@ impl Engine {
                     }
                 }
             }
+            FeatureKind::Revolve(r) => {
+                let inputs = (|| {
+                    let (plane, sketch) = ctx.sketch_input(r.sketch)?;
+                    let angle = ctx.scalar(&r.angle, ScalarKind::Angle, "Angle")?;
+                    let axis = match &r.axis {
+                        crate::RevolveAxisRef::Axis(a) => {
+                            Some(ctx.axis(a).map_err(|m| format!("Axis: {m}"))?)
+                        }
+                        _ => None,
+                    };
+                    Ok((plane, sketch, angle, axis))
+                })();
+                match inputs {
+                    Err(m) => fail(m, Output::None),
+                    Ok((plane, sketch, angle, axis)) => {
+                        let sketch_key = run.out_keys.get(&r.sketch).copied().unwrap_or(0);
+                        let key = hash::of(&(
+                            14u8,
+                            id,
+                            &**r,
+                            sketch_key,
+                            run.body_key,
+                            angle,
+                            axis.map(|a| (a.origin, a.dir)),
+                        ));
+                        self.solid_feature(id, key, run, |bodies| {
+                            let out = crate::apply_revolve(&crate::RevolveInput {
+                                feature: id,
+                                bodies,
+                                plane: &plane,
+                                sketch,
+                                def: r,
+                                angle,
+                                axis,
+                                stamp: key,
+                                mirror: false,
+                            })?;
+                            let warning = lost_sheet(model, bodies, &out, &feature.name);
+                            Ok((out, warning))
+                        })
+                    }
+                }
+            }
+            FeatureKind::Blend(b) => match ctx.scalar(&b.size, ScalarKind::Length, "Size") {
+                Err(m) => fail(m, Output::None),
+                Ok(size) => {
+                    let key = hash::of(&(15u8, id, &**b, run.body_key, size));
+                    self.solid_feature(id, key, run, |bodies| {
+                        let (out, _) =
+                            crate::dressup::apply_blend(id, model, bodies, b, size, key)?;
+                        let warning = lost_sheet(model, bodies, &out, &feature.name);
+                        Ok((out, warning))
+                    })
+                }
+            },
+            FeatureKind::Shell(s) => {
+                match ctx.scalar(&s.thickness, ScalarKind::Length, "Thickness") {
+                    Err(m) => fail(m, Output::None),
+                    Ok(thickness) => {
+                        let key = hash::of(&(16u8, id, &**s, run.body_key, thickness));
+                        self.solid_feature(id, key, run, |bodies| {
+                            let (out, _) =
+                                crate::dressup::apply_shell(id, model, bodies, s, thickness, key)?;
+                            let warning = lost_sheet(model, bodies, &out, &feature.name);
+                            Ok((out, warning))
+                        })
+                    }
+                }
+            }
+            FeatureKind::Draft(d) => {
+                let inputs = (|| {
+                    let Some(p) = &d.neutral else {
+                        return Err("Pick the neutral plane: the part keeps its size where the drafted faces cross it.".to_owned());
+                    };
+                    let neutral = ctx.plane(p).map_err(|m| format!("Neutral plane: {m}"))?;
+                    let angle = ctx.scalar(&d.angle, ScalarKind::Angle, "Angle")?;
+                    Ok((neutral, angle))
+                })();
+                match inputs {
+                    Err(m) => fail(m, Output::None),
+                    Ok((neutral, angle)) => {
+                        let key = hash::of(&(17u8, id, &**d, run.body_key, &neutral, angle));
+                        self.solid_feature(id, key, run, |bodies| {
+                            let (out, _) = crate::dressup::apply_draft(
+                                model, bodies, d, &neutral, angle, key,
+                            )?;
+                            let warning = lost_sheet(model, bodies, &out, &feature.name);
+                            Ok((out, warning))
+                        })
+                    }
+                }
+            }
+            FeatureKind::Hole(h) => {
+                let inputs = (|| {
+                    let (plane, sketch) = ctx.sketch_input(h.sketch)?;
+                    Ok((plane, sketch, ctx.hole_sizes(h)?))
+                })();
+                match inputs {
+                    Err(m) => fail(m, Output::None),
+                    Ok((plane, sketch, sizes)) => {
+                        let sketch_key = run.out_keys.get(&h.sketch).copied().unwrap_or(0);
+                        let key = hash::of(&(18u8, id, &**h, sketch_key, run.body_key, &sizes));
+                        self.solid_feature(id, key, run, |bodies| {
+                            let (out, warning) =
+                                crate::hole::apply_hole(&crate::hole::HoleInput {
+                                    feature: id,
+                                    bodies,
+                                    plane: &plane,
+                                    sketch,
+                                    def: h,
+                                    sizes,
+                                    stamp: key,
+                                    instance: 0,
+                                    mirror: false,
+                                })?;
+                            let lost = lost_sheet(model, bodies, &out, &feature.name);
+                            Ok((out, warning.or(lost)))
+                        })
+                    }
+                }
+            }
+            FeatureKind::Sweep(s) => {
+                let inputs = (|| {
+                    let profile = ctx.sketch_input(s.profile)?;
+                    let Some(path_id) = s.path else {
+                        return Err("Pick the path: a sketch of lines and arcs that starts on the profile's plane.".to_owned());
+                    };
+                    let path = ctx
+                        .sketch_input(path_id)
+                        .map_err(|m| m.replace("Its sketch", "Its path"))?;
+                    Ok((profile, path, path_id))
+                })();
+                match inputs {
+                    Err(m) => fail(m, Output::None),
+                    Ok(((plane, sketch), (path_plane, path), path_id)) => {
+                        let keys = (
+                            run.out_keys.get(&s.profile).copied().unwrap_or(0),
+                            run.out_keys.get(&path_id).copied().unwrap_or(0),
+                        );
+                        let key = hash::of(&(20u8, id, &**s, keys, run.body_key));
+                        self.solid_feature(id, key, run, |bodies| {
+                            let out = crate::apply_sweep(&crate::SweepInput {
+                                feature: id,
+                                bodies,
+                                profile_plane: &plane,
+                                profile: sketch,
+                                path_plane: &path_plane,
+                                path,
+                                def: s,
+                                stamp: key,
+                            })?;
+                            let warning = lost_sheet(model, bodies, &out, &feature.name);
+                            Ok((out, warning))
+                        })
+                    }
+                }
+            }
+            FeatureKind::Import(i) => {
+                let key = hash::of(&(19u8, id, &**i, run.body_key));
+                self.solid_feature(id, key, run, |bodies| {
+                    crate::import::apply_import(id, bodies, i, key)
+                })
+            }
             // Reference geometry is a few vector operations: always recomputed.
             FeatureKind::Plane(def) => reference(ctx.plane_def(def).map(Output::Plane)),
             FeatureKind::Axis(def) => reference(ctx.axis_def(def).map(Output::Axis)),
@@ -885,6 +1048,21 @@ impl<'m> Ctx<'m, '_> {
             .map_err(|m| format!("{label}: {m}."))
     }
 
+    /// A hole feature's sizes, evaluated.
+    fn hole_sizes(&self, h: &crate::HoleFeature) -> Result<crate::HoleSizes, String> {
+        let length = |s: &crate::Scalar, label: &str| self.scalar(s, ScalarKind::Length, label);
+        let angle = |s: &crate::Scalar, label: &str| self.scalar(s, ScalarKind::Angle, label);
+        Ok(crate::HoleSizes {
+            diameter: length(&h.diameter, "Diameter")?,
+            depth: length(&h.depth, "Depth")?,
+            tip_angle: angle(&h.tip_angle, "Drill point angle")?,
+            counterbore_diameter: length(&h.counterbore_diameter, "Counterbore diameter")?,
+            counterbore_depth: length(&h.counterbore_depth, "Counterbore depth")?,
+            countersink_diameter: length(&h.countersink_diameter, "Countersink diameter")?,
+            countersink_angle: angle(&h.countersink_angle, "Countersink angle")?,
+        })
+    }
+
     fn plane_def(&self, def: &PlaneDef) -> Result<Plane, String> {
         match def {
             PlaneDef::Offset {
@@ -964,12 +1142,18 @@ impl<'m> Ctx<'m, '_> {
                         self.model.describe_face(&face.name)
                     )
                 })?;
-                match self.bodies[found.body].solid.face(found.id).surface {
-                    Surface::Cylinder(c) => Ok(Axis {
-                        origin: c.axis_origin(),
-                        dir: c.axis(),
+                // Every round face is turned about an axis (a ball's runs through its poles).
+                match self.bodies[found.body]
+                    .solid
+                    .face(found.id)
+                    .surface
+                    .revolution_frame()
+                {
+                    Some(frame) => Ok(Axis {
+                        origin: frame.origin,
+                        dir: frame.z_axis(),
                     }),
-                    Surface::Plane(_) => Err(
+                    None => Err(
                         "The face it refers to is flat now: an axis needs a round face.".to_owned(),
                     ),
                 }
@@ -1066,6 +1250,28 @@ impl<'m> Ctx<'m, '_> {
                         face: sheet::sketch_face_ref(self.model, c.sketch),
                     }
                 }
+                FeatureKind::Revolve(r) => {
+                    let (plane, sketch) = self.sketch_input(r.sketch)?;
+                    pattern::Seed::Revolve {
+                        plane,
+                        sketch,
+                        def: r,
+                        angle: self.scalar(&r.angle, ScalarKind::Angle, "Angle")?,
+                        axis: match &r.axis {
+                            crate::RevolveAxisRef::Axis(a) => Some(self.axis(a)?),
+                            _ => None,
+                        },
+                    }
+                }
+                FeatureKind::Hole(h) => {
+                    let (plane, sketch) = self.sketch_input(h.sketch)?;
+                    pattern::Seed::Hole {
+                        plane,
+                        sketch,
+                        def: h,
+                        sizes: self.hole_sizes(h)?,
+                    }
+                }
                 FeatureKind::Form(f) => {
                     let (plane, sketch) = self.sketch_input(f.sketch)?;
                     pattern::Seed::Form {
@@ -1078,7 +1284,7 @@ impl<'m> Ctx<'m, '_> {
                 }
                 other => {
                     return Err(format!(
-                        "{name} is a {}, which can't be copied: patterns and mirrors copy extrusions, cuts, sheet metal cuts and forms.",
+                        "{name} is a {}, which can't be copied: patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts and forms.",
                         other.type_name().to_lowercase()
                     ));
                 }

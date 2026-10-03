@@ -3,11 +3,13 @@
 A lightweight parametric 3D CAD application written in Rust, with sheet metal first.
 It runs as a native Windows app and in the browser (WebAssembly), from one codebase.
 
-> **Status:** early development (Phase 5: sheet metal for everyday work, with base, edge
-> and mitre flanges, hems, sketched bends and jogs, corners, dimples, embosses and
-> louvers, patterns and mirrors, manufacturing checks, gauge tables, a live flat pattern,
-> DXF export and import and STEP export, on top of a parametric, history-based modeller
-> with sketches, extrude and cut, reference geometry, undo and a native file format).
+> **Status:** early development (Phase 6: general solid modelling, with revolves, sweeps
+> along lines and arcs, a hole wizard, fillets and chamfers, shells, draft, STEP import and
+> mass properties, next to sheet metal for everyday work: base, edge and mitre flanges,
+> hems, sketched bends and jogs, corners, forms, patterns and mirrors, manufacturing
+> checks, gauge tables, a live flat pattern, DXF export and import and STEP export. All
+> of it on a parametric, history-based modeller with sketches, extrude and cut, reference
+> geometry, undo and a native file format).
 > See [ROADMAP.md](ROADMAP.md) for the plan.
 
 ## Running
@@ -85,6 +87,21 @@ Click a face or edge in the viewport to select it (hovering highlights it first)
 a model face, select a flat face and press `S`. **File → Export STL** saves the bodies as a
 mesh.
 
+| Action | How |
+|---|---|
+| Turn a profile | Sketch half the section and a centreline (a construction line), then **Revolve** or **Cut-Revolve**. The axis can also be the sketch's own X or Y axis, another line of the sketch, or a reference axis or straight edge lying in the sketch plane. Set the angle (360° for a full turn), mid-plane, and the operation |
+| Sweep along a path | Sketch the profile, and in a second sketch the path: lines and arcs joined smoothly (or one full circle), starting on the profile's plane and square to it. Select the profile, then **Sweep** or **Cut-Sweep**, and pick the path |
+| Drill holes | Sketch points on a flat face (one per hole), then **Hole**: a standard metric size with a close, normal or loose clearance fit or tapped; simple, counterbored or countersunk; through everything or blind with a drill point. Threads are cosmetic: the hole is drilled to tap size and carries the thread's designation |
+| Round or bevel edges | Select edges, then **Fillet** or **Chamfer**. With *tangent propagation* the blend carries on along edges that continue smoothly. Works on straight edges between flat faces and on round edges such as the rim of a hole or a boss; three fillets at a square corner meet in a ball |
+| Hollow a body | Select the faces to open, then **Shell**, and set the wall thickness. With no face selected the body becomes a closed hollow |
+| Taper walls | Select flat faces, then **Draft**: pick the neutral plane (the part keeps its size there; its normal is the direction of pull) and the angle |
+| Copy features | Select an extrusion, a cut, a revolve or a hole in the tree, then **Linear Pattern**, **Circular Pattern** (a bolt circle is one hole patterned round an axis) or **Mirror** |
+| Bring in another system's part | **File → Import STEP**: solids made of flat, cylindrical, conical, spherical and toroidal faces come in as bodies you can keep working on. Freeform (NURBS) faces can't be read yet, and the file says so |
+| Measure | Select a face, an edge or a vertex for its size (area, length, radius); select two for the distance and the angle between them. **Mass** (in the Evaluate group) lists volume, area, mass (set the density), centre of gravity and moments of inertia |
+
+**File → Open Sample Housing** opens a turned bearing housing with a filleted hub,
+chamfered rims and a bolt circle of counterbored holes.
+
 ### Sheet metal
 
 Select a sketch and click **Base Flange** (toolbar or **Features → Sheet Metal**). A
@@ -101,7 +118,7 @@ allowance or bend deduction) and relief type.
 | Bend along a line | Sketch lines across a flat face, then **Sketched Bend** (one bend per line) or **Jog** (a step: two bends that offset the far side) |
 | Corners | Flanges on neighbouring edges meet in a butt corner with a relief and a 0.1 mm gap. **Corner** changes that for the selected flanges' faces, or for every corner: butt, overlap or open, the gap, and the relief |
 | Dimples, embosses, louvers | Sketch circles (dimples) or closed polygons (embosses, louvers) on a flat face, then **Dimple**, **Emboss** or **Louver**. They are pressed, not cut: the flat pattern marks them on their own layer (a louver's open side is cut) |
-| Patterns and mirrors | Select an extrusion, a cut, a sheet metal cut or a form in the tree, then **Linear Pattern** (a row or a grid), **Circular Pattern** or **Mirror**. Directions can be the standard axes, a reference axis or a picked edge |
+| Patterns and mirrors | Select an extrusion, a cut, a revolve, a hole, a sheet metal cut or a form in the tree, then **Linear Pattern** (a row or a grid), **Circular Pattern** or **Mirror**. Directions can be the standard axes, a reference axis or a picked edge |
 | Check for manufacture | **Check**: flanges too short to bend, holes too close to a bend or an edge, holes too small, and parts that collide when folded. The limits are editable (multiples of thickness and radius) |
 | Materials and gauges | **Materials**: tables of thickness, bend radius and K-factor by material and gauge. **Apply** a row to the part; edit the tables, or share them as CSV |
 | Flat pattern | `U` toggles between folded and flat; bend lines are dashed |
@@ -160,10 +177,10 @@ crates/
   peet-platform/  time, files, autosave storage and crash reports for native and web
   peet-render/    wgpu viewport renderer: camera, grid, meshes, edges, overlays
   peet-sketch/    2D sketches: entities, constraints, solver, expressions, editing operations
-  peet-kernel/    B-rep kernel: planes and cylinders, extrude, booleans, validation, tessellation
+  peet-kernel/    B-rep kernel: planes, cylinders, cones, spheres and tori; extrude, revolve, booleans, fillets and chamfers, shell and draft, validation, tessellation, mass properties
   peet-sheetmetal/ sheet metal: flat layouts of flanges and bends, folding, flat patterns, bend math
-  peet-model/     the parametric core: feature tree, persistent naming, rebuilds, sheet metal features, undo
-  peet-io/        file formats: native .peet, STL export, DXF flat patterns
+  peet-model/     the parametric core: feature tree, persistent naming, rebuilds, solid and sheet metal features, undo
+  peet-io/        file formats: native .peet, STL export, DXF flat patterns and import, STEP export and import
   peet-document/  the open document, headless: model, rebuilds, undo and bodies, shared by the app and scripts
   peet-ui/        egui application shell: panels, commands, viewport interaction
   peetcad/        the application binary (native main and web entry point)

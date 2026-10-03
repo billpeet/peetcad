@@ -8,4 +8,5 @@ pub mod dxf;
 pub mod dxf_import;
 pub mod peet;
 pub mod step;
+pub mod step_import;
 pub mod stl;

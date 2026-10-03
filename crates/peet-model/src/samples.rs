@@ -327,6 +327,112 @@ pub fn chassis() -> (Model, Engine) {
 }
 
 /// The bracket's exact volume for a base plate `width` wide.
+/// Sizes of [`housing`], for its tests.
+pub mod housing_size {
+    /// Radius of the flange, the hub and the bore.
+    pub const FLANGE_R: f64 = 50.0;
+    pub const HUB_R: f64 = 28.0;
+    pub const BORE_R: f64 = 15.0;
+    /// Thickness of the flange and overall height.
+    pub const FLANGE_T: f64 = 12.0;
+    pub const HEIGHT: f64 = 40.0;
+    /// The fillet at the foot of the hub and the chamfers on its top rims.
+    pub const FILLET: f64 = 4.0;
+    pub const CHAMFER: f64 = 1.5;
+    /// The bolt circle: six counterbored holes for M8 cap screws.
+    pub const BOLT_CIRCLE_R: f64 = 40.0;
+    pub const BOLTS: u32 = 6;
+}
+
+/// A turned bearing housing: a flange and a hub revolved from one half section, the
+/// foot of the hub filleted, the top rims chamfered, and a bolt circle of counterbored
+/// holes patterned round the axis. The Phase 6 exit part.
+pub fn housing() -> (Model, Engine) {
+    use housing_size as hs;
+    let mut b = Builder {
+        model: Model::new(),
+        engine: Engine::new(),
+    };
+    b.model.name = "Housing".to_owned();
+    // Half the section on the front plane: sketch x is the radius, y the height.
+    let section = b.sketch(PlaneRef::Standard(StdPlane::Front), |s| {
+        let pts = [
+            DVec2::new(hs::BORE_R, 0.0),
+            DVec2::new(hs::FLANGE_R, 0.0),
+            DVec2::new(hs::FLANGE_R, hs::FLANGE_T),
+            DVec2::new(hs::HUB_R, hs::FLANGE_T),
+            DVec2::new(hs::HUB_R, hs::HEIGHT),
+            DVec2::new(hs::BORE_R, hs::HEIGHT),
+        ];
+        for i in 0..pts.len() {
+            s.add_line(pts[i], pts[(i + 1) % pts.len()]);
+        }
+        let axis = s.add_line(DVec2::new(0.0, -10.0), DVec2::new(0.0, hs::HEIGHT + 10.0));
+        s.set_construction(axis, true);
+    });
+    b.model.add_revolve(section, Operation::NewBody);
+
+    let foot = b.circle_edge(hs::HUB_R, hs::FLANGE_T);
+    let fillet = b.model.add_blend(crate::BlendKind::Fillet, vec![foot]);
+    if let Some(FeatureKind::Blend(f)) = b.model.feature_mut(fillet).map(|f| &mut f.kind) {
+        f.size = Scalar::new(hs::FILLET);
+    }
+    let rims = vec![
+        b.circle_edge(hs::HUB_R, hs::HEIGHT),
+        b.circle_edge(hs::BORE_R, hs::HEIGHT),
+    ];
+    let chamfer = b.model.add_blend(crate::BlendKind::Chamfer, rims);
+    if let Some(FeatureKind::Blend(c)) = b.model.feature_mut(chamfer).map(|f| &mut f.kind) {
+        c.size = Scalar::new(hs::CHAMFER);
+    }
+
+    let top = b.face(DVec3::Z, DVec3::new(hs::BOLT_CIRCLE_R, 0.0, hs::FLANGE_T));
+    let at = b.sketch_at(top, |s, to| {
+        s.add_point(to(DVec3::new(hs::BOLT_CIRCLE_R, 0.0, hs::FLANGE_T)));
+    });
+    let hole = b.model.add_hole(at);
+    if let Some(FeatureKind::Hole(h)) = b.model.feature_mut(hole).map(|f| &mut f.kind) {
+        let m8 = crate::METRIC
+            .iter()
+            .find(|s| s.name == "M8")
+            .expect("M8 is in the table");
+        h.set_standard(m8, crate::HoleFit::Normal);
+        h.kind = crate::HoleKind::Counterbore;
+    }
+    b.model.add_pattern(
+        vec![hole],
+        crate::PatternDef::Circular {
+            axis: crate::AxisRef::Standard(crate::StdAxis::Z),
+            count: hs::BOLTS,
+            angle: Scalar::new(360.0),
+            flip: false,
+        },
+    );
+    b.engine.regenerate(&mut b.model);
+    (b.model, b.engine)
+}
+
+/// Volume of [`housing`], from its sizes.
+pub fn housing_volume() -> f64 {
+    use housing_size as hs;
+    use std::f64::consts::{PI, TAU};
+    let bore2 = hs::BORE_R * hs::BORE_R;
+    let turned = PI
+        * ((hs::FLANGE_R * hs::FLANGE_R - bore2) * hs::FLANGE_T
+            + (hs::HUB_R * hs::HUB_R - bore2) * (hs::HEIGHT - hs::FLANGE_T));
+    // Pappus: a section's area times the distance its centroid travels. A fillet's
+    // sliver (a square less a quarter disc) has its centroid this far from its corner.
+    let r = hs::FILLET;
+    let sliver = r * r * (1.0 - PI / 4.0);
+    let sliver_centroid = r * (5.0 / 6.0 - PI / 4.0) / (1.0 - PI / 4.0);
+    let fillet = TAU * (hs::HUB_R + sliver_centroid) * sliver;
+    let d = hs::CHAMFER;
+    let chamfers = TAU * (hs::HUB_R - d / 3.0 + hs::BORE_R + d / 3.0) * (d * d / 2.0);
+    // M8, normal clearance: a Ø9 hole with a Ø15 counterbore 8.6 deep.
+    let hole = PI * (7.5 * 7.5 * 8.6 + 4.5 * 4.5 * (hs::FLANGE_T - 8.6));
+    turned + fillet - chamfers - f64::from(hs::BOLTS) * hole
+}
+
 pub fn bracket_volume(width: f64) -> f64 {
     let pi = std::f64::consts::PI;
     width * 80.0 * 8.0 // plate
@@ -408,6 +514,23 @@ impl Builder {
 
     /// A reference to the planar face with outward normal `n` through `at`, in the model
     /// as built so far.
+    /// The round edge of this radius about the Z axis at height `z`.
+    fn circle_edge(&mut self, radius: f64, z: f64) -> crate::EdgeRef {
+        let eval = self.engine.regenerate(&mut self.model);
+        for body in &eval.bodies {
+            for e in body.solid.edge_ids() {
+                if let peet_kernel::Curve3::Circle(c) = body.solid.edge(e).curve
+                    && (c.radius - radius).abs() < 1e-9
+                    && (c.frame.origin.z - z).abs() < 1e-9
+                    && let Some(r) = body.edge_ref(e)
+                {
+                    return r;
+                }
+            }
+        }
+        panic!("no round edge of radius {radius} at z = {z}");
+    }
+
     fn face(&mut self, n: DVec3, at: DVec3) -> PlaneRef {
         let eval = self.engine.regenerate(&mut self.model);
         for body in &eval.bodies {

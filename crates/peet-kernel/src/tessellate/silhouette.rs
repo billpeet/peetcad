@@ -1,11 +1,16 @@
-//! Silhouette lines of cylindrical faces.
+//! Silhouette lines of curved faces.
 //!
 //! A cylinder's silhouette is made of generator lines (parallel to the axis) at the angles
 //! where the surface normal is perpendicular to the view direction: two angles for a given
 //! view, the same along the whole axis (also in perspective, where the condition
 //! `normal · (eye − point) = 0` reduces to `ρ(θ) · (eye − axis origin) = r`).
-//! Each generator is clipped to the face by intersecting the vertical line `θ = const`
-//! with the face's loops in `(r θ, v)` parameter space (even–odd rule).
+//! A cone's is made of rulings through its apex, found the same way. Each generator is
+//! clipped to the face by intersecting the vertical line `θ = const` with the face's loops
+//! in `(θ, v)` parameter space (even–odd rule).
+//!
+//! A sphere's or a torus's silhouette is a curve across the surface. It is traced where
+//! `normal · view` changes sign over a grid of the face's parameters (marching squares),
+//! and the pieces inside the face's loops are kept.
 
 use std::f64::consts::TAU;
 
@@ -13,7 +18,7 @@ use peet_math::{DVec2, DVec3, tolerance};
 
 use super::{View, face_boundary, sample_edges};
 use crate::Solid;
-use crate::geom::{Cylinder, Surface};
+use crate::geom::{Cone, Cylinder, Surface};
 
 /// Chord tolerance (mm) for the boundary polygons used for clipping. Lines and circles are
 /// straight in a cylinder's parameter space, so this only matters for oblique (elliptical)
@@ -23,57 +28,67 @@ const BOUNDARY_TOLERANCE: f64 = 0.01;
 /// Angular slack (radians, and turns) for generators that fall on a face's boundary.
 const ANGLE_SLACK: f64 = 1e-9;
 
-/// One cylindrical face, prepared for silhouette queries.
+/// How close (radians) to the ends of a face's angular range a traced silhouette counts
+/// as being on the seam.
+const SEAM_SLACK: f64 = 1e-6;
+
+/// Grid cells per full turn when tracing a sphere's or a torus's silhouette.
+const CELLS_PER_TURN: f64 = 64.0;
+
+/// One curved face, prepared for silhouette queries.
 #[derive(Clone, Debug)]
-struct CylinderFace {
-    cylinder: Cylinder,
-    /// Boundary segments in `(θ, v)` (true angle, not mirrored), all loops together.
+struct CurvedFace {
+    surface: Surface,
+    /// Boundary segments in `(θ, v)` (true parameters, not mirrored or scaled), all loops
+    /// together.
     segments: Vec<[DVec2; 2]>,
-    theta_min: f64,
-    theta_max: f64,
+    lo: DVec2,
+    hi: DVec2,
 }
 
 /// Precomputed data for silhouette extraction: build once per solid, query per view.
 #[derive(Clone, Debug, Default)]
 pub struct Silhouettes {
-    faces: Vec<CylinderFace>,
+    faces: Vec<CurvedFace>,
 }
 
 impl Silhouettes {
     pub fn new(solid: &Solid) -> Self {
         let mut faces = Vec::new();
-        if !solid
+        if solid
             .faces
             .iter()
-            .any(|f| matches!(f.surface, Surface::Cylinder(_)))
+            .all(|f| matches!(f.surface, Surface::Plane(_)))
         {
             return Self { faces };
         }
         let samples = sample_edges(solid, BOUNDARY_TOLERANCE);
         for id in solid.face_ids() {
-            let Surface::Cylinder(cylinder) = solid.face(id).surface else {
+            let surface = solid.face(id).surface;
+            if matches!(surface, Surface::Plane(_)) {
                 continue;
-            };
-            let b = face_boundary(solid, id, &samples);
+            }
+            let b = face_boundary(solid, id, &samples, BOUNDARY_TOLERANCE);
             let mirror = if b.mirrored { -1.0 } else { 1.0 };
-            let to_angle = |p: DVec2| DVec2::new(p.x * mirror / cylinder.radius, p.y);
+            let to_param = |p: DVec2| DVec2::new(p.x * mirror / b.scale.x, p.y / b.scale.y);
             let mut segments = Vec::with_capacity(b.param.len());
-            let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+            let mut lo = DVec2::splat(f64::INFINITY);
+            let mut hi = DVec2::splat(f64::NEG_INFINITY);
             for r in &b.loops {
                 let pts = &b.param[r.clone()];
                 for i in 0..pts.len() {
-                    let (p, q) = (to_angle(pts[i]), to_angle(pts[(i + 1) % pts.len()]));
-                    lo = lo.min(p.x);
-                    hi = hi.max(p.x);
+                    let (p, q) = (to_param(pts[i]), to_param(pts[(i + 1) % pts.len()]));
+                    lo = lo.min(p);
+                    hi = hi.max(p);
                     segments.push([p, q]);
                 }
             }
             if !segments.is_empty() {
-                faces.push(CylinderFace {
-                    cylinder,
+                faces.push(CurvedFace {
+                    surface,
                     segments,
-                    theta_min: lo,
-                    theta_max: hi,
+                    lo,
+                    hi,
                 });
             }
         }
@@ -83,41 +98,161 @@ impl Silhouettes {
     /// The silhouette segments for `view`, in model space.
     pub fn lines(&self, view: View) -> Vec<[DVec3; 2]> {
         let mut out = Vec::new();
-        let mut crossings: Vec<f64> = Vec::new();
         for f in &self.faces {
-            let Some(angles) = silhouette_angles(&f.cylinder, view) else {
-                continue;
-            };
-            for base in angles {
-                // Every representative of the angle inside the face's (unwrapped) range
-                // `[min, max)`: half open, so a generator on a full cylinder's seam is found
-                // once, not at both ends of the range.
-                let mut theta = base + ((f.theta_min - base) / TAU - ANGLE_SLACK).ceil() * TAU;
-                while theta < f.theta_max - ANGLE_SLACK {
-                    let at = theta.max(f.theta_min);
-                    crossings.clear();
-                    for [p, q] in &f.segments {
-                        if (p.x <= at) != (q.x <= at) {
-                            let s = (at - p.x) / (q.x - p.x);
-                            crossings.push(p.y + (q.y - p.y) * s);
-                        }
+            match &f.surface {
+                Surface::Cylinder(c) => {
+                    if let Some(angles) = silhouette_angles(c, view) {
+                        f.generators(&angles, &mut out);
                     }
-                    crossings.sort_by(f64::total_cmp);
-                    let surface = Surface::Cylinder(f.cylinder);
-                    for pair in crossings.as_chunks::<2>().0 {
-                        if pair[1] - pair[0] > tolerance::LINEAR {
-                            out.push([
-                                surface.point(DVec2::new(theta, pair[0])),
-                                surface.point(DVec2::new(theta, pair[1])),
-                            ]);
-                        }
-                    }
-                    theta += TAU;
                 }
+                Surface::Cone(c) => f.generators(&cone_angles(c, view), &mut out),
+                Surface::Sphere(_) | Surface::Torus(_) => f.contour(view, &mut out),
+                Surface::Plane(_) => {}
             }
         }
         out
     }
+}
+
+impl CurvedFace {
+    /// The `v` intervals of the generator at `theta` that are inside the face.
+    fn crossings(&self, theta: f64) -> Vec<f64> {
+        let mut crossings = Vec::new();
+        for [p, q] in &self.segments {
+            if (p.x <= theta) != (q.x <= theta) {
+                let s = (theta - p.x) / (q.x - p.x);
+                crossings.push(p.y + (q.y - p.y) * s);
+            }
+        }
+        crossings.sort_by(f64::total_cmp);
+        crossings
+    }
+
+    /// The generators (lines of constant angle) at `angles`, clipped to the face.
+    fn generators(&self, angles: &[f64], out: &mut Vec<[DVec3; 2]>) {
+        for &base in angles {
+            // Every representative of the angle inside the face's (unwrapped) range
+            // `[min, max)`: half open, so a generator on a full turn's seam is found
+            // once, not at both ends of the range.
+            let mut theta = base + ((self.lo.x - base) / TAU - ANGLE_SLACK).ceil() * TAU;
+            while theta < self.hi.x - ANGLE_SLACK {
+                let at = theta.max(self.lo.x);
+                for pair in self.crossings(at).as_chunks::<2>().0 {
+                    let (a, b) = (
+                        self.surface.point(DVec2::new(theta, pair[0])),
+                        self.surface.point(DVec2::new(theta, pair[1])),
+                    );
+                    if a.distance(b) > tolerance::LINEAR {
+                        out.push([a, b]);
+                    }
+                }
+                theta += TAU;
+            }
+        }
+    }
+
+    /// Whether the parameter point `q` is inside the face's loops.
+    fn contains(&self, q: DVec2) -> bool {
+        self.crossings(q.x).iter().filter(|&&v| v > q.y).count() % 2 == 1
+    }
+
+    /// The silhouette across a doubly curved face: where the normal turns away from the
+    /// viewer, traced over a grid of the face's parameters.
+    fn contour(&self, view: View, out: &mut Vec<[DVec3; 2]>) {
+        let size = self.hi - self.lo;
+        if !(size.x > 0.0 && size.y > 0.0) {
+            return;
+        }
+        let step = TAU / CELLS_PER_TURN;
+        let nu = ((size.x / step).ceil() as usize).clamp(2, 512);
+        let nv = ((size.y / step).ceil() as usize).clamp(2, 512);
+        // One more column of cells before the face's range (and one more row where the
+        // surface also goes round in `v`): a silhouette that runs along the face's seam
+        // (a ball seen from the front, a ring seen along its axis) has its sign change
+        // right at the edge of the range, on one side of it or the other.
+        let extra_v = usize::from(self.surface.is_periodic_v());
+        let at = |i: usize, j: usize| {
+            self.lo
+                + size
+                    * DVec2::new(
+                        (i as f64 - 1.0) / nu as f64,
+                        (j as f64 - extra_v as f64) / nv as f64,
+                    )
+        };
+        let (nu, nv) = (nu + 1, nv + extra_v);
+        // How squarely the surface faces the viewer at each grid point.
+        let facing = |uv: DVec2| {
+            let n = self.surface.normal(uv);
+            match view {
+                View::Orthographic { dir } => n.dot(dir),
+                View::Perspective { eye } => n.dot(self.surface.point(uv) - eye),
+            }
+        };
+        let values: Vec<f64> = (0..=nu)
+            .flat_map(|i| (0..=nv).map(move |j| (i, j)))
+            .map(|(i, j)| facing(at(i, j)))
+            .collect();
+        let value = |i: usize, j: usize| values[i * (nv + 1) + j];
+        for i in 0..nu {
+            for j in 0..nv {
+                // The cell's corners, counter-clockwise, and where the sign changes
+                // along its sides.
+                let corners = [(i, j), (i + 1, j), (i + 1, j + 1), (i, j + 1)];
+                let mut cuts: Vec<DVec2> = Vec::with_capacity(4);
+                for k in 0..4 {
+                    let (a, b) = (corners[k], corners[(k + 1) % 4]);
+                    let (fa, fb) = (value(a.0, a.1), value(b.0, b.1));
+                    if (fa < 0.0) != (fb < 0.0) {
+                        let s = fa / (fa - fb);
+                        cuts.push(at(a.0, a.1).lerp(at(b.0, b.1), s));
+                    }
+                }
+                // Two cuts: one piece. Four (a saddle): two pieces, paired as they come.
+                for pair in cuts.as_chunks::<2>().0 {
+                    // The range is half open, like the generators': a piece on the seam
+                    // counts at the low end and not again at the high end.
+                    let mut middle = 0.5 * (pair[0] + pair[1]);
+                    if middle.x > self.hi.x - SEAM_SLACK
+                        || (extra_v == 1 && middle.y > self.hi.y - SEAM_SLACK)
+                    {
+                        continue;
+                    }
+                    middle.x = middle.x.max(self.lo.x + SEAM_SLACK);
+                    if extra_v == 1 {
+                        middle.y = middle.y.max(self.lo.y + SEAM_SLACK);
+                    }
+                    if self.contains(middle) {
+                        let (a, b) = (self.surface.point(pair[0]), self.surface.point(pair[1]));
+                        if a.distance(b) > tolerance::LINEAR {
+                            out.push([a, b]);
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The angles (in the cone's frame) of its silhouette rulings: two, one or none.
+fn cone_angles(c: &Cone, view: View) -> Vec<f64> {
+    // The normal along a ruling is (cos u cos α, sin u cos α, −sin α): it is square to
+    // the view direction (or, in perspective, to the line from the apex to the eye) where
+    // cos(u − φ) = tan α · dz / |d_xy|.
+    let d = match view {
+        View::Orthographic { dir } => c.frame.vector_to_local(dir),
+        View::Perspective { eye } => c.frame.vector_to_local(eye - c.apex()),
+    };
+    let across = d.x.hypot(d.y);
+    if !(across.is_finite() && across > tolerance::ANGULAR * d.length().max(f64::MIN_POSITIVE)) {
+        return Vec::new();
+    }
+    let k = c.slope() * d.z / across;
+    if k.abs() >= 1.0 {
+        return Vec::new();
+    }
+    let phi = d.y.atan2(d.x);
+    let w = k.acos();
+    vec![phi - w, phi + w]
 }
 
 /// The two angles (in the cylinder's frame) of its silhouette generators, or `None` when
@@ -264,5 +399,58 @@ mod tests {
         let lines = sorted(silhouettes(&solid, View::Orthographic { dir: DVec3::Y }));
         assert_eq!(lines.len(), 2);
         assert!((lines[0][0].x - 7.0).abs() < 1e-9 && (lines[1][0].x - 13.0).abs() < 1e-9);
+    }
+
+    fn total(lines: &[[DVec3; 2]]) -> f64 {
+        lines.iter().map(|l| l[0].distance(l[1])).sum()
+    }
+
+    #[test]
+    fn ball_cone_and_ring() {
+        use crate::revolve::{RevolveAxis, revolve};
+        let axis = RevolveAxis {
+            origin: DVec2::ZERO,
+            dir: DVec2::Y,
+        };
+        // A ball's outline is a great circle, whatever the direction.
+        let ball = crate::primitive::ball(&peet_math::Frame::WORLD, 5.0).unwrap();
+        for dir in [DVec3::Y, DVec3::Z, DVec3::new(0.3, -0.5, 0.8).normalize()] {
+            let lines = silhouettes(&ball, View::Orthographic { dir });
+            let length = total(&lines);
+            assert!((length - TAU * 5.0).abs() < 0.02 * TAU * 5.0, "{length}");
+            for l in &lines {
+                for p in l {
+                    assert!((p.length() - 5.0).abs() < 1e-9);
+                    assert!(p.dot(dir).abs() < 0.05, "{p} is not on the outline");
+                }
+            }
+        }
+        // In perspective it is a smaller circle, nearer the eye.
+        let eye = DVec3::new(0.0, -13.0, 0.0);
+        let lines = silhouettes(&ball, View::Perspective { eye });
+        let r = 5.0 * (1.0 - (5.0 / 13.0_f64).powi(2)).sqrt();
+        assert!((total(&lines) - TAU * r).abs() < 0.02 * TAU * r);
+        // A cone from the side: two rulings from the rim to the apex.
+        let mut s = Sketch::new();
+        for (a, b) in [
+            (DVec2::ZERO, DVec2::new(5.0, 0.0)),
+            (DVec2::new(5.0, 0.0), DVec2::new(0.0, 12.0)),
+            (DVec2::new(0.0, 12.0), DVec2::ZERO),
+        ] {
+            s.add_line(a, b);
+        }
+        let cone = revolve(&Plane::front(), &find_regions(&s).regions, &axis, 0.0, TAU).unwrap();
+        let lines = silhouettes(&cone, View::Orthographic { dir: DVec3::Y });
+        assert_eq!(lines.len(), 2, "{lines:?}");
+        assert!((total(&lines) - 2.0 * 13.0).abs() < 1e-9);
+        // From above the apex, looking down: the whole cone faces the viewer.
+        assert!(silhouettes(&cone, View::Orthographic { dir: -DVec3::Z }).is_empty());
+        // A ring seen along its axis: its outer and inner equators.
+        let mut s = Sketch::new();
+        s.add_circle(DVec2::new(10.0, 0.0), 3.0);
+        let ring = revolve(&Plane::front(), &find_regions(&s).regions, &axis, 0.0, TAU).unwrap();
+        let lines = silhouettes(&ring, View::Orthographic { dir: DVec3::Z });
+        let expected = TAU * 13.0 + TAU * 7.0;
+        assert!((total(&lines) - expected).abs() < 0.02 * expected);
     }
 }

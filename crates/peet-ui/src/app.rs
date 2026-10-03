@@ -22,8 +22,11 @@ use crate::perf::{PerfInfo, PerfMonitor};
 use crate::ribbon;
 use crate::settings::{MousePreset, OrbitChoice, STORAGE_KEY, Settings, ThemeChoice};
 use crate::sketch_ui::{self, SketchEditor};
+use crate::solid_ui;
 use crate::tree::{TreeAction, TreeView, tree_ui};
 use crate::viewport::{Viewport, ViewportParams};
+
+mod solids;
 
 pub const APP_NAME: &str = "PeetCAD";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -49,6 +52,7 @@ struct OpenWindows {
     bend_table: bool,
     sheet_checks: bool,
     gauges: bool,
+    mass_properties: bool,
 }
 
 /// A drag of an edge flange's length handle in progress.
@@ -107,6 +111,9 @@ pub struct PeetApp {
     /// File dialogs waiting for an answer.
     gauge_import: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
     dxf_import: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
+    step_import: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
+    /// A message to read and dismiss (what an import left out, or why it failed).
+    notice: Option<solids::Notice>,
 }
 
 impl PeetApp {
@@ -121,7 +128,20 @@ impl PeetApp {
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
             .unwrap_or_default();
 
-        let render_state = cc.wgpu_render_state.clone();
+        Self::with_renderer(settings, cc.wgpu_render_state.clone(), process_start)
+    }
+
+    /// The app without a GPU or a window: commands work, the viewport shows nothing.
+    #[cfg(test)]
+    pub(crate) fn headless() -> Self {
+        Self::with_renderer(Settings::default(), None, Instant::now())
+    }
+
+    fn with_renderer(
+        settings: Settings,
+        render_state: Option<RenderState>,
+        process_start: Instant,
+    ) -> Self {
         let (adapter_name, backend_name) = render_state.as_ref().map_or_else(
             || ("none".to_owned(), "none".to_owned()),
             |rs| {
@@ -183,6 +203,8 @@ impl PeetApp {
             gauge_message: None,
             gauge_import: None,
             dxf_import: None,
+            step_import: None,
+            notice: None,
         }
     }
 
@@ -307,7 +329,7 @@ impl PeetApp {
                 Some(Picked::Face {
                     face: b.face_ref(face),
                     planar: matches!(surface, Surface::Plane(_)),
-                    round: matches!(surface, Surface::Cylinder(_)),
+                    round: !matches!(surface, Surface::Plane(_)),
                 })
             }
             Some(GeomRef::Edge { body, edge }) => Some(Picked::Edge(
@@ -336,6 +358,20 @@ impl PeetApp {
         };
         let name = feature.name.clone();
         let mut kind = feature.kind.clone();
+        // What the feature itself made can't define it: the reference would go in a circle.
+        let own = match &picked {
+            Picked::Edge(e) => e.features().any(|f| f == id),
+            Picked::Vertex(v) => v.features().any(|f| f == id),
+            Picked::Face { face, .. } => face.name.features().any(|f| f == id),
+            _ => false,
+        };
+        if own {
+            self.error(format!(
+                "That was made by {name} itself, so {name} can't be built on it. Pick something that was there before."
+            ));
+            self.picking = Some((id, slot));
+            return;
+        }
         match features_ui::apply_pick(&mut kind, slot, picked) {
             Ok(()) => {
                 self.change(&format!("Edit {name}"), |m| {
@@ -344,6 +380,10 @@ impl PeetApp {
                     }
                 });
                 self.status_message = None;
+                // Lists of edges and faces take one click after another.
+                if slot.repeats() && self.doc.feature(id).is_some() {
+                    self.picking = Some((id, slot));
+                }
             }
             Err(e) => {
                 self.error(e);
@@ -764,6 +804,12 @@ impl PeetApp {
                 self.files.discard_autosave();
                 self.info("Opened the sample chassis. Press U for its flat pattern; Sheet Metal > Check runs the manufacturing checks.");
             }
+            AfterDiscard::SampleHousing => {
+                let (model, _) = peet_model::samples::housing();
+                self.set_document(Document::from_model(model, None));
+                self.files.discard_autosave();
+                self.info("Opened the sample housing: a revolve with a fillet, chamfers and a bolt circle of counterbored holes. Mass on the Model tab weighs it.");
+            }
             AfterDiscard::Quit => {
                 self.files.discard_autosave();
                 self.doc.mark_saved(None);
@@ -901,7 +947,19 @@ impl PeetApp {
             CommandId::LinearPattern | CommandId::CircularPattern | CommandId::MirrorFeature => {
                 enabled(!in_sketch && self.copy_source().is_some())
             }
-            CommandId::GaugeTables | CommandId::ImportDxf => enabled(true),
+            CommandId::GaugeTables
+            | CommandId::ImportDxf
+            | CommandId::ImportStep
+            | CommandId::MassProperties => enabled(true),
+            CommandId::Revolve | CommandId::CutRevolve | CommandId::Sweep | CommandId::CutSweep => {
+                enabled(self.extrude_source().is_some())
+            }
+            CommandId::Hole => {
+                enabled(self.extrude_source().is_some() && !self.doc.bodies.is_empty())
+            }
+            CommandId::Fillet | CommandId::Chamfer | CommandId::Shell | CommandId::Draft => {
+                enabled(!in_sketch && !self.doc.bodies.is_empty())
+            }
             CommandId::ExportStep => enabled(!self.doc.bodies.is_empty()),
             CommandId::EditSketch => enabled(!in_sketch && self.selected_sketch().is_some()),
             CommandId::ExitSketch => enabled(in_sketch),
@@ -925,6 +983,7 @@ impl PeetApp {
             | CommandId::OpenSample
             | CommandId::OpenSampleEnclosure
             | CommandId::OpenSampleChassis
+            | CommandId::OpenSampleHousing
             | CommandId::SaveDocument
             | CommandId::SaveDocumentAs => enabled(true),
             CommandId::ViewIsometric
@@ -1017,6 +1076,19 @@ impl PeetApp {
             CommandId::ImportDxf => {
                 self.dxf_import = Some(peet_platform::open_file(("DXF drawing", &["dxf"])));
             }
+            CommandId::ImportStep => {
+                self.step_import = Some(peet_platform::open_file(("STEP file", &["step", "stp"])));
+            }
+            CommandId::Revolve => self.start_revolve(peet_model::Operation::Add),
+            CommandId::CutRevolve => self.start_revolve(peet_model::Operation::Cut),
+            CommandId::Sweep => self.start_sweep(peet_model::Operation::Add),
+            CommandId::CutSweep => self.start_sweep(peet_model::Operation::Cut),
+            CommandId::Fillet => self.start_blend(peet_model::BlendKind::Fillet),
+            CommandId::Chamfer => self.start_blend(peet_model::BlendKind::Chamfer),
+            CommandId::Shell => self.start_shell(),
+            CommandId::Draft => self.start_draft(),
+            CommandId::Hole => self.start_hole(),
+            CommandId::MassProperties => self.windows.mass_properties = true,
             CommandId::NewSketch => match self.selected_plane() {
                 Some((plane, placement)) => self.new_sketch(plane, placement),
                 None => {
@@ -1061,6 +1133,7 @@ impl PeetApp {
             CommandId::OpenSample => self.guard_unsaved(AfterDiscard::Sample),
             CommandId::OpenSampleEnclosure => self.guard_unsaved(AfterDiscard::SampleEnclosure),
             CommandId::OpenSampleChassis => self.guard_unsaved(AfterDiscard::SampleChassis),
+            CommandId::OpenSampleHousing => self.guard_unsaved(AfterDiscard::SampleHousing),
             CommandId::SaveDocument => self.save(false),
             CommandId::SaveDocumentAs => self.save(true),
             CommandId::CommandPalette => self.palette.toggle(),
@@ -1142,6 +1215,25 @@ impl PeetApp {
                     {
                         self.finish_sketch_plane_pick(None, Some(item));
                         continue;
+                    }
+                    // While picking an axis or a path, clicking a reference axis or a
+                    // sketch in the tree picks it.
+                    if let Some((_, slot)) = self.picking
+                        && let Some(ItemId::Feature(id)) = item
+                    {
+                        let picked = match (slot, self.doc.feature(id).map(|f| &f.kind)) {
+                            (Slot::RevolveAxis, Some(FeatureKind::Axis(_))) => {
+                                Some(Picked::Axis(peet_model::AxisRef::Feature(id)))
+                            }
+                            (Slot::SweepPath, Some(FeatureKind::Sketch(_))) => {
+                                Some(Picked::Sketch(id))
+                            }
+                            _ => None,
+                        };
+                        if picked.is_some() {
+                            self.finish_pick(picked);
+                            continue;
+                        }
                     }
                     // While picking, clicking a plane in the tree picks it.
                     if self.picking.is_some()
@@ -1403,8 +1495,18 @@ impl PeetApp {
                                         Small,
                                     );
                                 });
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::OpenSampleHousing,
+                                        "Housing",
+                                        Small,
+                                    );
+                                });
                             });
                             ribbon::group(ui, "Import", |ui| {
+                                tool(ui, pending, CommandId::ImportStep, "STEP", Large);
                                 tool(ui, pending, CommandId::ImportDxf, "DXF", Large);
                             });
                             ribbon::group(ui, "Export", |ui| {
@@ -1428,6 +1530,13 @@ impl PeetApp {
                             ribbon::group(ui, "Features", |ui| {
                                 tool(ui, pending, CommandId::Extrude, "Extrude", Large);
                                 tool(ui, pending, CommandId::CutExtrude, "Cut", Large);
+                                tool(ui, pending, CommandId::Revolve, "Revolve", Large);
+                                tool(ui, pending, CommandId::Hole, "Hole", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::CutRevolve, "Cut-Revolve", Small);
+                                    tool(ui, pending, CommandId::Sweep, "Sweep", Small);
+                                    tool(ui, pending, CommandId::CutSweep, "Cut-Sweep", Small);
+                                });
                                 ribbon::dropdown(
                                     ui,
                                     Icon::Reference,
@@ -1436,6 +1545,16 @@ impl PeetApp {
                                     Large,
                                     |ui| menu(ui, pending, &REFERENCES),
                                 );
+                            });
+                            ribbon::group(ui, "Modify", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::Fillet, "Fillet", Small);
+                                    tool(ui, pending, CommandId::Chamfer, "Chamfer", Small);
+                                });
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::Shell, "Shell", Small);
+                                    tool(ui, pending, CommandId::Draft, "Draft", Small);
+                                });
                             });
                             ribbon::group(ui, "Copy", |ui| {
                                 ribbon::stack(ui, |ui| {
@@ -1463,6 +1582,9 @@ impl PeetApp {
                                     tool(ui, pending, CommandId::RollToEnd, "Roll to End", Small);
                                 });
                             });
+                            ribbon::group(ui, "Evaluate", |ui| {
+                                tool(ui, pending, CommandId::MassProperties, "Mass", Large);
+                            });
                             ribbon::group(ui, "View", |ui| {
                                 tool(ui, pending, CommandId::ZoomToFit, "Fit", Large);
                                 ribbon::stack(ui, |ui| {
@@ -1479,6 +1601,11 @@ impl PeetApp {
                             ribbon::group(ui, "Features", |ui| {
                                 tool(ui, pending, CommandId::Extrude, "Extrude", Large);
                                 tool(ui, pending, CommandId::CutExtrude, "Cut", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::Revolve, "Revolve", Small);
+                                    tool(ui, pending, CommandId::Sweep, "Sweep", Small);
+                                    tool(ui, pending, CommandId::Hole, "Hole", Small);
+                                });
                                 tool(ui, pending, CommandId::BaseFlange, "Base Flange", Large);
                                 ribbon::stack(ui, |ui| {
                                     tool(ui, pending, CommandId::SheetCut, "Sheet Cut", Small);
@@ -2039,6 +2166,37 @@ impl PeetApp {
             }
             FeatureKind::Pattern(p) => features_ui::pattern_panel(ui, &self.doc, id, p, picking),
             FeatureKind::Mirror(m) => features_ui::mirror_panel(ui, &self.doc, id, m, picking),
+            FeatureKind::Revolve(r) => {
+                let out = solid_ui::revolve_panel(ui, &self.doc, r, picking);
+                self.edit_sketch_button(ui, r.sketch, pending);
+                out
+            }
+            FeatureKind::Sweep(s) => {
+                let out = solid_ui::sweep_panel(ui, &self.doc, id, s, picking);
+                ui.add_space(8.0);
+                ui.horizontal(|ui| {
+                    if ui.button("Edit Profile").clicked() {
+                        self.selected = Some(ItemId::Feature(s.profile));
+                        pending.push(CommandId::EditSketch);
+                    }
+                    if let Some(path) = s.path
+                        && ui.button("Edit Path").clicked()
+                    {
+                        self.selected = Some(ItemId::Feature(path));
+                        pending.push(CommandId::EditSketch);
+                    }
+                });
+                out
+            }
+            FeatureKind::Blend(b) => solid_ui::blend_panel(ui, &self.doc, b, picking),
+            FeatureKind::Shell(s) => solid_ui::shell_panel(ui, &self.doc, s, picking),
+            FeatureKind::Draft(d) => solid_ui::draft_panel(ui, &self.doc, d, picking),
+            FeatureKind::Hole(h) => {
+                let out = solid_ui::hole_panel(ui, &self.doc, h);
+                self.edit_sketch_button(ui, h.sketch, pending);
+                out
+            }
+            FeatureKind::Import(i) => solid_ui::import_panel(ui, i),
             other => features_ui::reference_panel(ui, &self.doc, other, picking),
         };
         if kind != feature.kind {
@@ -2052,6 +2210,9 @@ impl PeetApp {
         if let Some(slot) = result.pick {
             self.picking = Some((id, slot));
             self.status_message = None;
+        }
+        if result.stop_pick {
+            self.picking = None;
         }
 
         // What depends on it.
@@ -2092,7 +2253,7 @@ impl PeetApp {
 
     fn geometry_properties(&self, ui: &mut Ui) {
         let units = self.doc.model.parameters.units;
-        for g in &self.selected_geom {
+        for (index, g) in self.selected_geom.iter().enumerate() {
             let Some(body) = self.doc.bodies.get(g.body()) else {
                 continue;
             };
@@ -2105,44 +2266,46 @@ impl PeetApp {
                             "Cylindrical face, R{}",
                             units.format_length(c.radius)
                         )),
+                        Surface::Cone(c) => ui.label(format!(
+                            "Conical face, {}° to its axis",
+                            peet_model::feature::format_number(c.half_angle.abs().to_degrees())
+                        )),
+                        Surface::Sphere(s) => ui.label(format!(
+                            "Spherical face, R{}",
+                            units.format_length(s.radius)
+                        )),
+                        Surface::Torus(t) => ui.label(format!(
+                            "Toroidal face, R{} around R{}",
+                            units.format_length(t.minor),
+                            units.format_length(t.major)
+                        )),
                     };
                     ui.weak(capitalized(
                         &self.doc.model.describe_face(body.face_name(face)),
                     ));
                 }
-                GeomRef::Vertex { vertex, .. } => {
-                    let p = body.solid.vertex(vertex).point;
-                    ui.label(format!(
-                        "Vertex at {}, {}, {}",
-                        units.format_length_value(p.x),
-                        units.format_length_value(p.y),
-                        units.format_length_value(p.z)
-                    ));
+                GeomRef::Vertex { .. } => {
+                    ui.label("Vertex");
                 }
                 GeomRef::Edge { edge, .. } => {
-                    let e = body.solid.edge(edge);
-                    let len = body
-                        .tess()
-                        .edges
-                        .iter()
-                        .find(|p| p.edge == edge)
-                        .map(|p| {
-                            p.points
-                                .windows(2)
-                                .map(|w| w[0].distance(w[1]))
-                                .sum::<f64>()
-                        })
-                        .unwrap_or(0.0);
-                    let kind = match e.curve {
+                    ui.label(match body.solid.edge(edge).curve {
                         peet_kernel::Curve3::Line(_) => "Line edge",
                         peet_kernel::Curve3::Circle(_) => "Circular edge",
                         peet_kernel::Curve3::Ellipse(_) => "Elliptical edge",
-                    };
-                    ui.label(format!("{kind}, length {}", units.format_length(len)));
+                    });
                 }
             }
+            // Its exact measurements: length, area, radius, centre.
+            self.measurement_rows(ui, index, *g);
+            ui.add_space(4.0);
         }
+        self.between_rows(ui);
         ui.add_space(6.0);
+        if self.selected_geom.len() == 1 {
+            ui.weak(
+                "Select a second face, edge or vertex with Shift held to measure between the two.",
+            );
+        }
         if self.selected_face().is_some() {
             ui.weak("Press S to sketch on this face, or add a reference plane from it.");
         }
@@ -3025,6 +3188,8 @@ impl eframe::App for PeetApp {
         self.parameters_window(&ctx);
         self.sheet_checks_window(&ctx);
         self.gauge_window(&ctx);
+        self.mass_properties_window(&ctx);
+        self.notice_window(&ctx);
         if let Some(cmd) = self.bend_table_window(&ctx) {
             pending.push(cmd);
         }
@@ -3202,7 +3367,7 @@ impl PeetApp {
     /// Adds a pattern or a mirror of the selected feature.
     fn start_copy(&mut self, kind: CopyKind) {
         let Some(seed) = self.copy_source() else {
-            self.error("Select the feature to copy in the tree first: an extrusion, a cut, a sheet metal cut or a form.");
+            self.error("Select the feature to copy in the tree first: an extrusion, a cut, a revolve, a hole, a sheet metal cut or a form.");
             return;
         };
         use peet_model::{AxisRef, LinearDirection, PatternDef, Scalar, StdAxis, StdPlane};
@@ -3692,6 +3857,16 @@ impl PeetApp {
                 Err(e) => self.error(e),
             }
         }
+        if let Some(p) = &self.step_import
+            && let Some(result) = p.take()
+        {
+            self.step_import = None;
+            match result {
+                Ok(Some(file)) => self.finish_step_import(&file),
+                Ok(None) => {}
+                Err(e) => self.error(e),
+            }
+        }
         if let Some(p) = &self.gauge_import
             && let Some(result) = p.take()
         {
@@ -3722,7 +3897,7 @@ impl PeetApp {
                 Err(e) => self.error(e),
             }
         }
-        if self.dxf_import.is_some() || self.gauge_import.is_some() {
+        if self.dxf_import.is_some() || self.gauge_import.is_some() || self.step_import.is_some() {
             ctx.request_repaint_after(std::time::Duration::from_millis(100));
         }
     }

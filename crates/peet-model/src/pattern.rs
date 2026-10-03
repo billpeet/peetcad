@@ -3,8 +3,8 @@
 //! A pattern or a mirror copies *features*, not geometry: each copy is the copied
 //! feature built again from a moved (or reflected) sketch, so a copy of a cut is a cut,
 //! and a copy of a sheet metal cut or a form is made in the flat pattern like the
-//! original. The features that can be copied are extrusions (bosses and cuts), sheet
-//! metal cuts and forms.
+//! original. The features that can be copied are extrusions (bosses and cuts), revolves,
+//! holes (a bolt circle is a circular pattern of one hole), sheet metal cuts and forms.
 //!
 //! **Names.** Each copy is built as the pattern feature itself, and every face a copy
 //! makes also carries [`FaceRole::Instance`] with the copy's number, so the faces of
@@ -23,8 +23,10 @@ use peet_sketch::Sketch;
 use peet_sketch::region::find_regions;
 
 use crate::extrude::{Extrude, ExtrudeInput, apply_extrude, default_regions};
-use crate::feature::{FeatureId, FormFeature};
+use crate::feature::{Axis, FeatureId, FormFeature};
+use crate::hole::{HoleFeature, HoleInput, HoleSizes, apply_hole};
 use crate::naming::{Body, FaceName, FaceRef, FaceRole};
+use crate::revolve::{RevolveFeature, RevolveInput, apply_revolve};
 use crate::sheet::{Applied, form_outlines, map_shape, rebuild_sheet, sketch_face};
 use crate::{FeatureError, Model};
 
@@ -107,6 +109,19 @@ pub(crate) enum Seed<'a> {
         depth: f64,
         up_to: Option<Plane>,
     },
+    Revolve {
+        plane: Plane,
+        sketch: &'a Sketch,
+        def: &'a RevolveFeature,
+        angle: f64,
+        axis: Option<Axis>,
+    },
+    Hole {
+        plane: Plane,
+        sketch: &'a Sketch,
+        def: &'a HoleFeature,
+        sizes: HoleSizes,
+    },
     SheetCut {
         plane: Plane,
         sketch: &'a Sketch,
@@ -147,10 +162,10 @@ pub(crate) fn apply_copies(
     for (si, (name, seed)) in seeds.iter().enumerate() {
         let key = crate::hash::combine(stamp, si as u64);
         let result = match seed {
-            Seed::Extrude { .. } => {
+            Seed::Extrude { .. } | Seed::Revolve { .. } | Seed::Hole { .. } => {
                 let mut ok = 0;
                 for (k, m) in motions.iter().enumerate() {
-                    match extrude_copy(feature, &bodies, seed, m, copy_number(si, k + 1), key) {
+                    match solid_copy(feature, &bodies, seed, m, copy_number(si, k + 1), key) {
                         Ok(b) => {
                             bodies = b;
                             ok += 1;
@@ -197,8 +212,9 @@ pub(crate) fn apply_copies(
     Ok((bodies, warning))
 }
 
-/// One copy of an extrusion.
-fn extrude_copy(
+/// One copy of an extrusion, a revolve or a hole feature: the feature built again on its
+/// sketch plane moved (or reflected) by `motion`.
+fn solid_copy(
     feature: FeatureId,
     bodies: &[Arc<Body>],
     seed: &Seed<'_>,
@@ -206,31 +222,73 @@ fn extrude_copy(
     copy: u32,
     stamp: u64,
 ) -> Result<Vec<Arc<Body>>, FeatureError> {
-    let Seed::Extrude {
-        plane,
-        sketch,
-        params,
-        depth,
-        up_to,
-    } = seed
-    else {
-        unreachable!()
+    let moved = |plane: &Plane| {
+        motion
+            .sketch_plane(plane)
+            .ok_or_else(|| FeatureError("the copy's plane is degenerate".to_owned()))
     };
-    let moved = motion
-        .sketch_plane(plane)
-        .ok_or_else(|| FeatureError("the copy's plane is degenerate".to_owned()))?;
-    let up_to = up_to.and_then(|p| motion.plane(&p));
-    let out = apply_extrude(&ExtrudeInput {
-        feature,
-        bodies,
-        plane: &moved,
-        sketch,
-        params,
-        depth: *depth,
-        up_to,
-        stamp: crate::hash::combine(stamp, u64::from(copy)),
-        mirror: motion.is_mirror(),
-    })?;
+    let stamp = crate::hash::combine(stamp, u64::from(copy));
+    let out = match seed {
+        Seed::Extrude {
+            plane,
+            sketch,
+            params,
+            depth,
+            up_to,
+        } => apply_extrude(&ExtrudeInput {
+            feature,
+            bodies,
+            plane: &moved(plane)?,
+            sketch,
+            params,
+            depth: *depth,
+            up_to: up_to.and_then(|p| motion.plane(&p)),
+            stamp,
+            mirror: motion.is_mirror(),
+        })?,
+        Seed::Revolve {
+            plane,
+            sketch,
+            def,
+            angle,
+            axis,
+        } => apply_revolve(&RevolveInput {
+            feature,
+            bodies,
+            plane: &moved(plane)?,
+            sketch,
+            def,
+            angle: *angle,
+            // An axis outside the sketch moves with the copy.
+            axis: axis.map(|a| Axis {
+                origin: motion.point(a.origin),
+                dir: motion.vector(a.dir),
+            }),
+            stamp,
+            mirror: motion.is_mirror(),
+        })?,
+        Seed::Hole {
+            plane,
+            sketch,
+            def,
+            sizes,
+        } => {
+            // Every hole of every copy gets a number of its own for its faces' names.
+            let (out, _) = apply_hole(&HoleInput {
+                feature,
+                bodies,
+                plane: &moved(plane)?,
+                sketch,
+                def,
+                sizes: *sizes,
+                stamp,
+                instance: copy.wrapping_mul(4096),
+                mirror: motion.is_mirror(),
+            })?;
+            return Ok(out);
+        }
+        Seed::SheetCut { .. } | Seed::Form { .. } => unreachable!("copied in the flat pattern"),
+    };
     // Name the copy's faces apart from the other copies'.
     let instance = FaceName::new(feature, FaceRole::Instance(copy));
     Ok(out
@@ -289,7 +347,7 @@ fn sheet_copies(
             face,
             ..
         } => (plane, *sketch, face.as_ref()),
-        Seed::Extrude { .. } => unreachable!(),
+        Seed::Extrude { .. } | Seed::Revolve { .. } | Seed::Hole { .. } => unreachable!(),
     };
     let on = sketch_face(model, bodies, face, "the copied feature")?;
     let mut layout = on.sheet.layout.clone();
@@ -371,7 +429,7 @@ fn sheet_copies(
                     layout = before;
                 }
             }
-            Seed::Extrude { .. } => unreachable!(),
+            Seed::Extrude { .. } | Seed::Revolve { .. } | Seed::Hole { .. } => unreachable!(),
         }
     }
     if made == 0 {

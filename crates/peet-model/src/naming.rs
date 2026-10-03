@@ -76,6 +76,18 @@ pub enum FaceRole {
     /// part of (the copied feature's place in the list, times 2^16, plus the copy's
     /// number). Faces of different copies then have different names.
     Instance(u32),
+    // New roles go at the end: files store the variant's index.
+    /// A fillet or a chamfer: the place of its edge in the feature's list (times 2^12)
+    /// plus the edge's place along the smooth chain picked there.
+    Blend(u32),
+    /// The flat step where a blend ends and nothing carries it on.
+    BlendEnd(u32),
+    /// The ball that rounds a corner where three fillets meet.
+    BlendCorner(u32),
+    /// Added to the name of the face a shell's inside wall stands behind.
+    Inner,
+    /// A face of an imported body: its index in the imported solid.
+    Imported(u32),
 }
 
 /// One feature's contribution to a face.

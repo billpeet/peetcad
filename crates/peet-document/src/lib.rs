@@ -11,6 +11,8 @@
 
 mod body;
 mod document;
+mod solids;
 
 pub use body::{BodyView, GeomRef, tolerance};
 pub use document::{Document, FileLocation, ItemId, Persistent, SketchStatus, sketch_bounds};
+pub use solids::{MassTotal, StepImported};

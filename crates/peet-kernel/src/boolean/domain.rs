@@ -13,11 +13,11 @@
 use std::cell::OnceCell;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
-use peet_math::tolerance::LINEAR;
+use peet_math::tolerance::{self, LINEAR};
 use peet_math::{Aabb, DVec2, DVec3};
 
 use super::util::{bounded_distance, curve_bounds, grow};
-use crate::geom::{Curve3, Surface};
+use crate::geom::{Curve3, Pole, Surface, pole_exit};
 use crate::topo::{EdgeId, FaceId, Solid};
 
 /// A point this close (mm) to a seam is classified as if it were just beside it: a seam is
@@ -38,43 +38,60 @@ impl Domain {
         }
     }
 
-    /// Length of one turn in `x`, for cylinders.
+    /// Length of one turn in `x`, for surfaces of revolution.
     pub fn period(&self) -> Option<f64> {
-        match &self.surface {
-            Surface::Plane(_) => None,
-            Surface::Cylinder(c) => Some(TAU * c.radius),
-        }
+        self.surface
+            .is_periodic_u()
+            .then(|| TAU * self.scales().x.abs())
     }
 
-    fn scale(&self) -> f64 {
+    /// Length of one turn in `y`, for tori.
+    pub fn period_y(&self) -> Option<f64> {
+        self.surface.is_periodic_v().then(|| TAU * self.scales().y)
+    }
+
+    /// Domain units per unit of `(u, v)`; `x` is negative for mirrored domains. Only the
+    /// cylinder's domain is isometric: the others are just as good for telling what is
+    /// inside a loop, which is all a domain is for.
+    fn scales(&self) -> DVec2 {
         let s = match &self.surface {
-            Surface::Plane(_) => 1.0,
-            Surface::Cylinder(c) => c.radius,
+            Surface::Plane(_) => DVec2::ONE,
+            Surface::Cylinder(c) => DVec2::new(c.radius, 1.0),
+            Surface::Cone(c) => DVec2::new(c.radius.max(1.0), 1.0),
+            Surface::Sphere(s) => DVec2::splat(s.radius),
+            Surface::Torus(t) => DVec2::new(t.major + t.minor, t.minor),
         };
-        if self.flip { -s } else { s }
+        if self.flip { DVec2::new(-s.x, s.y) } else { s }
     }
 
-    /// Domain coordinates of (the projection of) `p`; cylinder angles in `(−π, π]`.
+    fn scaled(&self, uv: DVec2) -> DVec2 {
+        uv * self.scales()
+    }
+
+    /// Domain coordinates of (the projection of) `p`; angles in `(−π, π]`.
     pub fn map(&self, p: DVec3) -> DVec2 {
-        let uv = self.surface.param(p);
-        DVec2::new(uv.x * self.scale(), uv.y)
+        self.scaled(self.surface.param(p))
     }
 
-    /// `q` moved by whole turns so its `x` is as close as possible to `x`.
-    pub fn shift_near(&self, q: DVec2, x: f64) -> DVec2 {
-        match self.period() {
-            Some(period) => DVec2::new(q.x + ((x - q.x) / period).round() * period, q.y),
+    /// `q` moved by whole turns so it is as close as possible to `near`.
+    pub fn shift_near(&self, q: DVec2, near: DVec2) -> DVec2 {
+        let shift = |q: f64, near: f64, period: Option<f64>| match period {
+            Some(period) => q + ((near - q) / period).round() * period,
             None => q,
-        }
+        };
+        DVec2::new(
+            shift(q.x, near.x, self.period()),
+            shift(q.y, near.y, self.period_y()),
+        )
     }
 
-    pub fn map_near(&self, p: DVec3, x: f64) -> DVec2 {
-        self.shift_near(self.map(p), x)
+    pub fn map_near(&self, p: DVec3, near: DVec2) -> DVec2 {
+        self.shift_near(self.map(p), near)
     }
 
     /// The surface point at domain coordinates `q`.
     pub fn point(&self, q: DVec2) -> DVec3 {
-        self.surface.point(DVec2::new(q.x / self.scale(), q.y))
+        self.surface.point(q / self.scales())
     }
 
     /// Outward normal of the face at (the projection of) `p`.
@@ -83,42 +100,113 @@ impl Domain {
         if self.flip { -n } else { n }
     }
 
+    /// Whether `curve` runs around the surface's axis or along a meridian: its image in
+    /// the domain is then a straight segment parallel to an axis of the domain.
+    fn is_iso(&self, curve: &Curve3) -> bool {
+        let Some(frame) = self.surface.revolution_frame() else {
+            return false;
+        };
+        let axis = frame.z_axis();
+        let off_axis = |p: DVec3| {
+            let w = p - frame.origin;
+            (w - axis * w.dot(axis)).length()
+        };
+        match curve {
+            // A line on a cylinder or a cone is a ruling.
+            Curve3::Line(_) => true,
+            Curve3::Circle(c) => {
+                let normal = c.frame.z_axis();
+                if tolerance::directions_parallel(normal, axis) {
+                    off_axis(c.frame.origin) <= LINEAR
+                } else {
+                    // A meridian: its plane contains the axis.
+                    normal.dot(axis).abs() <= tolerance::ANGULAR
+                        && (frame.origin - c.frame.origin).dot(normal).abs() <= LINEAR
+                }
+            }
+            Curve3::Ellipse(_) => false,
+        }
+    }
+
     /// Whether the image of `curve` in the domain is a straight segment.
     fn is_straight(&self, curve: &Curve3) -> bool {
-        matches!(
-            (curve, &self.surface),
-            (Curve3::Line(_), _) | (Curve3::Circle(_), Surface::Cylinder(_))
-        )
+        match &self.surface {
+            Surface::Plane(_) => matches!(curve, Curve3::Line(_)),
+            _ => self.is_iso(curve),
+        }
     }
 
     /// How many straight pieces approximate a part of `curve` spanning `span` of parameter.
     pub fn segments(&self, curve: &Curve3, span: f64) -> usize {
-        match (curve, &self.surface) {
-            (Curve3::Line(_), _) => 1,
+        match curve {
+            Curve3::Line(_) => 1,
             // Straight in the domain, but the angle must be tracked around the turn.
-            (Curve3::Circle(_), Surface::Cylinder(_)) => {
-                ((span.abs() / (PI / 3.0)).ceil() as usize).max(1)
-            }
+            _ if self.is_straight(curve) => ((span.abs() / (PI / 3.0)).ceil() as usize).max(1),
             // Curved in the domain. Even a short arc gets a few pieces, so thin regions
             // next to a tangency keep their shape.
             _ => ((span.abs() / (PI / 24.0)).ceil() as usize).max(4),
         }
     }
 
+    /// The image of the point of `curve` at `t`, raw (angles in `(−π, π]`). At a pole of
+    /// the surface the `x` is the one the curve has on its way towards `toward`.
+    fn image(&self, curve: &Curve3, t: f64, toward: f64) -> (DVec2, Option<Pole>) {
+        let (uv, pole) = self.surface.param_toward(curve, t, toward);
+        (self.scaled(uv), pole)
+    }
+
+    /// Where a loop that reached a pole at `from` goes along the pole's line before it
+    /// leaves in the direction with (raw) coordinate `x`.
+    fn pole_exit(&self, from: DVec2, x: f64, pole: Pole) -> DVec2 {
+        let s = self.scales().x.abs();
+        // In the domain every face's loops run counter-clockwise.
+        DVec2::new(pole_exit(from.x / s, x / s, pole.top, true) * s, from.y)
+    }
+
     /// Appends the image of `curve` from `ta` to `tb` to `out`, continuing from its last
-    /// point (the curve's start itself is not added unless `out` is empty).
+    /// point (the curve's start itself is not added unless `out` is empty). Where the
+    /// curve starts at a pole, the run along the pole's line is added first.
     pub fn trace(&self, curve: &Curve3, ta: f64, tb: f64, out: &mut Vec<DVec2>) {
         let n = self.segments(curve, tb - ta);
-        let first = if out.is_empty() { 0 } else { 1 };
-        for i in first..=n {
+        for i in 0..=n {
             let t = ta + (tb - ta) * i as f64 / n as f64;
-            let p = curve.point(t);
-            let q = match out.last() {
-                Some(prev) => self.map_near(p, prev.x),
-                None => self.map(p),
-            };
-            out.push(q);
+            let (raw, pole) = self.image(curve, t, if i == 0 { tb } else { ta });
+            match (out.last().copied(), i, pole) {
+                (None, _, _) => out.push(raw),
+                (Some(prev), 0, Some(pole)) => {
+                    let exit = self.pole_exit(prev, raw.x, pole);
+                    if exit != prev {
+                        out.push(exit);
+                    }
+                }
+                (Some(_), 0, None) => {}
+                (Some(prev), _, _) => out.push(self.shift_near(raw, prev)),
+            }
         }
+    }
+
+    /// Closes a traced loop: its last point is where it started, so that point is dropped,
+    /// after the run along a pole's line if the loop starts at a pole. `Err` if the loop
+    /// doesn't come back to where it began (it wraps around the surface without a seam).
+    pub fn close(&self, first: &Curve3, ta: f64, tb: f64, poly: &mut Vec<DVec2>) -> Result<(), ()> {
+        let (Some(&start), Some(&end)) = (poly.first(), poly.last()) else {
+            return Ok(());
+        };
+        let (raw, pole) = self.image(first, ta, tb);
+        let back = match pole {
+            Some(pole) => self.pole_exit(end, raw.x, pole),
+            None => end,
+        };
+        let off = |a: f64, b: f64, period: Option<f64>| {
+            period.is_some_and(|period| (a - b).abs() > 0.5 * period)
+        };
+        if off(back.x, start.x, self.period()) || off(back.y, start.y, self.period_y()) {
+            return Err(());
+        }
+        if pole.is_none() {
+            poly.pop();
+        }
+        Ok(())
     }
 }
 
@@ -174,9 +262,9 @@ impl ExactLoop {
     /// Traces the directed curve parts `(curve, from, to)` of a loop, in order. The first
     /// point is placed near `start_x` if given (on a cylinder), and each next point near
     /// the one before.
-    pub fn new(domain: &Domain, parts: &[(Curve3, f64, f64)], start_x: Option<f64>) -> Self {
-        let mut traces = Vec::with_capacity(parts.len());
-        let mut last_x = start_x;
+    pub fn new(domain: &Domain, parts: &[(Curve3, f64, f64)], start: Option<DVec2>) -> Self {
+        let mut traces: Vec<Trace> = Vec::with_capacity(parts.len());
+        let mut last = start;
         let mut lo = DVec2::splat(f64::INFINITY);
         let mut hi = DVec2::splat(f64::NEG_INFINITY);
         let mut bulge = 0.0_f64;
@@ -187,18 +275,22 @@ impl ExactLoop {
             let mut qs: Vec<DVec2> = Vec::with_capacity(n + 1);
             for i in 0..=n {
                 let t = ta + (tb - ta) * i as f64 / n as f64;
-                let p = curve.point(t);
-                let q = match last_x {
-                    Some(x) => domain.map_near(p, x),
-                    None => domain.map(p),
+                let (raw, pole) = domain.image(&curve, t, if i == 0 { tb } else { ta });
+                let q = match (last, pole) {
+                    // Leaving a pole the loop arrived at: along the pole's line first.
+                    (Some(prev), Some(pole)) if i == 0 && !traces.is_empty() => {
+                        domain.pole_exit(prev, raw.x, pole)
+                    }
+                    (Some(prev), _) => domain.shift_near(raw, prev),
+                    (None, _) => raw,
                 };
                 if !straight && i > 0 {
                     // How far the curve leaves its chord, measured at the middle.
                     let (t0, q0): (f64, DVec2) = (ts[i - 1], qs[i - 1]);
-                    let mid = domain.map_near(curve.point(0.5 * (t0 + t)), q0.x);
+                    let mid = domain.map_near(curve.point(0.5 * (t0 + t)), q0);
                     bulge = bulge.max(mid.distance(0.5 * (q0 + q)));
                 }
-                last_x = Some(q.x);
+                last = Some(q);
                 lo = lo.min(q);
                 hi = hi.max(q);
                 ts.push(t);
@@ -279,7 +371,7 @@ fn sweep(
         return a;
     }
     let tm = 0.5 * (t0 + t1);
-    let qm = domain.map_near(tr.curve.point(tm), q0.x);
+    let qm = domain.map_near(tr.curve.point(tm), q0);
     sweep(domain, tr, t0, q0, tm, qm, q, depth + 1)
         + sweep(domain, tr, tm, qm, t1, q1, q, depth + 1)
 }
@@ -357,6 +449,7 @@ impl FaceGeom {
                 .collect();
             loops.push(parts);
         }
+        let bounds = bounds.union(&crate::validate::measure::bulge_bounds(solid, id));
         Self {
             surface: face.surface,
             reversed: face.reversed,
@@ -393,6 +486,9 @@ impl FaceGeom {
         });
         if on_seam {
             q.x += 2.0 * SEAM_NUDGE;
+            if self.domain.period_y().is_some() {
+                q.y += 2.0 * SEAM_NUDGE;
+            }
         }
         let mut total = 0.0;
         let loops = self.loops.get_or_init(|| {
@@ -401,19 +497,25 @@ impl FaceGeom {
                 .map(|parts| ExactLoop::new(&self.domain, parts, None))
                 .collect()
         });
+        // A traced loop can be wider than one turn (a full ring with a skirt that
+        // straddles the seam), so every placement of the point within the loop's
+        // extent counts. The face covers each surface point at most once.
+        let turns = |lo: f64, hi: f64, q: f64, period: Option<f64>| match period {
+            Some(period) => (
+                ((lo - q) / period).ceil() as i64,
+                ((hi - q) / period).floor() as i64,
+                period,
+            ),
+            None => (0, 0, 0.0),
+        };
         for l in loops {
-            match self.domain.period() {
-                // A traced loop can be wider than one turn (a full ring with a skirt that
-                // straddles the seam), so every placement of the point within the loop's
-                // extent counts. The face covers each surface point at most once.
-                Some(period) => {
-                    let first = ((l.lo.x - q.x) / period).ceil() as i64;
-                    let last = ((l.hi.x - q.x) / period).floor() as i64;
-                    for k in first..=last {
-                        total += l.sweep(&self.domain, DVec2::new(q.x + k as f64 * period, q.y));
-                    }
+            let (x0, x1, px) = turns(l.lo.x, l.hi.x, q.x, self.domain.period());
+            let (y0, y1, py) = turns(l.lo.y, l.hi.y, q.y, self.domain.period_y());
+            for i in x0..=x1 {
+                for j in y0..=y1 {
+                    let at = DVec2::new(q.x + i as f64 * px, q.y + j as f64 * py);
+                    total += l.sweep(&self.domain, at);
                 }
-                None => total += l.sweep(&self.domain, q),
             }
         }
         if (total / TAU).round() as i64 != 0 {
@@ -479,6 +581,7 @@ mod tests {
                         Where::Outside
                     );
                 }
+                _ => unreachable!("a cylinder has flat and cylindrical faces"),
             }
         }
     }

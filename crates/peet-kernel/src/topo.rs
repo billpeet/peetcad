@@ -229,7 +229,8 @@ impl Solid {
         out
     }
 
-    /// Bounds of the vertices, plus sample points along curved edges.
+    /// Bounds of the vertices, plus sample points along curved edges and across the faces
+    /// that bulge out between their edges (spheres and tori).
     pub fn bounds(&self) -> Aabb {
         let mut b = Aabb::EMPTY;
         for v in &self.vertices {
@@ -241,6 +242,9 @@ impl Solid {
                     b.extend(e.point_at_fraction(f64::from(i) / 32.0));
                 }
             }
+        }
+        for face in self.face_ids() {
+            b = b.union(&crate::validate::measure::bulge_bounds(self, face));
         }
         b
     }
@@ -332,49 +336,9 @@ pub(crate) mod test_shapes {
     //! Hand-built solids for tests in this crate (independent of the extrude code).
 
     use super::*;
-    use crate::geom::Surface;
-    use peet_math::{DVec3, Plane};
+    use peet_math::DVec3;
 
-    /// An axis-aligned box from `min` to `max`, with outward-facing faces.
-    pub fn cuboid(min: DVec3, max: DVec3) -> Solid {
-        let mut s = Solid::new();
-        let shell = s.add_shell();
-        let c = |i: usize| {
-            DVec3::new(
-                if i & 1 == 0 { min.x } else { max.x },
-                if i & 2 == 0 { min.y } else { max.y },
-                if i & 4 == 0 { min.z } else { max.z },
-            )
-        };
-        let v: Vec<VertexId> = (0..8).map(|i| s.add_vertex(c(i))).collect();
-        // Each face: four corner indices, counter-clockwise seen from outside, and its normal.
-        let faces: [([usize; 4], DVec3); 6] = [
-            ([0, 2, 3, 1], -DVec3::Z),
-            ([4, 5, 7, 6], DVec3::Z),
-            ([0, 1, 5, 4], -DVec3::Y),
-            ([2, 6, 7, 3], DVec3::Y),
-            ([0, 4, 6, 2], -DVec3::X),
-            ([1, 3, 7, 5], DVec3::X),
-        ];
-        let mut edges: std::collections::HashMap<(usize, usize), EdgeId> = Default::default();
-        for (corners, normal) in faces {
-            let origin = c(corners[0]);
-            let x = c(corners[1]) - origin;
-            let plane = Plane::from_origin_normal_x(origin, normal, x).expect("valid face");
-            let face = s.add_face(shell, Surface::Plane(plane), false);
-            let mut uses = Vec::new();
-            for k in 0..4 {
-                let (a, b) = (corners[k], corners[(k + 1) % 4]);
-                let key = (a.min(b), a.max(b));
-                let edge = *edges
-                    .entry(key)
-                    .or_insert_with(|| s.add_line_edge(v[key.0], v[key.1]));
-                uses.push((edge, a > b));
-            }
-            s.add_loop(face, &uses);
-        }
-        s
-    }
+    pub use crate::primitive::cuboid;
 
     #[test]
     fn cuboid_is_closed() {

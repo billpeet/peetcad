@@ -3,8 +3,9 @@
 //! **Algorithm.**
 //!
 //! 1. *Intersect.* Every pair of faces whose boxes overlap is intersected analytically
-//!    ([`ssi`]): plane–plane lines, plane–cylinder lines, circles and ellipses, and lines
-//!    between cylinders with parallel axes. Each curve is clipped to both faces ([`clip`]),
+//!    ([`ssi`]): plane–plane lines, plane–cylinder lines, circles and ellipses, lines
+//!    between cylinders with parallel axes, circles between surfaces turned about one
+//!    axis, and a plane's circles, ellipses and rulings on spheres, cones and tori. Each curve is clipped to both faces ([`clip`]),
 //!    cut exactly where it meets their boundary edges ([`roots`]). Faces on the *same*
 //!    surface (coplanar faces, coaxial cylinders of equal radius) instead imprint their
 //!    boundary edges on each other.
@@ -41,7 +42,7 @@ mod clip;
 mod domain;
 mod faces;
 mod roots;
-mod ssi;
+pub(crate) mod ssi;
 mod util;
 
 #[cfg(test)]
@@ -62,7 +63,7 @@ use self::ssi::Ssi;
 use self::util::{
     GEdge, HalfEdge, VertexPool, bounded_distance, boxes_overlap, curve_bounds, grow,
 };
-use crate::geom::Curve3;
+use crate::geom::{Curve3, Surface};
 use crate::topo::FaceId;
 use crate::{KernelError, Solid};
 
@@ -98,9 +99,11 @@ pub struct Traced {
 /// Combines two closed solids. The result is a valid closed solid (possibly empty: no
 /// shells) or an error; inputs are never modified.
 ///
-/// Supported geometry is what extrusions produce: planar and cylindrical faces. Cylinders
-/// whose axes are not parallel may be combined as long as their walls don't cross each
-/// other (that curve is a quartic); if they do, the result is [`KernelError::Unsupported`].
+/// Supported geometry is what extrusions, revolutions and blends produce: planes,
+/// cylinders, cones, spheres and tori. Faces whose surfaces meet in a curve the kernel
+/// can't represent (cylinders whose axes are not parallel, curved faces without a common
+/// axis) may be combined as long as the faces themselves don't cross; if they do, the
+/// result is [`KernelError::Unsupported`].
 pub fn boolean(a: &Solid, b: &Solid, op: BooleanOp) -> Result<Solid, KernelError> {
     boolean_traced(a, b, op).map(|t| t.solid)
 }
@@ -316,12 +319,10 @@ impl<'a> Work<'a> {
                     }
                     Ssi::Unsupported => {
                         if faces_cross(fa, fb) {
-                            return Err(KernelError::Unsupported(
-                                "two cylindrical faces with non-parallel axes cross each other \
-                                 (for example a hole drilled across another hole); only \
-                                 cylinders with parallel axes can intersect for now"
-                                    .to_owned(),
-                            ));
+                            return Err(KernelError::Unsupported(unsupported_crossing(
+                                &fa.surface,
+                                &fb.surface,
+                            )));
                         }
                     }
                 }
@@ -496,7 +497,7 @@ impl<'a> Work<'a> {
             }
         }
         let all_edges = half_edges;
-        let half_edges = faces::prune_dangling(&all_edges, edges);
+        let half_edges = faces::prune_dangling(&all_edges, edges, &geom.domain, &self.pool.points);
         // Imprints that bound nothing (the other body only touches the face there) are
         // still on the other body's surface: sample points must keep clear of them.
         let mut dangling: Vec<u32> = all_edges
@@ -627,14 +628,39 @@ fn unique_edge(
     (id, true)
 }
 
-/// Whether two cylinder faces with non-parallel axes actually cross (their intersection
-/// curve is not representable). Looks for edges of one piercing the other, and for the
-/// other's surface passing through the inside of the face.
+/// What to tell the user when two faces cross in a curve the kernel can't represent.
+fn unsupported_crossing(a: &Surface, b: &Surface) -> String {
+    use Surface::{Cone, Cylinder, Plane, Torus};
+    match (a, b) {
+        (Cylinder(_), Cylinder(_)) => "two cylindrical faces with non-parallel axes cross each \
+             other (for example a hole drilled across another hole); only cylinders with \
+             parallel axes can intersect for now"
+            .to_owned(),
+        (Plane(_), Cone(_)) | (Cone(_), Plane(_)) => "a flat face cuts a conical face along \
+             its length (a parabola or a hyperbola); a plane can cut a cone square to its axis, \
+             through its tip, or steeply enough to give an ellipse"
+            .to_owned(),
+        (Plane(_), Torus(_)) | (Torus(_), Plane(_)) => "a flat face cuts a doughnut-shaped \
+             face at an angle; a plane can cut it square to its axis or through its axis"
+            .to_owned(),
+        _ => "two curved faces cross each other without sharing an axis; curved faces can \
+             intersect when they are turned about the same axis"
+            .to_owned(),
+    }
+}
+
+/// Whether two faces whose surfaces meet in a curve the kernel can't represent actually
+/// cross. Looks for edges of one piercing the other, and for the other's surface passing
+/// through the inside of the face.
 fn faces_cross(a: &FaceGeom, b: &FaceGeom) -> bool {
     pierces(a, b) || pierces(b, a) || passes_through(a, b) || passes_through(b, a)
 }
 
-/// Whether an edge of `a` crosses the face `b`.
+/// Whether an edge of `a` crosses the face `b` inside it. Meeting `b`'s boundary is not
+/// crossing the face: a fillet runs up to the round corner next to it, two blends share
+/// the arc where one takes over from the other, and a wall's edge passes the corner of a
+/// chamfer's cone. (Faces that do cross from their boundaries inwards are caught by
+/// [`passes_through`].)
 fn pierces(a: &FaceGeom, b: &FaceGeom) -> bool {
     const SAMPLES: usize = 64;
     for e in &a.edges {
@@ -646,10 +672,10 @@ fn pierces(a: &FaceGeom, b: &FaceGeom) -> bool {
         let mut prev = dist(e.t0);
         for i in 1..=SAMPLES {
             let here = dist(at(i));
-            if prev.abs() <= LINEAR && b.locate(e.curve.point(at(i - 1))) != Where::Outside {
+            if prev.abs() <= LINEAR && b.locate(e.curve.point(at(i - 1))) == Where::Inside {
                 return true;
             }
-            if prev * here < 0.0 {
+            if prev * here < 0.0 && prev.abs() > LINEAR && here.abs() > LINEAR {
                 let (mut lo, mut hi, flo) = (at(i - 1), at(i), prev);
                 for _ in 0..60 {
                     let mid = 0.5 * (lo + hi);
@@ -659,7 +685,7 @@ fn pierces(a: &FaceGeom, b: &FaceGeom) -> bool {
                         hi = mid;
                     }
                 }
-                if b.locate(b.surface.project(e.curve.point(lo))) != Where::Outside {
+                if b.locate(b.surface.project(e.curve.point(lo))) == Where::Inside {
                     return true;
                 }
             }
@@ -686,6 +712,9 @@ fn passes_through(a: &FaceGeom, b: &FaceGeom) -> bool {
     // Around a cylinder, search the whole turn: `locate` discards what is not on the face.
     if let Some(period) = a.domain.period() {
         (lo.x, hi.x) = (-0.5 * period, 0.5 * period);
+    }
+    if let Some(period) = a.domain.period_y() {
+        (lo.y, hi.y) = (-0.5 * period, 0.5 * period);
     }
     let node = |i: usize, j: usize| {
         let f = DVec2::new(i as f64 + 0.5, j as f64 + 0.5) / GRID as f64;

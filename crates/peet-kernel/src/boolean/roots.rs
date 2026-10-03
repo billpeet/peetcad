@@ -54,6 +54,22 @@ impl Implicit {
                 a: e.major,
                 b: e.minor,
             },
+            // A ruling of a cone: the plane through it and the axis.
+            (Curve3::Line(l), Surface::Cone(c)) => Self::Plane {
+                origin: c.axis_origin(),
+                normal: c.axis().cross(l.dir).try_normalize()?,
+            },
+            (Curve3::Line(_), Surface::Sphere(_) | Surface::Torus(_)) => return None,
+            // On a curved surface a circle or an ellipse is cut out by its own plane
+            // (which may cut out more: callers check hits against the edge itself).
+            (Curve3::Circle(ci), _) => Self::Plane {
+                origin: ci.frame.origin,
+                normal: ci.frame.z_axis(),
+            },
+            (Curve3::Ellipse(e), _) => Self::Plane {
+                origin: e.frame.origin,
+                normal: e.frame.z_axis(),
+            },
         })
     }
 
