@@ -1211,7 +1211,7 @@ impl PeetApp {
     fn export_stl(&mut self) {
         let mut triangles = Vec::new();
         for body in &self.doc.bodies {
-            for f in &body.tess.faces {
+            for f in &body.tess().faces {
                 for t in &f.triangles {
                     triangles.push(t.map(|i| f.positions[i as usize]));
                 }
@@ -1755,7 +1755,7 @@ impl PeetApp {
         }
         ui.horizontal(|ui| {
             // A body that can't be displayed is a bug, but must not go unnoticed.
-            let display_error = self.doc.bodies.iter().find_map(|b| b.error.as_deref());
+            let display_error = self.doc.bodies.iter().find_map(|b| b.error());
             if self.picking_sketch_plane {
                 ui.colored_label(
                     PICKING,
@@ -2122,7 +2122,7 @@ impl PeetApp {
                 GeomRef::Edge { edge, .. } => {
                     let e = body.solid.edge(edge);
                     let len = body
-                        .tess
+                        .tess()
                         .edges
                         .iter()
                         .find(|p| p.edge == edge)

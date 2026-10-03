@@ -1,0 +1,19 @@
+[package]
+name = "peet-document"
+description = "PeetCAD's open document, headless: the model with its rebuild state, undo history and tessellated bodies"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+peet-math.workspace = true
+peet-sketch.workspace = true
+peet-kernel.workspace = true
+peet-model.workspace = true
+peet-io.workspace = true
+web-time.workspace = true
+
+[lints]
+workspace = true
