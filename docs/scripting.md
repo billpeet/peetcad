@@ -259,7 +259,7 @@ with their defaults' types):
 | `new` | `discard` |
 | `open` | `path`, `discard` |
 | `open_sample` | `sample` (`bracket`, `enclosure`, `chassis`, `housing`), `discard` |
-| `save` | `path` (optional once the part has a file), `caches` (default true) |
+| `save` | `path` (optional once the part has a file), `caches` (default true: a part's file keeps its built bodies and their display meshes, so it opens without rebuilding; an assembly's keeps the display meshes the application has drawn) |
 | `import_step` | `path`. In a part: the file's solids become bodies, in one feature named after the file. In an assembly: the file's parts and assemblies become parts and sub-assemblies, placed as components where the file has them (fixed); replies `components`, `parts`, `bodies` |
 | `import_dxf` | `path`, and `sketch` (an existing one) or `on` with `name` (a new one; default the top plane); `unit`, `placement` (`keep`, `centred`, `lower_left`) |
 | `export` | `path`, `format` (`stl`, `dxf`, `step`; taken from the path if absent), `body`, `schema` (`ap214`, `ap242`) |

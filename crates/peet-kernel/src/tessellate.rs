@@ -106,11 +106,32 @@ pub enum View {
 /// curved faces also keep facets under about 10° of arc so shading looks smooth. Edge
 /// polylines use exactly the same points as the faces' boundaries, so there are no cracks.
 pub fn tessellate(solid: &Solid, tolerance: f64) -> Result<SolidMesh, KernelError> {
+    tessellate_with(solid, tolerance, MAX_ANGLE)
+}
+
+/// [`tessellate`] with another limit than 10° on the arc a facet may span (radians, up
+/// to 45°): a larger one gives a coarser mesh of the same faces and edges, for drawing a
+/// body small.
+pub fn tessellate_with(
+    solid: &Solid,
+    tolerance: f64,
+    max_angle: f64,
+) -> Result<SolidMesh, KernelError> {
     if !(tolerance.is_finite() && tolerance > 0.0) {
         return Err(KernelError::InvalidInput(format!(
             "tessellation tolerance must be a positive number of mm (got {tolerance})"
         )));
     }
+    if !(max_angle.is_finite() && max_angle > 0.0 && max_angle <= std::f64::consts::FRAC_PI_4) {
+        return Err(KernelError::InvalidInput(format!(
+            "the largest facet angle must be between 0 and 45 degrees (got {} degrees)",
+            max_angle.to_degrees()
+        )));
+    }
+    let tolerance = Fine {
+        tolerance,
+        max_angle,
+    };
     let samples = sample_edges(solid, tolerance);
     let mut faces = Vec::with_capacity(solid.faces.len());
     for face in solid.face_ids() {
@@ -139,9 +160,28 @@ pub(crate) struct EdgeSamples {
     pub points: Vec<DVec3>,
 }
 
+/// How fine a tessellation is: the largest chord deviation (mm) and the largest arc a
+/// facet or an edge segment may span (radians).
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct Fine {
+    pub tolerance: f64,
+    pub max_angle: f64,
+}
+
+impl From<f64> for Fine {
+    /// Within `tolerance`, with the usual limit on the angle.
+    fn from(tolerance: f64) -> Self {
+        Self {
+            tolerance,
+            max_angle: MAX_ANGLE,
+        }
+    }
+}
+
 /// Largest parameter step on `curve` keeping the chord error under `tolerance` and the arc
 /// under [`MAX_ANGLE`].
-fn max_step(curve: &Curve3, tolerance: f64) -> f64 {
+fn max_step(curve: &Curve3, fine: Fine) -> f64 {
+    let tolerance = fine.tolerance;
     let radius = match curve {
         Curve3::Line(_) => return f64::INFINITY,
         Curve3::Nurbs(n) => {
@@ -159,7 +199,7 @@ fn max_step(curve: &Curve3, tolerance: f64) -> f64 {
                 .sum::<f64>()
                 / (hi - lo);
             let by_chord = (8.0 * tolerance / bend).sqrt();
-            let by_angle = MAX_ANGLE * speed / bend;
+            let by_angle = fine.max_angle * speed / bend;
             return by_chord
                 .min(by_angle)
                 .max((hi - lo) / MAX_SEGMENTS_PER_TURN);
@@ -174,17 +214,17 @@ fn max_step(curve: &Curve3, tolerance: f64) -> f64 {
     } else {
         2.0 * (1.0 - tolerance / radius).acos()
     };
-    chord.clamp(TAU / MAX_SEGMENTS_PER_TURN, MAX_ANGLE)
+    chord.clamp(TAU / MAX_SEGMENTS_PER_TURN, fine.max_angle)
 }
 
 /// Largest angle step on a circle of `radius` within `tolerance`.
-fn arc_step(radius: f64, tolerance: f64) -> f64 {
+fn arc_step(radius: f64, fine: Fine) -> f64 {
     max_step(
         &Curve3::Circle(crate::geom::Circle3 {
             frame: peet_math::Frame::WORLD,
             radius,
         }),
-        tolerance,
+        fine,
     )
 }
 
@@ -200,13 +240,14 @@ pub(crate) struct Chart {
 }
 
 /// The chart of a curved face (`None` for planes).
-pub(crate) fn face_chart(solid: &Solid, face: FaceId, tolerance: f64) -> Option<Chart> {
+pub(crate) fn face_chart(solid: &Solid, face: FaceId, fine: Fine) -> Option<Chart> {
+    let tolerance = fine.tolerance;
     let f = solid.face(face);
     Some(match &f.surface {
         Surface::Plane(_) => return None,
         Surface::Cylinder(c) => Chart {
             scale: DVec2::new(c.radius, 1.0),
-            max_du: arc_step(c.radius, tolerance),
+            max_du: arc_step(c.radius, fine),
             max_dv: None,
         },
         Surface::Cone(c) => {
@@ -228,19 +269,19 @@ pub(crate) fn face_chart(solid: &Solid, face: FaceId, tolerance: f64) -> Option<
             };
             Chart {
                 scale: DVec2::new(reach, 1.0),
-                max_du: arc_step(reach, tolerance),
+                max_du: arc_step(reach, fine),
                 max_dv: None,
             }
         }
         Surface::Sphere(s) => Chart {
             scale: DVec2::splat(s.radius),
-            max_du: arc_step(s.radius, tolerance),
-            max_dv: Some(arc_step(s.radius, tolerance)),
+            max_du: arc_step(s.radius, fine),
+            max_dv: Some(arc_step(s.radius, fine)),
         },
         Surface::Torus(t) => Chart {
             scale: DVec2::new(t.major + t.minor, t.minor),
-            max_du: arc_step(t.major + t.minor, tolerance),
-            max_dv: Some(arc_step(t.minor, tolerance)),
+            max_du: arc_step(t.major + t.minor, fine),
+            max_dv: Some(arc_step(t.minor, fine)),
         },
         Surface::Nurbs(s) => {
             // As for a freeform curve, in each direction. A direction the surface is
@@ -254,7 +295,7 @@ pub(crate) fn face_chart(solid: &Solid, face: FaceId, tolerance: f64) -> Option<
                 }
                 (8.0 * tolerance / bend)
                     .sqrt()
-                    .min(MAX_ANGLE * stretch / bend)
+                    .min(fine.max_angle * stretch / bend)
                     .clamp(size / MAX_SEGMENTS_PER_TURN, size)
             };
             Chart {
@@ -278,17 +319,17 @@ fn is_latitude(curve: &Curve3, surface: &Surface) -> bool {
 }
 
 /// Samples every edge once, within `tolerance`.
-pub(crate) fn sample_edges(solid: &Solid, tolerance: f64) -> Vec<EdgeSamples> {
+pub(crate) fn sample_edges(solid: &Solid, fine: Fine) -> Vec<EdgeSamples> {
     let charts: Vec<Option<Chart>> = solid
         .face_ids()
-        .map(|f| face_chart(solid, f, tolerance))
+        .map(|f| face_chart(solid, f, fine))
         .collect();
     solid
         .edges
         .iter()
         .map(|e| {
             let span = e.t1 - e.t0;
-            let mut step = max_step(&e.curve, tolerance);
+            let mut step = max_step(&e.curve, fine);
             // A circle around the axis of a cone, sphere or torus face is stepped as
             // finely as the face's widest part needs, so facets can run from it straight
             // across the face.
@@ -365,13 +406,13 @@ pub(crate) fn face_boundary(
     solid: &Solid,
     face: FaceId,
     samples: &[EdgeSamples],
-    tolerance: f64,
+    fine: Fine,
 ) -> FaceBoundary {
     let f = solid.face(face);
     let mirror = if f.reversed { -1.0 } else { 1.0 };
-    let chart = face_chart(solid, face, tolerance);
+    let chart = face_chart(solid, face, fine);
     let scale = chart.map_or(DVec2::ONE, |c| c.scale);
-    let max_du = chart.map_or(MAX_ANGLE, |c| c.max_du);
+    let max_du = chart.map_or(fine.max_angle, |c| c.max_du);
     let mut out = FaceBoundary {
         param: Vec::new(),
         positions: Vec::new(),
@@ -506,7 +547,7 @@ fn tessellate_face(
     solid: &Solid,
     face: FaceId,
     samples: &[EdgeSamples],
-    tolerance: f64,
+    fine: Fine,
 ) -> Result<FaceMesh, KernelError> {
     let f = solid.face(face);
     if f.loops.is_empty() {
@@ -515,7 +556,7 @@ fn tessellate_face(
             face.0
         )));
     }
-    let boundary = face_boundary(solid, face, samples, tolerance);
+    let boundary = face_boundary(solid, face, samples, fine);
     let scale = boundary.scale;
     let mut param = boundary.param;
     let mut positions = boundary.positions;
@@ -540,7 +581,7 @@ fn tessellate_face(
             vec![pl.normal() * sign; mesh.points.len()]
         }
         _ => {
-            let chart = face_chart(solid, face, tolerance).expect("a curved face has a chart");
+            let chart = face_chart(solid, face, fine).expect("a curved face has a chart");
             // A little slack: boundary steps are often exactly the limit (an arc that
             // divides evenly), and rounding must not make those facets look too wide.
             // No facet can be narrower than the widest step of the boundary it stands on
@@ -936,6 +977,27 @@ mod tests {
             proptest::prop_assert!((volume - area * depth).abs() < 1e-6 * volume);
             check_mesh(&solid, tol);
         }
+    }
+
+    #[test]
+    fn a_larger_facet_angle_gives_a_coarser_watertight_mesh() {
+        let coarse_angle = 30f64.to_radians();
+        for solid in [plate_with_hole(), cylinder()] {
+            let fine = tessellate(&solid, 0.05).unwrap();
+            let coarse = tessellate_with(&solid, 2.0, coarse_angle).unwrap();
+            assert_watertight(&coarse);
+            assert_eq!(coarse.faces.len(), fine.faces.len());
+            assert_eq!(coarse.edges.len(), fine.edges.len());
+            let (few, many) = (coarse.triangles().len(), fine.triangles().len());
+            assert!(few * 2 <= many, "{few} / {many}");
+            // Still the same shape, roughly: within the chords of 30 degree facets.
+            let (a, b) = (mesh_volume(&coarse), mesh_volume(&fine));
+            assert!((a - b).abs() < 0.06 * b.abs(), "{a} / {b}");
+        }
+        let solid = cylinder();
+        assert!(tessellate_with(&solid, 0.05, 0.0).is_err());
+        assert!(tessellate_with(&solid, 0.05, 1.0).is_err());
+        assert!(tessellate_with(&solid, 0.05, f64::NAN).is_err());
     }
 
     #[test]

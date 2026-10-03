@@ -4,11 +4,13 @@
 //! geometry and produces a texture. The same code runs on DX12/Vulkan natively and on
 //! WebGPU/WebGL2 in the browser, so it sticks to features that WebGL2 supports.
 
+mod batch;
 pub mod camera;
 pub mod mesh;
 mod pick;
 mod renderer;
 
+pub use batch::in_view;
 pub use camera::{Camera, CameraAnimation, OrbitStyle, Projection, StandardView};
 pub use mesh::{ColorVertex, MeshData, MeshVertex, Overlay};
 pub use pick::{MAX_PICK_RADIUS_PX, PickHit, PickRequest, PickResult};
@@ -94,7 +96,7 @@ mod shader_tests {
         }
     }
 
-    /// The Rust `Globals` and `ObjectUniform` structs must match the WGSL ones byte for byte.
+    /// The Rust `Globals` struct must match the WGSL one byte for byte.
     #[test]
     fn globals_layout_matches_wgsl() {
         let full = format!(
@@ -112,14 +114,7 @@ mod shader_tests {
         layouter.update(module.to_ctx()).expect("layout");
         let wgsl_size = layouter[globals.0].size as usize;
         assert_eq!(wgsl_size, crate::renderer::GLOBALS_SIZE);
-        let object = module
-            .types
-            .iter()
-            .find(|(_, t)| t.name.as_deref() == Some("Object"))
-            .expect("Object struct");
-        assert_eq!(
-            layouter[object.0].size as usize,
-            crate::renderer::OBJECT_SIZE
-        );
+        // The instance attributes: 4 columns, a tint and a pick id (padded).
+        assert_eq!(std::mem::size_of::<crate::batch::Instance>(), 96);
     }
 }

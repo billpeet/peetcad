@@ -312,8 +312,40 @@ which no released version writes, without another version number.
 - Component and explode fields were added to model schema 6 (still unreleased), so an
   assembly file written by an earlier build of this phase does not open.
 
+## What stage 6 built
+
+- **Instanced drawing.** The renderer groups a frame's objects by mesh and draws each
+  group in one call, with a per-instance transform, tint and pick id as instance
+  vertex attributes (`peet-render/src/batch.rs`); the per-object uniform buffer is
+  gone. Before this the transform lived with the GPU mesh, so the instances of a part,
+  which share a mesh, were all drawn where the last of them was: stage 2's "shared
+  meshes" drew wrongly, and no test drew anything. `peet-render/tests/gpu.rs` now draws
+  on a real adapter (skipped where there is none) and picks two objects of one mesh
+  each in its own place.
+- **Culling.** An object whose box is wholly beyond one side of the view is left out
+  before anything reaches the GPU (`peet_render::in_view`), in the picture and in the
+  pick pass, whose view is the few pixels round the cursor.
+- **On demand.** A body is tessellated and its mesh uploaded when it is first drawn,
+  not when the document changes: what is hidden or never comes into view costs
+  nothing. An assembly's file keeps the display meshes of the bodies that were drawn
+  (by body stamp, with the model's hash); when it is opened its parts are still
+  rebuilt, and a body whose stamp is in the file takes its mesh from there instead of
+  being tessellated. Nothing is tessellated just to be saved, so the command line,
+  which draws nothing, writes none and keeps the ones a file has.
+- **Level of detail** (`peet-ui/src/lod.rs`). A body drawn under 100 pixels across
+  gets a coarse mesh (`tessellate_with`: facets up to 30° of arc instead of 10°, the
+  same faces and edges, so picking is unchanged), made and uploaded the first time it
+  is needed; under 28 pixels it has no edges or silhouette lines. Silhouettes of
+  bodies of one part turned the same way are worked out once in a parallel view.
+- Measured: 1,000 instances of 50 parts (1.9 million triangles, a million edge
+  segments, 1600 × 1000 with 4× MSAA and picking) take 102 draw calls and about 1 ms a
+  frame on an RTX 4070 Super, drawn and waited for; deciding what to draw takes under
+  1 ms for 1,000 bodies in an unoptimised build.
+
 ## Consequences
 
+- A machine whose graphics can't draw instanced geometry can't run the viewport (WebGL2
+  and every wgpu backend can).
 - An assembly file grows with the parts in it, and a part used by two assemblies is two
   copies until linking exists.
 - A part can't be shaped by its neighbours (a hole placed from the mating part). It has

@@ -3661,6 +3661,8 @@ impl eframe::App for PeetApp {
                     triangles: viewport.stats.triangles,
                     lines: viewport.stats.lines,
                     draw_calls: viewport.stats.draw_calls,
+                    objects: viewport.stats.objects,
+                    bodies: self.doc.bodies.len(),
                 };
                 let rect = ui.max_rect();
                 self.perf.show(ui, rect, &info);

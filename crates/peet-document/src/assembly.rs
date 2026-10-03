@@ -650,6 +650,47 @@ mod tests {
     }
 
     #[test]
+    fn an_assemblys_meshes_are_made_on_demand_and_kept_in_its_file() {
+        let (a, b) = (plate("Plate", 40.0, 30.0, 5.0, 4.0), pin(4.0, 20.0));
+        let doc = assembly(&[
+            (&a, at(0.0, 0.0, 0.0)),
+            (&a, at(0.0, 0.0, 10.0)),
+            (&b, at(0.0, 0.0, 0.0)),
+        ]);
+        // Nothing is tessellated until it is shown, and instances share what is made.
+        assert!(doc.bodies.iter().all(|b| !b.is_tessellated()));
+        let triangles = doc.bodies[0].tess().triangles().len();
+        assert!(doc.bodies[1].is_tessellated() && !doc.bodies[2].is_tessellated());
+        assert!(Arc::ptr_eq(&doc.bodies[0], &doc.bodies[1]));
+
+        // A coarser mesh for drawing it small: the same faces and edges, fewer triangles
+        // round the hole.
+        let coarse = doc.bodies[0].coarse();
+        assert_eq!(coarse.faces.len(), doc.bodies[0].tess().faces.len());
+        assert_eq!(coarse.edges.len(), doc.bodies[0].tess().edges.len());
+        assert!(coarse.triangles().len() < triangles, "{triangles}");
+
+        // Saved: the mesh that was made, and not the one that was not.
+        let bytes = doc.save_bytes(true).unwrap();
+        let opened = peet_io::document::open(&bytes).unwrap();
+        assert_eq!(opened.meshes.len(), 1);
+        assert_eq!(opened.meshes[0].stamp, doc.bodies[0].stamp);
+        let again = Document::from_opened(opened, None);
+        assert_eq!(again.model, doc.model);
+        // Opened: the plate's mesh is the file's (it is there without being made), the
+        // pin's is still to be made.
+        assert!(again.bodies[0].is_tessellated() && again.bodies[1].is_tessellated());
+        assert!(!again.bodies[2].is_tessellated());
+        assert_eq!(again.bodies[0].tess().triangles().len(), triangles);
+        // Saved again without having been drawn, it keeps what it has.
+        let kept = peet_io::document::open(&again.save_bytes(true).unwrap()).unwrap();
+        assert_eq!(kept.meshes.len(), 1);
+        // And without caches there are none.
+        let bare = peet_io::document::open(&doc.save_bytes(false).unwrap()).unwrap();
+        assert!(bare.meshes.is_empty());
+    }
+
+    #[test]
     fn a_bill_of_materials_counts_the_parts() {
         let mut holed = plate("Plate", 40.0, 30.0, 5.0, 4.0);
         holed.material = Some(Material::new("Mild steel", 7850.0).unwrap());

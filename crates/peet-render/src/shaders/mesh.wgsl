@@ -11,17 +11,20 @@ struct MeshOut {
     @location(0) world_pos: vec3<f32>,
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
+    @location(3) tint: vec4<f32>,
 };
 
 @vertex
-fn vs_mesh(v: MeshIn) -> MeshOut {
-    let world = object.model * vec4<f32>(v.position, 1.0);
+fn vs_mesh(v: MeshIn, instance: InstanceIn) -> MeshOut {
+    let model = instance_model(instance);
+    let world = model * vec4<f32>(v.position, 1.0);
     var out: MeshOut;
     out.clip = globals.view_proj * world;
     out.world_pos = world.xyz;
     // Object transforms are rigid, so the model matrix transforms normals correctly.
-    out.normal = (object.model * vec4<f32>(v.normal, 0.0)).xyz;
+    out.normal = (model * vec4<f32>(v.normal, 0.0)).xyz;
     out.color = v.color;
+    out.tint = instance.tint;
     return out;
 }
 
@@ -33,7 +36,7 @@ fn fs_mesh(in: MeshOut) -> @location(0) vec4<f32> {
     if dot(n, v) > 0.0 {
         n = -n;
     }
-    let base = srgb_to_linear(mix(in.color.rgb, object.tint.rgb, object.tint.a));
+    let base = srgb_to_linear(mix(in.color.rgb, in.tint.rgb, in.tint.a));
 
     // Key light slightly above and to the left of the camera, so faces square to the
     // view still differ in brightness from their neighbours.

@@ -137,6 +137,9 @@ pub struct Document {
     /// How far an assembly is shown exploded: 0 as it is, 1 with every explode step
     /// taken in full.
     explode: f64,
+    /// Display meshes from an assembly's file, by body stamp: each is handed to its
+    /// body's view when the body is first shown, in place of tessellating it.
+    mesh_pool: HashMap<u64, peet_kernel::tessellate::SolidMesh>,
 }
 
 impl Default for Document {
@@ -163,6 +166,7 @@ impl Document {
             pending_rebuild: false,
             flat: false,
             explode: 0.0,
+            mesh_pool: HashMap::new(),
         };
         doc.rebuild();
         doc
@@ -195,6 +199,7 @@ impl Document {
             pending_rebuild: true,
             flat: false,
             explode: 0.0,
+            mesh_pool: HashMap::new(),
         };
         // The caches are of a part's own bodies: an assembly is rebuilt at once.
         match opened.bodies.filter(|_| !doc.model.is_assembly()) {
@@ -218,7 +223,14 @@ impl Document {
                     .collect();
                 doc.revision = next_revision();
             }
-            None => doc.rebuild(),
+            None => {
+                // An assembly's parts are rebuilt; their meshes are taken from the file
+                // as they are needed.
+                if doc.model.is_assembly() {
+                    doc.mesh_pool = std::mem::take(&mut meshes);
+                }
+                doc.rebuild();
+            }
         }
         doc
     }
@@ -275,10 +287,13 @@ impl Document {
         let mut views: HashMap<u64, Arc<BodyView>> =
             self.bodies.drain(..).map(|b| (b.stamp, b)).collect();
         let flat = self.flat;
+        let pool = &mut self.mesh_pool;
         let mut view = |b: &Arc<peet_model::Body>| {
             views
                 .entry(BodyView::key(b, flat))
-                .or_insert_with(|| Arc::new(BodyView::of(b.clone(), flat)))
+                .or_insert_with(|| {
+                    Arc::new(BodyView::of_cached(b.clone(), flat, pool.remove(&b.stamp)))
+                })
                 .clone()
         };
         let built = self.engine.evaluation();
@@ -326,7 +341,7 @@ impl Document {
     /// The bounds of a component where it is, or of nothing if it shows no bodies.
     pub fn component_bounds(&self, component: CompId) -> Aabb {
         self.bodies_of(component)
-            .map(|i| placed_bounds(&self.bodies[i].solid.bounds(), &self.placed[i].frame))
+            .map(|i| placed_bounds(&self.bodies[i].bounds(), &self.placed[i].frame))
             .fold(Aabb::EMPTY, |a, b| a.union(&b))
     }
 
@@ -523,8 +538,10 @@ impl Document {
                 .map(|d| d.as_secs()),
             ..Default::default()
         };
-        // Caches only describe a fully built model, and a part's own bodies: an assembly
-        // is saved without (its parts are rebuilt when it is opened).
+        // The body cache is of a fully built part's own bodies. An assembly's parts are
+        // rebuilt when it is opened, so it has only the meshes: those of the bodies that
+        // have been drawn (nothing is tessellated just to be saved), and those it was
+        // opened with that are still waiting to be used.
         let cached = with_caches && !self.pending_rebuild && !self.is_assembly();
         let caches = cached.then(|| peet_io::document::Caches {
             bodies: &self.evaluation().bodies,
@@ -539,7 +556,36 @@ impl Document {
         });
         if self.is_assembly() {
             let written = self.model.for_file(folder);
-            return peet_io::document::save(&written, &metadata, None).map_err(|e| e.message);
+            let mut stamps = std::collections::HashSet::new();
+            let mut meshes = Vec::new();
+            if with_caches && !self.pending_rebuild {
+                for b in &self.bodies {
+                    if !b.flat
+                        && b.is_tessellated()
+                        && b.error().is_none()
+                        && stamps.insert(b.stamp)
+                    {
+                        meshes.push(peet_io::document::CachedMesh {
+                            stamp: b.stamp,
+                            mesh: b.tess().clone(),
+                        });
+                    }
+                }
+                for (stamp, mesh) in &self.mesh_pool {
+                    if stamps.insert(*stamp) {
+                        meshes.push(peet_io::document::CachedMesh {
+                            stamp: *stamp,
+                            mesh: mesh.clone(),
+                        });
+                    }
+                }
+                meshes.sort_by_key(|m| m.stamp);
+            }
+            let caches = (!meshes.is_empty()).then_some(peet_io::document::Caches {
+                bodies: &[],
+                meshes,
+            });
+            return peet_io::document::save(&written, &metadata, caches).map_err(|e| e.message);
         }
         peet_io::document::save(&self.model, &metadata, caches).map_err(|e| e.message)
     }
@@ -659,12 +705,22 @@ impl Document {
     /// Bounds of all bodies (reference geometry is excluded, as in other CAD tools'
     /// "zoom to fit").
     pub fn visible_body_bounds(&self) -> Aabb {
+        // (Looked up once: an assembly can have a thousand bodies.)
+        let hidden: std::collections::HashSet<CompId> = self
+            .model
+            .assembly()
+            .map(|a| {
+                a.components()
+                    .filter(|c| !c.visible)
+                    .map(|c| c.id)
+                    .collect()
+            })
+            .unwrap_or_default();
         self.bodies
             .iter()
             .zip(&self.placed)
-            .enumerate()
-            .filter(|(i, _)| !self.is_hidden(*i))
-            .map(|(_, (b, p))| placed_bounds(&b.solid.bounds(), &p.shown))
+            .filter(|(_, p)| !p.component().is_some_and(|c| hidden.contains(&c)))
+            .map(|(b, p)| placed_bounds(&b.bounds(), &p.shown))
             .fold(Aabb::EMPTY, |a, b| a.union(&b))
     }
 

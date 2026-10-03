@@ -96,6 +96,12 @@ impl PerfMonitor {
                                 row("Triangles", info.triangles.to_string());
                                 row("Lines", info.lines.to_string());
                                 row("Draw calls", info.draw_calls.to_string());
+                                // Of the bodies shown: how many were drawn. The rest are
+                                // hidden or outside the view.
+                                row(
+                                    "Bodies drawn",
+                                    format!("{} of {}", info.objects, info.bodies),
+                                );
                                 if let Some(ms) = self.startup_ms {
                                     row("Startup", format!("{ms:.0} ms to first frame"));
                                 }
@@ -120,6 +126,9 @@ pub struct PerfInfo {
     pub triangles: usize,
     pub lines: usize,
     pub draw_calls: usize,
+    /// Bodies drawn, and bodies shown (the rest are hidden or outside the view).
+    pub objects: usize,
+    pub bodies: usize,
 }
 
 fn push(buf: &mut VecDeque<f32>, value: f32) {
