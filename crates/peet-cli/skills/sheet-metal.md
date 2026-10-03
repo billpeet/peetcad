@@ -27,7 +27,8 @@ features. It always has an exact **flat pattern**, which is what the DXF export 
 - `thickness`, `radius` (the default inner bend radius) and `bend` (`{"k_factor":
   0.44}`, or an `allowance` or `deduction`) apply to the whole body. Defaults: 1.5 mm,
   1.5 mm, K 0.44. Or take them from the material tables: `peet materials`, then
-  `{"op": "apply_material", "material": ..., "gauge": ...}`.
+  `{"op": "apply_material", "material": ..., "gauge": ...}`. That also makes it the
+  part's material, so `mass` gives `mass_kg`.
 
 ## From a solid
 

@@ -13,6 +13,7 @@ use crate::args::{Args, boolean, integer, list, number, text};
 use crate::fields::FeatureArgs;
 use crate::host::{AppCommand, word_enum};
 use crate::library::{CheckRule, Gauge};
+use crate::session::SessionCommand;
 use crate::sketch::{self, DrawItem};
 use crate::value::{EdgeSel, FeatureSel, GeomSel, Input, PlaneSel};
 
@@ -191,8 +192,9 @@ pub enum Query {
     Materials {
         material: Option<String>,
     },
-    /// Mass properties for a density of 1: volume, area, centre of gravity, principal
-    /// moments of inertia. Of one body, or of all (each, and together).
+    /// Mass properties: volume, area, centre of gravity, principal moments of inertia
+    /// (for a density of 1), and the mass if the part has a material. Of one body, or of
+    /// all (each, and together).
     Mass {
         body: Option<usize>,
     },
@@ -314,6 +316,17 @@ pub enum Op {
         /// The first base flange if absent.
         feature: Option<FeatureSel>,
     },
+    /// Say what the part is made of: a material of the tables, or any name with a
+    /// density in kg/m³. No material clears it.
+    SetMaterial {
+        material: Option<String>,
+        /// The tables' density for the material if absent.
+        density: Option<f64>,
+    },
+    /// The colour the part is drawn in (sRGB), or `None` for the usual one.
+    SetColor {
+        color: Option<[u8; 3]>,
+    },
     /// Add a row to a material's gauge table, or change one.
     SetGauge(Gauge),
     /// Remove a gauge from a material's table, or (with no gauge) the whole table.
@@ -337,19 +350,26 @@ pub enum Op {
         constant: Option<f64>,
     },
     /// Start a new, empty part. Refused if the part has unsaved changes, unless told to
-    /// discard them.
+    /// discard them. With `keep`, the part that is open stays open beside the new one
+    /// (see [`crate::apply_session`]), and so there is nothing to discard.
     New {
         discard: bool,
+        keep: bool,
     },
-    /// Open a part from a `.peet` file.
+    /// Open a part from a `.peet` file: in place of the one that is open, or with `keep`
+    /// beside it.
     Open {
         file: Source,
         discard: bool,
+        keep: bool,
     },
     OpenSample {
         sample: Sample,
         discard: bool,
+        keep: bool,
     },
+    /// Something about the documents that are open together: list them, switch, close.
+    Session(SessionCommand),
     /// Something for the application itself, not the part: it needs a running PeetCAD.
     App(AppCommand),
     Undo,
@@ -403,6 +423,8 @@ impl Op {
             Self::ShowDatum { .. } => "show",
             Self::FlatPattern { .. } => "flat_pattern",
             Self::ApplyMaterial { .. } => "apply_material",
+            Self::SetMaterial { .. } => "set_material",
+            Self::SetColor { .. } => "set_color",
             Self::SetGauge(_) => "set_gauge",
             Self::DeleteGauge { .. } => "delete_gauge",
             Self::ImportMaterials { .. } => "import_materials",
@@ -412,6 +434,7 @@ impl Op {
             Self::Open { .. } => "open",
             Self::OpenSample { .. } => "open_sample",
             Self::App(command) => command.word(),
+            Self::Session(command) => command.word(),
             Self::Undo => "undo",
             Self::Redo => "redo",
             Self::Query(q) => match q {
@@ -613,7 +636,7 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "mass",
         "body",
-        "Mass properties for a density of 1: volume, area, centre of gravity, principal moments of inertia.",
+        "Mass properties: volume, area, centre of gravity, principal moments of inertia (for a density of 1), and the mass if the part has a material.",
     ),
     (
         "measure",
@@ -648,11 +671,21 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "apply_material",
         "material, gauge or thickness (the nearest gauge), feature (a base flange; default the first)",
-        "Set a sheet metal body's thickness, bend radius and bend model from the material tables.",
+        "Set a sheet metal body's thickness, bend radius and bend model from the material tables, and the part's material.",
+    ),
+    (
+        "set_material",
+        "material (a name, or null for none), density (kg/m³; default the material tables')",
+        "Say what the part is made of: its name in a bill of materials and the density its mass is worked out with.",
+    ),
+    (
+        "set_color",
+        "color (\"#rrggbb\" or [r, g, b], or null for the usual one)",
+        "The colour the part is drawn in.",
     ),
     (
         "set_gauge",
-        "material, gauge, thickness, radius, bend ({k_factor} | {allowance} | {deduction}), notes",
+        "material, gauge, thickness, radius, bend ({k_factor} | {allowance} | {deduction}), notes, density (kg/m³, of the material)",
         "Add a row to a material's gauge table, or change one.",
     ),
     (
@@ -677,18 +710,18 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "new",
-        "discard (default false)",
-        "Start a new, empty part. Refused if there are unsaved changes, unless discard is true.",
+        "discard (default false), keep (default false)",
+        "Start a new, empty part. Refused if there are unsaved changes, unless discard is true. With keep, the part that is open stays open beside the new one.",
     ),
     (
         "open",
-        "path, discard (default false)",
-        "Open a part from a .peet file.",
+        "path, discard (default false), keep (default false)",
+        "Open a part from a .peet file: in place of the one that is open, or with keep beside it.",
     ),
     (
         "open_sample",
-        "sample (bracket, enclosure, chassis, housing), discard (default false)",
-        "Open one of the sample parts.",
+        "sample (bracket, enclosure, chassis, housing), discard (default false), keep (default false)",
+        "Open one of the sample parts: in place of the one that is open, or with keep beside it.",
     ),
     (
         "save",
@@ -719,14 +752,17 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         }),
         "new" => Op::New {
             discard: a.flag("discard", false)?,
+            keep: a.flag("keep", false)?,
         },
         "open" => Op::Open {
             file: Source::path(path(a, "open")?),
             discard: a.flag("discard", false)?,
+            keep: a.flag("keep", false)?,
         },
         "open_sample" => Op::OpenSample {
             sample: a.required("sample", Sample::parse)?,
             discard: a.flag("discard", false)?,
+            keep: a.flag("keep", false)?,
         },
         "flat_pattern" => Op::FlatPattern {
             on: a.parsed("on", boolean)?,
@@ -764,6 +800,33 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             gauge: a.string("gauge")?,
             thickness: a.parsed("thickness", number)?,
             feature: a.parsed("feature", FeatureSel::parse)?,
+        },
+        "set_material" => {
+            let material = match a.take_nullable("material") {
+                None => {
+                    return Err(
+                        "'set_material' needs a 'material' field (null for no material)."
+                            .to_owned(),
+                    );
+                }
+                Some(Value::Null) => None,
+                Some(v) => Some(text(&v).map_err(|e| format!("material: {e}"))?.to_owned()),
+            };
+            Op::SetMaterial {
+                material,
+                density: a.parsed("density", number)?,
+            }
+        }
+        "set_color" => Op::SetColor {
+            color: match a.take_nullable("color") {
+                None => {
+                    return Err(
+                        "'set_color' needs a 'color' field (null for the usual colour).".to_owned(),
+                    );
+                }
+                Some(Value::Null) => None,
+                Some(v) => Some(crate::library::color(&v).map_err(|e| format!("color: {e}"))?),
+            },
         },
         "set_gauge" => Op::SetGauge(Gauge::parse(a)?),
         "delete_gauge" => Op::DeleteGauge {
@@ -910,6 +973,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         },
         _ if FeatureArgs::adds(op) => Op::Add(new_features(op, a)?),
         _ if let Some(command) = AppCommand::parse(op, a) => Op::App(command?),
+        _ if let Some(command) = SessionCommand::parse(op, a) => Op::Session(command?),
         other => {
             let mut all: Vec<&str> = OTHER_OPS
                 .iter()
@@ -931,6 +995,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
                 "exit_sketch",
             ]);
             all.extend(["tool", "quit"]);
+            all.extend(crate::session::SESSION_OPS.iter().map(|(n, ..)| *n));
             all.sort_unstable();
             all.dedup();
             return Err(format!(

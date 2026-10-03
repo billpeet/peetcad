@@ -33,8 +33,10 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 ///   bodies. Earlier models decode unchanged (new variants at the end of the feature enum).
 /// - B-rep 4 (Phase 6): cones, spheres and tori as surfaces; blend, shell and import roles
 ///   in face names. Earlier caches decode unchanged.
+/// - Model 5 (Phase 7): the part's material and colour, which are new fields of the model
+///   itself. Models up to version 4 are read as [`peet_model::ModelV4`] and converted.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 4;
+pub const MODEL_SCHEMA: u16 = 5;
 pub const BREP_SCHEMA: u16 = 4;
 pub const MESH_SCHEMA: u16 = 1;
 
@@ -146,9 +148,15 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
     check_schema(&r, SectionKind::METADATA, METADATA_SCHEMA)?;
     check_schema(&r, SectionKind::MODEL, MODEL_SCHEMA)?;
     let metadata: Metadata = r.read(SectionKind::METADATA)?.unwrap_or_default();
-    let mut model: Model = r
-        .read(SectionKind::MODEL)?
-        .ok_or_else(|| PeetError::new("The file is damaged: it has no model in it."))?;
+    // Before version 5 a model had no material or colour (see `MODEL_SCHEMA`).
+    let model = match r.schema_version(SectionKind::MODEL) {
+        Some(v) if v < 5 => r
+            .read::<peet_model::ModelV4>(SectionKind::MODEL)?
+            .map(Model::from),
+        _ => r.read(SectionKind::MODEL)?,
+    };
+    let mut model: Model =
+        model.ok_or_else(|| PeetError::new("The file is damaged: it has no model in it."))?;
     model.validate().map_err(PeetError::new)?;
     let model_hash = peet_model::hash::of(&model);
     let mut warnings = Vec::new();
@@ -285,7 +293,7 @@ mod tests {
         let mut w = Writer::new();
         w.section(SectionKind::METADATA, 1, &Metadata::default())
             .unwrap();
-        w.section(SectionKind::MODEL, 1, &other).unwrap();
+        w.section(SectionKind::MODEL, MODEL_SCHEMA, &other).unwrap();
         w.section(
             SectionKind::BREP_CACHE,
             1,
@@ -318,6 +326,40 @@ mod tests {
             .unwrap();
         let e = open(&w.finish()).unwrap_err();
         assert!(e.message.contains("newer version"), "{e}");
+    }
+
+    #[test]
+    fn models_from_before_materials_still_open() {
+        let (mut model, _) = bracket();
+        // As version 4 wrote it: the same fields, without the material and the colour.
+        let mut w = Writer::new();
+        w.section(SectionKind::METADATA, 1, &Metadata::default())
+            .unwrap();
+        w.section(SectionKind::MODEL, 4, &peet_model::ModelV4::of(&model))
+            .unwrap();
+        let old = w.finish();
+        assert_eq!(open(&old).unwrap().model, model);
+
+        // The new fields are saved, and a file with them is not read as an old one.
+        model.material = Some(peet_model::Material::new("Mild steel", 7850.0).unwrap());
+        model.color = Some([200, 40, 40]);
+        let new = save(&model, &Metadata::default(), None).unwrap();
+        assert_eq!(open(&new).unwrap().model, model);
+        let text = to_text(&new).unwrap();
+        assert!(text.contains("Mild steel"));
+        assert_eq!(open(&from_text(&text).unwrap()).unwrap().model, model);
+        // The text of an older version has neither field.
+        let old_text = to_text(&old).unwrap();
+        let without: String = old_text
+            .lines()
+            .filter(|l| !l.contains("material:") && !l.contains("color:"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(without.len() < old_text.len());
+        assert!(from_text(&without).is_ok());
     }
 
     #[test]

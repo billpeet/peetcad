@@ -27,7 +27,8 @@ pub(super) struct Notice {
     error: bool,
 }
 
-/// Densities to choose from in the mass properties window, kg/m³.
+/// Materials to choose from in the mass properties window besides those of the material
+/// tables, with their densities in kg/m³.
 const DENSITIES: [(&str, f64); 8] = [
     ("Steel", crate::settings::STEEL_DENSITY),
     ("Stainless steel", 8000.0),
@@ -548,42 +549,79 @@ impl PeetApp {
         }
         let mut open = true;
         let units = self.doc.model.parameters.units;
-        let mut density = self.settings.density;
+        // The part's material; until it has one, it is weighed with the density last used.
+        let material = self.doc.model.material.clone();
+        let mut density = material
+            .as_ref()
+            .map_or(self.settings.density, |m| m.density);
+        // The materials of the tables that have a density, then some common ones.
+        let mut choices: Vec<(String, f64)> = self
+            .settings
+            .materials
+            .tables
+            .iter()
+            .filter_map(|t| t.density.map(|d| (t.material.clone(), d)))
+            .collect();
+        for (name, d) in DENSITIES {
+            if !choices.iter().any(|(n, _)| n == name) {
+                choices.push((name.to_owned(), d));
+            }
+        }
+        let mut picked: Option<Option<(String, f64)>> = None;
+        let mut density_changed = false;
+        let mut density_done = false;
+        let mut color = self.doc.model.color;
         egui::Window::new("Mass Properties")
             .open(&mut open)
             .resizable(true)
             .default_width(420.0)
             .show(ctx, |ui| {
                 ui.horizontal(|ui| {
-                    ui.label("Density");
-                    ui.add(
-                        egui::DragValue::new(&mut density)
-                            .range(1.0..=30000.0)
-                            .speed(10.0)
-                            .suffix(" kg/m³"),
-                    )
-                    .on_hover_text("What a cubic metre of the material weighs. It is remembered for next time.");
+                    ui.label("Material");
                     egui::ComboBox::from_id_salt("density_material")
-                        .selected_text(
-                            DENSITIES
-                                .iter()
-                                .find(|(_, d)| (d - density).abs() < 0.5)
-                                .map_or("Material…", |(name, _)| name),
-                        )
+                        .selected_text(material.as_ref().map_or("None", |m| m.name.as_str()))
                         .show_ui(ui, |ui| {
-                            for (name, d) in DENSITIES {
+                            if ui.selectable_label(material.is_none(), "None").clicked() {
+                                picked = Some(None);
+                            }
+                            for (name, d) in &choices {
+                                let current = material
+                                    .as_ref()
+                                    .is_some_and(|m| m.name == *name && m.density == *d);
                                 if ui
-                                    .selectable_label(
-                                        (d - density).abs() < 0.5,
-                                        format!("{name} ({d} kg/m³)"),
-                                    )
+                                    .selectable_label(current, format!("{name} ({d} kg/m³)"))
                                     .clicked()
                                 {
-                                    density = d;
+                                    picked = Some(Some((name.clone(), *d)));
                                 }
                             }
-                        });
+                        })
+                        .response
+                        .on_hover_text("What the part is made of. It is saved with the part, and is its material in a bill of materials.");
+                    let r = ui
+                        .add(
+                            egui::DragValue::new(&mut density)
+                                .range(peet_model::Material::DENSITY_RANGE)
+                                .speed(10.0)
+                                .suffix(" kg/m³"),
+                        )
+                        .on_hover_text("What a cubic metre of the material weighs.");
+                    density_changed = r.changed();
+                    density_done = r.drag_stopped() || r.lost_focus();
                 });
+                ui.horizontal(|ui| {
+                    ui.label("Colour");
+                    let mut rgb = color.unwrap_or(crate::bodies::BODY_COLOR);
+                    if ui.color_edit_button_srgb(&mut rgb).changed() {
+                        color = Some(rgb);
+                    }
+                    if color.is_some() && ui.button("Default").clicked() {
+                        color = None;
+                    }
+                });
+                if material.is_none() {
+                    ui.weak("The part has no material yet: it is weighed with the density last used.");
+                }
                 ui.separator();
                 if self.doc.bodies.is_empty() {
                     ui.weak("There are no bodies yet. Extrude or revolve a sketch to make one.");
@@ -667,7 +705,38 @@ impl PeetApp {
                     ui.weak("Sheet metal parts are measured folded, also while the flat pattern is shown.");
                 }
             });
-        self.settings.density = density;
+        // Changes go to the part (as operations, like every change).
+        match picked {
+            Some(choice) => {
+                if let Some((_, d)) = &choice {
+                    self.settings.density = *d;
+                }
+                self.change("Set Material", |m| {
+                    m.material = choice
+                        .as_ref()
+                        .and_then(|(name, d)| peet_model::Material::new(name, *d).ok());
+                });
+            }
+            None if density_changed => {
+                self.settings.density = density;
+                let name = material.map_or_else(|| "Custom".to_owned(), |m| m.name);
+                // One key for the whole drag: its changes are one undo step.
+                self.change_model("Set Density", Some(0x0064_656e_7369_7479), |m| {
+                    if let Ok(material) = peet_model::Material::new(&name, density) {
+                        m.material = Some(material);
+                    }
+                });
+            }
+            None => {}
+        }
+        if density_done {
+            self.doc.seal_history();
+        }
+        if color != self.doc.model.color {
+            self.change_model("Change Colour", Some(0x0000_636f_6c6f_7572), |m| {
+                m.color = color;
+            });
+        }
         self.windows.mass_properties = open;
     }
 }

@@ -72,6 +72,17 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
         return Err("the parameters were put in another order, which no operation does".to_owned());
     }
 
+    // ---- What the part is made of, and its colour ----
+    if old.material != new.material {
+        ops.push(Op::SetMaterial {
+            material: new.material.as_ref().map(|m| m.name.clone()),
+            density: new.material.as_ref().map(|m| m.density),
+        });
+    }
+    if old.color != new.color {
+        ops.push(Op::SetColor { color: new.color });
+    }
+
     // ---- Features removed ----
     // The tree's order and the rollback bar are followed through the operations, to see
     // at the end what is left to move.

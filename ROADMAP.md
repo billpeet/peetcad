@@ -56,6 +56,7 @@ This makes unfolding exact and trivial instead of a fragile geometric operation,
 ```
 crates/
   peet-math/        f64 vectors, transforms, tolerances, robust predicates
+  peet-solve/       the constraint solvers' numerical core (added in Phase 7)
   peet-sketch/      2D sketch entities + geometric constraint solver
   peet-kernel/      B-rep topology & geometry, extrude/cut, tessellation
   peet-sheetmetal/  sheet definition, bend math, fold/unfold, flat pattern
@@ -256,12 +257,45 @@ The freeform stage adds, in `peet-kernel`: `nurbs` (clamped rational B-spline cu
 Known limits of the freeform stage: a boolean that involves a freeform face takes a few tenths of a second (analytic ones take microseconds); faces that touch along a curve without crossing can't be intersected; fillets, chamfers, shells and offsets refuse freeform faces and edges; draft doesn't tilt freeform faces; the sketcher has no splines, so freeform shapes come from lofts, intersections and import only; STEP import refuses freeform faces that come to a point where their surface is pinched together (a dome's tip written as a B-spline), bands that wrap a closed surface with no seam, offset surfaces and edges given only as parameter-space curves, and has only been tested on hand-written files in other systems' styles; a loft's profiles need the same number of edges, and there are no guide curves or end tangency; a sweep mitres corners between straight pieces only, and its path is still flat; converting to sheet metal refuses pressed forms, conical bends, sharp bends, and walls of different thickness; none of the new commands has been exercised by hand in the running app.
 
 ### Phase 7: Assemblies
-- [ ] Multi-part documents, part instancing, external references
-- [ ] Mates/joints: coincident, concentric, distance, angle, and rigid groups (reusing the constraint solver in 3D)
-- [ ] Assembly tree, component visibility and colors, exploded views
-- [ ] Interference detection
-- [ ] Bill of materials (with sheet metal flat sizes and material)
-- [ ] Large assembly performance: instanced rendering, lazy loading, LOD
+*Goal: put parts together, hold them with mates, and report on the whole.*
+
+The design is recorded in [ADR 0009](docs/adr/0009-assemblies.md). The work is in six stages:
+
+**Stage 1: groundwork**
+- [x] A part has a material, a density and a colour (they were application settings or constants)
+- [x] `peet-solve`: the constraint solver's numerical core, out of `peet-sketch`, behind a trait for a system of equations
+- [x] A session of several open documents, one current; operations apply to the current one, or to one they name
+
+**Stage 2: assembly documents and instancing**
+- [ ] The assembly: definitions (parts embedded in the file, sub-assemblies), components with placements, its own section in `.peet`
+- [ ] Assembly tree; drawing components with shared meshes; picking by instance
+- [ ] Insert, move, fix, replace, delete and open a component for editing (the part alone, not in context)
+- [ ] Operations, the `assemblies` skill and the reference
+- [ ] STEP import that keeps an assembly's structure; STEP export of an assembly
+- [ ] Linked parts: a component that refers to a part file, found through the host
+
+**Stage 3: mates**
+- [ ] Coincident, concentric, distance, angle, parallel, and fasten (a rigid group), on persistent references
+- [ ] Solving with `peet-solve`: six unknowns per free component; rigid sub-assemblies
+- [ ] Dragging with a live solve; degrees of freedom per component; conflicting and redundant mates explained
+
+**Stage 4: interference, bill of materials, mass**
+- [ ] Interference detection (bounding boxes, then the kernel's intersection), with volumes
+- [ ] Bill of materials: quantities, material, mass, sheet metal flat sizes; CSV export
+- [ ] Mass properties of an assembly
+
+**Stage 5: visibility, colours, exploded views**
+- [ ] Show, hide and colour components
+- [ ] Exploded views as stored steps that don't affect mates
+
+**Stage 6: large assemblies**
+- [ ] Instanced rendering, culling, loading from the mesh cache on demand, level of detail
+
+**Exit criteria:** An enclosure is assembled from the chassis sample, a cover, the housing and patterned fasteners, fully mated, with no interference and a bill of materials that matches the hand count and hand-calculated masses and flat sizes. Changing the chassis's width moves every component to the right place. A mate solve during a drag takes under 4 ms with 50 components, and 1,000 instances of 50 parts draw at 60 FPS.
+
+**Left out on purpose:** editing a part in the context of its assembly (features that refer to neighbouring parts), and flexible sub-assemblies.
+
+**Status:** Stage 1 is implemented; stages 2 to 6 are not started. A part's `Model` has a material (name and density) and a colour, saved with it (model schema 5; older files still open) and set with `set_material` and `set_color`; the material tables carry densities, and `mass` gives the mass. The solver's core is the new `peet-solve` crate, which `peet-sketch` now uses: its 186 tests pass unchanged and the drag benchmark is the same to within noise. `peet_document::Session` holds the open documents; `peet_ops::apply_session` sends an operation to the current one or to one it names, with `documents`, `switch`, `close` and `"keep": true` on `new`, `open` and `open_sample`; the command line and the application hold a session. Still to do in this stage's area: the mass properties window's new material and colour rows and the document tabs have been compile-checked and tested through the operations, not exercised by hand; the application can't yet open a second document from its own menus (stage 2 adds the commands that do); autosave covers the current document only.
 
 ### Phase 8: Drawings
 - [ ] 2D drawing sheets, templates, title blocks
@@ -293,6 +327,8 @@ Known limits of the freeform stage: a boolean that involves a freeform face take
 | Sketch solve during drag | < 2 ms |
 | Regenerate a 20-feature part after an edit | < 100 ms |
 | Unfold / flat pattern | < 20 ms |
+| Mate solve during a drag (50 components) | < 4 ms |
+| Viewport frame time (1,000 instances of 50 parts) | < 16 ms |
 | Memory for an empty document | < 100 MB |
 
 Benchmarks (`criterion`) run in CI for the solver, kernel operations and regeneration, so regressions are visible.
@@ -344,6 +380,7 @@ Benchmarks (`criterion`) run in CI for the solver, kernel operations and regener
 | Regeneration and undo | Content-hashed keys per feature decide what to rebuild; undo stores model snapshots that share unchanged features ([ADR 0002](docs/adr/0002-incremental-regeneration.md)) |
 | Sheet metal features | Flanges are profiles of bends and flats; sketched bends split a flange in place; corners are declared and resolved at build time; forms are square-walled and present in both solids; patterns copy features, not geometry ([ADR 0005](docs/adr/0005-sheet-metal-phase-5.md)) |
 | General solid modelling | Analytic first: cones, spheres and tori as surfaces of revolution with poles at vertices; fillets and chamfers as boolean tools; shell and draft by solving the same topology on new surfaces; imported bodies as features. NURBS are one more kind of surface, with marched intersections ([ADR 0006](docs/adr/0006-general-solid-modelling.md), [ADR 0008](docs/adr/0008-freeform-geometry.md)) |
+| Assemblies | A second kind of document in the same container; parts embedded in the assembly's file first, linked files second; components are instances of definitions; rigid sub-assemblies; no in-context editing; mates on persistent references, solved by the sketch solver's core ([ADR 0009](docs/adr/0009-assemblies.md)) |
 
 ## Open questions
 

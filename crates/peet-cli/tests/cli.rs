@@ -314,6 +314,57 @@ fn problems_with_the_command_line_and_files_are_told_apart() {
 }
 
 #[test]
+fn a_run_can_open_documents_beside_the_part() {
+    let dir = Folder::new("documents");
+    let part = dir.path("plate.peet");
+    let other = dir.path("panel.peet");
+    let script = dir.write(
+        "two.jsonl",
+        &format!(
+            r#"{{"op": "sketch", "on": "top", "draw": [{{"type": "rectangle", "from": [0, 0], "to": [40, 30]}}]}}
+{{"op": "extrude", "sketch": "Sketch1", "depth": 5}}
+{{"op": "open_sample", "sample": "enclosure", "keep": true}}
+{{"op": "set_parameter", "name": "extra", "value": "3mm"}}
+{{"op": "save", "path": {}}}
+{{"op": "open_sample", "sample": "housing", "keep": true}}
+{{"op": "set_parameter", "name": "extra", "value": "4mm"}}
+{{"op": "set_parameter", "name": "t", "value": "5mm", "document": 1}}
+{{"op": "documents"}}
+"#,
+            json!(other)
+        ),
+    );
+    let ran = peet(&["run", &script, "--new", "-f", &part]);
+    assert_eq!(ran.code, OK, "{}", ran.err);
+    let list = ran.replies.last().unwrap()["documents"].as_array().unwrap();
+    assert_eq!(list.len(), 3);
+    assert_eq!(list[2]["current"], true);
+    // The part of --file is saved by the run, though it is not the current document
+    // at the end; the others are the script's to save.
+    assert!(ran.err.contains(&format!("Saved {part}")), "{}", ran.err);
+    assert!(
+        ran.err.contains("Housing") && ran.err.contains("not saved"),
+        "{}",
+        ran.err
+    );
+    assert!(
+        !ran.err.contains("Enclosure Panel was changed"),
+        "{}",
+        ran.err
+    );
+    let saved = model(&part);
+    assert_eq!(saved.len(), 2);
+    assert!(saved.parameters.entries.iter().any(|p| p.name == "t"));
+    assert!(
+        model(&other)
+            .parameters
+            .entries
+            .iter()
+            .any(|p| p.name == "extra")
+    );
+}
+
+#[test]
 fn materials_come_from_a_file_for_the_run() {
     let dir = Folder::new("materials");
     let part = dir.path("panel.peet");

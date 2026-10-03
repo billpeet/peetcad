@@ -8,8 +8,8 @@
 //! `peet_ops::AppCommand`, which [`PeetApp::apply_op`] carries out.
 
 use peet_ops::{
-    AppCommand, Host, Op, Query, Reply, SketchTool, Toggle, Undo, View, Window, apply_in,
-    apply_model,
+    AppCommand, DocSel, Host, Op, Query, Reply, SessionCommand, SketchTool, Toggle, Undo, View,
+    Window, apply_model, apply_session,
 };
 use peet_sheetmetal::{CheckRules, MaterialLibrary};
 use serde_json::{Map, Value, json};
@@ -250,9 +250,51 @@ impl PeetApp {
     /// it: the part changes on screen, and a change is an undo step.
     ///
     /// While a sketch is open for editing, its working copy is not in the part yet, so
-    /// operations that change the part are refused until the sketch is finished
-    /// (`exit_sketch`). Queries and application commands are not.
+    /// operations that change the part (or go to another document) are refused until the
+    /// sketch is finished (`exit_sketch`). Queries and application commands are not.
+    ///
+    /// The operation goes to the current document; [`PeetApp::apply_op_to`] sends one to
+    /// another of the open documents.
     pub fn apply_op(&mut self, ctx: &egui::Context, op: &Op, undo: Undo) -> Reply {
+        self.apply_op_to(ctx, None, op, undo)
+    }
+
+    /// [`PeetApp::apply_op`], to the open document `target` names instead of the current
+    /// one (what a `document` field does in a JSON operation).
+    pub fn apply_op_to(
+        &mut self,
+        ctx: &egui::Context,
+        target: Option<&DocSel>,
+        op: &Op,
+        undo: Undo,
+    ) -> Reply {
+        // The interface (selection, open sketch) is about the current document.
+        let elsewhere = match target.map(|t| t.resolve(&self.doc)) {
+            Some(Ok(id)) => id != self.doc.current_id(),
+            Some(Err(e)) => return Reply::error(op.word(), e),
+            None => false,
+        };
+        if elsewhere {
+            let mut host = SettingsHost {
+                materials: &mut self.settings.materials,
+                check_rules: &mut self.settings.check_rules,
+            };
+            let reply = match op {
+                Op::App(command) => Reply::error(
+                    command.word(),
+                    format!(
+                        "'{}' is about what the application shows, which is the current document: 'switch' to the other one first.",
+                        command.word()
+                    ),
+                ),
+                _ => apply_session(&mut host, &mut self.doc, target, op, undo),
+            };
+            if reply.ok && !matches!(op, Op::Query(_)) {
+                self.journal.record([op.clone()]);
+            }
+            ctx.request_repaint();
+            return reply;
+        }
         let reply = match op {
             Op::App(command) => match self.app_command(ctx, command) {
                 Ok(data) => {
@@ -271,11 +313,12 @@ impl PeetApp {
                 Err(e) => Reply::error(command.word(), e),
             },
             Op::Query(Query::Help | Query::Status | Query::Features | Query::Parameters)
-            | Op::Query(Query::Materials { .. }) => self.apply_to_document(op, undo),
+            | Op::Query(Query::Materials { .. })
+            | Op::Session(SessionCommand::Documents) => self.apply_to_document(op, undo),
             _ if self.sketch.is_some() && !matches!(op, Op::Query(_)) => Reply::error(
                 op.word(),
                 format!(
-                    "{} is open for editing in PeetCAD, so the part can't be changed from outside: finish the sketch first (exit_sketch).",
+                    "{} is open for editing in PeetCAD, so the part can't be changed or left from outside: finish the sketch first (exit_sketch).",
                     self.sketch
                         .as_ref()
                         .map_or_else(String::new, |e| self.doc.item_name(e.item))
@@ -375,7 +418,7 @@ impl PeetApp {
             materials: &mut self.settings.materials,
             check_rules: &mut self.settings.check_rules,
         };
-        let reply = apply_in(&mut host, &mut self.doc, op, undo);
+        let reply = apply_session(&mut host, &mut self.doc, None, op, undo);
         if reply.replaced {
             self.document_replaced();
             self.files.discard_autosave();
@@ -591,6 +634,72 @@ mod tests {
             &ctx,
             json!({"op": "edit", "feature": "Extrude1", "depth": 9}),
         );
+
+        // A second document beside this one: the application goes to it, and forgets
+        // what it knew about the first (the selection). The first keeps its changes.
+        let first = app.doc.current_id();
+        app.selected = app
+            .doc
+            .model
+            .features()
+            .next()
+            .map(|f| crate::document::ItemId::Feature(f.id));
+        let beside = run(
+            &mut app,
+            &ctx,
+            json!({"op": "open_sample", "sample": "housing", "keep": true}),
+        );
+        assert!(beside.ok && beside.replaced, "{}", beside.json);
+        assert!(app.selected.is_none());
+        assert_eq!(app.doc.count(), 2);
+        assert_eq!(app.doc.title(), "Housing");
+        // An operation sent to the first document doesn't disturb the interface.
+        app.selected = app
+            .doc
+            .model
+            .features()
+            .next()
+            .map(|f| crate::document::ItemId::Feature(f.id));
+        let there = app.apply_op_to(
+            &ctx,
+            Some(&DocSel::Id(first)),
+            &Op::Suppress {
+                feature: "Extrude1".into(),
+                on: true,
+            },
+            Undo::Step,
+        );
+        assert!(there.ok && there.changed, "{}", there.json);
+        assert!(app.selected.is_some());
+        assert_eq!(app.doc.title(), "Housing");
+        let view = app.apply_op_to(
+            &ctx,
+            Some(&DocSel::Id(first)),
+            &Op::App(AppCommand::ZoomToFit),
+            Undo::Step,
+        );
+        assert!(!view.ok, "the view is of the current document");
+        // A sketch open for editing keeps the application in its document.
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "edit_sketch", "sketch": "Sketch1"}),
+        );
+        let busy = run(&mut app, &ctx, json!({"op": "switch", "document": first.0}));
+        assert!(!busy.ok && busy.json["error"].as_str().unwrap().contains("left"));
+        ok(&mut app, &ctx, json!({"op": "documents"}));
+        ok(&mut app, &ctx, json!({"op": "exit_sketch"}));
+        let back = run(&mut app, &ctx, json!({"op": "switch", "document": first.0}));
+        assert!(back.ok && back.replaced);
+        assert_eq!(app.doc.current_id(), first);
+        assert_eq!(app.doc.undo_label(), Some("Suppress Extrude1"));
+        ok(&mut app, &ctx, json!({"op": "undo"}));
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "close", "document": "Housing", "discard": true}),
+        );
+        assert_eq!(app.doc.count(), 1);
 
         // A new document resets what the application knew about the old one.
         let refused = run(&mut app, &ctx, json!({"op": "new"}));

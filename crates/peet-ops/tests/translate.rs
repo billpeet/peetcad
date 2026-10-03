@@ -406,6 +406,28 @@ fn sheet_metal_tools_are_made_by_operations() {
 }
 
 #[test]
+fn material_and_colour_are_set_by_operations() {
+    let mut pair = Pair::new();
+    let ops = pair.change("Set Material", |m| {
+        // As the mass properties window sets it: a name of its own list, lower case.
+        m.material = Some(peet_model::Material::new("mild steel", 7900.0).unwrap());
+    });
+    assert!(matches!(ops, [Op::SetMaterial { .. }]), "{ops:?}");
+    let ops = pair.change("Change Colour", |m| m.color = Some([10, 20, 30]));
+    assert_eq!(
+        ops,
+        [Op::SetColor {
+            color: Some([10, 20, 30])
+        }]
+    );
+    let ops = pair.change("Clear", |m| {
+        m.material = None;
+        m.color = None;
+    });
+    assert_eq!(ops.len(), 2, "{ops:?}");
+}
+
+#[test]
 fn a_drag_is_one_undo_step() {
     let mut doc = Document::default();
     let mut host = Headless::default();

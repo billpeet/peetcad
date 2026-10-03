@@ -19,8 +19,8 @@
 use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
-use peet_document::Document;
-use peet_ops::{Headless, Op, Reply, Source, Undo, apply_in, apply_json_in};
+use peet_document::{Document, Session};
+use peet_ops::{Headless, Op, Reply, Source, Undo, apply_in, apply_json_in, apply_session_json};
 use serde_json::{Map, Value, json};
 
 /// Every operation was applied.
@@ -471,8 +471,11 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
     };
 
     // ---- The part ----
+    // A script can open more documents beside it; the part of --file is the one a run
+    // saves by itself.
     let mut host = Headless::default();
-    let mut doc = Document::default();
+    let mut doc = Session::default();
+    let part = doc.current_id();
     if let Some(csv) = &options.materials {
         let reply = apply_in(
             &mut host,
@@ -501,6 +504,7 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
             &Op::Open {
                 file: Source::path(file.clone()),
                 discard: true,
+                keep: false,
             },
             Undo::Step,
         );
@@ -519,7 +523,7 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
     let mut failed = false;
     let mut wrote = false;
     for op in &ops {
-        let reply = apply_json_in(&mut host, &mut doc, op, Undo::Step);
+        let reply = apply_session_json(&mut host, &mut doc, op, Undo::Step);
         print(out, &reply.json, options.pretty);
         if reply.ok {
             wrote |= matches!(reply.json["op"].as_str(), Some("save" | "export"));
@@ -538,8 +542,22 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
         });
         return FAILED;
     }
+    // Documents the script opened beside the part are its own to save.
+    for (id, other) in doc.documents() {
+        if id != part && other.is_modified() {
+            notes.say(&format!(
+                "{} was changed and not saved: a document opened with \"keep\" is saved by a 'save' operation sent to it.",
+                other.title()
+            ));
+        }
+    }
+    // The part itself, whichever document is current by now. A script that closed it
+    // has nothing left to save.
+    let Some(doc) = doc.get_mut(part) else {
+        return OK;
+    };
     if options.strict {
-        let status = apply_json_in(&mut host, &mut doc, &json!({"op": "status"}), Undo::Step);
+        let status = apply_json_in(&mut host, doc, &json!({"op": "status"}), Undo::Step);
         let failures: Vec<String> = status.json["failures"]
             .as_array()
             .map(|list| {
@@ -579,7 +597,7 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
         Some(path) if changed && !options.no_save => {
             let reply = apply_in(
                 &mut host,
-                &mut doc,
+                doc,
                 &Op::Save {
                     path: Some(path.clone()),
                     caches: !options.no_caches,

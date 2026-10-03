@@ -13,6 +13,7 @@ use crate::extrude::{Extrude, Operation};
 use crate::feature::{
     ExtrudeFeature, Feature, FeatureId, FeatureKind, PlaneRef, SketchFeature, StdPlane,
 };
+use crate::material::Material;
 use crate::naming::{FaceName, FaceRole};
 
 /// The built-in reference geometry every part has.
@@ -58,6 +59,59 @@ pub struct Model {
     next_id: u32,
     /// The next number for automatic names, per name prefix.
     name_counters: BTreeMap<String, u32>,
+    /// What the part is made of: its name in a bill of materials and the density its
+    /// mass is worked out with. `None` until one is chosen.
+    #[serde(default)]
+    pub material: Option<Material>,
+    /// The colour the part is drawn in (sRGB). `None` is the application's colour for
+    /// parts.
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+}
+
+/// The model as files up to model schema 4 have it: before a part had a material and a
+/// colour. The file format is not self-describing, so an older model is read as this
+/// and converted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelV4 {
+    name: String,
+    features: Vec<Arc<Feature>>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+}
+
+impl From<ModelV4> for Model {
+    fn from(m: ModelV4) -> Self {
+        Self {
+            name: m.name,
+            features: m.features,
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            material: None,
+            color: None,
+        }
+    }
+}
+
+impl ModelV4 {
+    /// `model` as it would have been saved before: without its material and colour.
+    pub fn of(model: &Model) -> Self {
+        Self {
+            name: model.name.clone(),
+            features: model.features.clone(),
+            parameters: model.parameters.clone(),
+            rollback: model.rollback,
+            datums_visible: model.datums_visible,
+            next_id: model.next_id,
+            name_counters: model.name_counters.clone(),
+        }
+    }
 }
 
 impl Default for Model {
@@ -70,6 +124,8 @@ impl Default for Model {
             datums_visible: [true; 4],
             next_id: 1,
             name_counters: BTreeMap::new(),
+            material: None,
+            color: None,
         }
     }
 }

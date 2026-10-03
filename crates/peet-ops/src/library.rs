@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use peet_document::Document;
-use peet_model::{BendModelDef, FeatureId, FeatureKind, Model, Scalar};
+use peet_model::{BendModelDef, FeatureId, FeatureKind, Material, Model, Scalar};
 use peet_sheetmetal::{BendModel, CheckRules, GaugeEntry, GaugeTable, MaterialLibrary, Rule};
 use serde_json::{Map, Value, json};
 
@@ -37,6 +37,8 @@ pub struct Gauge {
     /// A K-factor of 0.44, for a new row, if absent.
     pub bend: Option<GaugeBend>,
     pub notes: Option<String>,
+    /// The material's density in kg/m³ (it is the whole table's, not the row's).
+    pub density: Option<f64>,
 }
 
 impl Gauge {
@@ -62,6 +64,7 @@ impl Gauge {
                 }
             })?,
             notes: a.string("notes")?,
+            density: a.parsed("density", number)?,
         })
     }
 }
@@ -176,7 +179,13 @@ pub(crate) fn materials(
 ) -> Result<Map<String, Value>, String> {
     let table_out = |t: &GaugeTable| {
         let gauges: Vec<Value> = t.entries.iter().map(|e| entry_out(e, doc)).collect();
-        json!({ "material": t.material, "gauges": gauges })
+        let mut m = Map::new();
+        m.insert("material".to_owned(), json!(t.material));
+        if let Some(d) = t.density {
+            m.insert("density_kg_m3".to_owned(), json!(d));
+        }
+        m.insert("gauges".to_owned(), json!(gauges));
+        Value::Object(m)
     };
     let tables: Vec<Value> = match material {
         Some(m) => vec![table_out(
@@ -189,9 +198,96 @@ pub(crate) fn materials(
     Ok(out)
 }
 
+/// A colour as scripts write it: `"#c82828"`, or `[200, 40, 40]`.
+pub(crate) fn color(v: &Value) -> Result<[u8; 3], String> {
+    let wrong = || format!("expected a colour like \"#c82828\" or [200, 40, 40], not {v}");
+    match v {
+        Value::String(s) => {
+            let hex = s.trim().trim_start_matches('#');
+            if hex.len() != 6 || !hex.is_ascii() {
+                return Err(wrong());
+            }
+            let mut out = [0u8; 3];
+            for (i, o) in out.iter_mut().enumerate() {
+                *o = u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).map_err(|_| wrong())?;
+            }
+            Ok(out)
+        }
+        Value::Array(items) if items.len() == 3 => {
+            let mut out = [0u8; 3];
+            for (o, item) in out.iter_mut().zip(items) {
+                *o = item
+                    .as_u64()
+                    .and_then(|n| u8::try_from(n).ok())
+                    .ok_or_else(wrong)?;
+            }
+            Ok(out)
+        }
+        _ => Err(wrong()),
+    }
+}
+
+/// A colour as replies give it: `"#c82828"`.
+pub(crate) fn color_out(c: [u8; 3]) -> Value {
+    json!(format!("#{:02x}{:02x}{:02x}", c[0], c[1], c[2]))
+}
+
+/// A part's material as replies give it.
+pub(crate) fn material_out(m: &Material) -> Value {
+    json!({ "name": m.name, "density_kg_m3": m.density })
+}
+
+/// Sets what the part is made of, or (with no material) clears it. The density is the
+/// one given, or the material tables' for that material. Returns the undo label and what
+/// was set.
+pub(crate) fn set_material(
+    library: &MaterialLibrary,
+    model: &mut Model,
+    material: Option<&str>,
+    density: Option<f64>,
+) -> Result<(String, Map<String, Value>), String> {
+    let mut out = Map::new();
+    let Some(name) = material else {
+        if density.is_some() {
+            return Err("A density needs a material to go with it.".to_owned());
+        }
+        model.material = None;
+        out.insert("material".to_owned(), Value::Null);
+        return Ok(("Remove Material".to_owned(), out));
+    };
+    // A material taken from the tables is called as the tables call it ("mild steel"
+    // finds "Mild steel"). One given with its own density is taken as it is written.
+    let table = library.table(name).filter(|_| density.is_none());
+    let density = match density.or_else(|| table.and_then(|t| t.density)) {
+        Some(d) => d,
+        None => {
+            let known: Vec<&str> = library
+                .tables
+                .iter()
+                .filter(|t| t.density.is_some())
+                .map(|t| t.material.as_str())
+                .collect();
+            return Err(format!(
+                "The material tables have no density for '{name}': give a 'density' in kg/m³. They have one for: {}.",
+                if known.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    known.join(", ")
+                }
+            ));
+        }
+    };
+    let material = Material::new(table.map_or(name, |t| t.material.as_str()), density)?;
+    let label = format!("Set Material to {}", material.name);
+    out.insert("material".to_owned(), material_out(&material));
+    model.material = Some(material);
+    Ok((label, out))
+}
+
 /// Sets a base flange's thickness, bend radius and bend model from a row of the tables:
-/// the gauge named, or the one nearest a thickness. Returns the feature, the undo label
-/// and what was applied.
+/// the gauge named, or the one nearest a thickness. The part's material becomes the
+/// table's, if the table has a density. Returns the feature, the undo label and what was
+/// applied.
 pub(crate) fn apply_material(
     library: &MaterialLibrary,
     doc: &Document,
@@ -258,6 +354,12 @@ pub(crate) fn apply_material(
             BendModel::Deduction(v) => BendModelDef::Deduction(Scalar::new(v)),
         };
     }
+    if let Some(material) = table
+        .density
+        .and_then(|d| Material::new(&table.material, d).ok())
+    {
+        model.material = Some(material);
+    }
     let label = format!("Apply {} to {}", entry.gauge, doc.model.name_of(target));
     let applied = json!({ "material": table.material, "applied": entry_out(entry, doc) });
     Ok((target, label, applied))
@@ -309,6 +411,9 @@ pub(crate) fn set_gauge(
         entry.notes.clone_from(n);
     }
     entry.check()?;
+    if let Some(d) = gauge.density {
+        Material::new(material, d)?;
+    }
     let known = library.table(material).map(|t| t.material.clone());
     let table = match known {
         Some(m) => library.tables.iter_mut().find(|t| t.material == m),
@@ -317,6 +422,7 @@ pub(crate) fn set_gauge(
                 name: material.to_owned(),
                 material: material.to_owned(),
                 entries: Vec::new(),
+                density: None,
             });
             library.tables.last_mut()
         }
@@ -329,8 +435,14 @@ pub(crate) fn set_gauge(
         Some(e) => *e = entry,
         None => table.entries.push(entry),
     }
+    if gauge.density.is_some() {
+        table.density = gauge.density;
+    }
     let mut m = Map::new();
     m.insert("material".to_owned(), json!(table.material));
+    if let Some(d) = table.density {
+        m.insert("density_kg_m3".to_owned(), json!(d));
+    }
     m.insert("gauge".to_owned(), out);
     Ok(m)
 }

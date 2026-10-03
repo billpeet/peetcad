@@ -68,6 +68,30 @@ Done when `status` shows `"failures": []` and `bodies` has the sizes that were a
 - **Exit code:** 0 applied, 1 an operation was not applied, 2 the command line or a file
   was wrong.
 
+## Several documents in one run
+
+Use this to read from one part while building another, or to make several parts in one
+script. Otherwise one `peet` call per part is simpler.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "open_sample", "sample": "bracket", "keep": true}
+{"op": "documents"}
+{"op": "bodies", "document": 1}
+{"op": "close"}
+```
+
+- `"keep": true` on `new`, `open` or `open_sample` opens a document **beside** the one
+  that is open and makes it current. Without it they replace the current document.
+- Operations go to the current document. `"document": NAME_OR_ID` on any operation
+  sends it to another without leaving the current one; `switch` changes which is
+  current. `documents` lists them with their ids.
+- The run saves only the part of `-f`. Save any other with
+  `{"op": "save", "path": ..., "document": ...}`, or its changes are lost (the run says
+  so on standard error).
+- `close` refuses a document with unsaved changes: save it, or add `"discard": true`.
+
 ## More, when the task reaches it
 
 - **Drawing or changing a sketch** (shapes, relations, dimensions, entity labels and

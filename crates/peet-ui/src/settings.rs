@@ -210,7 +210,8 @@ pub struct Settings {
     pub materials: peet_sheetmetal::MaterialLibrary,
     /// The limits the manufacturing checks use.
     pub check_rules: peet_sheetmetal::CheckRules,
-    /// The density mass properties are worked out with, in kg/m³.
+    /// The density last used, in kg/m³: what a part that has no material yet is weighed
+    /// with in the mass properties window. A part's own material is saved with the part.
     pub density: f64,
 }
 

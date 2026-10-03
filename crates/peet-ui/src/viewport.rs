@@ -477,17 +477,19 @@ impl Viewport {
         if self.body_revision == Some(params.document.revision) {
             return;
         }
-        // GPU meshes are kept per body stamp: unchanged bodies keep theirs.
+        // GPU meshes are kept per body stamp and colour: unchanged bodies keep theirs.
+        let color = params.document.model.color;
         let mut old: HashMap<u64, MeshId> = self.body_meshes.drain(..).collect();
         for body in &params.document.bodies {
-            let id = match old.remove(&body.stamp) {
+            let key = body.stamp ^ crate::bodies::color_key(color);
+            let id = match old.remove(&key) {
                 Some(id) => id,
                 None => self.renderer.upload_mesh(
                     &params.render_state.device,
-                    &crate::bodies::to_mesh_data(body.tess()),
+                    &crate::bodies::to_mesh_data(body.tess(), color),
                 ),
             };
-            self.body_meshes.push((body.stamp, id));
+            self.body_meshes.push((key, id));
         }
         for id in old.into_values() {
             self.renderer.remove_mesh(id);

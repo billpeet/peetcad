@@ -15,7 +15,7 @@ use peet_ops::Op;
 
 use crate::bodies::GeomRef;
 use crate::commands::{CommandId, CommandState};
-use crate::document::{Document, FileLocation, ItemId, Persistent, SketchItem};
+use crate::document::{Document, FileLocation, ItemId, Persistent, Session, SketchItem};
 use crate::features_ui::{self, ERROR, PICKING, Picked, Slot};
 use crate::files::{self, AfterDiscard, FileState};
 use crate::icons::{self, Icon};
@@ -82,7 +82,9 @@ struct FlangeDrag {
 pub struct PeetApp {
     settings: Settings,
     applied_theme: Option<ThemeChoice>,
-    doc: Document,
+    /// The open documents. It stands for the current one: `self.doc.model` is the
+    /// current document's model.
+    doc: Session,
     selected: Option<ItemId>,
     /// Item under the cursor in the feature tree this frame (highlighted in the viewport).
     hovered: Option<ItemId>,
@@ -188,7 +190,7 @@ impl PeetApp {
         Self {
             settings,
             applied_theme: None,
-            doc: Document::default(),
+            doc: Session::default(),
             selected: None,
             hovered: None,
             render_state,
@@ -267,9 +269,9 @@ impl PeetApp {
         }
     }
 
-    /// Replaces the document (new, opened, recovered).
+    /// Replaces the current document (new, opened, recovered).
     fn set_document(&mut self, doc: Document) {
-        self.doc = doc;
+        *self.doc = doc;
         self.document_replaced();
     }
 
@@ -284,6 +286,65 @@ impl PeetApp {
         self.picking = None;
         self.picking_sketch_plane = false;
         self.initial_fit_done = false;
+    }
+
+    /// A tab per open document, shown while more than one is open: click to work on a
+    /// document, × to close it.
+    fn document_tabs(&mut self, ui: &mut Ui) {
+        use peet_ops::SessionCommand;
+        let current = self.doc.current_id();
+        let tabs: Vec<_> = self
+            .doc
+            .documents()
+            .map(|(id, d)| (id, d.title(), d.is_modified()))
+            .collect();
+        let mut switch = None;
+        let mut close = None;
+        ui.horizontal(|ui| {
+            for (id, title, modified) in &tabs {
+                let label = if *modified {
+                    format!("{title} *")
+                } else {
+                    title.clone()
+                };
+                if ui.selectable_label(*id == current, label).clicked() && *id != current {
+                    switch = Some(*id);
+                }
+                if ui
+                    .small_button("×")
+                    .on_hover_text(format!("Close {title}"))
+                    .clicked()
+                {
+                    close = Some((*id, title.clone(), *modified));
+                }
+                ui.separator();
+            }
+        });
+        if switch.is_none() && close.is_none() {
+            return;
+        }
+        // The open sketch is a working copy of the current document's.
+        if self.sketch.is_some() {
+            self.error("Finish the sketch before going to another document.");
+            return;
+        }
+        if let Some(id) = switch {
+            self.perform(Op::Session(SessionCommand::Switch {
+                document: id.into(),
+            }));
+        }
+        if let Some((id, title, modified)) = close {
+            if modified {
+                self.error(format!(
+                    "{title} has unsaved changes: save it before closing it."
+                ));
+            } else {
+                self.perform(Op::Session(SessionCommand::Close {
+                    document: Some(id.into()),
+                    discard: false,
+                }));
+            }
+        }
     }
 
     // ---- Selection helpers ----
@@ -821,7 +882,10 @@ impl PeetApp {
     fn after_discard(&mut self, then: AfterDiscard) {
         match then {
             AfterDiscard::New => {
-                self.perform(Op::New { discard: true });
+                self.perform(Op::New {
+                    discard: true,
+                    keep: false,
+                });
             }
             AfterDiscard::Open => {
                 self.files.opening = Some(peet_platform::open_file(files::FILTER));
@@ -830,6 +894,7 @@ impl PeetApp {
                 self.perform(Op::OpenSample {
                     sample: peet_ops::Sample::Bracket,
                     discard: true,
+                    keep: false,
                 });
                 self.info("Opened the sample bracket. Try changing Sketch1's width (d1), or drag the rollback bar.");
             }
@@ -837,6 +902,7 @@ impl PeetApp {
                 self.perform(Op::OpenSample {
                     sample: peet_ops::Sample::Enclosure,
                     discard: true,
+                    keep: false,
                 });
                 self.info("Opened the sample enclosure panel. Press U for its flat pattern, or change the thickness and flange parameters (Tools > Parameters).");
             }
@@ -844,6 +910,7 @@ impl PeetApp {
                 self.perform(Op::OpenSample {
                     sample: peet_ops::Sample::Chassis,
                     discard: true,
+                    keep: false,
                 });
                 self.info("Opened the sample chassis. Press U for its flat pattern; Sheet Metal > Check runs the manufacturing checks.");
             }
@@ -851,6 +918,7 @@ impl PeetApp {
                 self.perform(Op::OpenSample {
                     sample: peet_ops::Sample::Housing,
                     discard: true,
+                    keep: false,
                 });
                 self.info("Opened the sample housing: a revolve with a fillet, chamfers and a bolt circle of counterbored holes. Mass on the Model tab weighs it.");
             }
@@ -911,6 +979,7 @@ impl PeetApp {
                     let reply = self.perform(Op::Open {
                         file: peet_ops::Source::loaded(file.name, file.path, file.bytes),
                         discard: true,
+                        keep: false,
                     });
                     if reply.ok {
                         match reply.json["warnings"][0].as_str() {
@@ -3092,7 +3161,7 @@ impl eframe::App for PeetApp {
 
         // Closing the window with unsaved changes asks first.
         if ctx.input(|i| i.viewport().close_requested())
-            && self.doc.is_modified()
+            && self.doc.any_modified()
             && !self.quit_requested
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -3118,6 +3187,9 @@ impl eframe::App for PeetApp {
             ui.add_space(3.0);
         });
         self.ribbon_tab = tab;
+        if self.doc.count() > 1 {
+            egui::Panel::top("documents").show(ui, |ui| self.document_tabs(ui));
+        }
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
         if self.settings.show_feature_tree {
             egui::Panel::left("feature_tree")
@@ -3756,6 +3828,7 @@ impl PeetApp {
                             name: format!("Material {}", library.tables.len() + 1),
                             material: format!("Material {}", library.tables.len() + 1),
                             entries: Vec::new(),
+                            density: None,
                         });
                         tab = library.tables.len() - 1;
                     }

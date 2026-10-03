@@ -51,6 +51,7 @@ mod library;
 mod op;
 mod query;
 pub mod select;
+mod session;
 pub mod sketch;
 mod value;
 
@@ -67,6 +68,7 @@ pub use library::{CheckRule, Gauge, GaugeBend};
 pub use op::{
     DatumSel, DxfPlacement, DxfTarget, Format, New, Op, Place, Query, RollTo, Sample, Source,
 };
+pub use session::{DocSel, SessionCommand, apply_session, apply_session_json};
 pub use sketch::{Draw, DrawItem, Ent, Measure, Relation};
 pub use value::{
     AxisSel, Bend, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel, HoleStandard,
@@ -234,6 +236,12 @@ fn help() -> Map<String, Value> {
             }
         }
     }
+    for (name, fields_text, what) in session::SESSION_OPS {
+        ops.insert(
+            (*name).to_owned(),
+            json!({ "does": what, "fields": fields_text }),
+        );
+    }
     for (name, fields_text, what) in host::app_ops() {
         ops.insert(
             name.to_owned(),
@@ -253,6 +261,10 @@ fn help() -> Map<String, Value> {
             "edge": "{between: [[x,y,z],[x,y,z]], at: [x,y,z], faces: [face, face], body, index}",
             "vertex": "{at: [x,y,z], body, index}",
         }),
+    );
+    out.insert(
+        "document".to_owned(),
+        json!("Any operation can take \"document\": the name or id of an open document (see 'documents'). It is then applied to that document instead of the current one."),
     );
     out.insert(
         "values".to_owned(),
@@ -316,13 +328,22 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.data = host.app(command)?;
             return Ok(done);
         }
-        Op::New { discard } => {
+        Op::Session(command) => return Err(session::needs_session(command.word())),
+        Op::New { keep: true, .. }
+        | Op::Open { keep: true, .. }
+        | Op::OpenSample { keep: true, .. } => {
+            return Err(format!(
+                "{} (Leave 'keep' out to open it in place of this document.)",
+                session::needs_session(op.word())
+            ));
+        }
+        Op::New { discard, .. } => {
             guard_unsaved(doc, *discard, "new")?;
             *doc = Document::default();
             done.replaced = true;
             return Ok(done);
         }
-        Op::Open { file, discard } => {
+        Op::Open { file, discard, .. } => {
             guard_unsaved(doc, *discard, "open")?;
             let bytes = file.read()?;
             let opened = peet_io::document::open(&bytes)
@@ -342,7 +363,9 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.replaced = true;
             return Ok(done);
         }
-        Op::OpenSample { sample, discard } => {
+        Op::OpenSample {
+            sample, discard, ..
+        } => {
             guard_unsaved(doc, *discard, "open_sample")?;
             let (model, _) = match sample {
                 Sample::Bracket => peet_model::samples::bracket(),
@@ -410,6 +433,20 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.feature = Some(id);
             done.data = object(applied);
             label
+        }
+        Op::SetMaterial { material, density } => {
+            let (label, set) =
+                library::set_material(host.materials(), &mut model, material.as_deref(), *density)?;
+            done.data = set;
+            label
+        }
+        Op::SetColor { color } => {
+            model.color = *color;
+            done.data.insert(
+                "color".to_owned(),
+                color.map_or(Value::Null, library::color_out),
+            );
+            "Change Colour".to_owned()
         }
         Op::ShowDatum { datum, on } => {
             use peet_model::{Datum, StdPlane};

@@ -71,6 +71,8 @@ peet pack IN.ron PART.peet         # and back
   and `export` operations.
 - **Features that can't be built** are not failed operations: the reply lists them under
   `failures` and the part is saved. `--strict` makes them a failure.
+- **Other documents.** A script can open more documents beside the part
+  ([several documents](#several-documents)); it saves those itself.
 - **Material tables and check limits** are the built-in ones (or `--materials`), and
   changes to them last for the run. The command line does not read or change the
   application's settings.
@@ -229,13 +231,15 @@ with their defaults' types):
 | `set_parameter` | `name`, `value` |
 | `delete_parameter` | `name` |
 | `set_units` | `length` (`mm`, `cm`, `m`, `in`, `ft`) |
+| `set_material` | `material` (a name, or `null` for none), `density` in kg/m³ (left out: the material tables' density for that material). What the part is made of: saved with it, and what `mass` weighs it with |
+| `set_color` | `color` (`"#rrggbb"` or `[r, g, b]`, or `null` for the usual colour): what the part is drawn in |
 | `undo`, `redo` | |
 
 ### Queries
 
 | Operation | Gives |
 |---|---|
-| `status` | name, file, units, counts, failures, undo and redo labels |
+| `status` | name, file, units, material, colour, counts, failures, undo and redo labels |
 | `features` | the tree, each feature's status and what it uses |
 | `feature` (`feature`) | its fields; a sketch's plane, definition, entities, relations and dimensions |
 | `parameters` | named values and units |
@@ -244,7 +248,7 @@ with their defaults' types):
 | `bend_table` (`body`) | flat size, area, and each bend |
 | `checks` (`body`) | manufacturing checks, and the limits they were run with |
 | `materials` (`material`) | the material and gauge tables |
-| `mass` (`body`) | for a density of 1: volume, area, centre of gravity, principal moments; each body and the total |
+| `mass` (`body`) | volume, area, centre of gravity, principal moments (for a density of 1), and `mass_kg` if the part has a material; each body and the total |
 | `measure` (`a`, `b`) | the exact size of a face, edge or vertex, or with `b` the distance and angle between two. Each is `{"face": selector}`, `{"edge": selector}` or `{"vertex": selector}` |
 | `help` | this reference as data |
 
@@ -261,15 +265,36 @@ with their defaults' types):
 | `export` | `path`, `format` (`stl`, `dxf`, `step`; taken from the path if absent), `body`, `schema` (`ap214`, `ap242`) |
 
 `new`, `open` and `open_sample` replace the document. They are refused while the part has
-unsaved changes, unless `discard` is true.
+unsaved changes, unless `discard` is true. With `"keep": true` they open a document
+beside the one that is open instead (see below), and there is nothing to discard.
+
+### Several documents
+
+The application and the command line hold a *session*: the documents that are open
+together, one of them *current*. An operation goes to the current document. Any
+operation can take `"document"` (a name or an id, as `documents` lists them): it is then
+applied to that document, which does not become current.
+
+| Operation | Fields |
+|---|---|
+| `new`, `open`, `open_sample` with `"keep": true` | opens a document beside the others and makes it current. The reply's `document` is its id |
+| `documents` | the open documents: `id`, `name`, `file`, `modified`, `current` |
+| `switch` | `document`: make it current. The reply has its `status` |
+| `close` | `document` (default the current one), `discard` (default false). Refused if it has unsaved changes, unless `discard` is true. Closing the last one leaves a new, empty part |
+
+From the command line, the part of `--file` is the first document and the one a run
+saves by itself, whichever is current at the end. A document opened with `keep` is saved
+by a `save` operation sent to it; a run that leaves one changed and unsaved says so.
+Undo is per document. `apply` and `apply_json` on a `Document` alone (Rust) refuse these:
+a session is applied to with `apply_session` and `apply_session_json`.
 
 ### Sheet metal: materials, checks, flat pattern
 
 | Operation | Fields |
 |---|---|
 | `flat_pattern` | `on` (left out: the other way). A view, not an undo step; selectors and exports always mean the folded part |
-| `apply_material` | `material`, and `gauge` or `thickness` (the nearest gauge); `feature` (a base flange; default the first) |
-| `set_gauge` | `material`, `gauge`, `thickness`, `radius`, `bend` (`{"k_factor": …}`, `{"allowance": …}` or `{"deduction": …}`), `notes`: adds a row, or changes one |
+| `apply_material` | `material`, and `gauge` or `thickness` (the nearest gauge); `feature` (a base flange; default the first). Also makes it the part's material, if the table has a density |
+| `set_gauge` | `material`, `gauge`, `thickness`, `radius`, `bend` (`{"k_factor": …}`, `{"allowance": …}` or `{"deduction": …}`), `notes`: adds a row, or changes one. `density` (kg/m³) is the material's, not the row's |
 | `delete_gauge` | `material`, `gauge` (left out: the whole table) |
 | `import_materials`, `export_materials` | `path` (CSV) |
 | `set_check_rule` | `rule` (`min_flange`, `hole_to_bend`, `hole_to_edge`, `hole_to_hole`, `min_hole`, `collision`), `thickness`, `radius`, `constant`: the limit is that many thicknesses plus that many bend radii plus a constant in mm |

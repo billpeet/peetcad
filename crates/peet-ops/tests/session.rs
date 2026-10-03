@@ -1,10 +1,10 @@
 //! Operations beyond one part: opening and starting documents, the material tables and
 //! check limits of the host, drawings brought in, and the application's own commands.
 
-use peet_document::Document;
+use peet_document::{DocId, Document, Session};
 use peet_ops::{
-    AppCommand, Headless, Host, Op, Toggle, Undo, View, apply, apply_all, apply_json,
-    apply_json_in, parse,
+    AppCommand, DocSel, Headless, Host, Op, SessionCommand, Toggle, Undo, View, apply, apply_all,
+    apply_json, apply_json_in, apply_session, apply_session_json, parse,
 };
 use peet_sheetmetal::{CheckRules, MaterialLibrary};
 use serde_json::{Map, Value, json};
@@ -139,6 +139,269 @@ fn the_flat_pattern_and_the_planes_are_shown_and_hidden() {
 }
 
 #[test]
+fn several_documents_are_open_together() {
+    let mut host = Headless::default();
+    let mut session = Session::default();
+    let first = session.current_id();
+    let mut run =
+        |session: &mut Session, op: Value| apply_session_json(&mut host, session, &op, Undo::Step);
+    let ok = |reply: peet_ops::Reply| {
+        assert!(reply.ok, "{}", reply.json);
+        reply.json
+    };
+    let err = |reply: peet_ops::Reply| {
+        assert!(!reply.ok, "{}", reply.json);
+        reply.json["error"].as_str().unwrap().to_owned()
+    };
+
+    // As before in the current document; then a second document beside it.
+    let bracket = ok(run(
+        &mut session,
+        json!({"op": "open_sample", "sample": "bracket"}),
+    ));
+    let bracket = bracket["name"].as_str().unwrap().to_owned();
+    assert_eq!((session.count(), session.current_id()), (1, first));
+    let beside = run(
+        &mut session,
+        json!({"op": "open_sample", "sample": "enclosure", "keep": true}),
+    );
+    assert!(beside.replaced, "the current document is another one now");
+    let beside = ok(beside);
+    assert_eq!(beside["name"], "Enclosure Panel");
+    let second = DocId(beside["document"].as_u64().unwrap() as u32);
+    assert_eq!((session.count(), session.current_id()), (2, second));
+    assert!(session.has_sheet_metal());
+
+    let list = ok(run(&mut session, json!({"op": "documents"})));
+    assert_eq!(
+        list["documents"],
+        json!([
+            {"id": first.0, "name": bracket, "modified": false, "current": false},
+            {"id": second.0, "name": "Enclosure Panel", "modified": false, "current": true},
+        ])
+    );
+
+    // An operation goes to the current document, or to the one it names: by name or
+    // by id, without making it current.
+    let features = ok(run(&mut session, json!({"op": "features"})));
+    assert_eq!(features["features"][1]["name"], "Base-Flange1");
+    let features = ok(run(
+        &mut session,
+        json!({"op": "features", "document": bracket}),
+    ));
+    assert_eq!(features["features"][1]["name"], "Extrude1");
+    // An edit is read against the document it is for: only the bracket has Extrude1.
+    let edited = run(
+        &mut session,
+        json!({"op": "edit", "feature": "Extrude1", "depth": 9, "document": first.0}),
+    );
+    assert!(edited.changed && !edited.replaced, "{}", edited.json);
+    assert_eq!(session.current_id(), second);
+    assert!(session.get(first).unwrap().is_modified() && !session.is_modified());
+    assert_eq!(
+        session.get(first).unwrap().undo_label(),
+        Some("Edit Extrude1")
+    );
+    let e = err(run(
+        &mut session,
+        json!({"op": "edit", "feature": "Extrude1", "depth": 9}),
+    ));
+    assert!(e.contains("Extrude1"), "{e}");
+
+    // Mistakes say which documents there are.
+    let e = err(run(
+        &mut session,
+        json!({"op": "status", "document": "Lid"}),
+    ));
+    assert!(e.contains("'Lid'") && e.contains("Enclosure Panel"), "{e}");
+    let e = err(run(&mut session, json!({"op": "status", "document": 99})));
+    assert!(e.contains("99"), "{e}");
+    let e = err(run(&mut session, json!({"op": "status", "document": true})));
+    assert!(e.contains("document:"), "{e}");
+    let e = err(run(
+        &mut session,
+        json!({"op": "new", "keep": true, "document": bracket}),
+    ));
+    assert!(e.contains("of its own"), "{e}");
+    // A file that can't be opened leaves no empty document behind.
+    let e = err(run(
+        &mut session,
+        json!({"op": "open", "path": "no-such-part.peet", "keep": true}),
+    ));
+    assert!(e.contains("no-such-part.peet"), "{e}");
+    assert_eq!((session.count(), session.current_id()), (2, second));
+
+    // Switching makes another document the one operations go to.
+    let switched = run(&mut session, json!({"op": "switch", "document": bracket}));
+    assert!(switched.replaced && !switched.changed);
+    assert_eq!(switched.json["document"], first.0);
+    assert_eq!(switched.json["modified"], true);
+    assert_eq!(session.current_id(), first);
+    let again = run(&mut session, json!({"op": "switch", "document": first.0}));
+    assert!(again.ok && !again.replaced, "already there");
+
+    // Closing: unsaved changes are not thrown away by accident.
+    let e = err(run(&mut session, json!({"op": "close"})));
+    assert!(
+        e.contains("unsaved changes") && e.contains("discard"),
+        "{e}"
+    );
+    let closed = run(
+        &mut session,
+        json!({"op": "close", "document": "Enclosure Panel"}),
+    );
+    assert!(
+        closed.ok && !closed.replaced,
+        "another than the current one"
+    );
+    assert_eq!(closed.json["closed"], "Enclosure Panel");
+    assert_eq!((session.count(), session.current_id()), (1, first));
+    let closed = run(&mut session, json!({"op": "close", "discard": true}));
+    assert!(closed.replaced);
+    assert_eq!(session.count(), 1, "an empty document is left");
+    assert!(session.model.is_empty() && session.current_id() != first);
+
+    // Typed, as the application sends them.
+    let reply = apply_session(
+        &mut host,
+        &mut session,
+        None,
+        &Op::New {
+            discard: false,
+            keep: true,
+        },
+        Undo::Step,
+    );
+    assert!(reply.ok && session.count() == 2);
+    let other = session.documents().next().unwrap().0;
+    let reply = apply_session(
+        &mut host,
+        &mut session,
+        Some(&DocSel::Id(other)),
+        &Op::Session(SessionCommand::Documents),
+        Undo::Step,
+    );
+    assert!(!reply.ok, "the open documents are not one document's");
+
+    // A document on its own has no others.
+    let mut doc = Document::default();
+    for op in [
+        json!({"op": "documents"}),
+        json!({"op": "switch", "document": 1}),
+        json!({"op": "close"}),
+        json!({"op": "new", "keep": true}),
+        json!({"op": "open_sample", "sample": "bracket", "keep": true}),
+    ] {
+        let e = error(&mut doc, op);
+        assert!(e.contains("open together"), "{e}");
+    }
+}
+
+#[test]
+fn a_part_has_a_material_and_a_colour() {
+    let mut host = Headless::default();
+    let mut doc = Document::default();
+    ok(&mut doc, json!({"op": "open_sample", "sample": "housing"}));
+    let bare = ok(&mut doc, json!({"op": "mass"}));
+    assert!(bare.get("material").is_none());
+    assert!(bare["total"].get("mass_kg").is_none(), "{bare}");
+    let volume = bare["total"]["volume_mm3"].as_f64().unwrap();
+
+    // A material of the tables brings its density, and is called as the tables call it.
+    let set = ok(
+        &mut doc,
+        json!({"op": "set_material", "material": "mild steel"}),
+    );
+    assert_eq!(
+        set["material"],
+        json!({"name": "Mild steel", "density_kg_m3": 7850.0})
+    );
+    assert_eq!(doc.undo_label(), Some("Set Material to Mild steel"));
+    let mass = ok(&mut doc, json!({"op": "mass"}));
+    assert_eq!(mass["material"]["name"], "Mild steel");
+    let kg = mass["total"]["mass_kg"].as_f64().unwrap();
+    assert!((kg - volume * 7850e-9).abs() < 1e-6, "{kg}");
+    // The housing: just under a kilogram of steel.
+    assert!((kg - 0.98).abs() < 0.005, "{kg}");
+    assert_eq!(mass["bodies"][0]["mass_kg"], mass["total"]["mass_kg"]);
+    let status = ok(&mut doc, json!({"op": "status"}));
+    assert_eq!(status["material"]["density_kg_m3"], 7850.0);
+    assert!(status.get("color").is_none());
+
+    // Any other material needs its density.
+    let e = error(&mut doc, json!({"op": "set_material", "material": "Brass"}));
+    assert!(e.contains("density") && e.contains("Mild steel"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "set_material", "material": "Brass", "density": -1}),
+    );
+    assert!(e.contains("kg/m³"), "{e}");
+    let e = error(&mut doc, json!({"op": "set_material"}));
+    assert!(e.contains("null"), "{e}");
+    ok(
+        &mut doc,
+        json!({"op": "set_material", "material": "Brass", "density": 8500}),
+    );
+    assert_eq!(doc.model.material.as_ref().unwrap().density, 8500.0);
+    // A density given to the tables is there for the next part.
+    ok_in(
+        &mut host,
+        &mut doc,
+        json!({"op": "set_gauge", "material": "Brass", "gauge": "1 mm", "thickness": 1, "density": 8470}),
+    );
+    let brass = ok_in(
+        &mut host,
+        &mut doc,
+        json!({"op": "materials", "material": "brass"}),
+    );
+    assert_eq!(brass["materials"][0]["density_kg_m3"], 8470.0);
+    ok_in(
+        &mut host,
+        &mut doc,
+        json!({"op": "set_material", "material": "brass"}),
+    );
+    assert_eq!(doc.model.material.as_ref().unwrap().density, 8470.0);
+    ok(&mut doc, json!({"op": "set_material", "material": null}));
+    assert_eq!(doc.model.material, None);
+
+    // The colour.
+    let red = ok(&mut doc, json!({"op": "set_color", "color": "#C82828"}));
+    assert_eq!(red["color"], "#c82828");
+    assert_eq!(doc.model.color, Some([200, 40, 40]));
+    ok(&mut doc, json!({"op": "set_color", "color": [1, 2, 3]}));
+    assert_eq!(ok(&mut doc, json!({"op": "status"}))["color"], "#010203");
+    for bad in [
+        json!("red"),
+        json!([1, 2, 300]),
+        json!([1, 2]),
+        json!("#12345"),
+    ] {
+        let e = error(&mut doc, json!({"op": "set_color", "color": bad}));
+        assert!(e.contains("#c82828"), "{e}");
+    }
+    ok(&mut doc, json!({"op": "set_color", "color": null}));
+    assert_eq!(doc.model.color, None);
+    // Neither rebuilds anything: the bodies are the same ones.
+    let before = doc.bodies[0].stamp;
+    ok(&mut doc, json!({"op": "set_color", "color": "#336699"}));
+    assert_eq!(doc.bodies[0].stamp, before);
+
+    // It is saved with the part.
+    let dir = temp("material");
+    let file = dir.join("housing.peet").to_string_lossy().into_owned();
+    ok(
+        &mut doc,
+        json!({"op": "set_material", "material": "Stainless steel 304"}),
+    );
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let mut again = Document::default();
+    let opened = ok(&mut again, json!({"op": "open", "path": file}));
+    assert_eq!(opened["material"]["density_kg_m3"], 8000.0);
+    assert_eq!(opened["color"], "#336699");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
 fn materials_are_listed_applied_and_edited() {
     let dir = temp("materials");
     let mut host = Headless::default();
@@ -161,6 +424,12 @@ fn materials_are_listed_applied_and_edited() {
     );
     assert_eq!(applied["feature"]["name"], "Base-Flange1");
     assert_eq!(applied["applied"]["thickness"], gauge["thickness"]);
+    // The part is now made of that material.
+    assert_eq!(doc.model.material.as_ref().unwrap().name, material);
+    assert_eq!(
+        json!(doc.model.material.as_ref().unwrap().density),
+        tables[0]["density_kg_m3"]
+    );
     let table = ok(&mut doc, json!({"op": "bend_table"}));
     assert_eq!(table["thickness"], gauge["thickness"]);
     assert!(doc.undo_label().unwrap().starts_with("Apply "));
