@@ -24,6 +24,11 @@ egui.workspace = true
 log.workspace = true
 serde.workspace = true
 
+# What tells an open assembly that a linked part's file changed. Desktop only: the
+# browser has no files to watch.
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+notify = "8"
+
 [dev-dependencies]
 # Drives the sketch editor with simulated mouse input in tests (no GPU needed).
 egui_kittest = "0.36"

@@ -206,6 +206,8 @@ impl Icon {
             C::NewAssembly => Self::NewDocument,
             C::InsertComponent => Self::Open,
             C::EditComponent => Self::EditSketch,
+            C::InsertLinkedComponent => Self::ImportStep,
+            C::UpdateLinks => Self::RollToEnd,
             C::MateCoincident => Self::RefPlane,
             C::MateConcentric => Self::Circle,
             C::MateParallel => Self::Offset,

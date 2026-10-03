@@ -79,6 +79,13 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
         (None, None) => {}
         (Some(before), Some(after)) => {
             for d in after.definitions() {
+                let was = before.definition(d.id);
+                if was.map_or(d.link.is_some(), |o| o.link != d.link) {
+                    return Err(format!(
+                        "{} was linked to a file or unlinked, which is done by an operation, not by a change to the model",
+                        d.name()
+                    ));
+                }
                 if before.definition(d.id).is_some_and(|o| o.model != d.model) {
                     ops.push(Op::SetPart {
                         part: d.id,
@@ -110,6 +117,8 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
                     name: Some(c.name.clone()),
                     placing: Some(Placing::Frame(c.placement)),
                     fixed: Some(c.fixed),
+                    link: false,
+                    absolute: false,
                 });
                 if c.suppressed {
                     ops.push(component(c, ComponentChange::Suppress(true)));

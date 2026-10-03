@@ -28,11 +28,9 @@ misreading it.
 
 **Parts are embedded first, linked second.** An assembly file holds the parts it uses:
 each is a complete part (its model, and its caches) stored in the assembly's file. One
-file opens anywhere, headless or in the browser. A component can later be *linked* to a part file instead
-(stage 2b): the assembly then stores the path, the hash of the part it was built
-against, and that part's caches so it still opens when the file is missing. Linked files
-are found through the `Host`, as the material tables are, so the browser can answer
-from what the user has opened.
+file opens anywhere, headless or in the browser. A component can instead be *linked* to
+a part file, on the desktop: the assembly then stores the file's path and the part as
+it last read it, so it still opens when the file is missing (see "Linked parts" below).
 
 **A component is an instance of a definition.** The assembly lists its definitions
 (parts, sub-assemblies) once; a component names a definition and has a placement (a
@@ -143,12 +141,57 @@ assembly command is an operation, and a new `assemblies` skill covers them.
 
 Left of stage 2: STEP import that keeps a file's assembly structure (it still makes one
 body per occurrence, in a part) and STEP export with structure (each component is
-written as a solid of its own, without the product tree); linked parts; dragging a
-component in the view (its position is typed, for now). Also open: mass properties
+written as a solid of its own, without the product tree). Also open: mass properties
 and measurements in an assembly (stage 4), an assembly's caches in its file (it is
 rebuilt when opened), selections on a component's faces (stage 3 needs them for mates),
 autosave of documents other than the current one, and a colour per component (a part's
 colour is baked into its mesh, so it needs a colour per drawn object).
+
+## Linked parts (stage 2, desktop only)
+
+- A definition has an optional `Link`: the path of the part's file. It still holds
+  the part's model, as it was when the file was last read: that copy is what the
+  assembly is built from, so the engine, undo, mates and the file format treat linked
+  and own parts alike, and an assembly whose linked file is missing still opens whole,
+  with a warning.
+- The file is read when the assembly is opened (before the document is made, so it is
+  not an unsaved change and not an undo step), by `update_links` (an undo step), and
+  when the part's document is saved in the same session (an undo step of each assembly
+  that links to it, "Update Bracket"). Linked assemblies read their own linked parts
+  the same way, to a fixed depth.
+- **Links are relative by default.** While an assembly is open a link is the file's
+  full path, so undo snapshots, an assembly that has no file yet and Save As all mean
+  the same file without anything being rewritten. A relative link is made relative to
+  the assembly's folder only as the model is written (`Model::for_file`), and full
+  again as it is read (`Model::from_file`); so an assembly and its parts moved or
+  copied together, keeping their layout, find each other, and an assembly saved
+  somewhere else still points at the same parts. A link can be absolute instead (a
+  shared library that stays put). Paths on another drive stay full paths. Failing all
+  that, a file of the same name next to the assembly's file is used.
+- **Watching.** In the application, the system reports changes in the folders the
+  open assemblies' linked parts are in (the `notify` crate: `ReadDirectoryChangesW`,
+  inotify, FSEvents), and a part whose file was touched and has then been left alone
+  for 0.3 s is read again, as `update_links` does: an undo step, with a line in the
+  status bar. Folders are watched, not files, so a save that writes a new file and
+  renames it over the old one is seen, and so is a missing file being put back. If the
+  system's watcher can't be started, the files' times and sizes are compared once a
+  second instead. It can be turned off in the settings. `notify` is in the desktop
+  build only (`peet-ui`, not for `wasm32`); it is CC0-1.0, a public domain dedication,
+  which the licence policy's "and similar" is taken to cover.
+- `open_component` on a linked part opens the file as an ordinary document of the
+  session (not a working copy): its `save` writes the file.
+- Operations: `insert` with `link`, `update_links`, `link` (to an existing file, or
+  writing the part out), `unlink`; `components` reports each link's state. In the
+  application: Insert Linked Part, Update Linked Parts, and the link with "Make Own
+  Copy" in a component's properties.
+- It is refused in the browser build, where there are no files to follow. The `Host`
+  is not involved after all: operations already read files from disk directly, and a
+  browser host has nothing to answer with.
+
+Not done: `replace` always copies; a part file that is open with unsaved changes is
+read from disk, not from the open document; a part put back into a folder that did not
+exist when the assembly was opened is noticed only at Update Linked Parts or when the
+assembly is opened again (there was no folder to watch).
 
 ## What stage 3 built so far
 

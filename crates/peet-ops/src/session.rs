@@ -328,12 +328,16 @@ pub fn apply_session(
             name,
             placing,
             fixed,
+            link,
+            absolute,
         } => from_document(from).map(|model| {
             model.map(|m| Op::Insert {
                 from: InsertSource::Model(m),
                 name: name.clone(),
                 placing: placing.clone(),
                 fixed: *fixed,
+                link: *link,
+                absolute: *absolute,
             })
         }),
         Op::Component {
@@ -364,10 +368,78 @@ pub fn apply_session(
         }
         _ => {}
     }
-    match session.get_mut(id) {
+    let mut reply = match session.get_mut(id) {
         Some(doc) => apply_in(host, doc, op, undo),
-        None => failed(word, "The document is no longer open.".to_owned()),
+        None => return failed(word, "The document is no longer open.".to_owned()),
+    };
+    // A part that was saved: the assemblies open here that link to its file follow.
+    if reply.ok && matches!(op, Op::Save { .. }) {
+        let followed = follow_saved(host, session, id, undo);
+        if !followed.is_empty() {
+            reply.json["updated_in"] = json!(followed);
+        }
     }
+    reply
+}
+
+/// After the document `saved` was written to its file: gives every other open assembly
+/// that links to that file the part as it is now. Returns the assemblies that changed.
+fn follow_saved(
+    host: &mut dyn Host,
+    session: &mut Session,
+    saved: DocId,
+    undo: Undo,
+) -> Vec<String> {
+    let Some(path) = session
+        .get(saved)
+        .and_then(|d| d.file.as_ref()?.path.clone())
+    else {
+        return Vec::new();
+    };
+    let mut linked = Vec::new();
+    for (id, doc) in session.documents() {
+        let Some(assembly) = doc.model.assembly().filter(|_| id != saved) else {
+            continue;
+        };
+        let beside = crate::links::folder(doc);
+        for d in assembly.definitions() {
+            let found = d
+                .link
+                .as_ref()
+                .and_then(|l| crate::links::find(l, beside.as_deref()));
+            if found.is_some_and(|f| crate::links::same_file(&f, &path)) {
+                linked.push((id, d.id));
+            }
+        }
+    }
+    if linked.is_empty() {
+        return Vec::new();
+    }
+    let Ok(model) = crate::links::read(&path, 0) else {
+        return Vec::new();
+    };
+    let model = Arc::new(model);
+    let mut followed = Vec::new();
+    for (id, part) in linked {
+        let Some(assembly) = session.get_mut(id) else {
+            continue;
+        };
+        let label = format!("Update {}", model.name);
+        let stored = apply_with(
+            host,
+            assembly,
+            &Op::SetPart {
+                part,
+                model: model.clone(),
+            },
+            undo,
+            Some(&label),
+        );
+        if stored.ok && stored.changed {
+            followed.push(assembly.title());
+        }
+    }
+    followed
 }
 
 /// The model of an open document, to make a component of in the document `into`.
@@ -411,6 +483,57 @@ fn open_component(
         .assembly()
         .and_then(|a| a.definition_of(id))
         .ok_or_else(|| "The component's part is missing.".to_owned())?;
+    // A linked part is its own file: that is what is opened, and saved.
+    if let Some(link) = &definition.link {
+        let Some(path) = crate::links::find(link, crate::links::folder(doc).as_deref()) else {
+            return Err(format!(
+                "{} is linked to {}, which can't be found. Put the file back, or make the part the assembly's own with 'unlink'.",
+                definition.name(),
+                link.path
+            ));
+        };
+        let open = session
+            .documents()
+            .find(|(_, d)| {
+                d.file
+                    .as_ref()
+                    .and_then(|f| f.path.as_ref())
+                    .is_some_and(|p| crate::links::same_file(p, &path))
+            })
+            .map(|(i, _)| i);
+        match open {
+            Some(open) => {
+                session.switch(open);
+            }
+            None => {
+                let bytes = std::fs::read(&path)
+                    .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+                let opened = peet_io::document::open(&bytes)
+                    .map_err(|e| format!("Couldn't open {}: {}", path.display(), e.message))?;
+                let name = path
+                    .file_name()
+                    .map_or_else(String::new, |n| n.to_string_lossy().into_owned());
+                let mut part = Document::from_opened(
+                    opened,
+                    Some(peet_document::FileLocation {
+                        name,
+                        path: Some(path),
+                    }),
+                );
+                part.finish_loading();
+                session.open(part);
+            }
+        }
+        let mut more = Map::new();
+        more.insert("part".to_owned(), json!(session.title()));
+        more.insert(
+            "note".to_owned(),
+            json!("This part is its own file: 'save' on this document writes it, and the open assemblies that link to it follow."),
+        );
+        let mut reply = done(session, "open_component", was, more);
+        reply.replaced = true;
+        return Ok(reply);
+    }
     let embedded = Embedded {
         assembly,
         definition: definition.id,

@@ -526,6 +526,89 @@ fn what_the_assemblies_skill_says_about_dragging_is_true() {
 }
 
 #[test]
+fn what_the_assemblies_skill_says_about_linked_parts_is_true() {
+    // The skill's commands, in a folder of their own.
+    let dir = Folder::new("linked");
+    let plate = dir.path("plate.peet");
+    let frame = dir.path("frame.peet");
+    let script = dir.write(
+        "plate.jsonl",
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 30]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+"#,
+    );
+    assert_eq!(peet(&["run", &script, "--new", "-f", &plate]).code, OK);
+    let insert = json!({"op": "insert", "path": plate, "link": true}).to_string();
+    let made = peet(&[
+        "op",
+        r#"{"op": "new", "assembly": true}"#,
+        &insert,
+        "--new",
+        "-f",
+        &frame,
+    ]);
+    assert_eq!(made.code, OK, "{}", made.err);
+    assert_eq!(made.replies[1]["component"]["max"][2], 5.0);
+    assert_eq!(
+        peet(&["insert", "component=plate-1", "at=[0,0,20]", "-f", &frame]).code,
+        OK
+    );
+
+    // The part changed in its own file: the assembly has it at the next call.
+    assert_eq!(
+        peet(&["edit", "feature=Extrude1", "depth=9", "-f", &plate]).code,
+        OK
+    );
+    let listed = peet(&["components", "-f", &frame]);
+    assert_eq!(listed.code, OK, "{}", listed.err);
+    let reply = &listed.replies[0];
+    assert_eq!(reply["components"][0]["max"][2], 9.0);
+    assert_eq!(reply["components"][1]["max"][2], 29.0);
+    assert_eq!(reply["parts"].as_array().unwrap().len(), 1);
+    assert_eq!(reply["parts"][0]["link_status"], "current");
+    // The link is relative to the assembly's folder, in the file too.
+    assert_eq!(reply["parts"][0]["link"], "plate.peet");
+    let link = model(&frame)
+        .assembly()
+        .unwrap()
+        .definitions()
+        .next()
+        .unwrap()
+        .link
+        .clone()
+        .unwrap();
+    assert_eq!((link.path.as_str(), link.relative), ("plate.peet", true));
+
+    // From the assembly: its part opens as the file, and saving it there carries over.
+    let edit = dir.write(
+        "edit.jsonl",
+        r#"{"op": "open_component", "component": "plate-1"}
+{"op": "edit", "feature": "Extrude1", "depth": 3}
+{"op": "save"}
+{"op": "close"}
+{"op": "components"}
+"#,
+    );
+    let ran = peet(&["run", &edit, "-f", &frame]);
+    assert_eq!(ran.code, OK, "{}", ran.err);
+    assert_eq!(ran.replies[2]["updated_in"], json!(["frame.peet"]));
+    assert_eq!(ran.replies[4]["components"][1]["max"][2], 23.0);
+    assert_eq!(model(&plate).len(), 2);
+
+    // The file gone: a warning, and the assembly whole as it last read the part.
+    std::fs::remove_file(&plate).unwrap();
+    let alone = peet(&["components", "-f", &frame]);
+    assert_eq!(alone.code, OK);
+    assert!(alone.err.contains("can't be found"), "{}", alone.err);
+    assert_eq!(alone.replies[0]["parts"][0]["link_status"], "missing");
+    assert_eq!(alone.replies[0]["components"][1]["max"][2], 23.0);
+    assert_eq!(peet(&["unlink", "part=plate", "-f", &frame]).code, OK);
+    let own = peet(&["components", "-f", &frame]);
+    assert!(own.err.is_empty(), "{}", own.err);
+    assert!(own.replies[0]["parts"][0].get("link").is_none());
+}
+
+#[test]
 fn materials_come_from_a_file_for_the_run() {
     let dir = Folder::new("materials");
     let part = dir.path("panel.peet");

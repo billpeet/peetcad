@@ -1,6 +1,6 @@
 ---
 name: assemblies
-description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
+description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, linked parts that follow their own files, replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
 ---
 
 # Assemblies
@@ -180,6 +180,43 @@ The parts live in the assembly. To change one:
 Until step 2 the assembly is unchanged, and `close` refuses to drop the edit. A part
 operation sent to the assembly itself fails with "is an assembly": it means step 1 was
 skipped.
+
+## Linked parts
+
+By default `insert` copies the part into the assembly. With `"link": true` the component
+**follows the part's file** instead: use it when one part file is shared by several
+assemblies, or will keep changing.
+
+```sh
+peet run plate.jsonl --new -f plate.peet
+peet op '{"op": "new", "assembly": true}' '{"op": "insert", "path": "plate.peet", "link": true}' --new -f frame.peet
+peet edit feature=Extrude1 depth=9 -f plate.peet     # change the part in its own file
+peet components -f frame.peet                        # the assembly has the new plate
+```
+
+- Linking needs `path`: a `.peet` file on disk. Give more instances of a linked part
+  with `{"op": "insert", "component": "plate-1"}`, as for any part.
+- **Links are relative** to the folder the assembly's file is in (`plate.peet`,
+  `../parts/plate.peet`), so an assembly and its parts can be moved or copied together
+  and still find each other. Keep the folder layout when you move them. Add
+  `"absolute": true` for a part that stays in one fixed place whatever happens to the
+  assembly (a shared library folder).
+- **When the file is read:** every time the assembly is opened (so every `peet` call),
+  and by `update_links`. `components` gives each linked part's `link` and
+  `link_status`: `current`, `changed` (the file is newer than what the assembly shows:
+  run `update_links`) or `missing`. `link` is the path as the assembly's file has it;
+  `link_file` is the file that means now.
+- **A missing file** is not an error: the assembly opens with the part as it last read
+  it, and warns. Put the file back where the link says (or next to the assembly's
+  file), or keep the part as it is with `{"op": "unlink", "part": ...}`.
+- **To change a linked part**, change its file: with `peet ... -f plate.peet`, or from
+  the assembly with `open_component`, which opens that file. `save` there writes the
+  file, and the assembly follows (the reply's `updated_in`).
+- `{"op": "link", "part": ..., "path": ...}` links a part the assembly already has: to
+  the file if it exists (the part becomes what is in the file), else the part is written
+  there. `part` is a part's name or id from `components` (use the id when two parts
+  have the same name). It takes `"absolute": true` too.
+- Linked parts are for files on disk: they are refused in the browser build.
 
 ## Checking, saving, exporting
 

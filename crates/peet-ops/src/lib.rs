@@ -49,6 +49,7 @@ mod export;
 mod fields;
 mod host;
 mod library;
+mod links;
 mod mate;
 mod op;
 mod query;
@@ -68,6 +69,7 @@ pub use fields::{
 };
 pub use host::{AppCommand, Headless, Host, SketchTool, Toggle, View, Window};
 pub use library::{CheckRule, Gauge, GaugeBend};
+pub use links::{PartSel, linked_files};
 pub use mate::{MateChange, MateEndSel, MateSel, MateType};
 pub use op::{
     DatumSel, DxfPlacement, DxfTarget, Format, New, Op, Place, Query, RollTo, Sample, Source,
@@ -250,6 +252,7 @@ fn help() -> Map<String, Value> {
         .iter()
         .map(|o| ("component", o))
         .chain(mate::MATE_OPS.iter().map(|o| ("mate", o)))
+        .chain(links::LINK_OPS.iter().map(|o| ("part", o)))
     {
         // Words a feature has too (rename, delete): the component's and the mate's
         // forms beside it.
@@ -359,7 +362,12 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             name,
             placing,
             fixed,
+            link,
+            absolute,
         } => {
+            if *absolute && !*link {
+                return Err("'absolute' is about a link: give it with \"link\": true.".to_owned());
+            }
             let (id, label) = assembly::insert(
                 doc,
                 &mut model,
@@ -367,9 +375,31 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 name.as_deref(),
                 placing.as_ref(),
                 *fixed,
+                link.then_some(!*absolute),
             )?;
             done.component = Some(id);
             label
+        }
+        Op::UpdateLinks => {
+            links::unavailable()?;
+            let (updated, problems) = links::refresh(&mut model, links::folder(doc).as_deref(), 0);
+            done.data = links::report(&updated, &problems);
+            if updated.is_empty() {
+                return Ok(done);
+            }
+            "Update Links".to_owned()
+        }
+        Op::Link {
+            part,
+            path,
+            absolute,
+        } => {
+            let id = part.resolve(doc)?;
+            assembly::link(doc, &mut model, id, path, !*absolute)?
+        }
+        Op::Unlink { part } => {
+            let id = part.resolve(doc)?;
+            assembly::unlink(doc, &mut model, id)?
         }
         Op::Component { component, change } => {
             let id = component.resolve(doc)?;
@@ -454,8 +484,19 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
         Op::Open { file, discard, .. } => {
             guard_unsaved(doc, *discard, "open")?;
             let bytes = file.read()?;
-            let opened = peet_io::document::open(&bytes)
+            let mut opened = peet_io::document::open(&bytes)
                 .map_err(|e| format!("Couldn't open {}: {}", file.shown(), e.message))?;
+            // An assembly's linked parts are read from their files as it is opened (its
+            // links being relative to where it is).
+            if links::unavailable().is_ok() {
+                let beside = file.path.as_ref().and_then(|p| p.parent());
+                opened.model.from_file(beside);
+                let (updated, problems) = links::refresh(&mut opened.model, beside, 0);
+                if !updated.is_empty() {
+                    done.data.insert("updated".to_owned(), json!(updated));
+                }
+                opened.warnings.extend(problems);
+            }
             if !opened.warnings.is_empty() {
                 done.data
                     .insert("warnings".to_owned(), json!(opened.warnings));

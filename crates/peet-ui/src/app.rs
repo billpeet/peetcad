@@ -140,6 +140,10 @@ pub struct PeetApp {
     selected_mate: Option<peet_model::MateId>,
     /// In an assembly: a component being dragged in the view.
     component_drag: Option<assembly::ComponentDrag>,
+    /// The files of the open assemblies' linked parts, as they were last seen.
+    link_watch: crate::link_watch::LinkWatch,
+    /// Whether the part being inserted is to be linked to its file.
+    inserting_linked: bool,
     /// The file dialog of Insert Part, waiting for an answer.
     inserting: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
 }
@@ -208,6 +212,8 @@ impl PeetApp {
             component_name: None,
             selected_mate: None,
             component_drag: None,
+            link_watch: crate::link_watch::LinkWatch::default(),
+            inserting_linked: false,
             inserting: None,
             selected: None,
             hovered: None,
@@ -1005,6 +1011,25 @@ impl PeetApp {
                     .path
                     .as_ref()
                     .map_or_else(|| location.name.clone(), |p| p.display().to_string());
+                // Saved somewhere new: an assembly's relative links are relative to that
+                // folder, which wasn't known when the file was written.
+                let was = self
+                    .doc
+                    .file
+                    .as_ref()
+                    .and_then(|f| f.path.as_ref()?.parent().map(std::path::Path::to_owned));
+                if let Some(path) = &location.path
+                    && self.doc.is_assembly()
+                    && path.parent() != was.as_deref()
+                {
+                    let written = self
+                        .doc
+                        .save_bytes_in(self.settings.save_caches, path.parent())
+                        .and_then(|bytes| peet_platform::write_file(path, &bytes));
+                    if let Err(e) = written {
+                        return self.error(format!("Couldn't save: {e}"));
+                    }
+                }
                 self.doc.mark_saved(Some(location));
                 self.files.discard_autosave();
                 self.info(format!("Saved {shown} ({} KB)", bytes.len().div_ceil(1024)));
@@ -1113,6 +1138,18 @@ impl PeetApp {
         match cmd {
             CommandId::NewAssembly => enabled(true),
             CommandId::InsertComponent => enabled(self.inserting.is_none()),
+            // Linked parts are files on disk: not in the browser.
+            CommandId::InsertLinkedComponent => {
+                enabled(self.inserting.is_none() && !peet_platform::is_web())
+            }
+            CommandId::UpdateLinks => enabled(
+                !peet_platform::is_web()
+                    && self
+                        .doc
+                        .model
+                        .assembly()
+                        .is_some_and(|a| a.definitions().any(|d| d.link.is_some())),
+            ),
             CommandId::EditComponent => enabled(self.selected_component().is_some()),
             CommandId::MateCoincident
             | CommandId::MateConcentric
@@ -1319,7 +1356,9 @@ impl PeetApp {
             CommandId::ExitSketch => self.close_sketch(),
             CommandId::Parameters => self.windows.parameters = true,
             CommandId::NewAssembly => self.guard_unsaved(AfterDiscard::NewAssembly),
-            CommandId::InsertComponent => self.start_insert_component(),
+            CommandId::InsertComponent => self.start_insert_component(false),
+            CommandId::InsertLinkedComponent => self.start_insert_component(true),
+            CommandId::UpdateLinks => self.update_links(),
             CommandId::EditComponent => self.open_selected_component(),
             CommandId::MateCoincident
             | CommandId::MateConcentric
@@ -1737,6 +1776,22 @@ impl PeetApp {
                                     Large,
                                 );
                                 tool(ui, pending, CommandId::EditComponent, "Edit Part", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::InsertLinkedComponent,
+                                        "Insert Linked",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::UpdateLinks,
+                                        "Update Links",
+                                        Small,
+                                    );
+                                });
                             });
                             ribbon::group(ui, "Mates", |ui| {
                                 ribbon::stack(ui, |ui| {
@@ -3016,6 +3071,10 @@ impl PeetApp {
                 ui.heading("Files");
                 ui.checkbox(&mut s.save_caches, "Save display data with parts")
                     .on_hover_text("Parts open instantly, but the files are larger. Without it the part is rebuilt when opened.");
+                if !peet_platform::is_web() {
+                    ui.checkbox(&mut s.watch_links, "Update linked parts when their files change")
+                        .on_hover_text("An open assembly watches the files of its linked parts, and reads a part again when its file is changed by another program. Without it, Update Linked Parts reads them.");
+                }
                 ui.add_space(8.0);
                 if ui.button("Reset to defaults").clicked() {
                     *s = Settings::default();
@@ -3340,6 +3399,7 @@ impl eframe::App for PeetApp {
         self.poll_files(&ctx);
         self.poll_imports(&ctx);
         self.poll_insert();
+        self.watch_links(&ctx);
         // A part opened with cached bodies was shown last frame; now build it for real.
         if self.doc.finish_loading() {
             ctx.request_repaint();

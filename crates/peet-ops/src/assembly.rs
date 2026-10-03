@@ -262,8 +262,8 @@ impl ComponentChange {
 pub(crate) const ASSEMBLY_OPS: &[(&str, &str, &str)] = &[
     (
         "insert",
-        "path (a .peet file), sample, part (an open document) or component (another instance of its part); name, at ([x, y, z]), rotate ({axis: \"x\"|\"y\"|\"z\"|[x, y, z], angle}), fixed",
-        "Add a component to the assembly: an instance of a part, which is copied into the assembly.",
+        "path (a .peet file), sample, part (an open document) or component (another instance of its part); name, at ([x, y, z]), rotate ({axis: \"x\"|\"y\"|\"z\"|[x, y, z], angle}), fixed, link (with path: follow the file instead of copying the part), absolute (with link: keep the link as a full path, not relative to the assembly's folder)",
+        "Add a component to the assembly: an instance of a part, which is copied into the assembly (or, with link, read from its file whenever the assembly is opened).",
     ),
     (
         "place",
@@ -330,6 +330,8 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
                 name: a.string("name")?,
                 placing: Placing::parse(a)?,
                 fixed: a.parsed("fixed", boolean)?,
+                link: a.flag("link", false)?,
+                absolute: a.flag("absolute", false)?,
             })
         })(),
         "components" => Ok(Op::Query(Query::Components)),
@@ -382,6 +384,9 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
             | Op::Component { .. }
             | Op::SetPart { .. }
             | Op::OpenComponent { .. }
+            | Op::UpdateLinks
+            | Op::Link { .. }
+            | Op::Unlink { .. }
             | Op::Drag { .. }
             | Op::Mate { .. }
             | Op::EditMate { .. }
@@ -552,6 +557,9 @@ pub(crate) fn components(doc: &Document) -> Result<Map<String, Value>, String> {
             if let Some(material) = &d.model.material {
                 m.insert("material".to_owned(), json!(material.name));
             }
+            if let Some(link) = &d.link {
+                crate::links::link_out(&mut m, &d.model, link, doc);
+            }
             Value::Object(m)
         })
         .collect();
@@ -593,8 +601,44 @@ pub(crate) fn insert(
     name: Option<&str>,
     placing: Option<&Placing>,
     fixed: Option<bool>,
+    link: Option<bool>,
 ) -> Result<(CompId, String), String> {
-    let part = from.model(doc)?;
+    // `link`: whether to link, and if so whether the link is relative.
+    let relative = link.unwrap_or(true);
+    let link = link.is_some();
+    // A linked part is read from its file, which the assembly then follows.
+    let linked = if link {
+        crate::links::unavailable()?;
+        let path = match from {
+            InsertSource::File(Source {
+                path: Some(path), ..
+            }) => path,
+            _ => {
+                return Err(
+                    "'link' follows a file, so it needs the part's 'path' (a .peet file on disk)."
+                        .to_owned(),
+                );
+            }
+        };
+        let own = doc.file.as_ref().and_then(|f| f.path.as_ref());
+        if own.is_some_and(|own| crate::links::same_file(own, path)) {
+            return Err(format!("{} can't be a component of itself.", doc.title()));
+        }
+        let model = crate::links::read(path, 0)?;
+        Some((Arc::new(model), crate::links::full(path)))
+    } else {
+        None
+    };
+    let part = match &linked {
+        Some((model, _)) => model.clone(),
+        None => from.model(doc)?,
+    };
+    let same_part = match from {
+        InsertSource::Component(c) => the_assembly(doc)?
+            .component(c.resolve(doc)?)
+            .map(|c| c.definition),
+        _ => None,
+    };
     check_not_itself(doc, &part)?;
     let units = doc.model.parameters.units;
     let frame = match placing {
@@ -604,7 +648,14 @@ pub(crate) fn insert(
     let assembly = model
         .assembly_mut()
         .ok_or_else(|| "The document is not an assembly.".to_owned())?;
-    let definition = assembly.define(part);
+    let definition = match (linked, same_part) {
+        (Some((model, path)), _) => {
+            assembly.define_linked(model, peet_model::Link { path, relative })
+        }
+        // One more instance of a component's part is of that very part, linked or not.
+        (None, Some(definition)) => definition,
+        (None, None) => assembly.define(part),
+    };
     let id = assembly
         .insert(definition, frame)
         .ok_or_else(|| "The component's part is missing.".to_owned())?;
@@ -675,6 +726,83 @@ pub(crate) fn change(
             format!("Delete {was}")
         }
     })
+}
+
+/// Links a part to a file: the file's part if there is one, else the part is written
+/// there. Returns the undo label.
+pub(crate) fn link(
+    doc: &Document,
+    model: &mut Model,
+    part: DefId,
+    path: &std::path::Path,
+    relative: bool,
+) -> Result<String, String> {
+    crate::links::unavailable()?;
+    let own = doc.file.as_ref().and_then(|f| f.path.as_ref());
+    if own.is_some_and(|own| crate::links::same_file(own, path)) {
+        return Err(format!(
+            "{} is the assembly's own file: a part can't be linked to it.",
+            path.display()
+        ));
+    }
+    let stored = crate::links::full(path);
+    let assembly = the_assembly(doc)?;
+    let definition = assembly
+        .definition(part)
+        .ok_or_else(|| "The part is no longer in the assembly.".to_owned())?;
+    if let Some(other) = assembly
+        .definitions()
+        .find(|d| d.id != part && d.link.as_ref().is_some_and(|l| l.path == stored))
+    {
+        return Err(format!(
+            "{} is already linked to {}: make these components instances of it with 'replace'.",
+            other.name(),
+            path.display()
+        ));
+    }
+    let now = if path.is_file() {
+        Arc::new(crate::links::read(path, 0)?)
+    } else {
+        let bytes = peet_io::document::save(
+            &definition.model,
+            &peet_io::document::Metadata::default(),
+            None,
+        )
+        .map_err(|e| e.message)?;
+        peet_platform::write_file(path, &bytes)?;
+        definition.model.clone()
+    };
+    let label = format!("Link {}", now.name);
+    let assembly = model
+        .assembly_mut()
+        .ok_or_else(|| "The document is not an assembly.".to_owned())?;
+    assembly.set_model(part, now);
+    assembly.set_link(
+        part,
+        Some(peet_model::Link {
+            path: stored,
+            relative,
+        }),
+    );
+    Ok(label)
+}
+
+/// Makes a linked part the assembly's own again. Returns the undo label.
+pub(crate) fn unlink(doc: &Document, model: &mut Model, part: DefId) -> Result<String, String> {
+    let definition = the_assembly(doc)?
+        .definition(part)
+        .ok_or_else(|| "The part is no longer in the assembly.".to_owned())?;
+    if definition.link.is_none() {
+        return Err(format!(
+            "{} is not linked: it is the assembly's own already.",
+            definition.name()
+        ));
+    }
+    let label = format!("Unlink {}", definition.name());
+    if let Some(assembly) = model.assembly_mut() {
+        assembly.set_link(part, None);
+    }
+    Ok(label)
 }
 
 /// What a drag operation asks of the solve, with the undo label.

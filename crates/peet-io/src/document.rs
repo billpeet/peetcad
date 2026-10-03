@@ -37,8 +37,8 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 ///   itself. Models up to version 4 are read as [`peet_model::ModelV4`] and converted.
 /// - Model 6 (Phase 7): assemblies. A model can hold an assembly: its parts (each a whole
 ///   model), its components and its mates. Version 5 models are read as
-///   [`peet_model::ModelV5`]. (Mates were added to version 6 before any version of
-///   PeetCAD that writes it was released.)
+///   [`peet_model::ModelV5`]. (Mates and links were added to version 6 before any version
+///   of PeetCAD that writes it was released.)
 pub const METADATA_SCHEMA: u16 = 1;
 pub const MODEL_SCHEMA: u16 = 6;
 pub const BREP_SCHEMA: u16 = 4;

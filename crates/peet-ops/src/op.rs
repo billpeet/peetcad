@@ -400,6 +400,25 @@ pub enum Op {
         placing: Option<Placing>,
         /// The first component of an assembly is fixed, the others are not, if absent.
         fixed: Option<bool>,
+        /// Link the part to its file instead of copying it into the assembly: the
+        /// assembly then follows the file. Needs a file on disk.
+        link: bool,
+        /// Keep the link as a full path, not relative to the assembly's folder.
+        absolute: bool,
+    },
+    /// Read the linked parts of an assembly from their files again.
+    UpdateLinks,
+    /// Link a part of an assembly to a file: to the file if there is one, else the part
+    /// is written there first.
+    Link {
+        part: crate::links::PartSel,
+        path: PathBuf,
+        /// Keep the link as a full path, not relative to the assembly's folder.
+        absolute: bool,
+    },
+    /// Make a linked part the assembly's own again.
+    Unlink {
+        part: crate::links::PartSel,
     },
     /// Change a component of an assembly.
     Component {
@@ -507,6 +526,9 @@ impl Op {
             Self::App(command) => command.word(),
             Self::Session(command) => command.word(),
             Self::Insert { .. } => "insert",
+            Self::UpdateLinks => "update_links",
+            Self::Link { .. } => "link",
+            Self::Unlink { .. } => "unlink",
             Self::Component { change, .. } => change.word(),
             Self::Drag { .. } => "drag",
             Self::Mate { .. } => "mate",
@@ -836,6 +858,15 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "materials" => Op::Query(Query::Materials {
             material: a.string("material")?,
         }),
+        "update_links" => Op::UpdateLinks,
+        "link" => Op::Link {
+            part: a.required("part", crate::links::PartSel::parse)?,
+            path: path(a, "link")?,
+            absolute: a.flag("absolute", false)?,
+        },
+        "unlink" => Op::Unlink {
+            part: a.required("part", crate::links::PartSel::parse)?,
+        },
         "new" => Op::New {
             discard: a.flag("discard", false)?,
             keep: a.flag("keep", false)?,
@@ -1085,6 +1116,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             all.extend(crate::session::SESSION_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::assembly::ASSEMBLY_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::mate::MATE_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::links::LINK_OPS.iter().map(|(n, ..)| *n));
             all.sort_unstable();
             all.dedup();
             return Err(format!(

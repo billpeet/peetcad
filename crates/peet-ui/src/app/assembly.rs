@@ -178,6 +178,7 @@ pub(super) fn works_in_assembly(cmd: CommandId) -> bool {
                     | "parameters"
                     | "materials"
                     | "insert"
+                    | "update_links"
                     | "open_component"
                     | "delete"
                     | "suppress"
@@ -192,6 +193,8 @@ pub(super) fn needs_assembly(cmd: CommandId) -> bool {
     matches!(
         cmd,
         CommandId::InsertComponent
+            | CommandId::InsertLinkedComponent
+            | CommandId::UpdateLinks
             | CommandId::EditComponent
             | CommandId::MateCoincident
             | CommandId::MateConcentric
@@ -319,8 +322,126 @@ impl PeetApp {
     }
 
     /// Asks for a part file to insert as a component.
-    pub(super) fn start_insert_component(&mut self) {
+    ///
+    /// `linked`: the component follows the file, instead of the assembly keeping a copy.
+    pub(super) fn start_insert_component(&mut self, linked: bool) {
+        self.inserting_linked = linked;
         self.inserting = Some(peet_platform::open_file(crate::files::FILTER));
+    }
+
+    /// Reads linked parts again when their files are changed by another program.
+    pub(super) fn watch_links(&mut self, ctx: &egui::Context) {
+        self.watch_links_at(ctx, peet_platform::Instant::now());
+    }
+
+    /// [`PeetApp::watch_links`], at a given time (files are read once they have been
+    /// left alone for a moment).
+    pub(super) fn watch_links_at(&mut self, ctx: &egui::Context, now: peet_platform::Instant) {
+        if peet_platform::is_web() || !self.settings.watch_links {
+            self.link_watch = crate::link_watch::LinkWatch::default();
+            return;
+        }
+        // What is watched is worked out again when an assembly changes (every rebuild
+        // has a revision of its own) or is opened or closed.
+        let signature =
+            self.doc
+                .documents()
+                .filter(|(_, d)| d.is_assembly())
+                .fold(0u64, |sum, (id, d)| {
+                    sum.wrapping_mul(31)
+                        .wrapping_add(d.revision)
+                        .wrapping_add(u64::from(id.0) << 32)
+                });
+        let session = &self.doc;
+        self.link_watch.follow(
+            signature,
+            || {
+                session
+                    .documents()
+                    .filter(|(_, d)| d.is_assembly())
+                    .flat_map(|(_, d)| peet_ops::linked_files(d))
+                    .collect()
+            },
+            ctx,
+        );
+        // Not in the middle of a drag: the assembly is being changed as it is.
+        if self.component_drag.is_none() {
+            let changed = self.link_watch.take_changed(now);
+            if !changed.is_empty() {
+                self.read_changed_links(ctx, &changed);
+            }
+        }
+        if let Some(wait) = self.link_watch.wake_in() {
+            ctx.request_repaint_after(wait);
+        }
+    }
+
+    /// Reads again the linked parts whose files are among `changed`, in every open
+    /// assembly that links to them.
+    fn read_changed_links(&mut self, ctx: &egui::Context, changed: &[std::path::PathBuf]) {
+        let linking: Vec<peet_document::DocId> = self
+            .doc
+            .documents()
+            .filter(|(_, d)| {
+                d.is_assembly()
+                    && peet_ops::linked_files(d)
+                        .iter()
+                        .any(|f| changed.contains(f))
+            })
+            .map(|(id, _)| id)
+            .collect();
+        for id in linking {
+            let reply = self.apply_op_to(
+                ctx,
+                Some(&peet_ops::DocSel::Id(id)),
+                &Op::UpdateLinks,
+                peet_ops::Undo::Step,
+            );
+            let updated: Vec<&str> = reply.json["updated"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|v| v.as_str())
+                .collect();
+            if let Some(warning) = reply.json["warnings"][0].as_str() {
+                self.error(warning.to_owned());
+            } else if let Some(e) = reply.json["error"].as_str() {
+                self.error(e.to_owned());
+            } else if reply.changed {
+                self.info(format!(
+                    "{} changed on disk and was read again.",
+                    updated.join(", ")
+                ));
+            }
+        }
+    }
+
+    /// Reads the assembly's linked parts from their files again.
+    pub(super) fn update_links(&mut self) {
+        let reply = self.perform(Op::UpdateLinks);
+        if !reply.ok {
+            return;
+        }
+        let updated: Vec<&str> = reply.json["updated"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|v| v.as_str())
+            .collect();
+        match reply.json["warnings"][0].as_str() {
+            Some(warning) => self.error(warning.to_owned()),
+            None if updated.is_empty() => {
+                self.info("The linked parts are as their files have them.");
+            }
+            None => self.info(format!("Read again: {}.", updated.join(", "))),
+        }
+    }
+
+    /// Makes a linked part the assembly's own copy.
+    fn unlink_part(&mut self, part: peet_model::DefId) {
+        if self.perform(Op::Unlink { part: part.into() }).ok {
+            self.info("The part is the assembly's own now: it no longer follows the file.");
+        }
     }
 
     /// Inserts the file the user chose, beside what is already there.
@@ -353,6 +474,8 @@ impl PeetApp {
                 ..peet_math::Frame::WORLD
             })),
             fixed: None,
+            link: self.inserting_linked,
+            absolute: false,
         });
         if reply.ok {
             let id = reply.json["component"]["id"]
@@ -665,6 +788,12 @@ impl PeetApp {
         let part = assembly
             .definition(c.definition)
             .map_or_else(String::new, |d| d.name().to_owned());
+        // A linked part: the file it follows.
+        let link = assembly
+            .definition(c.definition)
+            .and_then(|d| d.link.as_ref())
+            .map(|l| l.path.clone());
+        let mut unlink = false;
         let units = self.doc.model.parameters.units;
         let status = self.doc.evaluation().component_status(id).cloned();
         let freedom = freedom_text(c.fixed, self.doc.evaluation().component_freedom(id));
@@ -706,6 +835,19 @@ impl PeetApp {
                         .clicked();
                 });
                 ui.end_row();
+                if let Some(path) = &link {
+                    ui.label("Linked to").on_hover_text(
+                        "The part is read from this file whenever the assembly is opened.",
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(path);
+                        unlink = ui
+                            .small_button("Make Own Copy")
+                            .on_hover_text("Keep the part in the assembly as it is now, and stop following the file.")
+                            .clicked();
+                    });
+                    ui.end_row();
+                }
                 for (axis, value) in ["X", "Y", "Z"].iter().zip(&mut origin) {
                     ui.label(*axis).on_hover_text(
                         "Where the part's origin is in the assembly.",
@@ -781,6 +923,9 @@ impl PeetApp {
         }
         if open {
             self.open_component(id);
+        }
+        if unlink {
+            self.unlink_part(c.definition);
         }
     }
 }
@@ -1016,6 +1161,171 @@ mod tests {
                 .is_some_and(|(m, error)| *error && m.contains("is fixed"))
         );
         assert_eq!(app.doc.model, before);
+    }
+
+    #[test]
+    fn linked_parts_are_inserted_updated_and_made_own() {
+        let ctx = egui::Context::default();
+        let dir = std::env::temp_dir().join(format!("peet-ui-links-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("bracket.peet");
+        let part = peet_document::Document::from_model(peet_model::samples::bracket().0, None);
+        std::fs::write(&file, part.save_bytes(false).unwrap()).unwrap();
+
+        let mut app = PeetApp::headless();
+        // In a part, and in an assembly with nothing linked, there is nothing to update.
+        assert!(!app.command_state(CommandId::InsertLinkedComponent).enabled);
+        app.execute(&ctx, CommandId::NewAssembly);
+        assert!(app.command_state(CommandId::InsertLinkedComponent).enabled);
+        assert!(!app.command_state(CommandId::UpdateLinks).enabled);
+
+        // What Insert Linked Part does once the file is chosen.
+        let reply = app.perform(Op::Insert {
+            from: InsertSource::File(Source::path(file.clone())),
+            name: None,
+            placing: None,
+            fixed: None,
+            link: true,
+            absolute: false,
+        });
+        assert!(reply.ok, "{}", reply.json);
+        app.selected_component = Some(CompId(1));
+        assert!(app.command_state(CommandId::UpdateLinks).enabled);
+        draw(&mut app, &ctx);
+        app.execute(&ctx, CommandId::UpdateLinks);
+        assert!(
+            app.status_message
+                .as_ref()
+                .is_some_and(|(m, e)| !e && m.contains("as their files"))
+        );
+
+        // The part changed in its file: Update Linked Parts reads it.
+        let mut changed = peet_model::samples::bracket().0;
+        changed.color = Some([10, 20, 30]);
+        let changed = peet_document::Document::from_model(changed, None);
+        std::fs::write(&file, changed.save_bytes(false).unwrap()).unwrap();
+        app.execute(&ctx, CommandId::UpdateLinks);
+        let part = |app: &PeetApp| {
+            let a = app.doc.model.assembly().unwrap();
+            a.definitions().next().unwrap().clone()
+        };
+        assert_eq!(part(&app).model.color, Some([10, 20, 30]));
+        assert_eq!(app.doc.placed[0].color, Some([10, 20, 30]));
+        assert_eq!(app.doc.undo_label(), Some("Update Links"));
+
+        // Make Own Copy: it keeps the part, and no longer follows the file.
+        let id = part(&app).id;
+        app.unlink_part(id);
+        assert!(part(&app).link.is_none());
+        assert!(!app.command_state(CommandId::UpdateLinks).enabled);
+        draw(&mut app, &ctx);
+        assert!(app.untranslated().is_empty(), "{:?}", app.untranslated());
+        std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn a_linked_part_changed_on_disk_is_read_again_by_itself() {
+        use crate::link_watch::SETTLE;
+        let ctx = egui::Context::default();
+        let dir = std::env::temp_dir().join(format!("peet-ui-watch-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("bracket.peet");
+        let write = |color: Option<[u8; 3]>| {
+            let mut model = peet_model::samples::bracket().0;
+            model.color = color;
+            let part = peet_document::Document::from_model(model, None);
+            std::fs::write(&file, part.save_bytes(false).unwrap()).unwrap();
+        };
+        write(None);
+        let mut app = PeetApp::headless();
+        app.execute(&ctx, CommandId::NewAssembly);
+        let reply = app.perform(Op::Insert {
+            from: InsertSource::File(Source::path(file.clone())),
+            name: None,
+            placing: None,
+            fixed: None,
+            link: true,
+            absolute: false,
+        });
+        assert!(reply.ok, "{}", reply.json);
+        let asm = app.doc.current_id();
+        let color = |app: &PeetApp| app.doc.get(asm).unwrap().placed[0].color;
+
+        // The system says when the file is written, and it is read once it has been left
+        // alone (give it a few seconds). The assembly is in the background meanwhile: a
+        // part is being worked on.
+        app.watch_links(&ctx);
+        assert!(app.link_watch.is_notified(), "the system's watcher runs");
+        assert_eq!(app.doc.undo_label(), Some("Insert Bracket-1"));
+        let steps = app.journal().len();
+        ok(&mut app, &ctx, json!({"op": "new", "keep": true}));
+        app.watch_links(&ctx);
+        write(Some([1, 2, 3]));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while color(&app) != Some([1, 2, 3]) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            app.watch_links(&ctx);
+        }
+        assert_eq!(color(&app), Some([1, 2, 3]), "told by the system");
+        assert!(!app.doc.is_assembly());
+        assert_eq!(app.doc.get(asm).unwrap().undo_label(), Some("Update Links"));
+        assert!(
+            app.status_message
+                .as_ref()
+                .is_some_and(|(m, e)| !e && m.contains("changed on disk"))
+        );
+        // Once: nothing more happens to the file, and nothing more is done.
+        let read = app.journal().len();
+        assert!(read > steps);
+        std::thread::sleep(SETTLE * 2);
+        app.watch_links(&ctx);
+        assert_eq!(app.journal().len(), read);
+
+        // A file that was missing and is put back is seen arriving.
+        std::fs::remove_file(&file).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while !app.status_message.as_ref().is_some_and(|(_, e)| *e)
+            && std::time::Instant::now() < deadline
+        {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            app.watch_links(&ctx);
+        }
+        assert!(
+            app.status_message
+                .as_ref()
+                .is_some_and(|(m, e)| *e && m.contains("can't be found")),
+            "{:?}",
+            app.status_message
+        );
+        assert_eq!(color(&app), Some([1, 2, 3]), "as it was last read");
+        write(Some([9, 9, 9]));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        while color(&app) != Some([9, 9, 9]) && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            app.watch_links(&ctx);
+        }
+        assert_eq!(color(&app), Some([9, 9, 9]), "put back");
+
+        // Turned off in the settings, nothing is watched.
+        app.settings.watch_links = false;
+        app.watch_links(&ctx);
+        assert!(!app.link_watch.is_notified());
+        write(None);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        app.watch_links_at(&ctx, peet_platform::Instant::now() + SETTLE * 10);
+        assert_eq!(color(&app), Some([9, 9, 9]));
+
+        // Where the system can't watch, the files are looked at instead.
+        app.settings.watch_links = true;
+        app.link_watch.look_instead();
+        let start = peet_platform::Instant::now();
+        app.watch_links_at(&ctx, start);
+        write(Some([7, 7, 7]));
+        let second = std::time::Duration::from_secs(1);
+        app.watch_links_at(&ctx, start + second);
+        app.watch_links_at(&ctx, start + second + SETTLE);
+        assert_eq!(color(&app), Some([7, 7, 7]));
+        std::fs::remove_dir_all(dir).ok();
     }
 
     #[test]

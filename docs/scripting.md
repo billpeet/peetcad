@@ -300,6 +300,10 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 |---|---|
 | `new` with `"assembly": true` | starts an empty assembly |
 | `insert` | the part: `path` (a `.peet` file; an assembly becomes a sub-assembly), `sample`, `part` (an open document, by name or id) or `component` (another instance of its part). `name`, `at` (`[x, y, z]`: where the part's origin goes), `rotate` (`{"axis": "x"`, `"y"`, `"z"` or `[x, y, z]`, `"angle": degrees}`, from the part's own orientation), `fixed` (default: only the first component) |
+| `insert` with `"link": true` | with `path`: the component follows the part's file instead of the assembly keeping a copy. The link is relative to the assembly's folder unless `"absolute": true` |
+| `update_links` | reads every linked part from its file again. Replies `updated` (the parts that changed) and `warnings` (files that can't be found or read) |
+| `link` | `part` (a part's name or id, as `components` lists the parts), `path`, `absolute` (default false): links the part to the file if there is one (the part becomes what is in it), else writes the part there first |
+| `unlink` | `part`: the assembly keeps the part as it is and no longer follows the file |
 | `place` | `component`, `at`, `rotate`: the ones given are set, the other is kept |
 | `drag` | `component`, `to` (`[x, y, z]`, in the assembly), `point` (`[x, y, z]` on the component, in its own coordinates; default its origin): pulls the point towards the place as far as the component's mates allow. `short_by` in the reply is how far it still is |
 | `fix` | `component`, `on` (default true) |
@@ -327,6 +331,23 @@ the reason, as a feature that can't be built is. `drag` moves what the mates lea
 the component slides to the place if it can, turns only if sliding can't get it nearer,
 and takes what it is mated to along. When mates contradict each other, the
 earlier ones hold and the later one is flagged.
+
+**Linked parts** (desktop only: they are files on disk, and are refused in the browser).
+A linked part is read from its file when the assembly is opened, by `update_links`, and
+when the part's document is saved in the same session (that `save` replies `updated_in`
+with the assemblies that followed). The assembly keeps the part as it last read it, so
+it opens whole when the file is missing, with a warning. A link is written in the
+assembly's file relative to the folder that file is in (`../parts/pin.peet`), so an
+assembly and its parts can be moved or copied together; with `"absolute": true` it is a
+full path. Saving an assembly somewhere else keeps it pointing at the same part files
+(the relative links are rewritten from the new place). If nothing is where a link says,
+a file of the same name next to the assembly's is used. `components` gives a linked
+part's `link` (as the file has it), `link_file` (the file it means now) and
+`link_status` (`current`, `changed`, `missing`). In the application, an open assembly
+is told by the system when a linked part's file is changed by another program, and
+reads the part again a moment later (this can be turned off in the settings); the
+command line reads them at each call. `open_component` on a linked part opens its file as a document; on a part
+of the assembly's own, a working copy that `save` stores back.
 
 `failures` (in `status` and in replies) lists the components that need attention (a part
 with no bodies, or with features that can't be built) and the mates that don't hold. `export` writes every component's

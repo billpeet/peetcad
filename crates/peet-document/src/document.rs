@@ -163,7 +163,10 @@ impl Document {
     /// A document for a part read from a file. If the file has caches, its bodies are
     /// shown at once and the model is rebuilt on the next frame (see
     /// [`Document::finish_loading`]); cached meshes save tessellating again.
-    pub fn from_opened(opened: peet_io::document::Opened, file: Option<FileLocation>) -> Self {
+    pub fn from_opened(mut opened: peet_io::document::Opened, file: Option<FileLocation>) -> Self {
+        // An assembly's links are written relative to its file: here they are full paths.
+        let folder = file.as_ref().and_then(|f| f.path.as_ref()?.parent());
+        opened.model.from_file(folder);
         let hash = peet_model::hash::of(&opened.model);
         let mut meshes: HashMap<u64, peet_kernel::tessellate::SolidMesh> = opened
             .meshes
@@ -432,7 +435,21 @@ impl Document {
     }
 
     /// The bytes of the document as a `.peet` file.
+    ///
+    /// An assembly's relative links are written relative to the folder its file is in:
+    /// to save it somewhere else, use [`Document::save_bytes_in`].
     pub fn save_bytes(&self, with_caches: bool) -> Result<Vec<u8>, String> {
+        let folder = self.file.as_ref().and_then(|f| f.path.as_ref()?.parent());
+        self.save_bytes_in(with_caches, folder)
+    }
+
+    /// The bytes of the document as a `.peet` file in `folder` (`None`: nowhere yet, so
+    /// an assembly's links are written as full paths).
+    pub fn save_bytes_in(
+        &self,
+        with_caches: bool,
+        folder: Option<&std::path::Path>,
+    ) -> Result<Vec<u8>, String> {
         let metadata = peet_io::document::Metadata {
             saved_at: web_time::SystemTime::now()
                 .duration_since(web_time::UNIX_EPOCH)
@@ -454,6 +471,10 @@ impl Document {
                 })
                 .collect(),
         });
+        if self.is_assembly() {
+            let written = self.model.for_file(folder);
+            return peet_io::document::save(&written, &metadata, None).map_err(|e| e.message);
+        }
         peet_io::document::save(&self.model, &metadata, caches).map_err(|e| e.message)
     }
 

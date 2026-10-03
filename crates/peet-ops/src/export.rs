@@ -36,7 +36,8 @@ pub(crate) fn save(
             .and_then(|f| f.path.clone())
             .ok_or_else(|| "The part has no file yet: give 'save' a 'path'.".to_owned())?,
     };
-    let bytes = doc.save_bytes(caches)?;
+    // In the folder it is going to: an assembly's relative links are written from there.
+    let bytes = doc.save_bytes_in(caches, path.parent())?;
     peet_platform::write_file(&path, &bytes)?;
     let name = path
         .file_name()

@@ -526,6 +526,8 @@ fn the_applications_changes_to_an_assembly_are_made_by_operations() {
             name: None,
             placing: Some(Placing::Frame(far)),
             fixed: None,
+            link: false,
+            absolute: false,
         },
         Undo::Step,
     );
@@ -1103,5 +1105,426 @@ fn a_component_is_dragged_as_far_as_its_mates_allow() {
     doc.seal_history();
     ok(&mut doc, json!({"op": "undo"}));
     assert_eq!(doc.model, before);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Changes the depth of the plate in a part file, as another program (or another
+/// session) would: the file is read, edited and written back.
+fn set_depth(path: &str, depth: f64) {
+    let mut doc = Document::default();
+    ok(&mut doc, json!({"op": "open", "path": path}));
+    ok(
+        &mut doc,
+        json!({"op": "edit", "feature": "Extrude1", "depth": depth}),
+    );
+    ok(&mut doc, json!({"op": "save"}));
+}
+
+fn top_of(doc: &mut Document, component: usize) -> f64 {
+    ok(doc, json!({"op": "components"}))["components"][component]["max"][2]
+        .as_f64()
+        .unwrap()
+}
+
+#[test]
+fn a_linked_part_follows_its_file() {
+    let dir = temp("links");
+    let (plate, _) = plate_and_pin(&dir);
+    let file = dir.join("stack.peet").to_string_lossy().into_owned();
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+
+    // Two components of one linked part: the assembly follows the file.
+    let first = ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "link": true}),
+    );
+    assert_eq!(first["component"]["part"], "plate");
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "link": true, "at": [0, 0, 20]}),
+    );
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    let parts = listed["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 1, "one part, linked once");
+    assert_eq!(parts[0]["link_status"], "current");
+    // Relative to the assembly's folder, where the plate's file also is.
+    assert_eq!(parts[0]["link"], "plate.peet");
+    assert!(std::path::Path::new(parts[0]["link_file"].as_str().unwrap()).is_absolute());
+    // The same part inserted without a link is the assembly's own copy: another part.
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "at": [100, 0, 0]}),
+    );
+    assert_eq!(
+        doc.model.assembly().unwrap().definitions().count(),
+        2,
+        "a copy is not the linked part"
+    );
+    ok(&mut doc, json!({"op": "save"}));
+    assert_eq!(top_of(&mut doc, 0), 5.0);
+
+    // The file changes behind the assembly's back: it says so, and reads it when asked.
+    set_depth(&plate, 9.0);
+    let stale = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(stale["parts"][0]["link_status"], "changed");
+    assert!(
+        stale["parts"][0]["link_message"]
+            .as_str()
+            .unwrap()
+            .contains("update_links")
+    );
+    assert_eq!(top_of(&mut doc, 0), 5.0, "not until it is read again");
+    let updated = apply_json(&mut doc, &json!({"op": "update_links"}), Undo::Step);
+    assert!(updated.ok && updated.changed);
+    assert_eq!(updated.json["updated"], json!(["plate"]));
+    assert_eq!(doc.undo_label(), Some("Update Links"));
+    assert_eq!((top_of(&mut doc, 0), top_of(&mut doc, 1)), (9.0, 29.0));
+    assert_eq!(top_of(&mut doc, 2), 5.0, "the copy is not the file's");
+    let again = apply_json(&mut doc, &json!({"op": "update_links"}), Undo::Step);
+    assert!(again.ok && !again.changed, "{}", again.json);
+    assert_eq!(again.json["updated"], json!([]));
+    ok(&mut doc, json!({"op": "save"}));
+
+    // Opening the assembly reads the linked parts as they are now, and that is not an
+    // unsaved change.
+    set_depth(&plate, 12.0);
+    let mut opened = Document::default();
+    let reply = ok(&mut opened, json!({"op": "open", "path": file}));
+    assert_eq!(reply["updated"], json!(["plate"]));
+    assert!(!opened.is_modified() && !opened.can_undo());
+    assert_eq!(top_of(&mut opened, 0), 12.0);
+
+    // The file gone: the assembly opens with the part as it last read it, and says so.
+    let away = dir.join("elsewhere.peet");
+    std::fs::rename(&plate, &away).unwrap();
+    let mut alone = Document::default();
+    let reply = ok(&mut alone, json!({"op": "open", "path": file}));
+    assert!(
+        reply["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("can't be found"),
+        "{reply}"
+    );
+    assert_eq!(alone.bodies.len(), 3);
+    assert_eq!(top_of(&mut alone, 0), 9.0, "as saved");
+    let parts = ok(&mut alone, json!({"op": "components"}));
+    assert_eq!(parts["parts"][0]["link_status"], "missing");
+    assert!(
+        parts["parts"][0]["link_message"]
+            .as_str()
+            .unwrap()
+            .contains("unlink")
+    );
+    let again = apply_json(&mut alone, &json!({"op": "update_links"}), Undo::Step);
+    assert!(again.ok && !again.changed);
+    assert!(
+        again.json["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("plate.peet")
+    );
+    // Made the assembly's own, it is a part like any other.
+    // (By its id: the assembly has two parts called plate, the linked one and the copy.)
+    let e = error(&mut alone, json!({"op": "unlink", "part": "plate"}));
+    assert!(
+        e.contains("More than one part") && e.contains("1 (plate), 2 (plate)"),
+        "{e}"
+    );
+    ok(&mut alone, json!({"op": "unlink", "part": 1}));
+    assert_eq!(alone.undo_label(), Some("Unlink plate"));
+    let parts = ok(&mut alone, json!({"op": "components"}));
+    assert!(parts["parts"][0].get("link").is_none());
+    let e = error(&mut alone, json!({"op": "unlink", "part": 1}));
+    assert!(e.contains("not linked"), "{e}");
+
+    // Moved together to another folder, the part is found next to the assembly.
+    let moved = dir.join("moved");
+    std::fs::create_dir_all(&moved).unwrap();
+    std::fs::rename(&away, moved.join("plate.peet")).unwrap();
+    let there = moved.join("stack.peet");
+    std::fs::copy(&file, &there).unwrap();
+    let mut found = Document::default();
+    let reply = ok(&mut found, json!({"op": "open", "path": there}));
+    assert!(reply.get("warnings").is_none(), "{reply}");
+    assert_eq!(top_of(&mut found, 0), 12.0);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn parts_are_linked_to_files_and_mistakes_are_explained() {
+    let dir = temp("link-ops");
+    let (plate, pin) = plate_and_pin(&dir);
+    let file = dir.join("asm.peet").to_string_lossy().into_owned();
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    ok(&mut doc, json!({"op": "insert", "sample": "bracket"}));
+
+    // The assembly's own part, written to a file of its own and linked to it.
+    let out = dir.join("bracket.peet").to_string_lossy().into_owned();
+    ok(
+        &mut doc,
+        json!({"op": "link", "part": "Bracket", "path": out}),
+    );
+    assert_eq!(doc.undo_label(), Some("Link Bracket"));
+    let mut written = Document::default();
+    let opened = ok(&mut written, json!({"op": "open", "path": out}));
+    assert_eq!(
+        (opened["kind"].as_str(), opened["bodies"].as_u64()),
+        (Some("part"), Some(1))
+    );
+    let parts = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(parts["parts"][0]["link_status"], "current");
+    // Linked to a file that is there, a part becomes what is in the file.
+    ok(&mut doc, json!({"op": "unlink", "part": 1}));
+    let swapped = ok(&mut doc, json!({"op": "link", "part": 1, "path": pin}));
+    assert_eq!(swapped["failures"], Value::Null);
+    let parts = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(parts["parts"][0]["name"], "pin");
+    assert_eq!(parts["components"][0]["max"], json!([4.0, 4.0, 20.0]));
+
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "at": [50, 0, 0]}),
+    );
+    for (op, says) in [
+        (
+            json!({"op": "insert", "sample": "bracket", "link": true}),
+            "needs the part's 'path'",
+        ),
+        (
+            json!({"op": "insert", "component": "pin-1", "link": true}),
+            "needs the part's 'path'",
+        ),
+        (
+            json!({"op": "insert", "path": file, "link": true}),
+            "of itself",
+        ),
+        (
+            json!({"op": "insert", "path": "nowhere.peet", "link": true}),
+            "nowhere.peet",
+        ),
+        (json!({"op": "link", "part": "plate"}), "'path'"),
+        (
+            json!({"op": "link", "part": "plate", "path": file}),
+            "own file",
+        ),
+        (
+            json!({"op": "link", "part": "plate", "path": pin}),
+            "already linked",
+        ),
+        (json!({"op": "link", "part": "lid", "path": out}), "1 (pin)"),
+        (json!({"op": "unlink", "part": "plate"}), "not linked"),
+    ] {
+        let e = error(&mut doc, op.clone());
+        assert!(e.contains(says), "{op}: {e}");
+    }
+    let mut part = Document::default();
+    let e = error(&mut part, json!({"op": "update_links"}));
+    assert!(e.contains("is a part"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_linked_part_is_edited_in_its_own_file() {
+    let dir = temp("link-session");
+    let (plate, _) = plate_and_pin(&dir);
+    let file = dir.join("asm.peet").to_string_lossy().into_owned();
+    let mut host = Headless::default();
+    let mut session = Session::default();
+    let mut run =
+        |session: &mut Session, op: Value| apply_session_json(&mut host, session, &op, Undo::Step);
+    let ok = |reply: peet_ops::Reply| {
+        assert!(reply.ok, "{}", reply.json);
+        reply.json
+    };
+    ok(run(&mut session, json!({"op": "new", "assembly": true})));
+    ok(run(&mut session, json!({"op": "save", "path": file})));
+    ok(run(
+        &mut session,
+        json!({"op": "insert", "path": plate, "link": true}),
+    ));
+    ok(run(
+        &mut session,
+        json!({"op": "insert", "component": "plate-1", "at": [0, 0, 30]}),
+    ));
+    ok(run(&mut session, json!({"op": "save"})));
+    let asm = session.current_id();
+
+    // Its part opens as the file it is: a document with a path, not a working copy.
+    let opened = ok(run(
+        &mut session,
+        json!({"op": "open_component", "component": "plate-2"}),
+    ));
+    assert_eq!(opened["part"], "plate.peet");
+    assert!(opened["note"].as_str().unwrap().contains("its own file"));
+    assert!(session.embedded.is_none());
+    assert!(session.file.as_ref().unwrap().path.is_some());
+    let part = session.current_id();
+    // Again, from the other component: the same document.
+    ok(run(
+        &mut session,
+        json!({"op": "open_component", "component": "plate-1", "document": asm.0}),
+    ));
+    assert_eq!((session.count(), session.current_id()), (2, part));
+
+    // Saved, the file is written and the assembly that links to it follows, as a step
+    // of its own that can be undone there.
+    ok(run(
+        &mut session,
+        json!({"op": "edit", "feature": "Extrude1", "depth": 8}),
+    ));
+    let saved = ok(run(&mut session, json!({"op": "save"})));
+    assert_eq!(saved["updated_in"], json!(["asm.peet"]));
+    let assembly = session.get(asm).unwrap();
+    assert_eq!(assembly.undo_label(), Some("Update plate"));
+    assert!(assembly.is_modified());
+    let tops: Vec<f64> = assembly
+        .model
+        .assembly()
+        .unwrap()
+        .components()
+        .map(|c| assembly.component_bounds(c.id).max.z)
+        .collect();
+    assert_eq!(tops, [8.0, 38.0]);
+    // Saving it again changes nothing there.
+    let saved = ok(run(&mut session, json!({"op": "save"})));
+    assert!(saved.get("updated_in").is_none(), "{saved}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// The links of an assembly's file, as the file has them.
+fn links_in_file(path: &std::path::Path) -> Vec<(String, bool)> {
+    let model = peet_io::document::open(&std::fs::read(path).unwrap())
+        .unwrap()
+        .model;
+    model
+        .assembly()
+        .unwrap()
+        .definitions()
+        .filter_map(|d| d.link.as_ref().map(|l| (l.path.clone(), l.relative)))
+        .collect()
+}
+
+#[test]
+fn links_are_relative_to_the_assemblys_folder() {
+    let dir = temp("relative");
+    let (made, pin) = plate_and_pin(&dir);
+    // A job folder with the assembly in one folder and its parts in another.
+    let job = dir.join("job");
+    std::fs::create_dir_all(job.join("asm")).unwrap();
+    std::fs::create_dir_all(job.join("parts")).unwrap();
+    let plate = job.join("parts").join("plate.peet");
+    std::fs::rename(&made, &plate).unwrap();
+    let file = job.join("asm").join("stack.peet");
+
+    // Linked before the assembly has a file: there is nothing to be relative to yet.
+    let mut doc = assembly();
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "link": true}),
+    );
+    let before = ok(&mut doc, json!({"op": "components"}));
+    assert!(std::path::Path::new(before["parts"][0]["link"].as_str().unwrap()).is_absolute());
+    // Saved, the link is written from the assembly's folder; an absolute one as it is.
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "link": true, "absolute": true, "at": [80, 0, 0]}),
+    );
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let pin_full = std::path::absolute(&pin)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        links_in_file(&file),
+        [
+            ("../parts/plate.peet".to_owned(), true),
+            (pin_full.clone(), false)
+        ]
+    );
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(listed["parts"][0]["link"], "../parts/plate.peet");
+    assert_eq!(listed["parts"][1]["link"], pin_full);
+    assert_eq!(listed["parts"][0]["link_status"], "current");
+    assert!(!doc.is_modified());
+
+    // Opened again it is the same assembly, and not changed by being opened.
+    let mut again = Document::default();
+    let reply = ok(&mut again, json!({"op": "open", "path": file}));
+    assert!(
+        reply.get("warnings").is_none() && reply.get("updated").is_none(),
+        "{reply}"
+    );
+    assert_eq!(again.model, doc.model);
+    assert!(!again.is_modified());
+
+    // The whole job copied elsewhere: the copy's assembly follows the copy's parts, not
+    // the originals, though the full path stays where it pointed.
+    let copy = dir.join("backup");
+    for folder in ["asm", "parts"] {
+        std::fs::create_dir_all(copy.join(folder)).unwrap();
+    }
+    std::fs::copy(&file, copy.join("asm").join("stack.peet")).unwrap();
+    std::fs::copy(&plate, copy.join("parts").join("plate.peet")).unwrap();
+    set_depth(
+        &copy.join("parts").join("plate.peet").to_string_lossy(),
+        11.0,
+    );
+    let mut copied = Document::default();
+    let reply = ok(
+        &mut copied,
+        json!({"op": "open", "path": copy.join("asm").join("stack.peet")}),
+    );
+    assert_eq!(reply["updated"], json!(["plate"]));
+    assert_eq!(top_of(&mut copied, 0), 11.0);
+    let parts = ok(&mut copied, json!({"op": "components"}));
+    assert!(
+        parts["parts"][0]["link_file"]
+            .as_str()
+            .unwrap()
+            .contains("backup"),
+        "{parts}"
+    );
+    assert_eq!(parts["parts"][1]["link_file"], pin_full);
+    assert_eq!(top_of(&mut doc, 0), 5.0, "the original is as it was");
+
+    // Saved somewhere else, the assembly still means the same part files: its relative
+    // link is written from the new place.
+    let elsewhere = dir.join("stack-copy.peet");
+    ok(&mut doc, json!({"op": "save", "path": elsewhere}));
+    assert_eq!(links_in_file(&elsewhere)[0].0, "job/parts/plate.peet");
+    let mut moved = Document::default();
+    ok(&mut moved, json!({"op": "open", "path": elsewhere}));
+    assert_eq!(moved.model, doc.model);
+
+    // A part of the assembly's own, linked: relative by default, or a full path.
+    ok(
+        &mut doc,
+        json!({"op": "insert", "sample": "bracket", "at": [0, 100, 0]}),
+    );
+    let out = dir.join("bracket.peet");
+    ok(
+        &mut doc,
+        json!({"op": "link", "part": "Bracket", "path": out}),
+    );
+    ok(&mut doc, json!({"op": "save"}));
+    assert_eq!(
+        links_in_file(&elsewhere)[2],
+        ("bracket.peet".to_owned(), true)
+    );
+    ok(&mut doc, json!({"op": "unlink", "part": "Bracket"}));
+    ok(
+        &mut doc,
+        json!({"op": "link", "part": "Bracket", "path": out, "absolute": true}),
+    );
+    ok(&mut doc, json!({"op": "save"}));
+    assert!(!links_in_file(&elsewhere)[2].1);
+    let e = error(
+        &mut doc,
+        json!({"op": "insert", "sample": "bracket", "absolute": true}),
+    );
+    assert!(e.contains("\"link\": true"), "{e}");
     std::fs::remove_dir_all(dir).ok();
 }

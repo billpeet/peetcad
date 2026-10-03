@@ -119,6 +119,8 @@ pub enum CommandId {
     NewAssembly,
     InsertComponent,
     EditComponent,
+    InsertLinkedComponent,
+    UpdateLinks,
     MateCoincident,
     MateConcentric,
     MateParallel,
@@ -153,7 +155,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 116] = [
+    pub const ALL: [Self; 118] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -264,6 +266,8 @@ impl CommandId {
         Self::NewAssembly,
         Self::InsertComponent,
         Self::EditComponent,
+        Self::InsertLinkedComponent,
+        Self::UpdateLinks,
         Self::MateCoincident,
         Self::MateConcentric,
         Self::MateParallel,
@@ -874,6 +878,18 @@ impl CommandId {
                 "Edit Part",
                 "Assembly",
                 "Open the selected component's part as a document of its own. Saving it stores it back in the assembly, for every component of that part.",
+                None,
+            ),
+            Self::InsertLinkedComponent => (
+                "Insert Linked Part…",
+                "Assembly",
+                "Add a part from a .peet file as a component that follows the file: the assembly reads the part from it whenever it is opened, so a change to the part reaches every assembly that links to it. Not in the browser.",
+                None,
+            ),
+            Self::UpdateLinks => (
+                "Update Linked Parts",
+                "Assembly",
+                "Read the assembly's linked parts from their files again.",
                 None,
             ),
             Self::MateCoincident => (

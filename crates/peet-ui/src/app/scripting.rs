@@ -37,7 +37,8 @@ pub fn coverage(cmd: CommandId) -> Coverage {
         C::Undo => Op("undo"),
         C::Redo => Op("redo"),
         C::NewDocument | C::NewAssembly => Op("new"),
-        C::InsertComponent => Op("insert"),
+        C::InsertComponent | C::InsertLinkedComponent => Op("insert"),
+        C::UpdateLinks => Op("update_links"),
         C::EditComponent => Op("open_component"),
         C::MateCoincident
         | C::MateConcentric
