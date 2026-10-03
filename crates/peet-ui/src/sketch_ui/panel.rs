@@ -460,13 +460,21 @@ impl SketchEditor {
             .fixed_pos(pos)
             .show(ui.ctx(), |ui| {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
-                    let r = ui.add(
-                        egui::TextEdit::singleline(&mut edit.text)
-                            .desired_width(120.0)
-                            .font(egui::TextStyle::Monospace),
-                    );
+                    let out = egui::TextEdit::singleline(&mut edit.text)
+                        .desired_width(120.0)
+                        .font(egui::TextStyle::Monospace)
+                        .show(ui);
+                    let r = out.response.clone();
                     if edit.focus {
+                        // Select the whole value so typing replaces it straight away.
                         r.request_focus();
+                        let mut state = out.state;
+                        state
+                            .cursor
+                            .set_char_range(Some(egui::text::CCursorRange::select_all(
+                                &out.galley,
+                            )));
+                        state.store(ui.ctx(), r.id);
                         edit.focus = false;
                     }
                     if r.lost_focus() {

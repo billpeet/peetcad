@@ -31,7 +31,6 @@ struct OpenWindows {
     settings: bool,
     shortcuts: bool,
     about: bool,
-    plane_picker: bool,
     parameters: bool,
     bend_table: bool,
 }
@@ -75,6 +74,8 @@ pub struct PeetApp {
     selected_geom: Vec<GeomRef>,
     /// A feature reference waiting to be clicked in the viewport.
     picking: Option<(FeatureId, Slot)>,
+    /// New Sketch is waiting for a face or plane to be clicked.
+    picking_sketch_plane: bool,
     /// Last message for the status bar, and whether it is an error.
     status_message: Option<(String, bool)>,
     files: FileState,
@@ -148,6 +149,7 @@ impl PeetApp {
             hovered_geom: None,
             selected_geom: Vec::new(),
             picking: None,
+            picking_sketch_plane: false,
             status_message: None,
             files: FileState::default(),
             quit_requested: false,
@@ -222,6 +224,7 @@ impl PeetApp {
         self.selected_geom.clear();
         self.hovered_geom = None;
         self.picking = None;
+        self.picking_sketch_plane = false;
         self.initial_fit_done = false;
     }
 
@@ -321,6 +324,38 @@ impl PeetApp {
         }
     }
 
+    /// Starts a sketch on what was clicked while New Sketch was waiting for a plane.
+    fn finish_sketch_plane_pick(&mut self, geom: Option<GeomRef>, plane: Option<ItemId>) {
+        let target = match (geom, plane) {
+            (Some(GeomRef::Face { body, face }), _) => {
+                let Some(b) = self.doc.bodies.get(body).map(|b| &b.source) else {
+                    return;
+                };
+                match peet_model::face_sketch_plane(&b.solid, face) {
+                    Some(placement) => Some((PlaneRef::Face(b.face_ref(face)), placement)),
+                    None => {
+                        self.error("That face is curved: click a flat face or a plane.");
+                        return;
+                    }
+                }
+            }
+            (Some(_), _) => {
+                self.error("Click a flat face or a plane, not an edge or vertex.");
+                return;
+            }
+            (None, Some(item)) => self
+                .doc
+                .plane_ref_of_item(item)
+                .zip(self.doc.resolve_plane(item)),
+            (None, None) => None,
+        };
+        if let Some((plane, placement)) = target {
+            self.picking_sketch_plane = false;
+            self.status_message = None;
+            self.new_sketch(plane, placement);
+        }
+    }
+
     // ---- Sketches ----
 
     /// Opens a sketch for editing and turns the view to look straight at it.
@@ -409,6 +444,38 @@ impl PeetApp {
         });
         self.selected = id.map(ItemId::Feature);
         self.selected_geom.clear();
+        if let Some(e) = id
+            .and_then(|id| self.doc.feature(id))
+            .and_then(|f| f.extrude())
+        {
+            let (sketch, dir) = (e.sketch, e.params.direction());
+            self.show_in_3d(sketch, dir);
+        }
+    }
+
+    /// Turns the view to a 3D one that shows a sketch-based feature from the side its
+    /// material goes to (`dir`: +1 along the sketch normal, −1 against it), framing
+    /// everything.
+    fn show_in_3d(&mut self, sketch: FeatureId, dir: f64) {
+        let Some((plane, _)) = self.doc.sketch_placement(sketch) else {
+            return;
+        };
+        // The isometric view, mirrored to the side the material goes to, so the view looks
+        // at the new feature rather than from behind the sketch.
+        let iso = DVec3::new(1.0, -1.0, 1.0);
+        let out = plane.normal() * dir;
+        let from = if iso.dot(out) >= 0.0 {
+            iso
+        } else {
+            let n = out.normalize();
+            iso - n * (2.0 * iso.dot(n))
+        };
+        let bounds = self.doc.visible_bounds();
+        let animate = self.settings.animate_views;
+        if let Some(vp) = &mut self.viewport {
+            vp.set_rotation(peet_render::camera::rotation_looking_from(from), animate);
+            vp.zoom_to_fit(&bounds, animate);
+        }
     }
 
     /// Whether a sketch lies on a face of a sheet metal body.
@@ -444,6 +511,23 @@ impl PeetApp {
         });
         self.selected = id.map(ItemId::Feature);
         self.selected_geom.clear();
+        if let Some(id) = id {
+            // Look from the side the sheet ended up on: thickness or depth, depending on
+            // whether the profile is closed or open.
+            let side = self.doc.sketch_placement(sketch).and_then(|(plane, _)| {
+                let body = self
+                    .doc
+                    .evaluation()
+                    .bodies
+                    .iter()
+                    .find(|b| b.origin == id)?;
+                let off = plane
+                    .normal()
+                    .dot(body.solid.bounds().center() - plane.origin());
+                (off.abs() > 1e-6).then(|| off.signum())
+            });
+            self.show_in_3d(sketch, side.unwrap_or(1.0));
+        }
     }
 
     /// Adds an edge flange on each selected sheet metal edge, or one waiting for a pick.
@@ -850,7 +934,14 @@ impl PeetApp {
             CommandId::ExportDxf => self.export_dxf(),
             CommandId::NewSketch => match self.selected_plane() {
                 Some((plane, placement)) => self.new_sketch(plane, placement),
-                None => self.windows.plane_picker = true,
+                None => {
+                    self.close_sketch();
+                    self.picking = None;
+                    self.picking_sketch_plane = true;
+                    self.selected = None;
+                    self.selected_geom.clear();
+                    self.status_message = None;
+                }
             },
             CommandId::EditSketch => {
                 if let Some(id) = self.selected_sketch() {
@@ -959,6 +1050,13 @@ impl PeetApp {
         for action in actions {
             match action {
                 TreeAction::Select(item) => {
+                    if self.picking_sketch_plane
+                        && let Some(item) = item
+                        && self.doc.plane_ref_of_item(item).is_some()
+                    {
+                        self.finish_sketch_plane_pick(None, Some(item));
+                        continue;
+                    }
                     // While picking, clicking a plane in the tree picks it.
                     if self.picking.is_some()
                         && let Some(item) = item
@@ -1376,7 +1474,12 @@ impl PeetApp {
         ui.horizontal(|ui| {
             // A body that can't be displayed is a bug, but must not go unnoticed.
             let display_error = self.doc.bodies.iter().find_map(|b| b.error.as_deref());
-            if let Some((_, slot)) = self.picking {
+            if self.picking_sketch_plane {
+                ui.colored_label(
+                    PICKING,
+                    "New Sketch: click a flat face or a plane to sketch on. Esc to cancel.",
+                );
+            } else if let Some((_, slot)) = self.picking {
                 ui.colored_label(PICKING, format!("{} Esc to cancel.", slot.prompt()));
             } else if let Some(e) = display_error {
                 ui.colored_label(ERROR, format!("A body can't be displayed: {e}"));
@@ -1876,30 +1979,6 @@ impl PeetApp {
         command
     }
 
-    fn plane_picker_window(&mut self, ctx: &egui::Context) {
-        let mut open = self.windows.plane_picker;
-        let mut picked = None;
-        egui::Window::new("New Sketch")
-            .open(&mut open)
-            .collapsible(false)
-            .resizable(false)
-            .show(ctx, |ui| {
-                ui.label("Choose the plane to sketch on:");
-                ui.horizontal(|ui| {
-                    for plane in StdPlane::ALL {
-                        if ui.button(plane.label()).clicked() {
-                            picked = Some(plane);
-                        }
-                    }
-                });
-                ui.weak("Tip: select a plane or a flat face first to skip this step.");
-            });
-        self.windows.plane_picker = open && picked.is_none();
-        if let Some(plane) = picked {
-            self.new_sketch(PlaneRef::Standard(plane), plane.plane());
-        }
-    }
-
     fn parameters_window(&mut self, ctx: &egui::Context) {
         let mut open = self.windows.parameters;
         let mut params = self.doc.model.parameters.clone();
@@ -2395,6 +2474,94 @@ fn flange_handle(
     }
 }
 
+/// An arrow on the selected extrusion showing which way and how far it goes.
+fn extrude_arrow(ui: &Ui, viewport: &Viewport, doc: &Document, selected: Option<ItemId>) {
+    let Some(ItemId::Feature(id)) = selected else {
+        return;
+    };
+    let Some(e) = doc.feature(id).and_then(|f| f.extrude()) else {
+        return;
+    };
+    let Some((plane, _)) = doc.sketch_placement(e.sketch) else {
+        return;
+    };
+    let Some(sketch) = doc.model.sketch(e.sketch) else {
+        return;
+    };
+    let p = &e.params;
+    let sketch_box = crate::document::sketch_bounds(&plane, &sketch.sketch);
+    let base = if sketch_box.is_empty() {
+        plane.origin()
+    } else {
+        sketch_box.center()
+    };
+    let units = doc.model.parameters.units;
+    let depth = p
+        .depth
+        .evaluate(ScalarKind::Length, &doc.model.parameters)
+        .unwrap_or(p.depth.value);
+    let wpp = viewport.world_per_point();
+    let normal = plane.normal() * p.direction();
+    // (start, end, label) of each arrow, in model space.
+    let fixed = wpp * 60.0;
+    let arrows: Vec<(DVec3, DVec3, String)> = match &p.end {
+        peet_model::EndCondition::Blind => {
+            vec![(base, base + normal * depth, units.format_length(depth))]
+        }
+        peet_model::EndCondition::Symmetric => vec![
+            (
+                base,
+                base + normal * depth * 0.5,
+                units.format_length(depth),
+            ),
+            (base, base - normal * depth * 0.5, String::new()),
+        ],
+        other => vec![(base, base + normal * fixed, other.label().to_owned())],
+    };
+    let scene = doc.visible_body_bounds();
+    let color = if p.operation == peet_model::Operation::Cut {
+        egui::Color32::from_rgb(230, 70, 60)
+    } else {
+        egui::Color32::from_rgb(255, 150, 30)
+    };
+    let painter = ui.painter();
+    let stroke = egui::Stroke::new(2.5, color);
+    for (from, to, label) in arrows {
+        let (Some(a), Some(b)) = (viewport.project(from, &scene), viewport.project(to, &scene))
+        else {
+            continue;
+        };
+        painter.circle_filled(a, 3.5, color);
+        let len = a.distance(b);
+        if len < 4.0 {
+            // Looking straight along the extrusion: a target mark instead.
+            painter.circle_stroke(a, 9.0, stroke);
+            continue;
+        }
+        let dir = (b - a) / len;
+        let side = egui::vec2(-dir.y, dir.x);
+        // Keep the head a readable size even when the arrow is short on screen.
+        let head = 14.0_f32.min(len * 0.6).max(8.0);
+        let tip = b;
+        let neck = tip - dir * head;
+        painter.line_segment([a, neck], stroke);
+        painter.add(egui::Shape::convex_polygon(
+            vec![tip, neck + side * head * 0.45, neck - side * head * 0.45],
+            color,
+            egui::Stroke::NONE,
+        ));
+        if !label.is_empty() {
+            let at = tip + dir * 8.0;
+            let align = if dir.x >= 0.0 {
+                egui::Align2::LEFT_CENTER
+            } else {
+                egui::Align2::RIGHT_CENTER
+            };
+            painter.text(at, align, &label, egui::FontId::proportional(13.0), color);
+        }
+    }
+}
+
 /// A menu entry for a command, with its shortcut. Returns true if clicked.
 fn menu_button(ui: &mut Ui, cmd: CommandId, state: CommandState) -> bool {
     let info = cmd.info();
@@ -2454,8 +2621,11 @@ impl eframe::App for PeetApp {
         }
 
         let mut pending = self.shortcut_commands(&ctx);
-        if self.picking.is_some() && ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+        if (self.picking.is_some() || self.picking_sketch_plane)
+            && ctx.input(|i| i.key_pressed(egui::Key::Escape))
+        {
             self.picking = None;
+            self.picking_sketch_plane = false;
         }
         self.hovered = None;
 
@@ -2483,6 +2653,7 @@ impl eframe::App for PeetApp {
 
         let dark = ctx.theme() == egui::Theme::Dark;
         let mut pick_click = None;
+        let mut sketch_plane_click = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let (Some(viewport), Some(render_state)) = (&mut self.viewport, &self.render_state) else {
                 ui.centered_and_justified(|ui| {
@@ -2502,10 +2673,14 @@ impl eframe::App for PeetApp {
                     editing_sketch: self.sketch.as_ref().map(|e| e.item),
                     hovered_geom: if self.sketch.is_some() { None } else { self.hovered_geom },
                     selected_geom: &self.selected_geom,
+                    show_std_planes: self.picking_sketch_plane,
                 },
             );
             self.hovered_geom = viewport.hovered_geom;
-            let handles = self.sketch.is_none() && self.picking.is_none() && !self.doc.is_flat();
+            let handles = self.sketch.is_none()
+                && self.picking.is_none()
+                && !self.picking_sketch_plane
+                && !self.doc.is_flat();
             flange_handle(
                 ui,
                 viewport,
@@ -2513,13 +2688,16 @@ impl eframe::App for PeetApp {
                 self.selected.filter(|_| handles),
                 &mut self.flange_drag,
             );
+            extrude_arrow(ui, viewport, &self.doc, self.selected.filter(|_| handles));
             if let (Some(editor), Some(work)) = (&mut self.sketch, &mut self.sketch_work) {
                 if let Some(response) = &events.response {
                     editor.show(ui, response, &viewport.camera, work, &self.doc.model.parameters, dark);
                 }
             } else if events.clicked_background {
                 let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
-                if self.picking.is_some() {
+                if self.picking_sketch_plane {
+                    sketch_plane_click = Some((events.clicked_geom, events.clicked_plane));
+                } else if self.picking.is_some() {
                     pick_click = Some((events.clicked_geom, events.clicked_plane));
                 } else if let Some(g) = events.clicked_geom {
                     self.selected = None;
@@ -2565,10 +2743,12 @@ impl eframe::App for PeetApp {
             let picked = self.picked(geom, plane);
             self.finish_pick(picked);
         }
+        if let Some((geom, plane)) = sketch_plane_click {
+            self.finish_sketch_plane_pick(geom, plane);
+        }
         self.settings_window(&ctx);
         self.shortcuts_window(&ctx);
         self.about_window(&ctx);
-        self.plane_picker_window(&ctx);
         self.parameters_window(&ctx);
         if let Some(cmd) = self.bend_table_window(&ctx) {
             pending.push(cmd);

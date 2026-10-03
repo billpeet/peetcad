@@ -44,6 +44,8 @@ pub struct ViewportParams<'a> {
     /// Body face or edge under the cursor / selected, highlighted in the view.
     pub hovered_geom: Option<GeomRef>,
     pub selected_geom: &'a [GeomRef],
+    /// Show the standard planes even if hidden (while picking a plane to sketch on).
+    pub show_std_planes: bool,
 }
 
 pub struct Viewport {
@@ -538,7 +540,8 @@ impl Viewport {
 
         for datum in Datum::ALL {
             let item = ItemId::Datum(datum);
-            if !doc.model.datum_visible(datum) {
+            let forced = params.show_std_planes && matches!(datum, Datum::Plane(_));
+            if !doc.model.datum_visible(datum) && !forced {
                 continue;
             }
             let hi = highlighted(item);
@@ -667,7 +670,7 @@ impl Viewport {
         let ray = self.camera.ray(ndc(rect, p), self.aspect());
         let doc = params.document;
         let datums = Datum::ALL.into_iter().filter_map(|d| match d {
-            Datum::Plane(p) if doc.model.datum_visible(d) => {
+            Datum::Plane(p) if doc.model.datum_visible(d) || params.show_std_planes => {
                 Some((ItemId::Datum(d), p.plane(), 1.0))
             }
             _ => None,
