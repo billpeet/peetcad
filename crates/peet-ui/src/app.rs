@@ -28,6 +28,7 @@ use crate::solid_ui;
 use crate::tree::{TreeAction, TreeView, tree_ui};
 use crate::viewport::{Viewport, ViewportParams};
 
+mod assembly;
 mod convert;
 pub mod scripting;
 mod solids;
@@ -130,6 +131,13 @@ pub struct PeetApp {
     step_import: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
     /// A message to read and dismiss (what an import left out, or why it failed).
     notice: Option<solids::Notice>,
+    /// In an assembly: the selected component, and the one under the cursor this frame.
+    selected_component: Option<peet_model::CompId>,
+    hovered_component: Option<peet_model::CompId>,
+    /// A component's name while it is being typed in its properties.
+    component_name: Option<(peet_model::CompId, String)>,
+    /// The file dialog of Insert Part, waiting for an answer.
+    inserting: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
 }
 
 impl PeetApp {
@@ -191,6 +199,10 @@ impl PeetApp {
             settings,
             applied_theme: None,
             doc: Session::default(),
+            selected_component: None,
+            hovered_component: None,
+            component_name: None,
+            inserting: None,
             selected: None,
             hovered: None,
             render_state,
@@ -286,6 +298,9 @@ impl PeetApp {
         self.picking = None;
         self.picking_sketch_plane = false;
         self.initial_fit_done = false;
+        self.selected_component = None;
+        self.hovered_component = None;
+        self.component_name = None;
     }
 
     /// A tab per open document, shown while more than one is open: click to work on a
@@ -885,7 +900,16 @@ impl PeetApp {
                 self.perform(Op::New {
                     discard: true,
                     keep: false,
+                    assembly: false,
                 });
+            }
+            AfterDiscard::NewAssembly => {
+                self.perform(Op::New {
+                    discard: true,
+                    keep: false,
+                    assembly: true,
+                });
+                self.info("A new assembly. Insert Part (on the File tab) adds a part to it.");
             }
             AfterDiscard::Open => {
                 self.files.opening = Some(peet_platform::open_file(files::FILTER));
@@ -932,6 +956,21 @@ impl PeetApp {
 
     fn save(&mut self, save_as: bool) {
         self.close_sketch();
+        // A part opened from an assembly is saved by storing it back there.
+        if self.doc.embedded.is_some() {
+            let reply = self.perform(Op::Save {
+                path: None,
+                caches: self.settings.save_caches,
+            });
+            if let (Some(part), Some(assembly)) =
+                (reply.json["stored"].as_str(), reply.json["in"].as_str())
+            {
+                self.info(format!(
+                    "Stored {part} in {assembly}. Save the assembly to write it to its file."
+                ));
+            }
+            return;
+        }
         let bytes = match self.doc.save_bytes(self.settings.save_caches) {
             Ok(b) => b,
             Err(e) => return self.error(format!("Couldn't save: {e}")),
@@ -1024,7 +1063,37 @@ impl PeetApp {
             };
         }
         let in_sketch = self.sketch.is_some();
+        // A part's commands are off in an assembly, and an assembly's in a part.
+        let is_assembly = self.doc.is_assembly();
+        if (is_assembly && !assembly::works_in_assembly(cmd))
+            || (!is_assembly && assembly::needs_assembly(cmd))
+        {
+            return CommandState {
+                enabled: false,
+                checked: None,
+            };
+        }
+        if is_assembly {
+            match cmd {
+                CommandId::DeleteSelection => {
+                    return enabled(self.selected_component().is_some());
+                }
+                CommandId::ToggleSuppress => {
+                    let selected = self
+                        .selected_component()
+                        .and_then(|id| self.doc.model.assembly()?.component(id));
+                    return CommandState {
+                        enabled: selected.is_some(),
+                        checked: Some(selected.is_some_and(|c| c.suppressed)),
+                    };
+                }
+                _ => {}
+            }
+        }
         match cmd {
+            CommandId::NewAssembly => enabled(true),
+            CommandId::InsertComponent => enabled(self.inserting.is_none()),
+            CommandId::EditComponent => enabled(self.selected_component().is_some()),
             CommandId::Undo => enabled(self.doc.can_undo()),
             CommandId::Redo => enabled(self.doc.can_redo()),
             CommandId::NewSketch => enabled(!in_sketch),
@@ -1223,6 +1292,23 @@ impl PeetApp {
             }
             CommandId::ExitSketch => self.close_sketch(),
             CommandId::Parameters => self.windows.parameters = true,
+            CommandId::NewAssembly => self.guard_unsaved(AfterDiscard::NewAssembly),
+            CommandId::InsertComponent => self.start_insert_component(),
+            CommandId::EditComponent => self.open_selected_component(),
+            CommandId::DeleteSelection if self.doc.is_assembly() => {
+                if let Some(id) = self.selected_component() {
+                    self.change_component(id, peet_ops::ComponentChange::Delete);
+                }
+            }
+            CommandId::ToggleSuppress if self.doc.is_assembly() => {
+                if let Some(c) = self
+                    .selected_component()
+                    .and_then(|id| self.doc.model.assembly()?.component(id))
+                {
+                    let (id, on) = (c.id, !c.suppressed);
+                    self.change_component(id, peet_ops::ComponentChange::Suppress(on));
+                }
+            }
             CommandId::DeleteSelection => {
                 if let Some(id) = self.selected_feature() {
                     let name = self.doc.model.name_of(id).to_owned();
@@ -1592,6 +1678,17 @@ impl PeetApp {
                                 ribbon::stack(ui, |ui| {
                                     tool(ui, pending, CommandId::SaveDocumentAs, "Save As", Small);
                                 });
+                            });
+                            ribbon::group(ui, "Assembly", |ui| {
+                                tool(ui, pending, CommandId::NewAssembly, "New", Large);
+                                tool(
+                                    ui,
+                                    pending,
+                                    CommandId::InsertComponent,
+                                    "Insert Part",
+                                    Large,
+                                );
+                                tool(ui, pending, CommandId::EditComponent, "Edit Part", Large);
                             });
                             ribbon::group(ui, "Samples", |ui| {
                                 ribbon::stack(ui, |ui| {
@@ -2062,6 +2159,10 @@ impl PeetApp {
             }
         });
         ui.separator();
+        if self.doc.is_assembly() {
+            egui::ScrollArea::vertical().show(ui, |ui| self.assembly_tree(ui));
+            return;
+        }
         let view = TreeView {
             selected: self.selected,
             editing: self.sketch.as_ref().map(|e| e.item),
@@ -2103,6 +2204,14 @@ impl PeetApp {
         }
         ui.strong("Properties");
         ui.separator();
+        if let Some(id) = self.selected_component() {
+            egui::ScrollArea::vertical().show(ui, |ui| self.component_properties(ui, id));
+            return;
+        }
+        if self.doc.is_assembly() {
+            ui.weak("Select a component, in the tree or in the view, to see where it is and to move it.");
+            return;
+        }
         if let Some(ItemId::Feature(id)) = self.selected {
             egui::ScrollArea::vertical().show(ui, |ui| self.feature_properties(ui, id, pending));
             return;
@@ -3154,6 +3263,7 @@ impl eframe::App for PeetApp {
         self.apply_theme(&ctx);
         self.poll_files(&ctx);
         self.poll_imports(&ctx);
+        self.poll_insert();
         // A part opened with cached bodies was shown last frame; now build it for real.
         if self.doc.finish_loading() {
             ctx.request_repaint();
@@ -3227,12 +3337,28 @@ impl eframe::App for PeetApp {
                     hovered: self.hovered,
                     dark,
                     editing_sketch: self.sketch.as_ref().map(|e| e.item),
-                    hovered_geom: if self.sketch.is_some() { None } else { self.hovered_geom },
+                    // In an assembly a click picks a component, not a face of it.
+                    hovered_geom: if self.sketch.is_some() || self.doc.is_assembly() {
+                        None
+                    } else {
+                        self.hovered_geom
+                    },
                     selected_geom: &self.selected_geom,
                     show_std_planes: self.picking_sketch_plane,
+                    selected_component: self.selected_component,
+                    hovered_component: self.hovered_component,
                 },
             );
             self.hovered_geom = viewport.hovered_geom;
+            let component_at = |geom: Option<GeomRef>| {
+                geom.and_then(|g| self.doc.placed.get(g.body())?.component())
+            };
+            self.hovered_component = component_at(viewport.hovered_geom);
+            if self.doc.is_assembly() && events.clicked_background {
+                self.selected_component = component_at(events.clicked_geom);
+                self.selected = None;
+                self.selected_geom.clear();
+            }
             let handles = self.sketch.is_none()
                 && self.picking.is_none()
                 && !self.picking_sketch_plane
@@ -3249,7 +3375,7 @@ impl eframe::App for PeetApp {
                 if let Some(response) = &events.response {
                     editor.show(ui, response, &viewport.camera, work, &self.doc.model.parameters, dark);
                 }
-            } else if events.clicked_background {
+            } else if events.clicked_background && !self.doc.is_assembly() {
                 let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
                 if self.picking_sketch_plane {
                     sketch_plane_click = Some((events.clicked_geom, events.clicked_plane));
@@ -3576,8 +3702,7 @@ impl PeetApp {
     }
 
     fn export_step(&mut self) {
-        let bodies = self.doc.evaluation().bodies.clone();
-        if bodies.is_empty() {
+        if self.doc.bodies.is_empty() {
             self.error("There are no bodies to export.");
             return;
         }
@@ -3599,10 +3724,10 @@ impl PeetApp {
         ) {
             Ok(peet_platform::SaveOutcome::Saved(to)) => self.info(format!(
                 "Exported {} as STEP (AP214) to {to}",
-                if bodies.len() == 1 {
+                if self.doc.bodies.len() == 1 {
                     "the body".to_owned()
                 } else {
-                    format!("{} bodies", bodies.len())
+                    format!("{} bodies", self.doc.bodies.len())
                 }
             )),
             Ok(peet_platform::SaveOutcome::Cancelled) => {}

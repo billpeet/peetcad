@@ -35,8 +35,10 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 ///   in face names. Earlier caches decode unchanged.
 /// - Model 5 (Phase 7): the part's material and colour, which are new fields of the model
 ///   itself. Models up to version 4 are read as [`peet_model::ModelV4`] and converted.
+/// - Model 6 (Phase 7): assemblies. A model can hold an assembly: its parts (each a whole
+///   model) and its components. Version 5 models are read as [`peet_model::ModelV5`].
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 5;
+pub const MODEL_SCHEMA: u16 = 6;
 pub const BREP_SCHEMA: u16 = 4;
 pub const MESH_SCHEMA: u16 = 1;
 
@@ -148,10 +150,14 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
     check_schema(&r, SectionKind::METADATA, METADATA_SCHEMA)?;
     check_schema(&r, SectionKind::MODEL, MODEL_SCHEMA)?;
     let metadata: Metadata = r.read(SectionKind::METADATA)?.unwrap_or_default();
-    // Before version 5 a model had no material or colour (see `MODEL_SCHEMA`).
+    // Before version 5 a model had no material or colour, and before version 6 no
+    // assembly (see `MODEL_SCHEMA`).
     let model = match r.schema_version(SectionKind::MODEL) {
         Some(v) if v < 5 => r
             .read::<peet_model::ModelV4>(SectionKind::MODEL)?
+            .map(Model::from),
+        Some(5) => r
+            .read::<peet_model::ModelV5>(SectionKind::MODEL)?
             .map(Model::from),
         _ => r.read(SectionKind::MODEL)?,
     };
@@ -343,6 +349,11 @@ mod tests {
         // The new fields are saved, and a file with them is not read as an old one.
         model.material = Some(peet_model::Material::new("Mild steel", 7850.0).unwrap());
         model.color = Some([200, 40, 40]);
+        // As version 5 wrote it: with them, before assemblies.
+        let mut w = Writer::new();
+        w.section(SectionKind::MODEL, 5, &peet_model::ModelV5::of(&model))
+            .unwrap();
+        assert_eq!(open(&w.finish()).unwrap().model, model);
         let new = save(&model, &Metadata::default(), None).unwrap();
         assert_eq!(open(&new).unwrap().model, model);
         let text = to_text(&new).unwrap();
@@ -360,6 +371,47 @@ mod tests {
             );
         assert!(without.len() < old_text.len());
         assert!(from_text(&without).is_ok());
+    }
+
+    #[test]
+    fn an_assembly_is_saved_with_its_parts() {
+        use peet_math::{DVec3, Frame};
+        let mut model = Model::new_assembly();
+        {
+            let a = model.assembly_mut().unwrap();
+            let part = a.define(Arc::new(bracket().0));
+            a.insert(part, Frame::WORLD).unwrap();
+            a.insert(
+                part,
+                Frame {
+                    origin: DVec3::new(150.0, 0.0, 0.0),
+                    ..Frame::WORLD
+                },
+            )
+            .unwrap();
+        }
+        let bytes = save(&model, &Metadata::default(), None).unwrap();
+        let opened = open(&bytes).unwrap().model;
+        assert_eq!(opened, model);
+        let a = opened.assembly().unwrap();
+        assert_eq!((a.definitions().count(), a.components().count()), (1, 2));
+        // The part is in the file once.
+        let one = save(&bracket().0, &Metadata::default(), None).unwrap();
+        assert!(
+            bytes.len() < one.len() + 400,
+            "{} / {}",
+            bytes.len(),
+            one.len()
+        );
+        // And the text form round trips.
+        let text = to_text(&bytes).unwrap();
+        assert!(text.contains("Bracket-2"));
+        assert_eq!(open(&from_text(&text).unwrap()).unwrap().model, model);
+        // A file whose assembly is damaged is refused, not opened half.
+        let broken = text.replacen("definition: (1)", "definition: (7)", 1);
+        assert_ne!(broken, text);
+        let e = from_text(&broken).unwrap_err();
+        assert!(e.message.contains("not in the file"), "{e}");
     }
 
     #[test]

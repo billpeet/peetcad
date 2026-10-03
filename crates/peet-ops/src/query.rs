@@ -44,6 +44,9 @@ pub fn brief(doc: &Document, id: FeatureId) -> Value {
 
 /// Every feature that failed to build, in tree order.
 pub fn failures(doc: &Document) -> Vec<Value> {
+    if doc.is_assembly() {
+        return crate::assembly::problems(doc);
+    }
     doc.model
         .features()
         .filter(|f| doc.status(f.id).is_some_and(Status::is_failed))
@@ -478,8 +481,18 @@ pub fn status(doc: &Document) -> Value {
     if let Some(color) = doc.model.color {
         m.insert("color".to_owned(), crate::library::color_out(color));
     }
-    m.insert("features".to_owned(), json!(doc.model.len()));
-    m.insert("bodies".to_owned(), json!(doc.evaluation().bodies.len()));
+    if let Some(assembly) = doc.model.assembly() {
+        m.insert("kind".to_owned(), json!("assembly"));
+        m.insert(
+            "components".to_owned(),
+            json!(assembly.components().count()),
+        );
+        m.insert("parts".to_owned(), json!(assembly.definitions().count()));
+    } else {
+        m.insert("kind".to_owned(), json!("part"));
+        m.insert("features".to_owned(), json!(doc.model.len()));
+    }
+    m.insert("bodies".to_owned(), json!(doc.bodies.len()));
     m.insert("failures".to_owned(), json!(failures(doc)));
     if let Some(l) = doc.undo_label() {
         m.insert("undo".to_owned(), json!(l));

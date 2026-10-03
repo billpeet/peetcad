@@ -43,6 +43,7 @@
 //! - `{"op": "help"}` lists every operation and its fields.
 
 mod args;
+mod assembly;
 mod diff;
 mod export;
 mod fields;
@@ -55,6 +56,7 @@ mod session;
 pub mod sketch;
 mod value;
 
+pub use assembly::{CompSel, ComponentChange, InsertSource, Placing};
 pub use diff::{Translation, apply_model, diff};
 pub use export::export_bytes;
 pub use fields::{
@@ -121,6 +123,8 @@ struct Done {
     feature: Option<FeatureId>,
     /// A sketch whose plane and definition go in the reply.
     sketch: Option<FeatureId>,
+    /// A component the operation was about, reported with where it is and its status.
+    component: Option<peet_model::CompId>,
     data: Map<String, Value>,
 }
 
@@ -236,6 +240,20 @@ fn help() -> Map<String, Value> {
             }
         }
     }
+    for (name, fields_text, what) in assembly::ASSEMBLY_OPS {
+        // Words a feature has too (rename, delete): the component's form beside it.
+        match ops.get_mut(*name) {
+            Some(entry) => {
+                entry["component"] = json!({ "does": what, "fields": fields_text });
+            }
+            None => {
+                ops.insert(
+                    (*name).to_owned(),
+                    json!({ "does": what, "fields": fields_text, "in": "an assembly" }),
+                );
+            }
+        }
+    }
     for (name, fields_text, what) in session::SESSION_OPS {
         ops.insert(
             (*name).to_owned(),
@@ -290,6 +308,7 @@ fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, V
         Query::Checks { body } => object(query::checks(doc, *body, host.check_rules())?),
         Query::Mass { body } => object(query::mass(doc, *body)?),
         Query::Measure { a, b } => object(query::measure(doc, a, b.as_deref())?),
+        Query::Components => assembly::components(doc)?,
     })
 }
 
@@ -317,9 +336,44 @@ fn dxf_unit(unit: peet_sketch::expr::LengthUnit) -> peet_io::dxf_import::Unit {
 }
 
 fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String> {
+    if let Some(why) = assembly::wrong_kind(doc, op) {
+        return Err(why);
+    }
     let mut done = Done::default();
     let mut model = doc.model.clone();
     let label = match op {
+        Op::Insert {
+            from,
+            name,
+            placing,
+            fixed,
+        } => {
+            let (id, label) = assembly::insert(
+                doc,
+                &mut model,
+                from,
+                name.as_deref(),
+                placing.as_ref(),
+                *fixed,
+            )?;
+            done.component = Some(id);
+            label
+        }
+        Op::Component { component, change } => {
+            let id = component.resolve(doc)?;
+            let label = assembly::change(doc, &mut model, id, change)?;
+            if *change == ComponentChange::Delete {
+                done.data.insert(
+                    "deleted".to_owned(),
+                    json!([label.trim_start_matches("Delete ")]),
+                );
+            } else {
+                done.component = Some(id);
+            }
+            label
+        }
+        Op::SetPart { part, model: new } => assembly::set_part(&mut model, *part, new)?,
+        Op::OpenComponent { .. } => return Err(session::needs_session(op.word())),
         Op::Query(q) => {
             done.data = query(host, doc, q)?;
             return Ok(done);
@@ -337,9 +391,15 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 session::needs_session(op.word())
             ));
         }
-        Op::New { discard, .. } => {
+        Op::New {
+            discard, assembly, ..
+        } => {
             guard_unsaved(doc, *discard, "new")?;
-            *doc = Document::default();
+            *doc = if *assembly {
+                Document::from_model(Model::new_assembly(), None)
+            } else {
+                Document::default()
+            };
             done.replaced = true;
             return Ok(done);
         }
@@ -367,13 +427,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             sample, discard, ..
         } => {
             guard_unsaved(doc, *discard, "open_sample")?;
-            let (model, _) = match sample {
-                Sample::Bracket => peet_model::samples::bracket(),
-                Sample::Enclosure => peet_model::samples::enclosure(),
-                Sample::Chassis => peet_model::samples::chassis(),
-                Sample::Housing => peet_model::samples::housing(),
-            };
-            *doc = Document::from_model(model, None);
+            *doc = Document::from_model(sample.model(), None);
             done.replaced = true;
             return Ok(done);
         }
@@ -841,6 +895,9 @@ pub(crate) fn apply_with(
     }
     if let Some(id) = done.feature {
         out.insert("feature".to_owned(), query::brief(doc, id));
+    }
+    if let Some(id) = done.component {
+        out.insert("component".to_owned(), assembly::component_out(doc, id));
     }
     out.extend(done.data);
     if done.changed {

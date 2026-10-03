@@ -15,6 +15,11 @@
 //! and how to fix it, the bodies pass through it unchanged, and the features below still
 //! build. Features that refer to a failed one fail too, naming it.
 //!
+//! **Assemblies.** A model that is an assembly has no features. Each of its definitions
+//! is rebuilt by an engine of its own, kept here, and only if its model is another than
+//! last time; the result is a list of [`Instance`]s, one per body of each component, with
+//! the body shared between the instances of one part.
+//!
 //! **Write-back.** A sketch's solved positions and its resolved plane are stored back
 //! into the model, so a saved file opens with every sketch where it was, the solver always
 //! starts from the last solution, and a sketch whose plane is lost can still be shown.
@@ -28,6 +33,7 @@ use peet_sketch::solver::Solver;
 use peet_sketch::{Sketch, expr};
 use web_time::Instant;
 
+use crate::assembly::{CompId, DefId};
 use crate::extrude::{EndCondition, ExtrudeInput, apply_extrude};
 use crate::feature::{
     AxisDef, AxisRef, CoordSystemDef, Feature, FeatureId, FeatureKind, PatternDef, PlaneDef,
@@ -122,16 +128,46 @@ pub struct Stats {
     pub ms: f64,
 }
 
+/// One body of one component of an assembly, where it is.
+#[derive(Clone, Debug)]
+pub struct Instance {
+    /// The component, from the assembly's own down through sub-assemblies to the part's:
+    /// the first is the component of the assembly that was rebuilt.
+    pub path: Vec<CompId>,
+    /// The body, in its part's coordinates. Instances of one part share it.
+    pub body: Arc<Body>,
+    /// Where the part's coordinates are in the assembly.
+    pub frame: Frame,
+    /// The colour of the part the body belongs to.
+    pub color: Option<[u8; 3]>,
+}
+
 /// The result of a rebuild.
 #[derive(Clone, Debug, Default)]
 pub struct Evaluation {
-    /// The bodies at the rollback bar.
+    /// The bodies at the rollback bar. An assembly has none of its own: see
+    /// [`Evaluation::instances`].
     pub bodies: Vec<Arc<Body>>,
+    /// For an assembly: the bodies of its components, placed.
+    pub instances: Vec<Instance>,
     states: HashMap<FeatureId, FeatureState>,
+    components: HashMap<CompId, Status>,
     pub stats: Stats,
 }
 
 impl Evaluation {
+    /// How a component of an assembly came out.
+    pub fn component_status(&self, id: CompId) -> Option<&Status> {
+        self.components.get(&id)
+    }
+
+    /// The components that need attention, with why.
+    pub fn component_problems(&self) -> impl Iterator<Item = (CompId, &str)> {
+        self.components
+            .iter()
+            .filter_map(|(id, s)| s.message().map(|m| (*id, m)))
+    }
+
     pub fn state(&self, id: FeatureId) -> Option<&FeatureState> {
         self.states.get(&id)
     }
@@ -162,10 +198,19 @@ struct Cached {
     bodies: Option<Vec<Arc<Body>>>,
 }
 
+/// A definition of an assembly as last rebuilt.
+struct Part {
+    /// The model that was rebuilt: nothing is done while the definition still has it.
+    model: Arc<Model>,
+    engine: Engine,
+}
+
 /// Rebuilds models, remembering each feature's last result.
 #[derive(Default)]
 pub struct Engine {
     cache: HashMap<FeatureId, Cached>,
+    /// For an assembly: an engine per definition.
+    parts: HashMap<DefId, Part>,
     evaluation: Evaluation,
 }
 
@@ -182,6 +227,7 @@ impl Engine {
     /// Forgets every remembered result, so the next rebuild recomputes everything.
     pub fn clear(&mut self) {
         self.cache.clear();
+        self.parts.clear();
     }
 
     /// Rebuilds the model. Only features whose inputs changed since the last call are
@@ -236,13 +282,117 @@ impl Engine {
             }
         }
         self.cache.retain(|id, _| run.states.contains_key(id));
+        let (instances, components) = self.assemble(model, &mut run.stats);
         run.stats.ms = start.elapsed().as_secs_f64() * 1000.0;
         self.evaluation = Evaluation {
             bodies: run.bodies,
+            instances,
             states: run.states,
+            components,
             stats: run.stats,
         };
         &self.evaluation
+    }
+
+    /// Rebuilds the parts of an assembly (those whose model changed) and places their
+    /// bodies. A part's solved sketches are written back into its definition.
+    fn assemble(
+        &mut self,
+        model: &mut Model,
+        stats: &mut Stats,
+    ) -> (Vec<Instance>, HashMap<CompId, Status>) {
+        let Some(assembly) = model.assembly() else {
+            self.parts.clear();
+            return (Vec::new(), HashMap::new());
+        };
+        // ---- The definitions ----
+        let mut written = Vec::new();
+        for def in assembly.definitions() {
+            let part = self.parts.entry(def.id).or_insert_with(|| Part {
+                // A model no definition has, so the first rebuild is not skipped.
+                model: Arc::new(Model::new()),
+                engine: Self::new(),
+            });
+            if Arc::ptr_eq(&part.model, &def.model) {
+                continue;
+            }
+            let mut rebuilt = (*def.model).clone();
+            let done = part.engine.regenerate(&mut rebuilt).stats;
+            stats.rebuilt += done.rebuilt;
+            stats.reused += done.reused;
+            part.model = if rebuilt == *def.model {
+                def.model.clone()
+            } else {
+                let rebuilt = Arc::new(rebuilt);
+                written.push((def.id, rebuilt.clone()));
+                rebuilt
+            };
+        }
+        self.parts
+            .retain(|id, _| assembly.definition(*id).is_some());
+
+        // ---- The components ----
+        let mut instances = Vec::new();
+        let mut components = HashMap::new();
+        for c in assembly.components() {
+            if c.suppressed {
+                components.insert(c.id, Status::Suppressed);
+                continue;
+            }
+            let Some(part) = self.parts.get(&c.definition) else {
+                continue;
+            };
+            let built = part.engine.evaluation();
+            let before = instances.len();
+            for body in &built.bodies {
+                instances.push(Instance {
+                    path: vec![c.id],
+                    body: body.clone(),
+                    frame: c.placement,
+                    color: part.model.color,
+                });
+            }
+            // A sub-assembly's components, as one rigid thing.
+            for inner in &built.instances {
+                let mut path = Vec::with_capacity(inner.path.len() + 1);
+                path.push(c.id);
+                path.extend(&inner.path);
+                instances.push(Instance {
+                    path,
+                    body: inner.body.clone(),
+                    frame: c.placement.compose(&inner.frame),
+                    color: inner.color,
+                });
+            }
+            let name = &part.model.name;
+            let failed = built.failures().count() + built.component_problems().count();
+            let status = if failed > 0 {
+                Status::Warning(if part.model.is_assembly() {
+                    format!(
+                        "{failed} of the components of {name} need attention: open it to see which."
+                    )
+                } else if failed == 1 {
+                    format!("A feature of {name} can't be built: open the part to fix it.")
+                } else {
+                    format!(
+                        "{failed} features of {name} can't be built: open the part to fix them."
+                    )
+                })
+            } else if instances.len() == before {
+                Status::Warning(format!(
+                    "{name} has no bodies yet, so there is nothing to show."
+                ))
+            } else {
+                Status::Ok
+            };
+            components.insert(c.id, status);
+        }
+        if let Some(assembly) = model.assembly_mut() {
+            for (id, rebuilt) in written {
+                assembly.set_model(id, rebuilt);
+            }
+        }
+        (instances, components)
     }
 
     /// Builds one feature (or reuses its remembered result) and records its state.

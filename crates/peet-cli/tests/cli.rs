@@ -365,6 +365,78 @@ fn a_run_can_open_documents_beside_the_part() {
 }
 
 #[test]
+fn an_assembly_is_built_and_changed_across_calls() {
+    let dir = Folder::new("assembly");
+    let asm = dir.path("pair.peet");
+    let script = dir.write(
+        "build.jsonl",
+        r#"{"op": "new", "assembly": true}
+{"op": "insert", "sample": "bracket"}
+{"op": "insert", "component": "Bracket-1", "at": [0, 120, 0]}
+"#,
+    );
+    let ran = peet(&["run", &script, "--new", "-f", &asm]);
+    assert_eq!(ran.code, OK, "{}", ran.err);
+    assert!(model(&asm).is_assembly());
+
+    // Later calls work on the file: one operation by name, then a part changed inside.
+    let moved = peet(&["place", "component=Bracket-2", "at=[0,200,0]", "-f", &asm]);
+    assert_eq!(moved.code, OK, "{}", moved.err);
+    assert_eq!(
+        moved.replies[0]["component"]["at"],
+        json!([0.0, 200.0, 0.0])
+    );
+    let edit = dir.write(
+        "edit.jsonl",
+        r#"{"op": "open_component", "component": "Bracket-1"}
+{"op": "set_parameter", "name": "extra", "value": "2mm"}
+{"op": "save"}
+{"op": "close"}
+"#,
+    );
+    let ran = peet(&["run", &edit, "-f", &asm]);
+    assert_eq!(ran.code, OK, "{}", ran.err);
+    let saved = model(&asm);
+    let assembly = saved.assembly().unwrap();
+    assert_eq!(assembly.components().count(), 2);
+    let part = assembly.definitions().next().unwrap();
+    assert!(
+        part.model
+            .parameters
+            .entries
+            .iter()
+            .any(|p| p.name == "extra")
+    );
+    let listed = peet(&["components", "-f", &asm]);
+    assert_eq!(listed.replies[0]["components"][1]["status"], "ok");
+    assert_eq!(peet(&["status", "-f", &asm]).replies[0]["kind"], "assembly");
+
+    // A part left open with changes that were not stored is said, not lost silently.
+    let forgot = dir.write(
+        "forgot.jsonl",
+        r#"{"op": "open_component", "component": "Bracket-1"}
+{"op": "set_parameter", "name": "more", "value": "3mm"}
+"#,
+    );
+    let ran = peet(&["run", &forgot, "-f", &asm]);
+    assert_eq!(ran.code, OK);
+    assert!(
+        ran.err.contains("Bracket was changed and not saved"),
+        "{}",
+        ran.err
+    );
+    // Part operations on the assembly say what to do.
+    let wrong = peet(&["bodies", "-f", &asm]);
+    assert_eq!(wrong.code, FAILED);
+    assert!(
+        wrong.replies[0]["error"]
+            .as_str()
+            .unwrap()
+            .contains("open_component")
+    );
+}
+
+#[test]
 fn materials_come_from_a_file_for_the_run() {
     let dir = Folder::new("materials");
     let part = dir.path("panel.peet");

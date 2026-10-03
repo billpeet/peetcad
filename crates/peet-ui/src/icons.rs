@@ -202,6 +202,10 @@ impl Icon {
             C::Loft => Self::Loft,
             C::CutLoft => Self::CutLoft,
             C::ConvertToSheet => Self::ConvertToSheet,
+            // The assembly's commands borrow the icons of what they are most like.
+            C::NewAssembly => Self::NewDocument,
+            C::InsertComponent => Self::Open,
+            C::EditComponent => Self::EditSketch,
             C::CommandPalette => Self::Search,
             C::SketchSelect => Self::Select,
             C::SketchLine => Self::Line,

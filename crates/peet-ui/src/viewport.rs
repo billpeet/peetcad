@@ -46,6 +46,9 @@ pub struct ViewportParams<'a> {
     pub selected_geom: &'a [GeomRef],
     /// Show the standard planes even if hidden (while picking a plane to sketch on).
     pub show_std_planes: bool,
+    /// In an assembly: the component that is selected, and the one under the cursor.
+    pub selected_component: Option<peet_model::CompId>,
+    pub hovered_component: Option<peet_model::CompId>,
 }
 
 pub struct Viewport {
@@ -241,16 +244,39 @@ impl Viewport {
         self.build_overlay(params, wpp);
         self.body_overlay(params, wpp);
 
+        // One object per shown body, where it is. A hidden component's are left out (the
+        // pick ids stay the bodies' indices).
+        let doc = params.document;
+        let hidden = |component: Option<peet_model::CompId>| {
+            component
+                .and_then(|c| doc.model.assembly()?.component(c))
+                .is_some_and(|c| !c.visible)
+        };
         let objects: Vec<ObjectDraw> = self
             .body_meshes
             .iter()
+            .zip(&doc.placed)
             .enumerate()
-            .map(|(i, (_, mesh))| ObjectDraw {
-                mesh: *mesh,
-                transform: DMat4::IDENTITY,
-                show_edges: true,
-                highlight: 0.0,
-                pick_object: Some(i as u32),
+            .filter(|(_, (_, placed))| !hidden(placed.component()))
+            .map(|(i, ((_, mesh), placed))| {
+                let component = placed.component();
+                ObjectDraw {
+                    mesh: *mesh,
+                    transform: if placed.frame == peet_math::Frame::WORLD {
+                        DMat4::IDENTITY
+                    } else {
+                        placed.frame.to_mat4()
+                    },
+                    show_edges: true,
+                    highlight: if component.is_some() && component == params.selected_component {
+                        0.45
+                    } else if component.is_some() && component == params.hovered_component {
+                        0.2
+                    } else {
+                        0.0
+                    },
+                    pick_object: Some(i as u32),
+                }
             })
             .collect();
 
@@ -477,22 +503,26 @@ impl Viewport {
         if self.body_revision == Some(params.document.revision) {
             return;
         }
-        // GPU meshes are kept per body stamp and colour: unchanged bodies keep theirs.
-        let color = params.document.model.color;
-        let mut old: HashMap<u64, MeshId> = self.body_meshes.drain(..).collect();
-        for body in &params.document.bodies {
-            let key = body.stamp ^ crate::bodies::color_key(color);
-            let id = match old.remove(&key) {
-                Some(id) => id,
+        // GPU meshes are kept per body stamp and colour: unchanged bodies keep theirs,
+        // and the instances of one part in an assembly share one.
+        let old: HashMap<u64, MeshId> = self.body_meshes.drain(..).collect();
+        let mut kept: HashMap<u64, MeshId> = HashMap::new();
+        let doc = params.document;
+        for (body, placed) in doc.bodies.iter().zip(&doc.placed) {
+            let key = body.stamp ^ crate::bodies::color_key(placed.color);
+            let id = *kept.entry(key).or_insert_with(|| match old.get(&key) {
+                Some(id) => *id,
                 None => self.renderer.upload_mesh(
                     &params.render_state.device,
-                    &crate::bodies::to_mesh_data(body.tess(), color),
+                    &crate::bodies::to_mesh_data(body.tess(), placed.color),
                 ),
-            };
+            });
             self.body_meshes.push((key, id));
         }
-        for id in old.into_values() {
-            self.renderer.remove_mesh(id);
+        for (key, id) in old {
+            if !kept.contains_key(&key) {
+                self.renderer.remove_mesh(id);
+            }
         }
         self.body_revision = Some(params.document.revision);
     }
@@ -724,9 +754,32 @@ impl Viewport {
         } else {
             [28, 30, 36, 255]
         };
-        for body in &params.document.bodies {
-            for [a, b] in body.silhouettes().lines(view) {
-                self.overlay.line(a, b, edge_color);
+        let doc = params.document;
+        for (body, placed) in doc.bodies.iter().zip(&doc.placed) {
+            if placed
+                .component()
+                .and_then(|c| doc.model.assembly()?.component(c))
+                .is_some_and(|c| !c.visible)
+            {
+                continue;
+            }
+            // Seen from where the viewer is in the body's own coordinates.
+            let frame = &placed.frame;
+            let local = match view {
+                peet_kernel::tessellate::View::Orthographic { dir } => {
+                    peet_kernel::tessellate::View::Orthographic {
+                        dir: frame.vector_to_local(dir),
+                    }
+                }
+                peet_kernel::tessellate::View::Perspective { eye } => {
+                    peet_kernel::tessellate::View::Perspective {
+                        eye: frame.to_local(eye),
+                    }
+                }
+            };
+            for [a, b] in body.silhouettes().lines(local) {
+                self.overlay
+                    .line(frame.to_world(a), frame.to_world(b), edge_color);
             }
         }
         // Bend lines on both sides of flat patterns, dashed.
@@ -770,6 +823,11 @@ impl Viewport {
             let Some(body) = params.document.bodies.get(geom.body()) else {
                 continue;
             };
+            let frame = params
+                .document
+                .placed
+                .get(geom.body())
+                .map_or(peet_math::Frame::WORLD, |p| p.frame);
             let (fill, line): ([u8; 4], [u8; 4]) = if selected {
                 ([255, 150, 30, 110], [255, 150, 30, 255])
             } else {
@@ -783,7 +841,7 @@ impl Viewport {
                         for t in &fm.triangles {
                             for &i in t {
                                 let i = i as usize;
-                                let p = fm.positions[i] + fm.normals[i] * lift;
+                                let p = frame.to_world(fm.positions[i] + fm.normals[i] * lift);
                                 self.overlay
                                     .triangles
                                     .push(peet_render::ColorVertex::new(p, fill));
@@ -794,7 +852,8 @@ impl Viewport {
                 GeomRef::Edge { edge, .. } => {
                     if let Some(ep) = body.tess().edges.iter().find(|e| e.edge == edge) {
                         for w in ep.points.windows(2) {
-                            self.overlay.line(w[0], w[1], line);
+                            self.overlay
+                                .line(frame.to_world(w[0]), frame.to_world(w[1]), line);
                         }
                     }
                 }
@@ -804,7 +863,7 @@ impl Viewport {
                         continue;
                     };
                     let r = wpp * 5.0;
-                    let p = v.point - self.camera.forward() * (wpp * 2.0);
+                    let p = frame.to_world(v.point) - self.camera.forward() * (wpp * 2.0);
                     let (x, y) = (self.camera.right() * r, self.camera.up() * r);
                     for corner in [p + x, p + y, p - x, p + x, p - x, p - y] {
                         self.overlay

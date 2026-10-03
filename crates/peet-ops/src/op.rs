@@ -10,6 +10,7 @@ use peet_sketch::expr::LengthUnit;
 use serde_json::{Map, Value};
 
 use crate::args::{Args, boolean, integer, list, number, text};
+use crate::assembly::{CompSel, ComponentChange, InsertSource, Placing};
 use crate::fields::FeatureArgs;
 use crate::host::{AppCommand, word_enum};
 use crate::library::{CheckRule, Gauge};
@@ -28,6 +29,18 @@ word_enum! {
         Chassis = "chassis",
         /// A revolved housing with a bolt circle.
         Housing = "housing",
+    }
+}
+
+impl Sample {
+    /// The sample, built.
+    pub fn model(self) -> peet_model::Model {
+        match self {
+            Self::Bracket => peet_model::samples::bracket().0,
+            Self::Enclosure => peet_model::samples::enclosure().0,
+            Self::Chassis => peet_model::samples::chassis().0,
+            Self::Housing => peet_model::samples::housing().0,
+        }
     }
 }
 
@@ -204,6 +217,8 @@ pub enum Query {
         a: Box<GeomSel>,
         b: Option<Box<GeomSel>>,
     },
+    /// The components of an assembly, and its parts.
+    Components,
 }
 
 /// A file format to export.
@@ -355,6 +370,8 @@ pub enum Op {
     New {
         discard: bool,
         keep: bool,
+        /// An assembly, not a part.
+        assembly: bool,
     },
     /// Open a part from a `.peet` file: in place of the one that is open, or with `keep`
     /// beside it.
@@ -370,6 +387,33 @@ pub enum Op {
     },
     /// Something about the documents that are open together: list them, switch, close.
     Session(SessionCommand),
+    /// Add a component to an assembly: an instance of a part, which is copied into the
+    /// assembly (once, however many instances it has).
+    Insert {
+        from: InsertSource,
+        /// An automatic name (`Bracket-1`) if absent.
+        name: Option<String>,
+        /// At the assembly's origin, as the part is, if absent.
+        placing: Option<Placing>,
+        /// The first component of an assembly is fixed, the others are not, if absent.
+        fixed: Option<bool>,
+    },
+    /// Change a component of an assembly.
+    Component {
+        component: CompSel,
+        change: ComponentChange,
+    },
+    /// Replace the model of one of an assembly's parts: how a part that was opened from
+    /// an assembly and edited is stored back. A script saves that part instead.
+    SetPart {
+        part: peet_model::DefId,
+        model: Arc<peet_model::Model>,
+    },
+    /// Open a component's part as a document of its own (see
+    /// [`crate::apply_session`]): saving that document stores it back.
+    OpenComponent {
+        component: CompSel,
+    },
     /// Something for the application itself, not the part: it needs a running PeetCAD.
     App(AppCommand),
     Undo,
@@ -435,6 +479,10 @@ impl Op {
             Self::OpenSample { .. } => "open_sample",
             Self::App(command) => command.word(),
             Self::Session(command) => command.word(),
+            Self::Insert { .. } => "insert",
+            Self::Component { change, .. } => change.word(),
+            Self::SetPart { .. } => "set_part",
+            Self::OpenComponent { .. } => "open_component",
             Self::Undo => "undo",
             Self::Redo => "redo",
             Self::Query(q) => match q {
@@ -451,6 +499,7 @@ impl Op {
                 Query::Materials { .. } => "materials",
                 Query::Mass { .. } => "mass",
                 Query::Measure { .. } => "measure",
+                Query::Components => "components",
             },
             Self::Save { .. } => "save",
             Self::Export { .. } => "export",
@@ -710,8 +759,8 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "new",
-        "discard (default false), keep (default false)",
-        "Start a new, empty part. Refused if there are unsaved changes, unless discard is true. With keep, the part that is open stays open beside the new one.",
+        "discard (default false), keep (default false), assembly (default false)",
+        "Start a new, empty part, or with assembly an empty assembly. Refused if there are unsaved changes, unless discard is true. With keep, the document that is open stays open beside the new one.",
     ),
     (
         "open",
@@ -736,6 +785,9 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
 ];
 
 fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
+    if let Some(found) = crate::assembly::parse(op, a) {
+        return found;
+    }
     Ok(match op {
         "help" => Op::Query(Query::Help),
         "status" => Op::Query(Query::Status),
@@ -753,6 +805,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "new" => Op::New {
             discard: a.flag("discard", false)?,
             keep: a.flag("keep", false)?,
+            assembly: a.flag("assembly", false)?,
         },
         "open" => Op::Open {
             file: Source::path(path(a, "open")?),
@@ -996,6 +1049,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             ]);
             all.extend(["tool", "quit"]);
             all.extend(crate::session::SESSION_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::assembly::ASSEMBLY_OPS.iter().map(|(n, ..)| *n));
             all.sort_unstable();
             all.dedup();
             return Err(format!(

@@ -18,6 +18,8 @@ mod session;
 mod solids;
 
 pub use body::{BodyView, GeomRef, tolerance};
-pub use document::{Document, FileLocation, ItemId, Persistent, SketchStatus, sketch_bounds};
+pub use document::{
+    Document, Embedded, FileLocation, ItemId, Persistent, Placed, SketchStatus, sketch_bounds,
+};
 pub use session::{DocId, Session};
 pub use solids::{MassTotal, StepImported};

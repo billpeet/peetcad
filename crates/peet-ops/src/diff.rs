@@ -13,6 +13,7 @@ use peet_document::Document;
 use peet_model::{Datum, FeatureId, FeatureKind, Model, StdPlane};
 use peet_sketch::Sketch;
 
+use crate::assembly::{ComponentChange, InsertSource, Placing};
 use crate::fields::{FeatureArgs, SketchPlane};
 use crate::host::Host;
 use crate::op::{DatumSel, New, Op, Place, RollTo};
@@ -70,6 +71,91 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
         .eq(after.entries.iter().map(|p| p.name.as_str()))
     {
         return Err("the parameters were put in another order, which no operation does".to_owned());
+    }
+
+    // ---- An assembly's parts and components ----
+    match (old.assembly(), new.assembly()) {
+        (None, None) => {}
+        (Some(before), Some(after)) => {
+            for d in after.definitions() {
+                if before.definition(d.id).is_some_and(|o| o.model != d.model) {
+                    ops.push(Op::SetPart {
+                        part: d.id,
+                        model: d.model.clone(),
+                    });
+                }
+            }
+            let component = |c: &peet_model::Component, change| Op::Component {
+                component: c.id.into(),
+                change,
+            };
+            for c in before.components() {
+                if after.component(c.id).is_none() {
+                    ops.push(component(c, ComponentChange::Delete));
+                }
+            }
+            // New ones in the order they were made, so that they get the same ids.
+            let mut added: Vec<&peet_model::Component> = after
+                .components()
+                .filter(|c| before.component(c.id).is_none())
+                .collect();
+            added.sort_by_key(|c| c.id);
+            for c in added {
+                let part = after
+                    .definition(c.definition)
+                    .ok_or_else(|| format!("{} has no part", c.name))?;
+                ops.push(Op::Insert {
+                    from: InsertSource::Model(part.model.clone()),
+                    name: Some(c.name.clone()),
+                    placing: Some(Placing::Frame(c.placement)),
+                    fixed: Some(c.fixed),
+                });
+                if c.suppressed {
+                    ops.push(component(c, ComponentChange::Suppress(true)));
+                }
+                if !c.visible {
+                    ops.push(component(c, ComponentChange::Show(false)));
+                }
+            }
+            for c in after.components() {
+                let Some(o) = before.component(c.id) else {
+                    continue;
+                };
+                if o.definition != c.definition {
+                    let part = after
+                        .definition(c.definition)
+                        .ok_or_else(|| format!("{} has no part", c.name))?;
+                    ops.push(component(
+                        c,
+                        ComponentChange::Replace(InsertSource::Model(part.model.clone())),
+                    ));
+                }
+                if o.name != c.name {
+                    ops.push(component(c, ComponentChange::Rename(c.name.clone())));
+                }
+                if o.placement != c.placement {
+                    ops.push(component(
+                        c,
+                        ComponentChange::Place(Placing::Frame(c.placement)),
+                    ));
+                }
+                if o.fixed != c.fixed {
+                    ops.push(component(c, ComponentChange::Fix(c.fixed)));
+                }
+                if o.suppressed != c.suppressed {
+                    ops.push(component(c, ComponentChange::Suppress(c.suppressed)));
+                }
+                if o.visible != c.visible {
+                    ops.push(component(c, ComponentChange::Show(c.visible)));
+                }
+            }
+        }
+        _ => {
+            return Err(
+                "the document was changed from a part to an assembly or back, which no operation does"
+                    .to_owned(),
+            );
+        }
     }
 
     // ---- What the part is made of, and its colour ----

@@ -116,6 +116,9 @@ pub enum CommandId {
     Loft,
     CutLoft,
     ConvertToSheet,
+    NewAssembly,
+    InsertComponent,
+    EditComponent,
 }
 
 /// Static description of a command.
@@ -144,7 +147,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 107] = [
+    pub const ALL: [Self; 110] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -252,6 +255,9 @@ impl CommandId {
         Self::Loft,
         Self::CutLoft,
         Self::ConvertToSheet,
+        Self::NewAssembly,
+        Self::InsertComponent,
+        Self::EditComponent,
     ];
 
     pub fn info(self) -> CommandInfo {
@@ -838,6 +844,24 @@ impl CommandId {
                 "Convert to Sheet Metal",
                 "Sheet Metal",
                 "Turn a solid body of constant wall thickness (flat walls joined by rounded bends) into a sheet metal body, so it unfolds and takes flanges. Select the flat face that stays fixed first, or convert the only body from its largest face.",
+                None,
+            ),
+            Self::NewAssembly => (
+                "New Assembly",
+                "File",
+                "Start a new, empty assembly: a document that puts parts together.",
+                None,
+            ),
+            Self::InsertComponent => (
+                "Insert Part…",
+                "Assembly",
+                "Add a part (or another assembly) from a .peet file to the assembly as a component. The part is copied into the assembly.",
+                None,
+            ),
+            Self::EditComponent => (
+                "Edit Part",
+                "Assembly",
+                "Open the selected component's part as a document of its own. Saving it stores it back in the assembly, for every component of that part.",
                 None,
             ),
             Self::OpenSampleHousing => (

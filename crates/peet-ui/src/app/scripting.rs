@@ -36,7 +36,9 @@ pub fn coverage(cmd: CommandId) -> Coverage {
     match cmd {
         C::Undo => Op("undo"),
         C::Redo => Op("redo"),
-        C::NewDocument => Op("new"),
+        C::NewDocument | C::NewAssembly => Op("new"),
+        C::InsertComponent => Op("insert"),
+        C::EditComponent => Op("open_component"),
         C::OpenDocument => Op("open"),
         C::SaveDocument | C::SaveDocumentAs => Op("save"),
         C::OpenSample | C::OpenSampleEnclosure | C::OpenSampleChassis | C::OpenSampleHousing => {

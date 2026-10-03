@@ -267,11 +267,11 @@ The design is recorded in [ADR 0009](docs/adr/0009-assemblies.md). The work is i
 - [x] A session of several open documents, one current; operations apply to the current one, or to one they name
 
 **Stage 2: assembly documents and instancing**
-- [ ] The assembly: definitions (parts embedded in the file, sub-assemblies), components with placements, its own section in `.peet`
-- [ ] Assembly tree; drawing components with shared meshes; picking by instance
-- [ ] Insert, move, fix, replace, delete and open a component for editing (the part alone, not in context)
-- [ ] Operations, the `assemblies` skill and the reference
-- [ ] STEP import that keeps an assembly's structure; STEP export of an assembly
+- [x] The assembly: definitions (parts embedded in the file, sub-assemblies), components with placements, saved in the model section of `.peet`
+- [x] Assembly tree; drawing components with shared meshes; picking by instance
+- [x] Insert, move, fix, replace, delete and open a component for editing (the part alone, not in context). *Moving is by typed position; dragging in the view comes with mates*
+- [x] Operations, the `assemblies` skill and the reference
+- [ ] STEP import that keeps an assembly's structure; STEP export of an assembly. *Export writes every component where it is, each as a solid of its own; the product structure is not written yet*
 - [ ] Linked parts: a component that refers to a part file, found through the host
 
 **Stage 3: mates**
@@ -295,7 +295,9 @@ The design is recorded in [ADR 0009](docs/adr/0009-assemblies.md). The work is i
 
 **Left out on purpose:** editing a part in the context of its assembly (features that refer to neighbouring parts), and flexible sub-assemblies.
 
-**Status:** Stage 1 is implemented; stages 2 to 6 are not started. A part's `Model` has a material (name and density) and a colour, saved with it (model schema 5; older files still open) and set with `set_material` and `set_color`; the material tables carry densities, and `mass` gives the mass. The solver's core is the new `peet-solve` crate, which `peet-sketch` now uses: its 186 tests pass unchanged and the drag benchmark is the same to within noise. `peet_document::Session` holds the open documents; `peet_ops::apply_session` sends an operation to the current one or to one it names, with `documents`, `switch`, `close` and `"keep": true` on `new`, `open` and `open_sample`; the command line and the application hold a session. Still to do in this stage's area: the mass properties window's new material and colour rows and the document tabs have been compile-checked and tested through the operations, not exercised by hand; the application can't yet open a second document from its own menus (stage 2 adds the commands that do); autosave covers the current document only.
+**Status:** Stage 1 is implemented, and stage 2 except STEP assembly structure and linked parts; stages 3 to 6 are not started. An assembly is a `Model` with an `Assembly` in place of features: definitions (whole part models, stored once) and components (instances with placements). The engine rebuilds each part with an engine of its own, only when that part changed, and gives instances that share their bodies; `crates/peet-model/tests/assembly.rs` checks that moving a component rebuilds nothing and that an edit to a part reaches every instance. `crates/peet-ops/tests/assembly.rs` covers the operations (`insert`, `place`, `fix`, `replace`, `open_component`, `components`), files, sub-assemblies, export and the translation of the application's changes; the `assemblies` skill's scripts run in the command line's tests. A part of an assembly is edited as a working copy in a document of its own and stored back with `save`, as one undo step of the assembly. In the application: New Assembly, Insert Part, Edit Part, a component tree and properties, and a viewport that draws instances with shared meshes; these were tested without a window, not exercised by hand. Known limits: no mates yet, so components stay where they are put; a component is moved by typing its position; mass properties, measurements and face selection don't work in an assembly yet; an assembly file has no geometry caches (it is rebuilt on opening); STEP export has no product structure.
+
+Stage 1: A part's `Model` has a material (name and density) and a colour, saved with it (model schema 5; older files still open) and set with `set_material` and `set_color`; the material tables carry densities, and `mass` gives the mass. The solver's core is the new `peet-solve` crate, which `peet-sketch` now uses: its 186 tests pass unchanged and the drag benchmark is the same to within noise. `peet_document::Session` holds the open documents; `peet_ops::apply_session` sends an operation to the current one or to one it names, with `documents`, `switch`, `close` and `"keep": true` on `new`, `open` and `open_sample`; the command line and the application hold a session. Still to do in this stage's area: the mass properties window's new material and colour rows and the document tabs have been compile-checked and tested through the operations, not exercised by hand; the application can't yet open a second document from its own menus (stage 2 adds the commands that do); autosave covers the current document only.
 
 ### Phase 8: Drawings
 - [ ] 2D drawing sheets, templates, title blocks

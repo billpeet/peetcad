@@ -83,6 +83,65 @@ pub(crate) fn export(
     Ok(out)
 }
 
+/// An assembly's export: every component's bodies where they are, as STL or STEP.
+fn export_assembly(
+    doc: &Document,
+    format: Format,
+    body: Option<usize>,
+    schema: StepSchema,
+) -> Result<(Vec<u8>, Map<String, Value>), String> {
+    if body.is_some() {
+        return Err(
+            "An assembly is exported whole: leave 'body' out (to export one part, open it with 'open_component')."
+                .to_owned(),
+        );
+    }
+    let solids = crate::assembly::placed_solids(doc);
+    if solids.is_empty() {
+        return Err(
+            "There are no bodies to export: the assembly has no components that show any."
+                .to_owned(),
+        );
+    }
+    let mut out = Map::new();
+    let (bytes, word) = match format {
+        Format::Stl => {
+            let mut triangles = Vec::new();
+            for (view, placed) in doc.bodies.iter().zip(&doc.placed) {
+                triangles.extend(
+                    view.tess()
+                        .triangles()
+                        .into_iter()
+                        .map(|t| t.map(|p| placed.frame.to_world(p))),
+                );
+            }
+            out.insert("triangles".to_owned(), json!(triangles.len()));
+            (peet_io::stl::write_binary(&stem(doc), &triangles), "stl")
+        }
+        Format::Dxf => {
+            return Err(
+                "A flat pattern is a sheet metal part's: open the part with 'open_component' and export it there."
+                    .to_owned(),
+            );
+        }
+        Format::Step => {
+            let named: Vec<(&str, &peet_kernel::Solid)> =
+                solids.iter().map(|(n, s)| (n.as_str(), s)).collect();
+            let options = peet_io::step::StepOptions {
+                schema,
+                product_name: stem(doc),
+                author: String::new(),
+                organization: String::new(),
+                timestamp: peet_platform::timestamp_iso(),
+            };
+            out.insert("bodies".to_owned(), json!(named.len()));
+            (peet_io::step::write(&named, &options).into_bytes(), "step")
+        }
+    };
+    out.insert("format".to_owned(), json!(word));
+    Ok((bytes, out))
+}
+
 /// The contents of an export, with what to say about it: the bodies as STL or STEP, or a
 /// sheet metal body's flat pattern as DXF. For a host that writes the file itself (a
 /// save dialog, a download).
@@ -92,6 +151,9 @@ pub fn export_bytes(
     body: Option<usize>,
     schema: StepSchema,
 ) -> Result<(Vec<u8>, Map<String, Value>), String> {
+    if doc.is_assembly() {
+        return export_assembly(doc, format, body, schema);
+    }
     let bodies = &doc.evaluation().bodies;
     if let Some(b) = body
         && b >= bodies.len()

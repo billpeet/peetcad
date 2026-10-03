@@ -81,8 +81,8 @@ peet pack IN.ron PART.peet         # and back
 
 `peet skills` lists instructions written for an agent that is going to use `peet`, and
 `peet skills NAME` prints one. `core` is the one to start with: it gives the working loop
-and points to the others (`sketching`, `selectors`, `solids`, `sheet-metal`) for when a
-task reaches them. They are in `crates/peet-cli/skills/` and are built into the binary,
+and points to the others (`sketching`, `selectors`, `solids`, `sheet-metal`,
+`assemblies`) for when a task reaches them. They are in `crates/peet-cli/skills/` and are built into the binary,
 so they describe the version being run. Every script in them is run by a test, and
 [AGENTS.md](../AGENTS.md) asks that a new feature is added to them.
 
@@ -287,6 +287,30 @@ saves by itself, whichever is current at the end. A document opened with `keep` 
 by a `save` operation sent to it; a run that leaves one changed and unsaved says so.
 Undo is per document. `apply` and `apply_json` on a `Document` alone (Rust) refuse these:
 a session is applied to with `apply_session` and `apply_session_json`.
+
+### Assemblies
+
+An assembly is a document with components in place of features: `status` gives
+`"kind": "assembly"`. A component is a placed instance of a part, and the part is copied
+into the assembly (once, however many components use it). The operations on features and
+bodies are refused in an assembly, and these are refused in a part; each says what to do
+instead. The design is in [ADR 0009](adr/0009-assemblies.md).
+
+| Operation | Fields |
+|---|---|
+| `new` with `"assembly": true` | starts an empty assembly |
+| `insert` | the part: `path` (a `.peet` file; an assembly becomes a sub-assembly), `sample`, `part` (an open document, by name or id) or `component` (another instance of its part). `name`, `at` (`[x, y, z]`: where the part's origin goes), `rotate` (`{"axis": "x"`, `"y"`, `"z"` or `[x, y, z]`, `"angle": degrees}`, from the part's own orientation), `fixed` (default: only the first component) |
+| `place` | `component`, `at`, `rotate`: the ones given are set, the other is kept |
+| `fix` | `component`, `on` (default true) |
+| `replace` | `component`, and `path`, `sample` or `part`: another part, in the same place |
+| `rename`, `suppress`, `show`, `delete` | `component` in place of `feature` |
+| `open_component` | `component`: opens its part as a document of its own and makes it current. `save` without a `path` on that document stores it back, as one undo step of the assembly, for every component of the part. Needs a session |
+| `components` | every component (`id`, `name`, `part`, `at`, `rotate`, `fixed`, `status`, `message`, `min`, `max`) and every part (`id`, `name`, `kind`, how many `components`, `material`) |
+
+`failures` (in `status` and in replies) lists the components that need attention: a part
+with no bodies, or with features that can't be built. `export` writes every component's
+bodies where they are, as STEP or STL (each as a solid of its own: the file has no
+assembly structure). A reply about a component gives it under `component`.
 
 ### Sheet metal: materials, checks, flat pattern
 

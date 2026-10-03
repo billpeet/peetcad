@@ -79,12 +79,13 @@ EXIT CODE
 /// The skills: instructions for an agent on using `peet`, kept in this repository and
 /// built into the binary, so they always describe the version being run. `core` comes
 /// first and points to the others.
-pub const SKILLS: [(&str, &str); 5] = [
+pub const SKILLS: [(&str, &str); 6] = [
     ("core", include_str!("../skills/core.md")),
     ("sketching", include_str!("../skills/sketching.md")),
     ("selectors", include_str!("../skills/selectors.md")),
     ("solids", include_str!("../skills/solids.md")),
     ("sheet-metal", include_str!("../skills/sheet-metal.md")),
+    ("assemblies", include_str!("../skills/assemblies.md")),
 ];
 
 /// A skill's `description`, from the front matter at its top: what it is for.
@@ -546,7 +547,7 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
     for (id, other) in doc.documents() {
         if id != part && other.is_modified() {
             notes.say(&format!(
-                "{} was changed and not saved: a document opened with \"keep\" is saved by a 'save' operation sent to it.",
+                "{} was changed and not saved: a document a script opens beside the part is saved by a 'save' operation sent to it.",
                 other.title()
             ));
         }

@@ -9,6 +9,7 @@ use peet_sketch::Sketch;
 use peet_sketch::expr::Parameters;
 use serde::{Deserialize, Serialize};
 
+use crate::assembly::Assembly;
 use crate::extrude::{Extrude, Operation};
 use crate::feature::{
     ExtrudeFeature, Feature, FeatureId, FeatureKind, PlaneRef, SketchFeature, StdPlane,
@@ -67,6 +68,58 @@ pub struct Model {
     /// parts.
     #[serde(default)]
     pub color: Option<[u8; 3]>,
+    /// For an assembly: its parts and where they are. A model with an assembly has no
+    /// features of its own (see [`crate::Assembly`]).
+    #[serde(default)]
+    assembly: Option<Arc<Assembly>>,
+}
+
+/// The model as files of model schema 5 have it: before there were assemblies.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelV5 {
+    name: String,
+    features: Vec<Arc<Feature>>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+    material: Option<Material>,
+    color: Option<[u8; 3]>,
+}
+
+impl From<ModelV5> for Model {
+    fn from(m: ModelV5) -> Self {
+        Self {
+            name: m.name,
+            features: m.features,
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            material: m.material,
+            color: m.color,
+            assembly: None,
+        }
+    }
+}
+
+impl ModelV5 {
+    /// `model` as it would have been saved before: a part, without an assembly.
+    pub fn of(model: &Model) -> Self {
+        Self {
+            name: model.name.clone(),
+            features: model.features.clone(),
+            parameters: model.parameters.clone(),
+            rollback: model.rollback,
+            datums_visible: model.datums_visible,
+            next_id: model.next_id,
+            name_counters: model.name_counters.clone(),
+            material: model.material.clone(),
+            color: model.color,
+        }
+    }
 }
 
 /// The model as files up to model schema 4 have it: before a part had a material and a
@@ -95,6 +148,7 @@ impl From<ModelV4> for Model {
             name_counters: m.name_counters,
             material: None,
             color: None,
+            assembly: None,
         }
     }
 }
@@ -126,6 +180,7 @@ impl Default for Model {
             name_counters: BTreeMap::new(),
             material: None,
             color: None,
+            assembly: None,
         }
     }
 }
@@ -135,7 +190,31 @@ impl Model {
         Self::default()
     }
 
+    /// A new, empty assembly.
+    pub fn new_assembly() -> Self {
+        Self {
+            name: "Assembly1".to_owned(),
+            assembly: Some(Arc::new(Assembly::new())),
+            ..Self::default()
+        }
+    }
+
     // ---- Reading ----
+
+    /// Whether the model is an assembly (parts placed together) and not a part.
+    pub fn is_assembly(&self) -> bool {
+        self.assembly.is_some()
+    }
+
+    /// The parts and where they are, if the model is an assembly.
+    pub fn assembly(&self) -> Option<&Assembly> {
+        self.assembly.as_deref()
+    }
+
+    /// The assembly, for changing it. Other snapshots of the model are not affected.
+    pub fn assembly_mut(&mut self) -> Option<&mut Assembly> {
+        self.assembly.as_mut().map(Arc::make_mut)
+    }
 
     pub fn features(&self) -> impl DoubleEndedIterator<Item = &Feature> + ExactSizeIterator {
         self.features.iter().map(|f| &**f)
@@ -554,6 +633,14 @@ impl Model {
         self.next_id = self.next_id.max(max.saturating_add(1));
         self.rollback = self.rollback.filter(|&b| b < self.features.len());
         self.parameters.evaluate();
+        if self.assembly.is_some() && !self.features.is_empty() {
+            return Err(
+                "The model is damaged: it is an assembly, and has features of its own.".to_owned(),
+            );
+        }
+        if let Some(assembly) = self.assembly_mut() {
+            assembly.validate()?;
+        }
         Ok(())
     }
 }

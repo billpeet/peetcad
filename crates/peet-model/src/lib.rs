@@ -14,10 +14,13 @@
 //!   upstream edits.
 //! - [`DependencyGraph`]: which feature uses which.
 //! - [`Engine`]: incremental regeneration into bodies, with per-feature status.
+//! - [`Assembly`]: parts placed relative to each other, inside a [`Model`] that is an
+//!   assembly instead of a part.
 //! - [`History`]: undo and redo.
 //!
 //! The crate has no UI or GPU dependency: everything here runs headless.
 
+mod assembly;
 mod convert;
 mod dressup;
 mod extrude;
@@ -39,6 +42,7 @@ pub mod sheet;
 mod sweep;
 mod units;
 
+pub use assembly::{Assembly, CompId, Component, DefId, Definition};
 pub use convert::ConvertToSheetFeature;
 pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
 pub use extrude::{
@@ -56,10 +60,10 @@ pub use hole::{HoleEnd, HoleFeature, HoleFit, HoleKind, HoleSizes, METRIC, Metri
 pub use import::{ImportFeature, ImportedSolid};
 pub use loft::{LoftFeature, LoftInput, apply_loft};
 pub use material::{Material, STEEL_DENSITY};
-pub use model::{Datum, DependencyGraph, Model, ModelV4};
+pub use model::{Datum, DependencyGraph, Model, ModelV4, ModelV5};
 pub use naming::{Body, EdgeRef, FaceName, FaceOrigin, FaceRef, FaceRole, Found, VertexRef};
 pub use placement::face_sketch_plane;
-pub use regen::{Engine, Evaluation, FeatureState, Output, SketchStatus, Stats, Status};
+pub use regen::{Engine, Evaluation, FeatureState, Instance, Output, SketchStatus, Stats, Status};
 pub use revolve::{
     RevolveAxisRef, RevolveFeature, RevolveInput, apply_revolve, default_axis, sketch_axis,
 };

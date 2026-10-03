@@ -5,14 +5,21 @@
 //! making that one current. On top of that it carries out what only a session can:
 //! listing the open documents, switching, closing, and opening a document beside the
 //! others (`"keep": true` on `new`, `open` and `open_sample`).
+//!
+//! It is also where an assembly meets the other documents: a component is inserted from
+//! an open document (`"part"`), and a component's part is opened as a document of its
+//! own (`open_component`), which `save` stores back in the assembly.
 
-use peet_document::{DocId, Document, Session};
+use std::sync::Arc;
+
+use peet_document::{DocId, Document, Embedded, Session};
 use serde_json::{Map, Value, json};
 
 use crate::args::{Args, integer};
+use crate::assembly::{ComponentChange, InsertSource};
 use crate::host::Host;
 use crate::op::{self, Op};
-use crate::{Reply, Undo, apply_in, failed, query};
+use crate::{Reply, Undo, apply_in, apply_with, failed, query};
 
 /// An open document, by name (`"Bracket"`, as `documents` lists it) or id.
 #[derive(Clone, Debug, PartialEq)]
@@ -207,14 +214,25 @@ fn command(session: &mut Session, command: &SessionCommand) -> Result<Reply, Str
                 Some(d) => d.resolve(session)?,
                 None => was,
             };
-            if let Some(doc) = session.get(id)
-                && doc.is_modified()
-                && !discard
-            {
-                return Err(format!(
-                    "{} has unsaved changes: save it first, or give 'close' \"discard\": true.",
-                    doc.title()
-                ));
+            // The parts of an assembly that are open for editing close with it.
+            let parts: Vec<DocId> = session
+                .documents()
+                .filter(|(_, d)| d.embedded.is_some_and(|e| e.assembly == id))
+                .map(|(i, _)| i)
+                .collect();
+            for check in parts.iter().chain([&id]) {
+                if let Some(doc) = session.get(*check)
+                    && doc.is_modified()
+                    && !discard
+                {
+                    return Err(format!(
+                        "{} has unsaved changes: save it first, or give 'close' \"discard\": true.",
+                        doc.title()
+                    ));
+                }
+            }
+            for part in parts {
+                session.close(part);
             }
             if let Some(doc) = session.close(id) {
                 more.insert("closed".to_owned(), json!(doc.title()));
@@ -245,9 +263,11 @@ pub fn apply_session(
         Op::New {
             keep: true,
             discard,
+            assembly,
         } => Some(Op::New {
             keep: false,
             discard: *discard,
+            assembly: *assembly,
         }),
         Op::Open {
             keep: true,
@@ -297,10 +317,188 @@ pub fn apply_session(
         },
         None => session.current_id(),
     };
+    // What an assembly does with the other documents.
+    let from_document = |source: &InsertSource| match source {
+        InsertSource::Document(part) => Some(open_model(session, part, id)),
+        _ => None,
+    };
+    let resolved = match op {
+        Op::Insert {
+            from,
+            name,
+            placing,
+            fixed,
+        } => from_document(from).map(|model| {
+            model.map(|m| Op::Insert {
+                from: InsertSource::Model(m),
+                name: name.clone(),
+                placing: placing.clone(),
+                fixed: *fixed,
+            })
+        }),
+        Op::Component {
+            component,
+            change: ComponentChange::Replace(from),
+        } => from_document(from).map(|model| {
+            model.map(|m| Op::Component {
+                component: component.clone(),
+                change: ComponentChange::Replace(InsertSource::Model(m)),
+            })
+        }),
+        _ => None,
+    };
+    let op = match &resolved {
+        Some(Ok(op)) => op,
+        Some(Err(e)) => return failed(word, e.clone()),
+        None => op,
+    };
+    match op {
+        Op::OpenComponent { component } => {
+            return open_component(session, id, component).unwrap_or_else(|e| failed(word, e));
+        }
+        Op::Save { path, .. } => {
+            if let Some(embedded) = session.get(id).and_then(|d| d.embedded) {
+                return store(host, session, id, embedded, path.is_some(), undo)
+                    .unwrap_or_else(|e| failed(word, e));
+            }
+        }
+        _ => {}
+    }
     match session.get_mut(id) {
         Some(doc) => apply_in(host, doc, op, undo),
         None => failed(word, "The document is no longer open.".to_owned()),
     }
+}
+
+/// The model of an open document, to make a component of in the document `into`.
+fn open_model(
+    session: &Session,
+    part: &DocSel,
+    into: DocId,
+) -> Result<Arc<peet_model::Model>, String> {
+    let id = part.resolve(session)?;
+    let doc = session
+        .get(id)
+        .ok_or_else(|| "The document is no longer open.".to_owned())?;
+    if id == into {
+        return Err(format!("{} can't be a component of itself.", doc.title()));
+    }
+    let mut model = doc.model.clone();
+    // A part is known by its file's name, as in its title.
+    if matches!(model.name.as_str(), "Part1" | "Assembly1") {
+        let title = doc.title();
+        title
+            .strip_suffix(".peet")
+            .unwrap_or(&title)
+            .clone_into(&mut model.name);
+    }
+    Ok(Arc::new(model))
+}
+
+/// Opens a component's part as a document, or goes to it if it is open already.
+fn open_component(
+    session: &mut Session,
+    assembly: DocId,
+    component: &crate::assembly::CompSel,
+) -> Result<Reply, String> {
+    let was = session.current_id();
+    let doc = session
+        .get(assembly)
+        .ok_or_else(|| "The document is no longer open.".to_owned())?;
+    let id = component.resolve(doc)?;
+    let definition = doc
+        .model
+        .assembly()
+        .and_then(|a| a.definition_of(id))
+        .ok_or_else(|| "The component's part is missing.".to_owned())?;
+    let embedded = Embedded {
+        assembly,
+        definition: definition.id,
+    };
+    let open = session
+        .documents()
+        .find(|(_, d)| d.embedded == Some(embedded))
+        .map(|(i, _)| i);
+    match open {
+        Some(open) => {
+            session.switch(open);
+        }
+        None => {
+            let mut part = Document::from_model((*definition.model).clone(), None);
+            part.embedded = Some(embedded);
+            // Rebuilding writes solved sketches back: that is not a change of the user's.
+            part.mark_saved(None);
+            session.open(part);
+        }
+    }
+    let mut more = Map::new();
+    more.insert("part".to_owned(), json!(session.title()));
+    more.insert(
+        "note".to_owned(),
+        json!("'save' on this document stores the part back in its assembly, for every instance."),
+    );
+    let mut reply = done(session, "open_component", was, more);
+    reply.replaced = true;
+    Ok(reply)
+}
+
+/// Stores a part that was opened from an assembly back in it: what `save` does there.
+fn store(
+    host: &mut dyn Host,
+    session: &mut Session,
+    part: DocId,
+    embedded: Embedded,
+    to_file: bool,
+    undo: Undo,
+) -> Result<Reply, String> {
+    let doc = session
+        .get(part)
+        .ok_or_else(|| "The document is no longer open.".to_owned())?;
+    let name = doc.title();
+    if to_file {
+        return Err(format!(
+            "{name} is a part of an assembly, which is where it is saved: leave 'path' out to store it there, then save the assembly."
+        ));
+    }
+    let model = Arc::new(doc.model.clone());
+    let assembly = session.get_mut(embedded.assembly).ok_or_else(|| {
+        format!("The assembly {name} came from is no longer open, so it can't be stored there.")
+    })?;
+    let owner = assembly.title();
+    let stored = apply_with(
+        host,
+        assembly,
+        &Op::SetPart {
+            part: embedded.definition,
+            model,
+        },
+        undo,
+        None,
+    );
+    if !stored.ok {
+        return Err(stored.json["error"]
+            .as_str()
+            .unwrap_or("It could not be stored.")
+            .to_owned());
+    }
+    if let Some(doc) = session.get_mut(part) {
+        doc.mark_saved(None);
+    }
+    let mut out = Map::new();
+    out.insert("ok".to_owned(), json!(true));
+    out.insert("op".to_owned(), json!("save"));
+    out.insert("stored".to_owned(), json!(name));
+    out.insert("in".to_owned(), json!(owner));
+    if let Some(failures) = stored.json.get("failures") {
+        out.insert("failures".to_owned(), failures.clone());
+    }
+    Ok(Reply {
+        ok: true,
+        changed: stored.changed,
+        created: Vec::new(),
+        replaced: false,
+        json: Value::Object(out),
+    })
 }
 
 /// Applies one JSON operation to a session, in `host`. A `document` field (a name or an

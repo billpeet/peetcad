@@ -1,6 +1,6 @@
 ---
 name: peet
-description: Build, edit, inspect and export PeetCAD parts (.peet files) with the `peet` command line. Read before running peet. More with `peet skills sketching`, `selectors`, `solids`, `sheet-metal`.
+description: Build, edit, inspect and export PeetCAD parts and assemblies (.peet files) with the `peet` command line. Read before running peet. More with `peet skills sketching`, `selectors`, `solids`, `sheet-metal`, `assemblies`.
 ---
 
 # peet
@@ -102,3 +102,5 @@ script. Otherwise one `peet` call per part is simpler.
   shell, patterns, freeform faces, bodies from a STEP file): `peet skills solids`.
 - **Sheet metal** (base flange, flanges, cuts, converting a solid to sheet metal, flat
   pattern, DXF, materials, checks): `peet skills sheet-metal`.
+- **Putting parts together** (an assembly: inserting parts as components, placing them,
+  changing a part of an assembly): `peet skills assemblies`.

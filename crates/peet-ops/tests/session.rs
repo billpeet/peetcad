@@ -269,6 +269,7 @@ fn several_documents_are_open_together() {
         &Op::New {
             discard: false,
             keep: true,
+            assembly: false,
         },
         Undo::Step,
     );

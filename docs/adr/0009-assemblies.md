@@ -1,6 +1,7 @@
 # ADR 0009: Assemblies
 
-**Status:** accepted (Phase 7). Stage 1 (groundwork) is implemented; the rest is the plan.
+**Status:** accepted (Phase 7). Stage 1 (groundwork) and most of stage 2 (assembly
+documents) are implemented; the rest is the plan.
 
 ## Context
 
@@ -14,15 +15,20 @@ design that depends on a folder of part files next to the assembly doesn't carry
 
 ## Decision
 
-**An assembly is a second kind of document.** A part's source of truth is its `Model`
-(features); an assembly's is its components, mates and explode steps. Both are saved in
-the same `.peet` container: an assembly has an assembly section where a part has a model
-section, so an older version reports a file it can't use instead of misreading it.
+**An assembly is a second kind of document.** A part's source of truth is its features;
+an assembly's is its components, mates and explode steps. Both are a `Model`: an
+assembly's has no features and an `Assembly` in their place (`Model::assembly`). So
+everything built on a model holds for both without a second copy: the document, undo by
+snapshots that share what didn't change, the content hash that says whether a file is
+modified, the parameters and units, and the file's model section. A model that has both
+features and an assembly is refused as damaged. Operations are for one kind or the
+other, and say so when sent to the wrong one. The model section's schema version went up
+with it (6), so an older version says the file is from a newer one instead of
+misreading it.
 
 **Parts are embedded first, linked second.** An assembly file holds the parts it uses:
 each is a complete part (its model, and its caches) stored in the assembly's file. One
-file opens anywhere, headless or in the browser, and one undo history covers the
-assembly and its parts. A component can later be *linked* to a part file instead
+file opens anywhere, headless or in the browser. A component can later be *linked* to a part file instead
 (stage 2b): the assembly then stores the path, the hash of the part it was built
 against, and that part's caches so it still opens when the file is missing. Linked files
 are found through the `Host`, as the material tables are, so the browser can answer
@@ -31,7 +37,16 @@ from what the user has opened.
 **A component is an instance of a definition.** The assembly lists its definitions
 (parts, sub-assemblies) once; a component names a definition and has a placement (a
 rigid `Frame`), a name, and whether it is fixed. Any number of components share one
-definition, and so one rebuild, one tessellation and one GPU mesh.
+definition, and so one rebuild, one tessellation and one GPU mesh. A definition is a
+whole `Model`, held by the assembly; inserting a model the assembly already has (the
+same content) uses the definition that is there. A definition no component uses is
+dropped.
+
+**The engine rebuilds an assembly's parts with engines of its own**, one per definition,
+and only when a definition's model is another than last time: moving a component
+rebuilds nothing. The result is a list of instances (a body, where it is, the path of
+components down to it), not bodies of the assembly's own; the document shows one entry
+per instance, the instances of one body sharing a view.
 
 **Sub-assemblies are rigid.** A sub-assembly is solved on its own and placed as one
 body in its parent. Flexible sub-assemblies are left for later.
@@ -71,10 +86,13 @@ existing script still means what it meant. A session dereferences to its current
 document, so code written for one document works on a session unchanged. Opening a
 component for editing will make its part current.
 
-In stage 1 every document of a session is a part with its own file and its own undo
-history. How the parts embedded in an assembly's file appear in the session, and
-whether a change to one is an undo step of the assembly, is decided in stage 2 with the
-assembly document.
+**A part of an assembly is edited as a working copy.** `open_component` opens the
+definition's model as a document of the session, marked as embedded in its assembly.
+It has its own undo history while it is open. `save` on it stores its model back as the
+definition's, which is one undo step of the assembly ("Edit Bracket") and reaches every
+instance; until then the assembly is unchanged. This is how a sketch is edited too: a
+working copy, written back when it is finished. Closing the assembly closes the parts
+opened from it, and refuses while one has changes that were not stored.
 
 **Operations, skills and the reference grow with it**, as `AGENTS.md` requires: every
 assembly command is an operation, and a new `assemblies` skill covers them.
@@ -108,10 +126,29 @@ assembly command is an operation, and a new `assemblies` skill covers them.
   application hold a session; the application shows a tab per document when more than
   one is open.
 
-Left for later stages: the application has no command that opens a second document (a
-script does it with `keep`; inserting and opening components will, in stage 2); autosave
-and crash recovery cover the current document only; a component's colour will need a
-colour per drawn object, since a part's colour is baked into its mesh.
+## What stage 2 built so far
+
+- `peet_model::Assembly` (definitions, components), `Model::assembly`, model schema 6
+  (version 5 files are read as `ModelV5`), instances in the `Evaluation`.
+- `Document::placed` (where each shown body is, and whose), `Document::embedded`.
+- Operations: `new` with `assembly`, `insert` (from a file, a sample, an open document
+  or another component), `place`, `fix`, `replace`, `rename` / `suppress` / `show` /
+  `delete` with `component`, `open_component`, `components`; `status` and `failures`
+  for assemblies; STEP and STL export of every component where it is. The application's
+  own changes to an assembly are translated to these, like its changes to a part.
+- The `assemblies` skill and the reference.
+- In the application: New Assembly, Insert Part and Edit Part; a component tree and a
+  component's properties (name, position, quarter turns, fixed); components drawn
+  where they are, the instances of a part sharing a GPU mesh; a click picks a component.
+
+Left of stage 2: STEP import that keeps a file's assembly structure (it still makes one
+body per occurrence, in a part) and STEP export with structure (each component is
+written as a solid of its own, without the product tree); linked parts; dragging a
+component in the view (its position is typed, for now). Also open: mass properties
+and measurements in an assembly (stage 4), an assembly's caches in its file (it is
+rebuilt when opened), selections on a component's faces (stage 3 needs them for mates),
+autosave of documents other than the current one, and a colour per component (a part's
+colour is baked into its mesh, so it needs a colour per drawn object).
 
 ## Consequences
 
