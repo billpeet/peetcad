@@ -675,6 +675,11 @@ pub(crate) fn set_dimension(
             }
         )
     })?;
+    if matches!(value, Input::Number(n) | Input::Base(n) if *n == 0.0) {
+        return Err(format!(
+            "{name}: a dimension can't be 0. To put two things in line, use a relation instead: horizontal, vertical or coincident."
+        ));
+    }
     expr::set_dimension_input(sketch, &doc.model.parameters, id, &value.text())
         .map(|_| ())
         .map_err(|e| format!("{name}: {}", e.message))

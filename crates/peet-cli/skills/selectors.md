@@ -38,19 +38,29 @@ given must match.
 
 1. **By what made it**, when a feature made the face: `{"feature": "Extrude1", "side":
    "end"}`. It reads clearly and survives size changes. Sides: `start`, `end`, `side`
-   (extrude, revolve, sweep, hole); `top`, `bottom`, `bend`, `wall` (sheet metal);
-   `blend` (a fillet's or chamfer's own face); `inner` (the inside of a shell).
+   (an extrusion's two caps and its walls); `top`, `bottom`, `bend`, `wall` (sheet
+   metal); `blend` (a fillet's or chamfer's own face); `inner` (the inside of a shell).
+   A revolve all the way round has no caps: **every** face of it is a `side`, flat
+   ones included, so add `normal` or `at` (`{"feature": "Revolve1", "normal": [0, 0,
+   1]}`). When `feature` and `side` match nothing, the error lists the faces that
+   feature made, with the side of each.
 2. **By position**, when you know where it is: a face `at` a point on it, an edge
    `between` its two ends.
 3. **By listing**, when you don't: `peet faces` and `peet edges` give every face and
-   edge with what made it, its normal, centre and ends. Pick from the list by `body`
-   and `index`, in the same call or the next (an index is only good until the part
-   changes).
+   edge with its normal and where it is. Each face has `what` (in words: "the top face
+   of Wall3") and `made_by` (the same as `feature` and `side` values to put in a
+   selector). Or pick from the list by `body` and `index`, in the same call or the next
+   (an index is only good until the part changes). A face's `center` there is a point on or near the face for telling faces
+   apart, not its centroid: on a ring-shaped face it is off to one side.
 
 ## Things that go wrong
 
 - **A point on an edge is on two faces.** `{"at": [10, 0, 8]}` is ambiguous: add
   `"normal"` (`[0, 0, 1]` for the face that looks up), or use a point inside the face.
+- **A point on a corner or a seam is on several edges.** A round face has a seam: a
+  straight edge down it, which meets the circles at its ends. An `at` point there
+  matches both the circle and the seam. Use a point further round the circle, such as
+  the opposite side (`[0, 22, 63]` in place of `[22, 0, 63]`).
 - **`normal` alone** matches flat faces only, and every flat face that looks that way. On
   a body with several, add `at` or `feature`. For a round or freeform face use `at`,
   `feature` and `side`, or `index`.

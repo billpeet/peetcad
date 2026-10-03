@@ -491,6 +491,16 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
             return USAGE;
         }
     }
+    if let Some(file) = options.file.as_ref().filter(|_| options.new) {
+        // A new part is called after the file it will be saved to.
+        doc.file = Some(peet_document::FileLocation {
+            name: file.file_name().map_or_else(
+                || file.to_string_lossy().into_owned(),
+                |n| n.to_string_lossy().into_owned(),
+            ),
+            path: Some(file.clone()),
+        });
+    }
     if let Some(file) = options.file.as_ref().filter(|_| !options.new) {
         if !file.exists() {
             notes.problem(&format!(

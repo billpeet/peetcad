@@ -479,9 +479,27 @@ fn four_flanges_with_open_corners() {
     let err = build(panel(T + 1.0)).unwrap_err();
     assert!(matches!(err, SheetError::Overlap { .. }), "{err:?}");
     // Set back just past the bend zone: the reliefs of neighbouring flanges meet and cut
-    // the corner tabs free (five separate outlines).
-    let (_, loose) = built(panel(R + T + 1.0));
-    assert_eq!(loose.outline.iter().filter(|l| l.outer).count(), 5);
+    // the corner of the sheet off. That scrap is left out: the corners are notched, the
+    // sheet is one piece, and every bend is as long as its edge less the two set-backs.
+    for off in [R + T + 1.0, 5.0] {
+        let (solid, notched) = built(panel(off));
+        assert_eq!(
+            notched.outline.iter().filter(|l| l.outer).count(),
+            1,
+            "{off}"
+        );
+        validate(&solid).expect("a valid solid");
+        let mut lengths: Vec<f64> = notched
+            .bend_lines
+            .iter()
+            .map(|l| l.segments.iter().map(|s| s[0].distance(s[1])).sum())
+            .collect();
+        lengths.sort_by(f64::total_cmp);
+        let (short, long) = (H - 2.0 * off, W - 2.0 * off);
+        for (got, want) in lengths.iter().zip([short, short, long, long]) {
+            assert_close(*got, want, 1e-9);
+        }
+    }
     let (solid, body) = built(panel(10.0));
     let b = bounds(&solid);
     assert!(

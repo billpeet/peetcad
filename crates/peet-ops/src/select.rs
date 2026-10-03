@@ -111,16 +111,20 @@ pub(crate) fn describe_face(doc: &Document, body: usize, face: FaceId) -> String
     doc.model.describe_face(bodies(doc)[body].face_name(face))
 }
 
+/// The one thing a selector found. `none` is added to the message when it found
+/// nothing, and `several` says how to choose when it found more than one.
 fn exactly_one<T: Copy>(
     what: &str,
     selector: &Value,
     found: Vec<(usize, T)>,
     describe: impl Fn(usize, &T) -> String,
+    none: &str,
+    several: &str,
 ) -> Result<(usize, T), String> {
     match found.len() {
         1 => Ok(found[0]),
         0 => Err(format!(
-            "No {what} matches {selector}. The 'faces' and 'edges' operations list what a body has."
+            "No {what} matches {selector}.{none} The 'faces' and 'edges' operations list what a body has."
         )),
         n => {
             let mut lines: Vec<String> =
@@ -129,11 +133,75 @@ fn exactly_one<T: Copy>(
                 lines.push(format!("and {} more", n - 8));
             }
             Err(format!(
-                "{n} {what}s match {selector}: add a field to pick one. They are: {}.",
+                "{n} {what}s match {selector}. {several} They are: {}.",
                 lines.join("; ")
             ))
         }
     }
+}
+
+/// What part of its feature a face is, as a selector's `side` names it.
+pub(crate) fn side_word(role: FaceRole) -> &'static str {
+    match role {
+        FaceRole::NearCap => "start",
+        FaceRole::FarCap => "end",
+        FaceRole::Side(_) => "side",
+        FaceRole::SheetTop(_) => "top",
+        FaceRole::SheetBottom(_) => "bottom",
+        FaceRole::BendTop(_) | FaceRole::BendBottom(_) => "bend",
+        FaceRole::Wall(..) => "wall",
+        FaceRole::Blend(_) | FaceRole::BlendEnd(_) | FaceRole::BlendCorner(_) => "blend",
+        FaceRole::Inner => "inner",
+        FaceRole::Instance(_) => "copy",
+        FaceRole::Imported(_) => "imported",
+    }
+}
+
+/// The faces a feature made, for the message when a selector naming it found nothing:
+/// which sides it has, and where they are.
+fn faces_of(doc: &Document, feature: peet_model::FeatureId) -> String {
+    let units = &doc.model.parameters.units;
+    let mut lines = Vec::new();
+    let mut total = 0;
+    for (bi, body) in bodies(doc).iter().enumerate() {
+        for f in body.solid.face_ids() {
+            let sides: Vec<&str> = body
+                .face_name(f)
+                .origins()
+                .iter()
+                .filter(|o| o.feature == feature)
+                .map(|o| side_word(o.role))
+                .collect();
+            if sides.is_empty() {
+                continue;
+            }
+            total += 1;
+            if lines.len() < 8 {
+                let center = body.face_center(f);
+                let normal = match body.solid.face(f).surface {
+                    Surface::Plane(_) => format!(
+                        ", normal {}",
+                        crate::args::direction_out(body.solid.face_normal_at(f, center))
+                    ),
+                    _ => ", curved".to_owned(),
+                };
+                lines.push(format!(
+                    "body {bi} face {} (side \"{}\"{normal}, at {})",
+                    f.0,
+                    sides.join("\", \""),
+                    point3_out(center, units)
+                ));
+            }
+        }
+    }
+    let name = doc.model.name_of(feature);
+    if total == 0 {
+        return format!(" {name} made no face of the part as it is now.");
+    }
+    if total > lines.len() {
+        lines.push(format!("and {} more", total - lines.len()));
+    }
+    format!(" The faces {name} made are: {}.", lines.join("; "))
 }
 
 fn direction(d: [f64; 3]) -> Result<DVec3, String> {
@@ -207,14 +275,27 @@ fn find_face_query(doc: &Document, q: &FaceQuery) -> Result<(usize, FaceId), Str
             found.push((bi, f));
         }
     }
-    exactly_one("face", &q.json(), found, |b, f| {
-        format!(
-            "body {b} face {} ({}, centre {})",
-            f.0,
-            describe_face(doc, b, *f),
-            point3_out(bodies(doc)[b].face_center(*f), units)
-        )
-    })
+    let none = feature.map_or_else(String::new, |f| faces_of(doc, f));
+    let several = if at.is_some() && normal.is_none() {
+        "The point is on the edge where they meet: add \"normal\" (the way the face you mean looks), or use a point inside that face."
+    } else {
+        "Add a field to pick one: \"at\" with a point on the face is the surest."
+    };
+    exactly_one(
+        "face",
+        &q.json(),
+        found,
+        |b, f| {
+            format!(
+                "body {b} face {} ({}, at {})",
+                f.0,
+                describe_face(doc, b, *f),
+                point3_out(bodies(doc)[b].face_center(*f), units)
+            )
+        },
+        &none,
+        several,
+    )
 }
 
 /// The face a selector means, in the part as it is now: `(body, face)`.
@@ -298,15 +379,28 @@ fn find_edge_query(doc: &Document, q: &EdgeQuery) -> Result<(usize, EdgeId), Str
             found.push((bi, e));
         }
     }
-    exactly_one("edge", &q.json(), found, |b, e| {
-        let edge = bodies(doc)[b].solid.edge(*e);
-        format!(
-            "body {b} edge {} (from {} to {})",
-            e.0,
-            point3_out(bodies(doc)[b].solid.vertex(edge.start).point, units),
-            point3_out(bodies(doc)[b].solid.vertex(edge.end).point, units)
-        )
-    })
+    let several = if at.is_some() {
+        "The point is where they meet (a corner, or the seam of a round face): use a point further along the edge you mean."
+    } else {
+        "Add a field to pick one: \"at\" with a point along the edge is the surest."
+    };
+    exactly_one(
+        "edge",
+        &q.json(),
+        found,
+        |b, e| {
+            let edge = bodies(doc)[b].solid.edge(*e);
+            format!(
+                "body {b} edge {} (from {} to {}, through {})",
+                e.0,
+                point3_out(bodies(doc)[b].solid.vertex(edge.start).point, units),
+                point3_out(bodies(doc)[b].solid.vertex(edge.end).point, units),
+                point3_out(edge.point_at_fraction(0.5), units)
+            )
+        },
+        "",
+        several,
+    )
 }
 
 /// The edge a selector means, in the part as it is now: `(body, edge)`.
@@ -353,13 +447,20 @@ fn find_vertex_query(doc: &Document, q: &VertexQuery) -> Result<(usize, VertexId
             found.push((bi, id));
         }
     }
-    exactly_one("vertex", &q.json(), found, |b, id| {
-        format!(
-            "body {b} vertex {} at {}",
-            id.0,
-            point3_out(bodies(doc)[b].solid.vertex(*id).point, units)
-        )
-    })
+    exactly_one(
+        "vertex",
+        &q.json(),
+        found,
+        |b, id| {
+            format!(
+                "body {b} vertex {} at {}",
+                id.0,
+                point3_out(bodies(doc)[b].solid.vertex(*id).point, units)
+            )
+        },
+        "",
+        "Add \"body\" to pick one.",
+    )
 }
 
 /// The vertex a selector means, in the part as it is now: `(body, vertex)`.
