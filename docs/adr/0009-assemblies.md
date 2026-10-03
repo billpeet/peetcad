@@ -184,7 +184,12 @@ colour is baked into its mesh, so it needs a colour per drawn object).
   one component, a flat face for a concentric mate) is flagged the same way, with what
   to do. Redundant mates that agree are not flagged.
 - **Freedom**: six for each component that is not fixed, less the rank of the
-  Jacobian. It is reported for the assembly as a whole.
+  Jacobian, for the assembly as a whole; and for each component, in how many
+  independent ways it moves among the motions the mates leave: the rank of its six rows
+  of a basis of the Jacobian's null space. A component that only moves along with
+  others counts their motion as its own (two parts fastened to each other and to
+  nothing else each have six), which is what answers "what is still loose". Each group
+  is worked out on its own, and only when the mates change.
 - The solver's structure and the freedom are kept between solves of the same mates, so
   a drag costs only the numeric solve: 50 components held by 147 mates take about 3 ms
   per step in a release build, against the 4 ms budget
@@ -210,8 +215,7 @@ colour is baked into its mesh, so it needs a colour per drawn object).
   corner takes about 3 ms a step in a release build (7 ms for the first, which sets the
   solver up).
 
-Left of stage 3: freedom per component, to show
-which ones are still loose; a script can't describe a face of a part inside a
+Left of stage 3: a script can't describe a face of a part inside a
 sub-assembly (the application can pick one, and the model and the solve handle it);
 tangent and other mates beyond the roadmap's list. Mates were added to model schema 6,
 which no released version writes, without another version number.

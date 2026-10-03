@@ -157,6 +157,7 @@ pub struct Evaluation {
     /// For an assembly: how many ways its components can still move (six for each that
     /// is not fixed, less what the mates hold).
     pub freedom: usize,
+    component_freedom: HashMap<CompId, usize>,
     pub stats: Stats,
 }
 
@@ -164,6 +165,12 @@ impl Evaluation {
     /// How a component of an assembly came out.
     pub fn component_status(&self, id: CompId) -> Option<&Status> {
         self.components.get(&id)
+    }
+
+    /// How many ways a component of an assembly can still move (0 to 6), on its own or
+    /// along with others it is mated to: 0 for one that is fixed or fully held.
+    pub fn component_freedom(&self, id: CompId) -> Option<usize> {
+        self.component_freedom.get(&id).copied()
     }
 
     /// How a mate of an assembly came out.
@@ -223,6 +230,7 @@ struct Assembled {
     components: HashMap<CompId, Status>,
     mates: HashMap<MateId, Status>,
     freedom: usize,
+    component_freedom: HashMap<CompId, usize>,
 }
 
 /// A definition of an assembly as last rebuilt.
@@ -328,6 +336,7 @@ impl Engine {
             components: assembled.components,
             mates: assembled.mates,
             freedom: assembled.freedom,
+            component_freedom: assembled.component_freedom,
             stats: run.stats,
         };
         &self.evaluation
@@ -496,6 +505,7 @@ impl Engine {
             components,
             mates: solved.statuses,
             freedom: solved.freedom,
+            component_freedom: solved.component_freedom,
         }
     }
 

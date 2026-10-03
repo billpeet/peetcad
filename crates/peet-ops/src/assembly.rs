@@ -487,6 +487,10 @@ pub(crate) fn component_out(doc: &Document, id: CompId) -> Value {
     }
     placement_out(&mut m, &c.placement, units);
     m.insert("fixed".to_owned(), json!(c.fixed));
+    // How many ways it can still move, on its own or along with what it is mated to.
+    if let Some(freedom) = doc.evaluation().component_freedom(id) {
+        m.insert("freedom".to_owned(), json!(freedom));
+    }
     let mates: Vec<&str> = assembly.mates_of(id).map(|m| m.name.as_str()).collect();
     if !mates.is_empty() {
         m.insert("mates".to_owned(), json!(mates));

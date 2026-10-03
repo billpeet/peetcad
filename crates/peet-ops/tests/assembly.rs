@@ -48,7 +48,7 @@ fn components_are_inserted_placed_and_changed() {
         first["component"],
         json!({
             "id": 1, "name": "Bracket-1", "part": "Bracket", "at": [0.0, 0.0, 0.0],
-            "fixed": true, "status": "ok",
+            "fixed": true, "freedom": 0, "status": "ok",
             "min": first["component"]["min"], "max": first["component"]["max"],
         })
     );
@@ -614,6 +614,7 @@ fn components_are_mated_by_faces_of_their_parts() {
     let moved = &made["moved"][0];
     assert_eq!(moved["name"], "Top");
     assert_eq!(moved["mates"], json!(["Coincident1"]));
+    assert_eq!(moved["freedom"], 3, "it slides two ways and turns one");
     assert!(
         (moved["min"][2].as_f64().unwrap() - 5.0).abs() < 1e-6,
         "{moved}"
@@ -711,6 +712,26 @@ fn components_are_mated_by_faces_of_their_parts() {
     let list = ok(&mut doc, json!({"op": "mates"}));
     assert_eq!(list["mates"].as_array().unwrap().len(), 5);
     assert_eq!(list["freedom"], 1);
+    // Which component it is that can still move: the pin, turning in its hole.
+    let loose: Vec<(String, u64)> = ok(&mut doc, json!({"op": "components"}))["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap().to_owned(),
+                c["freedom"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        loose,
+        [
+            ("plate-1".to_owned(), 0),
+            ("Top".to_owned(), 0),
+            ("Pin".to_owned(), 1)
+        ]
+    );
     let status = ok(&mut doc, json!({"op": "status"}));
     assert_eq!(
         (status["mates"].as_u64(), status["freedom"].as_u64()),

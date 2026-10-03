@@ -805,3 +805,161 @@ fn what_a_dragged_component_is_mated_to_comes_along() {
     assert!(now.rotation.angle_between(relative.rotation) < 1e-9);
     let _ = part;
 }
+
+#[test]
+fn each_component_says_how_it_can_still_move() {
+    let (mut model, part, base, top) = two_plates();
+    // A third plate, to hang on the second.
+    let third = {
+        let a = model.assembly_mut().unwrap();
+        let d = a.component(base).unwrap().definition;
+        a.insert(d, at(0.0, 0.0, 200.0)).unwrap()
+    };
+    let mut engine = Engine::new();
+    let free = |engine: &Engine, id| engine.evaluation().component_freedom(id);
+    engine.regenerate(&mut model);
+    assert_eq!(
+        [base, top, third].map(|c| free(&engine, c)),
+        [Some(0), Some(6), Some(6)],
+        "the fixed one can't move; the others are loose"
+    );
+    assert_eq!(engine.evaluation().freedom, 12);
+
+    // The second on the first: it slides two ways and turns one.
+    mate(
+        &mut model,
+        MateKind::Coincident,
+        end(base, face(&part, UP)),
+        end(top, face(&part, DOWN)),
+    );
+    engine.regenerate(&mut model);
+    assert_eq!([top, third].map(|c| free(&engine, c)), [Some(3), Some(6)]);
+    // And against a side: it only slides along the edge.
+    let side = mate(
+        &mut model,
+        MateKind::Coincident,
+        end(base, face(&part, DVec3::NEG_X)),
+        end(top, face(&part, DVec3::NEG_X)),
+    );
+    model.assembly_mut().unwrap().mate_mut(side).unwrap().flip = true;
+    engine.regenerate(&mut model);
+    assert_eq!([top, third].map(|c| free(&engine, c)), [Some(1), Some(6)]);
+
+    // The third fastened to the second: it can't move on its own, but it goes where the
+    // second goes, so it has the second's one way to move. Together they have one.
+    let whole = |c| MateEnd {
+        path: vec![c],
+        geom: None,
+    };
+    let relative = frame(&model, top).inverse().compose(&frame(&model, third));
+    let held = mate(
+        &mut model,
+        MateKind::Fasten(relative),
+        whole(top),
+        whole(third),
+    );
+    engine.regenerate(&mut model);
+    assert_eq!([top, third].map(|c| free(&engine, c)), [Some(1), Some(1)]);
+    assert_eq!(engine.evaluation().freedom, 1);
+
+    // The second held all round: nothing is loose any more.
+    let end_stop = mate(
+        &mut model,
+        MateKind::Distance(Scalar::new(4.0)),
+        end(base, face(&part, DVec3::NEG_Y)),
+        end(top, face(&part, DVec3::Y)),
+    );
+    engine.regenerate(&mut model);
+    assert_eq!(
+        [base, top, third].map(|c| free(&engine, c)),
+        [Some(0), Some(0), Some(0)]
+    );
+    assert_eq!(engine.evaluation().freedom, 0);
+    // It stays known through a drag (which changes where things are, not what holds
+    // them), and is worked out again when a mate goes.
+    drag(
+        &mut model,
+        &mut engine,
+        third,
+        DVec3::ZERO,
+        DVec3::new(9.0, 9.0, 9.0),
+    );
+    assert_eq!(free(&engine, third), Some(0));
+    model.assembly_mut().unwrap().remove_mate(end_stop);
+    model.assembly_mut().unwrap().remove_mate(held);
+    engine.regenerate(&mut model);
+    assert_eq!([top, third].map(|c| free(&engine, c)), [Some(1), Some(6)]);
+
+    // With nothing fixed, everything can move, held together or not.
+    model
+        .assembly_mut()
+        .unwrap()
+        .component_mut(base)
+        .unwrap()
+        .fixed = false;
+    engine.regenerate(&mut model);
+    assert_eq!(
+        [base, top, third].map(|c| free(&engine, c)),
+        [Some(6), Some(6), Some(6)]
+    );
+    assert_eq!(
+        engine.evaluation().freedom,
+        13,
+        "6 + 1 for the pair, 6 for the third"
+    );
+
+    // A suppressed component is not there to move.
+    model
+        .assembly_mut()
+        .unwrap()
+        .component_mut(third)
+        .unwrap()
+        .suppressed = true;
+    engine.regenerate(&mut model);
+    assert_eq!(free(&engine, third), None);
+}
+
+#[test]
+fn a_hinge_leaves_one_way_to_move() {
+    let holed = plate("Holed", 40.0, 30.0, 5.0, 4.0);
+    let pin = pin(4.0, 20.0);
+    let mut model = Model::new_assembly();
+    let (post, arm) = {
+        let a = model.assembly_mut().unwrap();
+        let dp = a.define(Arc::new(pin.clone()));
+        let dh = a.define(Arc::new(holed.clone()));
+        (
+            a.insert(dp, Frame::WORLD).unwrap(),
+            a.insert(dh, at(-20.0, -15.0, 0.0)).unwrap(),
+        )
+    };
+    mate(
+        &mut model,
+        MateKind::Concentric,
+        end(post, face(&pin, DVec3::ZERO)),
+        end(arm, face(&holed, DVec3::ZERO)),
+    );
+    let mut engine = Engine::new();
+    engine.regenerate(&mut model);
+    assert_eq!(engine.evaluation().component_freedom(arm), Some(2));
+    let flush = mate(
+        &mut model,
+        MateKind::Coincident,
+        end(post, face(&pin, DOWN)),
+        end(arm, face(&holed, DOWN)),
+    );
+    model.assembly_mut().unwrap().mate_mut(flush).unwrap().flip = true;
+    engine.regenerate(&mut model);
+    assert_eq!(engine.evaluation().component_freedom(arm), Some(1));
+    assert_eq!(engine.evaluation().component_freedom(post), Some(0));
+    // A mate that can't hold is left out: the freedom is that of the ones that do.
+    let clash = mate(
+        &mut model,
+        MateKind::Distance(Scalar::new(9.0)),
+        end(post, face(&pin, DOWN)),
+        end(arm, face(&holed, DOWN)),
+    );
+    let built = engine.regenerate(&mut model).clone();
+    assert!(built.mate_status(clash).unwrap().is_failed());
+    assert_eq!(built.component_freedom(arm), Some(1));
+}

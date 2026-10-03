@@ -306,7 +306,7 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `replace` | `component`, and `path`, `sample` or `part`: another part, in the same place |
 | `rename`, `suppress`, `show`, `delete` | `component` in place of `feature` |
 | `open_component` | `component`: opens its part as a document of its own and makes it current. `save` without a `path` on that document stores it back, as one undo step of the assembly, for every component of the part. Needs a session |
-| `components` | every component (`id`, `name`, `part`, `at`, `rotate`, `fixed`, `mates`, `status`, `message`, `min`, `max`) and every part (`id`, `name`, `kind`, how many `components`, `material`); how many `mates`, and the `freedom` left |
+| `components` | every component (`id`, `name`, `part`, `at`, `rotate`, `fixed`, `freedom`, `mates`, `status`, `message`, `min`, `max`) and every part (`id`, `name`, `kind`, how many `components`, `material`); how many `mates`, and the `freedom` left |
 | `mate` | `type` (`coincident`, `concentric`, `parallel`, `distance`, `angle`, `fasten`), `a`, `b`, `distance` or `angle` for those types, `flip`, `name`. An end is `{"component": …, "face": selector}` (or `"edge"`, `"vertex"`), the selector in the part's own coordinates; for `fasten` it is the component alone |
 | `edit_mate` | `mate`, and `distance` or `angle`, `flip` |
 | `rename`, `suppress`, `delete` | `mate` in place of `feature` |
@@ -319,7 +319,9 @@ components move as little as they can from where they are: so `place` on a mated
 component is a suggestion, and where a component is placed before it is mated decides
 which of several positions it takes. A reply to an operation that moved other components
 lists them under `moved`, and gives the `freedom` left: how many ways the components can
-still move (six for each that is not fixed, less what the mates hold). A mate that
+still move (six for each that is not fixed, less what the mates hold). Each component
+has a `freedom` of its own, 0 to 6: how many ways it can still move, by itself or along
+with what it is mated to (so the ones above 0 are the ones not yet held). A mate that
 can't be solved is not a failed operation: it is added and listed under `failures` with
 the reason, as a feature that can't be built is. `drag` moves what the mates leave free:
 the component slides to the place if it can, turns only if sliding can't get it nearer,

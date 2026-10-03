@@ -150,6 +150,17 @@ enum TreeAction {
     ChangeMate(MateId, MateChange),
 }
 
+/// What to say about how a component can still move.
+fn freedom_text(fixed: bool, freedom: Option<usize>) -> Option<String> {
+    Some(match (fixed, freedom?) {
+        (true, _) => "Fixed: it stays where it is.".to_owned(),
+        (false, 0) => "Fully held by its mates.".to_owned(),
+        (false, 6) => "Free: nothing holds it yet.".to_owned(),
+        (false, 1) => "It can still move 1 way.".to_owned(),
+        (false, n) => format!("It can still move {n} ways."),
+    })
+}
+
 /// Whether a command works in an assembly. The others are about a part's features and
 /// bodies, and are disabled there.
 pub(super) fn works_in_assembly(cmd: CommandId) -> bool {
@@ -408,9 +419,17 @@ impl PeetApp {
         let mut actions = Vec::new();
         for c in assembly.components() {
             let status = self.doc.evaluation().component_status(c.id);
+            // As in other CAD systems: (f) fixed, (-) can still move.
+            let freedom = self.doc.evaluation().component_freedom(c.id);
             let mut text = RichText::new(format!(
                 "{}{}{}",
-                if c.fixed { "(f) " } else { "" },
+                if c.fixed {
+                    "(f) "
+                } else if freedom.is_some_and(|f| f > 0) {
+                    "(-) "
+                } else {
+                    ""
+                },
                 c.name,
                 if c.visible { "" } else { "  (hidden)" }
             ));
@@ -424,6 +443,8 @@ impl PeetApp {
             let mut r = ui.selectable_label(selected, text);
             if let Some(message) = status.and_then(Status::message) {
                 r = r.on_hover_text(message);
+            } else if let Some(text) = freedom_text(c.fixed, freedom) {
+                r = r.on_hover_text(text);
             }
             if r.hovered() {
                 self.hovered_component = Some(c.id);
@@ -646,6 +667,7 @@ impl PeetApp {
             .map_or_else(String::new, |d| d.name().to_owned());
         let units = self.doc.model.parameters.units;
         let status = self.doc.evaluation().component_status(id).cloned();
+        let freedom = freedom_text(c.fixed, self.doc.evaluation().component_freedom(id));
 
         // The name is typed into a copy and set when the field is left.
         let mut name = match &self.component_name {
@@ -713,6 +735,13 @@ impl PeetApp {
                 );
                 ui.checkbox(&mut fixed, "");
                 ui.end_row();
+                if let Some(text) = &freedom {
+                    ui.label("Freedom").on_hover_text(
+                        "How many ways the component can still move, by itself or along with what it is mated to.",
+                    );
+                    ui.label(text);
+                    ui.end_row();
+                }
             });
         if let Some(message) = status.as_ref().and_then(Status::message) {
             ui.add_space(6.0);
@@ -838,6 +867,16 @@ mod tests {
         let status = |app: &PeetApp| app.doc.evaluation().mate_status(id).cloned();
         assert_eq!(status(&app), Some(Status::Ok));
         assert_eq!(app.doc.evaluation().freedom, 3);
+        assert_eq!(app.doc.evaluation().component_freedom(CompId(2)), Some(3));
+        assert_eq!(
+            freedom_text(false, Some(3)).as_deref(),
+            Some("It can still move 3 ways.")
+        );
+        assert_eq!(
+            freedom_text(true, Some(0)).as_deref(),
+            Some("Fixed: it stays where it is.")
+        );
+        assert_eq!(freedom_text(false, None), None);
         // Against each other, 10 apart: the second one is turned over, below the first.
         let second = app
             .doc

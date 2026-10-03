@@ -632,6 +632,8 @@ pub(crate) struct Solved {
     /// How many ways the components can still move: six for each that is not fixed,
     /// less what the mates hold.
     pub freedom: usize,
+    /// How many ways each component can still move, on its own or along with others.
+    pub component_freedom: HashMap<CompId, usize>,
 }
 
 /// What is kept between solves of the same mates on the same components, wherever the
@@ -639,9 +641,9 @@ pub(crate) struct Solved {
 #[derive(Default)]
 pub(crate) struct Memo {
     key: u64,
-    /// The freedom the mates leave, if they all hold (only then does it depend on which
-    /// mates there are alone).
-    freedom: Option<usize>,
+    /// The freedom the mates leave (together, and for each component by its index), if
+    /// they all hold (only then does it depend on which mates there are alone).
+    freedom: Option<(usize, Vec<usize>)>,
     /// The solver's structure for each group.
     problems: Vec<Kept>,
 }
@@ -890,54 +892,142 @@ fn pull(
     used.push((still_signature, still));
 }
 
-/// The rank of the equations' Jacobian over the unknowns of the free components: how
-/// many ways of moving the mates take away.
-fn rank(system: &System, eqs: &[u32], components: &[Placed], vals: &[f64]) -> usize {
-    let free: Vec<usize> = (0..components.len())
-        .filter(|i| !components[*i].fixed)
-        .collect();
-    let column: HashMap<usize, usize> = free.iter().enumerate().map(|(k, i)| (*i, k * 6)).collect();
-    let width = free.len() * 6;
-    let mut rows: Vec<Vec<f64>> = Vec::with_capacity(eqs.len());
-    let mut g = [0.0; MAX_SLOTS];
-    for e in eqs {
-        let eq = &system.eqs[*e as usize];
-        eq.eval(vals, &mut g);
-        let mut row = vec![0.0; width];
-        for (k, slot) in eq.slots.iter().enumerate() {
-            if let Some(start) = column.get(&(*slot as usize / 6)) {
-                row[start + *slot as usize % 6] += g[k];
-            }
-        }
-        rows.push(row);
+/// The group a component is in: the first of the components it is joined to.
+fn root(group: &mut [usize], mut i: usize) -> usize {
+    while group[i] != i {
+        group[i] = group[group[i]];
+        i = group[i];
     }
-    // Gaussian elimination with full row pivoting on each column.
-    let mut rank = 0;
+    i
+}
+
+/// Below this a pivot counts as nothing: the Jacobian's entries are of order one.
+const PIVOT: f64 = 1e-7;
+
+/// Brings `rows` to reduced row echelon form in place. Returns the pivot column of each
+/// row that has one, in order.
+fn reduce(rows: &mut [Vec<f64>], width: usize) -> Vec<usize> {
+    let mut pivots = Vec::new();
     for col in 0..width {
+        let rank = pivots.len();
         let Some(pivot) =
             (rank..rows.len()).max_by(|a, b| rows[*a][col].abs().total_cmp(&rows[*b][col].abs()))
         else {
             break;
         };
-        if rows[pivot][col].abs() < 1e-7 {
+        if rows[pivot][col].abs() < PIVOT {
             continue;
         }
         rows.swap(rank, pivot);
+        let scale = rows[rank][col];
+        for x in &mut rows[rank][col..] {
+            *x /= scale;
+        }
         let lead = rows[rank].clone();
-        for row in rows.iter_mut().skip(rank + 1) {
-            let factor = row[col] / lead[col];
-            if factor != 0.0 {
+        for (r, row) in rows.iter_mut().enumerate() {
+            let factor = row[col];
+            if r != rank && factor != 0.0 {
                 for (x, l) in row.iter_mut().zip(&lead).skip(col) {
                     *x -= factor * l;
                 }
             }
         }
-        rank += 1;
-        if rank == rows.len() {
+        pivots.push(col);
+        if pivots.len() == rows.len() {
             break;
         }
     }
-    rank
+    pivots
+}
+
+/// How many ways the components can still move, with the mates that hold (`held`): of
+/// them all together, and of each one (by its index).
+///
+/// Together: six for each free component, less the rank of the mates' Jacobian. Of one
+/// component: in how many independent ways it moves among all the motions the mates
+/// leave, which is the rank of its six rows of a basis of the Jacobian's null space. A
+/// component that only moves along with others counts those motions as its own, so two
+/// free components fastened to each other each have six. Each group of mated
+/// components is worked out on its own.
+fn freedoms(
+    system: &System,
+    held: &[u32],
+    components: &[Placed],
+    vals: &[f64],
+    group: &mut [usize],
+) -> (usize, Vec<usize>) {
+    let mut each: Vec<usize> = components
+        .iter()
+        .map(|c| if c.fixed { 0 } else { 6 })
+        .collect();
+    let mut total: usize = each.iter().sum();
+    // The equations of each group, by the group of a free component they read.
+    let mut buckets: Vec<(usize, Vec<u32>)> = Vec::new();
+    for e in held {
+        let slots = system.eqs[*e as usize].slots;
+        let free = [slots[0], slots[6]]
+            .into_iter()
+            .map(|s| s as usize / 6)
+            .find(|i| !components[*i].fixed);
+        let Some(free) = free else {
+            continue;
+        };
+        let of = root(group, free);
+        match buckets.iter_mut().find(|(g, _)| *g == of) {
+            Some((_, eqs)) => eqs.push(*e),
+            None => buckets.push((of, vec![*e])),
+        }
+    }
+    let mut g = [0.0; MAX_SLOTS];
+    for (_, eqs) in &buckets {
+        // A column for each unknown of the group's free components.
+        let mut members: Vec<usize> = eqs
+            .iter()
+            .flat_map(|e| {
+                let slots = system.eqs[*e as usize].slots;
+                [slots[0] as usize / 6, slots[6] as usize / 6]
+            })
+            .filter(|i| !components[*i].fixed)
+            .collect();
+        members.sort_unstable();
+        members.dedup();
+        let width = members.len() * 6;
+        let column = |component: usize| members.binary_search(&component).ok().map(|k| k * 6);
+        let mut rows: Vec<Vec<f64>> = eqs
+            .iter()
+            .map(|e| {
+                let eq = &system.eqs[*e as usize];
+                eq.eval(vals, &mut g);
+                let mut row = vec![0.0; width];
+                for (k, slot) in eq.slots.iter().enumerate() {
+                    if let Some(start) = column(*slot as usize / 6) {
+                        row[start + *slot as usize % 6] += g[k];
+                    }
+                }
+                row
+            })
+            .collect();
+        let pivots = reduce(&mut rows, width);
+        total -= pivots.len();
+        // The null space: one vector for each column without a pivot, with one in
+        // that column and, in each pivot's column, minus that row's entry there.
+        let loose: Vec<usize> = (0..width).filter(|c| !pivots.contains(c)).collect();
+        for (k, member) in members.iter().enumerate() {
+            let mut own: Vec<Vec<f64>> = (k * 6..k * 6 + 6)
+                .map(|col| {
+                    loose
+                        .iter()
+                        .map(|f| match pivots.iter().position(|p| *p == col) {
+                            Some(row) => -rows[row][*f],
+                            None => f64::from(u8::from(col == *f)),
+                        })
+                        .collect()
+                })
+                .collect();
+            each[*member] = reduce(&mut own, loose.len()).len();
+        }
+    }
+    (total, each)
 }
 
 /// A component turned half way round about `axis` through `through`.
@@ -1067,13 +1157,6 @@ pub(crate) fn solve(
 
     // ---- The groups: components joined by mates, a fixed one joining nothing ----
     let mut group: Vec<usize> = (0..components.len()).collect();
-    fn root(group: &mut [usize], mut i: usize) -> usize {
-        while group[i] != i {
-            group[i] = group[group[i]];
-            i = group[i];
-        }
-        i
-    }
     for (_, ia, ib, _) in &asked {
         if !components[*ia].fixed && !components[*ib].fixed {
             let (a, b) = (root(&mut group, *ia), root(&mut group, *ib));
@@ -1228,14 +1311,20 @@ pub(crate) fn solve(
     // ---- Where the components are now ----
     let all_hold =
         held.len() == mates_equations && statuses.values().all(|s| !matches!(s, Status::Failed(_)));
-    let freedom = match memo.freedom.filter(|_| all_hold) {
-        Some(known) => known,
-        None => {
-            let free = components.iter().filter(|c| !c.fixed).count();
-            (free * 6).saturating_sub(rank(&system, &held, &components, &vals))
-        }
-    };
-    memo.freedom = all_hold.then_some(freedom);
+    let known = memo
+        .freedom
+        .take()
+        .filter(|(_, each)| all_hold && each.len() == components.len());
+    let (freedom, each) =
+        known.unwrap_or_else(|| freedoms(&system, &held, &components, &vals, &mut group));
+    let component_freedom = components
+        .iter()
+        .zip(&each)
+        .map(|(c, f)| (c.id, *f))
+        .collect();
+    if all_hold {
+        memo.freedom = Some((freedom, each));
+    }
     let mut frames = HashMap::with_capacity(components.len());
     for (i, c) in components.iter().enumerate() {
         let v = &vals[i * 6..i * 6 + 6];
@@ -1256,6 +1345,7 @@ pub(crate) fn solve(
         frames,
         statuses,
         freedom,
+        component_freedom,
     }
 }
 

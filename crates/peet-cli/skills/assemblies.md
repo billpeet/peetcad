@@ -104,6 +104,11 @@ rough placement decides which of several possible positions is taken.
   the components the mate moved, with where they are now (`at`, `min`, `max`);
   `freedom` is how many ways the assembly's components can still move (0: fully held).
   Check `moved` against where the component should be.
+- **Finding what is loose.** Each component in `components` has its own `freedom` (0 to
+  6): how many ways it can still move, by itself or along with what it is mated to. The
+  ones above 0 are the ones that still need a mate, or the one they are mated to does.
+  A pin in a hole with its end flush has 1 (it turns); two components fastened together
+  and to nothing else each have 6.
 - **A mate that fails** is still added, like a feature that can't be built. "It can't
   hold together with the mates above it" means it contradicts earlier mates: change its
   value, its `flip` or its faces (delete it and add another), or delete the one it
