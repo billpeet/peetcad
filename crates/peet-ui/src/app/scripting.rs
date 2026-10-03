@@ -53,6 +53,7 @@ pub fn coverage(cmd: CommandId) -> Coverage {
         | C::SketchCenterRectangle
         | C::SketchCircle
         | C::SketchArc
+        | C::SketchSpline
         | C::SketchSlot
         | C::SketchPolygon
         | C::SketchPoint
@@ -199,6 +200,7 @@ pub fn command_for(command: &AppCommand) -> CommandId {
             SketchTool::Offset => C::SketchOffset,
             SketchTool::Mirror => C::SketchMirror,
             SketchTool::Dimension => C::SmartDimension,
+            SketchTool::Spline => C::SketchSpline,
         },
         AppCommand::Quit => C::Quit,
     }

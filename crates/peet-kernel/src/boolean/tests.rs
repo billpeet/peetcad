@@ -505,14 +505,43 @@ fn parallel_cylinders_intersect_in_lines() {
 }
 
 #[test]
-fn crossing_cylinders_are_unsupported() {
+fn crossing_cylinders_of_different_sizes() {
+    // A rod of radius 1 through one of radius 2, square across it: the rims are curves
+    // with no closed form, traced. What the two share is the small rod's length inside
+    // the big one: 8 ∫₀¹ √(1 − y²) √(4 − y²) dy.
     let a = cylinder(v(0.0, 0.0, -5.0), DVec3::Z, 2.0, 10.0);
     let b = cylinder(v(-5.0, 0.0, 0.0), DVec3::X, 1.0, 10.0);
-    for op in [BooleanOp::Union, BooleanOp::Subtract, BooleanOp::Intersect] {
-        let err = boolean(&a, &b, op).unwrap_err();
-        assert!(matches!(err, KernelError::Unsupported(_)), "{err:?}");
-        assert!(err.to_string().contains("non-parallel"), "{err}");
+    let n = 200_000;
+    let shared: f64 = (0..n)
+        .map(|k| {
+            let y = (f64::from(k) + 0.5) / f64::from(n);
+            8.0 * ((1.0 - y * y) * (4.0 - y * y)).sqrt() / f64::from(n)
+        })
+        .sum();
+    let (va, vb) = (PI * 40.0, PI * 10.0);
+    for (op, expected) in [
+        (BooleanOp::Union, va + vb - shared),
+        (BooleanOp::Subtract, va - shared),
+        (BooleanOp::Intersect, shared),
+    ] {
+        let (s, _) = run(&a, &b, op);
+        let got = measure::volume(&s);
+        assert!(
+            (got - expected).abs() < 1e-4 * expected,
+            "{op:?}: {got} instead of {expected}"
+        );
+        assert!(
+            s.edges
+                .iter()
+                .any(|e| matches!(e.curve, crate::geom::Curve3::Nurbs(_)))
+        );
     }
+    // Askew: the small rod off the big one's axis, and tilted.
+    let b = cylinder(v(-6.0, 0.7, -1.5), v(1.0, 0.0, 0.25).normalize(), 0.8, 12.0);
+    let (drilled, _) = run(&a, &b, BooleanOp::Subtract);
+    let (kept, _) = run(&a, &b, BooleanOp::Intersect);
+    let whole = measure::volume(&drilled) + measure::volume(&kept);
+    assert!((whole - va).abs() < 1e-4 * va, "{whole} instead of {va}");
     // Non-parallel cylinders that don't touch are fine.
     let b = cylinder(v(-5.0, 0.0, 8.0), DVec3::X, 1.0, 10.0);
     let (s, c) = run(&a, &b, BooleanOp::Union);
@@ -1276,8 +1305,11 @@ mod random {
         fn feature_sequences(tools in proptest::collection::vec(tool(), 1..5)) {
             // A block, then a few add / cut features in different directions. Every step
             // must give a valid solid whose volume agrees with the intersection's, or say
-            // that crossing cylinders are not supported.
+            // that the faces cross in a way that isn't supported.
             let mut body = cuboid(DVec3::ZERO, DVec3::splat(4.0));
+            // Once a crossing has been traced, volumes are known to the fit of the
+            // traced curves, not exactly.
+            let before = crate::boolean::ssi::tracings();
             for t in &tools {
                 let solid = t.solid();
                 let op = if t.add { BooleanOp::Union } else { BooleanOp::Subtract };
@@ -1294,7 +1326,7 @@ mod random {
                 let (vb, vt, vc) = (volume(&body), volume(&solid), volume(&common));
                 let expected = if t.add { vb + vt - vc } else { vb - vc };
                 prop_assert!(
-                    (volume(&next) - expected).abs() < 1e-7,
+                    (volume(&next) - expected).abs() < if crate::boolean::ssi::tracings() > before { 1e-3 } else { 1e-7 },
                     "{op:?} with {t:?}: volume {} instead of {expected}", volume(&next)
                 );
                 if next.faces.is_empty() {
@@ -1392,6 +1424,9 @@ mod random {
             // principal planes: rectangles, circles and slots (whose flat sides are
             // tangent to their round ends), so arcs, partial cylinders and seams all occur.
             let mut body = block(&Plane::TOP, DVec2::ZERO, DVec2::splat(4.0), 0.0, 4.0);
+            // Once a crossing has been traced, volumes are known to the fit of the
+            // traced curves, not exactly.
+            let before = crate::boolean::ssi::tracings();
             for f in &features {
                 let Some(solid) = f.solid() else { break };
                 let op = if f.add { BooleanOp::Union } else { BooleanOp::Subtract };
@@ -1408,7 +1443,7 @@ mod random {
                 let (vb, vt, vc) = (volume(&body), volume(&solid), volume(&common));
                 let expected = if f.add { vb + vt - vc } else { vb - vc };
                 prop_assert!(
-                    (volume(&next) - expected).abs() < 1e-7,
+                    (volume(&next) - expected).abs() < if crate::boolean::ssi::tracings() > before { 1e-3 } else { 1e-7 },
                     "{op:?} with {f:?}: volume {} instead of {expected}", volume(&next)
                 );
                 if next.faces.is_empty() {

@@ -19,7 +19,8 @@ use crate::sketch::{ConstraintKind, EntityId, EntityKind, Geometry, Sketch};
 ///   original, and the original gets a point-on-curve relation to the axis (unless its
 ///   group is already tied to the axis), so the joined halves stay symmetric.
 /// - Circles also get `Equal` radius. Arcs don't need it: symmetric centres and
-///   endpoints already imply it.
+///   endpoints already imply it. Nor do splines: a spline is where its fit points are,
+///   so symmetric fit points make a symmetric curve.
 ///
 /// Mirroring reverses orientation, so a copied arc runs counter-clockwise from the mirror
 /// of the original's end to the mirror of its start. Copies keep the construction flag. A
@@ -86,6 +87,17 @@ pub fn mirror(
                 m.relate(sketch, center, c)?;
                 m.relate(sketch, end, s)?;
                 m.relate(sketch, start, e)?;
+                copy
+            }
+            Geometry::Spline { ref points, closed } => {
+                let points = points.clone();
+                let through: Vec<DVec2> =
+                    points.iter().map(|p| m.reflect(sketch.point(*p))).collect();
+                let copy = sketch.add_spline(&through, closed)?;
+                let copies = sketch.spline_points(copy).expect("a spline").0.to_vec();
+                for (original, copy) in points.into_iter().zip(copies) {
+                    m.relate(sketch, original, copy)?;
+                }
                 copy
             }
             Geometry::Circle { center, radius } => {

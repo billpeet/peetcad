@@ -17,6 +17,9 @@
 //! "UP" means the flange bends (or the form stands) towards the viewer (the top side of
 //! the sheet). Forms are pressed, not cut, so their outlines are kept off the cutting
 //! layers; the lance of a louver is cut, and is on `CUTOUTS`.
+//!
+//! R12 has no spline entity. Sheet metal refuses splines, so a flat pattern has none; if
+//! one ever did, it would be written as short lines within [`SPLINE_CHORD`] of the curve.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -24,6 +27,21 @@ use std::fmt::Write as _;
 use peet_math::DVec2;
 use peet_sheetmetal::{Report, SheetBody};
 use peet_sketch::Curve;
+
+/// How far (mm) the lines a spline is written as may stray from it.
+pub const SPLINE_CHORD: f64 = 0.01;
+
+/// A spline as short lines on `layer`.
+fn spline_lines(curve: &Curve, layer: &'static str, out: &mut Vec<Entity>) {
+    for w in curve.tessellate(SPLINE_CHORD).windows(2) {
+        out.push(Entity::Line {
+            layer,
+            a: w[0],
+            b: w[1],
+            dashed: false,
+        });
+    }
+}
 
 pub mod layer {
     pub const OUTLINE: &str = "OUTLINE";
@@ -90,6 +108,7 @@ pub fn flat_pattern_entities(sheet: &SheetBody) -> Vec<Entity> {
         }
         for (curve, _) in &l.edges {
             match *curve {
+                Curve::Spline(_) => spline_lines(curve, layer, &mut out),
                 Curve::Line { a, b } => {
                     // A slit (tear relief) gives the same segment twice: cut it once.
                     let (p, r) = if (a.x, a.y) <= (b.x, b.y) {
@@ -193,6 +212,10 @@ pub fn flat_pattern_entities(sheet: &SheetBody) -> Vec<Entity> {
         let mut size = 0.0_f64;
         for (curve, _) in &form.outline {
             match *curve {
+                Curve::Spline(_) => {
+                    size = size.max(curve.start().distance(form.center));
+                    spline_lines(curve, layer::FORMS, &mut out);
+                }
                 Curve::Line { a, b } => {
                     size = size.max(a.distance(form.center));
                     out.push(Entity::Line {
@@ -270,7 +293,7 @@ fn whole_circle(edges: &[(Curve, bool)]) -> Option<(DVec2, f64)> {
                 ..
             } => (center, radius, sweep),
             Curve::Circle { center, radius } => (center, radius, std::f64::consts::TAU),
-            Curve::Line { .. } => return None,
+            Curve::Line { .. } | Curve::Spline(_) => return None,
         };
         match circle {
             None => circle = Some((center, radius)),

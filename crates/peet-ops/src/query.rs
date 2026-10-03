@@ -249,6 +249,11 @@ fn sketch_detail(doc: &Document, sketch: &Sketch) -> (Vec<Value>, Vec<Value>, Ve
                 "type": "arc", "center": center.0, "start": start.0, "end": end.0,
                 "at": at(center), "from": at(start), "to": at(end),
             }),
+            Geometry::Spline { ref points, closed } => json!({
+                "type": "spline", "closed": closed,
+                "points": points.iter().map(|p| p.0).collect::<Vec<u32>>(),
+                "through": points.iter().map(|p| at(*p)).collect::<Vec<Value>>(),
+            }),
         };
         if let Value::Object(m) = &mut v {
             m.insert("id".to_owned(), json!(id.0));

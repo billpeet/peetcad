@@ -557,6 +557,10 @@ fn tessellate_face(
                 (1.0 + FACET_SLACK) * (scale.y * dv).max(widest.y)
             });
             mesh.delaunay(|_, _| true);
+            if let (Surface::Nurbs(_), true) = (&f.surface, max_dy.is_finite()) {
+                mesh.seed_grid(DVec2::new(max_dx, max_dy), MAX_STEINER_POINTS);
+                mesh.delaunay(|_, _| true);
+            }
             mesh.split_long(0, max_dx, MAX_STEINER_POINTS);
             if max_dy.is_finite() {
                 mesh.split_long(1, max_dy, MAX_STEINER_POINTS);

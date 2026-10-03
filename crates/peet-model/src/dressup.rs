@@ -27,7 +27,13 @@ pub enum BlendKind {
     Chamfer,
 }
 
-/// A fillet or a chamfer on edges of the bodies.
+/// A fillet or a chamfer on edges of the bodies: any edge that is a corner between two
+/// faces all along its length, whatever the edge and the faces are. Edges between flat
+/// faces and round rims stay exact (cylinders, tori, planes, cones); freeform edges and
+/// edges of curved faces get a rolling-ball blend, a freeform face. What the kernel
+/// can't do yet (a corner where such a blend would meet another, an end on a curved
+/// face) fails the feature with the kernel's own sentence, which says what to pick
+/// instead.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct BlendFeature {
     pub kind: BlendKind,
@@ -52,7 +58,8 @@ impl BlendFeature {
     }
 }
 
-/// Hollows bodies, leaving walls of one thickness.
+/// Hollows bodies, leaving walls of one thickness. Freeform faces (a loft's sides) take
+/// part like any others, as long as the wall is thinner than their tightest curve.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ShellFeature {
     /// The faces to remove, opening the hollow. None: every body becomes a closed hollow.
@@ -69,8 +76,10 @@ impl ShellFeature {
     }
 }
 
-/// Tapers faces about the lines where they cross a neutral plane: flat faces, and round
-/// faces whose axis is along the direction of pull (they become cones).
+/// Tapers faces about the curves where they cross a neutral plane: flat faces, round
+/// faces whose axis is along the direction of pull (they become cones), and freeform
+/// faces such as the walls of an extruded spline or the sides of a loft (they become
+/// ruled surfaces through their curve in the neutral plane).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DraftFeature {
     pub faces: Vec<FaceRef>,

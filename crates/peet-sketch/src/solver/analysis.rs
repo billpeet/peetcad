@@ -161,10 +161,7 @@ fn owner_points(sketch: &Sketch, owner: Owner) -> Vec<EntityId> {
     let mut out = Vec::new();
     let mut add = |id: EntityId| match sketch.entity(id).map(|e| &e.geometry) {
         Some(Geometry::Point { .. }) => out.push(id),
-        Some(g) => {
-            let (pts, n) = curve_points(g);
-            out.extend_from_slice(&pts[..n]);
-        }
+        Some(g) => out.extend_from_slice(&curve_points(g)),
         None => {}
     };
     match owner {
@@ -359,8 +356,7 @@ pub(crate) fn analyze(st: &mut Structure, sketch: &Sketch, vals: &[f64], eqs: &[
             for &r in &refs[..n] {
                 over[r.0 as usize] = true;
                 if let Some(e) = sketch.entity(r) {
-                    let (pts, k) = curve_points(&e.geometry);
-                    for p in &pts[..k] {
+                    for p in curve_points(&e.geometry).iter() {
                         over[p.0 as usize] = true;
                     }
                 }
@@ -397,11 +393,11 @@ pub(crate) fn analyze(st: &mut Structure, sketch: &Sketch, vals: &[f64], eqs: &[
             let fully = match e.geometry {
                 Geometry::Point { .. } => point_fixed(id),
                 ref g => {
-                    let (pts, n) = curve_points(g);
+                    let pts = curve_points(g);
                     let r = st.map.radius[i];
-                    pts[..n].iter().all(|&p| point_fixed(p))
+                    pts.iter().all(|&p| point_fixed(p))
                         && (r == NONE || (r as usize) >= st.n_vars || fixed_var[r as usize])
-                        && (n > 0)
+                        && !pts.is_empty()
                 }
             };
             if fully {

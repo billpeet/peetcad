@@ -310,6 +310,8 @@ pub(crate) fn mirrored(region: &Region) -> Region {
     let m = |p: DVec2| DVec2::new(p.x, -p.y);
     let edge = |e: &LoopEdge| -> LoopEdge {
         let curve = match e.curve {
+            // A spline keeps its direction too: its control points are mirrored.
+            Curve::Spline(ref s) => Curve::Spline(s.mapped(m)),
             Curve::Line { a, b } => Curve::Line { a: m(a), b: m(b) },
             Curve::Circle { center, radius } => Curve::Circle {
                 center: m(center),

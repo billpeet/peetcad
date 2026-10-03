@@ -327,7 +327,7 @@ pub enum Op {
     ImportStep {
         file: Source,
     },
-    /// Bring the lines, arcs, circles and polylines of a DXF file into a sketch.
+    /// Bring the lines, arcs, circles, polylines and fit-point splines of a DXF file into a sketch.
     ImportDxf {
         file: Source,
         into: DxfTarget,
@@ -712,7 +712,8 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "import_dxf",
         "path, and sketch (an existing one) or on (a plane: a new sketch; default top) with name; unit (mm, cm, m, in, ft), placement (keep, centred, lower_left)",
-        "Bring the lines, arcs, circles and polylines of a DXF file into a sketch.",
+        "Bring the lines, arcs, circles, polylines and fit-point splines of a DXF file into a sketch.
+",
     ),
     (
         "materials",

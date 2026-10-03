@@ -570,6 +570,19 @@ fn geometry_details(ui: &mut Ui, sketch: &Sketch, e: peet_sketch::EntityId) {
                         }
                     }
                 }
+                EntityKind::Spline => {
+                    if let Some((points, closed)) = sketch.spline_points(e) {
+                        row(ui, "Through", format!("{} points", points.len()));
+                        row(
+                            ui,
+                            "Ends",
+                            if closed { "Closed" } else { "Open" }.to_owned(),
+                        );
+                    }
+                    if let Some(c) = sketch.curve(e) {
+                        row(ui, "Length", super::length_with_unit(c.length()));
+                    }
+                }
             }
         });
 }

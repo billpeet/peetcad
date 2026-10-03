@@ -6,7 +6,10 @@ use std::f64::consts::PI;
 use peet_math::tolerance::{self, ANGULAR, LINEAR};
 use peet_math::{DVec2, DVec3, Frame, Plane};
 
+use std::sync::Arc;
+
 use crate::geom::{Circle3, Cone, Curve3, Cylinder, Ellipse3, Line3, Sphere, Surface, Torus};
+use crate::nurbs::{NurbsCurve, NurbsSurface};
 
 /// How two unbounded surfaces meet.
 #[derive(Clone, Debug)]
@@ -41,6 +44,117 @@ pub(crate) fn intersect_in(
     near: DVec3,
     region: Option<&peet_math::Aabb>,
 ) -> Ssi {
+    let found = closed_form(a, b, near, region);
+    if matches!(found, Ssi::Unsupported) {
+        // No closed form (cylinders that cross askew, a plane along a cone): the curve
+        // is traced on one of the two written as a freeform surface.
+        return marched(a, b, region);
+    }
+    found
+}
+
+/// The part of a cylinder or a cone near `region`, written exactly as a freeform
+/// surface: a full turn between two circles, with its seam on the side away from the
+/// region. `None` for other surfaces, and for a cone whose tip is in reach.
+fn patch(surface: &Surface, region: &peet_math::Aabb) -> Option<NurbsSurface> {
+    let (frame, radius_at): (&Frame, Box<dyn Fn(f64) -> f64>) = match surface {
+        Surface::Cylinder(c) => {
+            let r = c.radius;
+            (&c.frame, Box::new(move |_| r))
+        }
+        Surface::Cone(c) => {
+            let (r, slope) = (c.radius, c.half_angle.tan());
+            (&c.frame, Box::new(move |z| r + z * slope))
+        }
+        _ => return None,
+    };
+    let size = region.size().length();
+    let mut range = (f64::INFINITY, f64::NEG_INFINITY);
+    for i in 0..8 {
+        let corner = DVec3::new(
+            if i & 1 == 0 {
+                region.min.x
+            } else {
+                region.max.x
+            },
+            if i & 2 == 0 {
+                region.min.y
+            } else {
+                region.max.y
+            },
+            if i & 4 == 0 {
+                region.min.z
+            } else {
+                region.max.z
+            },
+        );
+        let z = frame.to_local(corner).z;
+        range = (range.0.min(z), range.1.max(z));
+    }
+    let margin = 0.05 * size + 1e-3;
+    let (z0, z1) = (range.0 - margin, range.1 + margin);
+    if radius_at(z0) <= LINEAR || radius_at(z1) <= LINEAR {
+        return None;
+    }
+    let middle = frame.to_local(0.5 * (region.min + region.max));
+    let away = middle.y.atan2(middle.x) + std::f64::consts::PI;
+    let ring = |z: f64| {
+        NurbsCurve::arc(
+            &Frame {
+                origin: frame.to_world(DVec3::new(0.0, 0.0, z)),
+                rotation: frame.rotation,
+            },
+            radius_at(z),
+            away,
+            std::f64::consts::TAU,
+        )
+    };
+    NurbsSurface::skin(&[ring(z0), ring(z1)]).ok()
+}
+
+thread_local! {
+    /// Whether an intersection of analytic surfaces has been traced on this thread since
+    /// [`take_traced`] was last called.
+    static TRACED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+#[cfg(test)]
+thread_local! {
+    static TRACINGS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
+
+/// How many intersections of analytic surfaces have been traced on this thread, for
+/// tests that expect exact results where nothing was.
+#[cfg(test)]
+pub(super) fn tracings() -> usize {
+    TRACINGS.with(std::cell::Cell::get)
+}
+
+/// Whether an intersection of two analytic surfaces was traced (it had no closed form)
+/// since the last call. Tracing can't follow faces that only touch, or that cross
+/// exactly at an edge, so what fails after it is reported as unsupported.
+pub(super) fn take_traced() -> bool {
+    TRACED.with(|t| t.replace(false))
+}
+
+/// The intersection of two analytic surfaces that has no closed form, traced within
+/// `region`. Without a region there is nowhere to look.
+fn marched(a: &Surface, b: &Surface, region: Option<&peet_math::Aabb>) -> Ssi {
+    let Some(region) = region else {
+        return Ssi::Unsupported;
+    };
+    for (s, other) in [(a, b), (b, a)] {
+        if let Some(written) = patch(s, region) {
+            TRACED.with(|t| t.set(true));
+            #[cfg(test)]
+            TRACINGS.with(|t| t.set(t.get() + 1));
+            return super::freeform::intersect(&Arc::new(written), other, Some(region));
+        }
+    }
+    Ssi::Unsupported
+}
+
+fn closed_form(a: &Surface, b: &Surface, near: DVec3, region: Option<&peet_math::Aabb>) -> Ssi {
     match (a, b) {
         (Surface::Nurbs(s), other) | (other, Surface::Nurbs(s)) => {
             super::freeform::intersect(s, other, region)

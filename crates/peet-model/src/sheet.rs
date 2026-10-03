@@ -152,12 +152,25 @@ pub(crate) struct BaseFlangeInput<'a> {
     pub stamp: u64,
 }
 
+/// Sheet metal is made of lines and arcs: refuses a sketch whose profile has a spline.
+fn refuse_splines(sketch: &Sketch) -> Result<(), FeatureError> {
+    let spline = sketch
+        .entities()
+        .any(|(_, e)| !e.construction && e.kind() == peet_sketch::EntityKind::Spline);
+    if spline {
+        Err(FeatureError(peet_sheetmetal::SPLINE_REFUSAL.to_owned()))
+    } else {
+        Ok(())
+    }
+}
+
 /// A base flange: a new sheet metal body.
 pub(crate) fn apply_base_flange(
     input: &BaseFlangeInput<'_>,
     bodies: &[Arc<Body>],
 ) -> Result<Applied, FeatureError> {
     let owner = input.feature.0;
+    refuse_splines(input.sketch)?;
     let profile = find_regions(input.sketch);
     let layout = if !profile.regions.is_empty() {
         let regions: Vec<_> = default_regions(&profile)
@@ -388,6 +401,7 @@ pub(crate) fn apply_sheet_cut(
                 .to_owned(),
         )
     })?;
+    refuse_splines(sketch)?;
     let profile = find_regions(sketch);
     if profile.regions.is_empty() {
         return Err(FeatureError(
@@ -858,8 +872,8 @@ pub(crate) fn apply_corner(
         let sheet = bodies[found.body].sheet.as_ref().ok_or_else(|| {
             FeatureError("Corners are of sheet metal bodies: pick a flange's face.".to_owned())
         })?;
-        let tag = sheet.faces[found.id.index()];
-        let end = match tag {
+        let tag = &sheet.faces[found.id.index()];
+        let end = match *tag {
             FaceTag::Wall {
                 tag: CurveTag::Generated { index, .. },
                 ..
@@ -962,7 +976,7 @@ fn round(l: &peet_sketch::region::Loop) -> Option<FormShape> {
                 sweep,
                 ..
             } => (center, radius, sweep),
-            Curve::Line { .. } => return None,
+            Curve::Line { .. } | Curve::Spline(_) => return None,
         };
         match circle {
             None => circle = Some((c, r)),
@@ -995,6 +1009,7 @@ pub(crate) fn form_outlines(
     sketch: &Sketch,
     kind: FormKind,
 ) -> Result<(Outlines, Option<String>), FeatureError> {
+    refuse_splines(sketch)?;
     let all = form_shapes(sketch);
     let total = find_regions(sketch).regions.len();
     let wanted: Vec<(u32, FormShape)> = all

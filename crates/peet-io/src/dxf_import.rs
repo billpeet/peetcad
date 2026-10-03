@@ -16,9 +16,12 @@
 //!
 //! **Entities.** `LINE`, `ARC`, `CIRCLE`, `LWPOLYLINE` and 2D `POLYLINE`s (segments with
 //! bulges become arcs) are imported. An `ELLIPSE` is imported when it is a circle or a
-//! circular arc. Splines are skipped (sketches have no splines; approximating them by
-//! many short lines would leave a profile that is hard to edit), as are ellipses that
-//! aren't circles and 3D polylines and meshes. Text, dimensions, hatches and every other
+//! circular arc. A `SPLINE` saved with fit points becomes a sketch spline through those
+//! points: the sketch draws its own curve through them, which can differ a little from
+//! the original between the points (the report says so). A spline with control points
+//! only is skipped (approximating it by many short lines would leave a profile that is
+//! hard to edit), as are ellipses that aren't circles and 3D polylines and meshes. Text,
+//! dimensions, hatches and every other
 //! kind are ignored. Every skipped entity is counted by kind in the [`ImportReport`], with
 //! a plain warning for each reason.
 //!
@@ -336,6 +339,15 @@ pub fn import_into(
     let (added, offset, collapsed) = build(sketch, items, options.placement);
     if collapsed > 0 {
         *skipped.entry(DEGENERATE).or_default() += collapsed;
+    }
+    if let Some(n) = skipped.remove(SPLINE_REDRAWN) {
+        warnings.push(format!(
+            "{n} spline{} drawn again through {} fit points. Between the points the curve \
+             can differ a little from the original: check it against the drawing where that \
+             matters.",
+            if n == 1 { " was" } else { "s were" },
+            if n == 1 { "its" } else { "their" }
+        ));
     }
     warnings.extend(skip_warnings(&skipped));
     if added.is_empty() {
@@ -733,8 +745,13 @@ fn ocs(n: [f64; 3]) -> Option<Xform> {
 }
 
 /// A curve read from the file, in world millimetres.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Shape {
+    /// A spline through fit points (a closed one doesn't repeat its first point).
+    Spline {
+        through: Vec<DVec2>,
+        closed: bool,
+    },
     Line(DVec2, DVec2),
     /// Counter-clockwise from `start` to `end` around `center`. `exact` when the ends
     /// were given in the file (polyline vertices) rather than computed from angles.
@@ -786,6 +803,10 @@ impl Shape {
 
     fn mapped(self, xf: &Xform) -> Self {
         match self {
+            Self::Spline { through, closed } => Self::Spline {
+                through: through.into_iter().map(|p| xf.apply(p)).collect(),
+                closed,
+            },
             Self::Line(a, b) => Self::Line(xf.apply(a), xf.apply(b)),
             Self::Arc {
                 center,
@@ -816,6 +837,23 @@ impl Shape {
     fn check(&self) -> Result<(), &'static str> {
         let ok = |p: DVec2| p.is_finite() && p.abs().max_element() < MAX_COORD;
         match *self {
+            Self::Spline {
+                ref through,
+                closed,
+            } => {
+                if !through.iter().all(|p| ok(*p)) {
+                    return Err(INVALID);
+                }
+                let mut different: Vec<DVec2> = Vec::new();
+                for p in through {
+                    if !different.iter().any(|q| q.distance(*p) <= 1e-9) {
+                        different.push(*p);
+                    }
+                }
+                if different.len() < if closed { 3 } else { 2 } {
+                    return Err(DEGENERATE);
+                }
+            }
             Self::Line(a, b) => {
                 if !(ok(a) && ok(b)) {
                     return Err(INVALID);
@@ -849,6 +887,10 @@ impl Shape {
 
     fn curve(&self) -> Curve {
         match *self {
+            Self::Spline {
+                ref through,
+                closed,
+            } => Curve::spline_through(through, closed),
             Self::Line(a, b) => Curve::Line { a, b },
             Self::Arc {
                 center, start, end, ..
@@ -861,6 +903,8 @@ impl Shape {
 // ---- Skip reasons (keys of `ImportReport::skipped`) ----
 
 const SPLINE: &str = "SPLINE";
+/// Not a reason to skip: counts the splines that were drawn again through fit points.
+const SPLINE_REDRAWN: &str = "SPLINE (drawn again through its fit points)";
 const ELLIPSE: &str = "ELLIPSE (not a circle)";
 const POLY3D: &str = "POLYLINE (3D or mesh)";
 const NOT_XY: &str = "not in the XY plane";
@@ -882,10 +926,13 @@ fn skip_warnings(skipped: &BTreeMap<&str, usize>) -> Vec<String> {
         let s = if n == 1 { "" } else { "s" };
         let line = match kind {
             SPLINE => format!(
-                "{n} spline{s} skipped: sketches have no splines yet. Redraw {} with lines \
-                 and arcs.",
+                "{n} spline{s} skipped: only splines saved with fit points can be imported, \
+                 and {} only control points. Save the drawing with fit-point splines, or \
+                 redraw {} in the sketch.",
+                if n == 1 { "this one has" } else { "these have" },
                 if n == 1 { "it" } else { "them" }
             ),
+            SPLINE_REDRAWN => continue,
             ELLIPSE => format!("{n} ellipse{s} skipped: sketches have no ellipses yet."),
             POLY3D => format!(
                 "{n} 3D polyline{s} or mesh{} skipped.",
@@ -1144,7 +1191,38 @@ impl<'a> Reader<'a, '_> {
             }
             "INSERT" => self.insert(r, &xf, layer),
             "SPLINE" => {
-                self.skip(SPLINE);
+                // Fit points are world coordinates: 11 and 21, in order. Flag 1: closed.
+                let mut through: Vec<DVec2> = Vec::new();
+                let mut x = None;
+                for p in r.pairs {
+                    match p.code {
+                        11 => x = Some(number(p)?),
+                        21 => {
+                            if let Some(x) = x.take() {
+                                through.push(DVec2::new(x, number(p)?));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if through.len() < 2 {
+                    self.skip(SPLINE);
+                    return Ok(());
+                }
+                if ocs(r.extrusion()?).is_none() {
+                    self.skip(NOT_XY);
+                    return Ok(());
+                }
+                let mut closed = r.int(70, 0)? & 1 != 0;
+                if through.len() > 2 && through[0].distance(through[through.len() - 1]) <= 1e-9 {
+                    through.pop();
+                    closed = true;
+                }
+                let before = self.items.len();
+                self.emit(Shape::Spline { through, closed }, &xf, construction)?;
+                if self.items.len() > before {
+                    self.skip(SPLINE_REDRAWN);
+                }
                 Ok(())
             }
             other => {
@@ -1302,6 +1380,14 @@ fn build(
     let mut ends: Vec<(DVec2, bool)> = Vec::new();
     for it in &items {
         match it.shape {
+            Shape::Spline {
+                ref through,
+                closed,
+            } => {
+                if !closed {
+                    ends.extend([(through[0], true), (through[through.len() - 1], true)]);
+                }
+            }
             Shape::Line(a, b) => ends.extend([(a, true), (b, true)]),
             Shape::Arc {
                 start, end, exact, ..
@@ -1318,6 +1404,37 @@ fn build(
     let mut k = 0;
     for it in &items {
         let id = match it.shape {
+            Shape::Spline {
+                ref through,
+                closed,
+            } => {
+                let mut through = through.clone();
+                let mut closed = closed;
+                let mut joins = None;
+                if !closed {
+                    let (ca, cb) = (cluster[k], cluster[k + 1]);
+                    k += 2;
+                    let last = through.len() - 1;
+                    if ca == cb {
+                        // The ends merged: the spline closes on itself.
+                        through.pop();
+                        closed = true;
+                    } else {
+                        through[0] = position[ca];
+                        through[last] = position[cb];
+                        joins = Some((ca, cb));
+                    }
+                }
+                let Ok(id) = sketch.add_spline(&through, closed) else {
+                    collapsed += 1;
+                    continue;
+                };
+                if let (Some((ca, cb)), Some((s, e))) = (joins, sketch.endpoints(id)) {
+                    joined[ca].push(s);
+                    joined[cb].push(e);
+                }
+                id
+            }
             Shape::Line(..) => {
                 let (ca, cb) = (cluster[k], cluster[k + 1]);
                 k += 2;

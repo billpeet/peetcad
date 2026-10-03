@@ -1749,6 +1749,7 @@ impl PeetApp {
                                 tool(ui, pending, CommandId::SketchRectangle, "Rectangle", Large);
                                 tool(ui, pending, CommandId::SketchCircle, "Circle", Large);
                                 tool(ui, pending, CommandId::SketchArc, "Arc", Large);
+                                tool(ui, pending, CommandId::SketchSpline, "Spline", Large);
                                 ribbon::stack(ui, |ui| {
                                     tool(
                                         ui,

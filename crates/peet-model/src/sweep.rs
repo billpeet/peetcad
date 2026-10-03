@@ -1,4 +1,4 @@
-//! Sweep features: a sketch's regions carried along a path of lines and arcs.
+//! Sweep features: a sketch's regions carried along a path of lines, arcs and splines.
 //!
 //! **Analytic sweeps.** The path is another sketch: straight lines and arcs joined end to
 //! end, smoothly (each piece leaves in the direction the last one arrived). It starts on
@@ -9,15 +9,25 @@
 //!
 //! A corner between two straight pieces is mitred: each piece runs on past the corner
 //! and is cut back with the plane that halves the angle, as a picture frame or a welded
-//! pipe elbow is made. A corner at an arc is refused (make the pieces tangent), and so
-//! is a path that leaves its sketch plane.
+//! pipe elbow is made. A corner at an arc is refused (make the pieces tangent).
+//!
+//! **Freeform sweeps.** A path with a spline in it is followed as a whole by the
+//! kernel's general sweep ([`peet_kernel::sweep`]): the profile is carried along without
+//! twisting and the sides are freeform faces, true to the sweep to a micron.
+//! The profile's plane has to cross the start of the path, but needn't be square to it
+//! (a spline's end direction can't be set exactly); the profile keeps the attitude to the
+//! path that it starts with. Such a path has no corners: every piece carries on the way
+//! the last one ended.
 
 use std::sync::Arc;
 
 use peet_kernel::Solid;
 use peet_kernel::boolean::{BooleanOp, boolean_traced};
 use peet_kernel::extrude::{ExtrudeFace, extrude_traced};
+use peet_kernel::geom::{Circle3, Curve3};
+use peet_kernel::nurbs::NurbsCurve;
 use peet_kernel::revolve::{RevolveAxis, RevolveFace, revolve_traced};
+use peet_kernel::sweep::{PathPiece, SweepFace, sweep_traced};
 use peet_math::{DQuat, DVec2, DVec3, Frame, Plane, tolerance};
 use peet_sketch::region::Region;
 use peet_sketch::{Curve, Sketch};
@@ -70,6 +80,14 @@ const JOIN: f64 = 100.0 * tolerance::LINEAR;
 /// Directions within this of each other (as 1 − cosine) continue smoothly.
 const SMOOTH: f64 = 1e-9;
 
+/// In a path with a spline, directions within this of each other (as 1 − cosine)
+/// continue smoothly (the kernel's own limit).
+const FREEFORM_SMOOTH: f64 = 1e-7;
+
+/// The least a path with a spline must leave the profile's plane by at its start (the
+/// cosine of the angle between its direction and the plane's normal).
+const LEAVES: f64 = 0.5;
+
 /// The cosine of the sharpest corner that is mitred (150° between the directions).
 const SHARPEST: f64 = -0.866;
 
@@ -88,18 +106,27 @@ enum Piece {
         axis: DVec3,
         angle: f64,
     },
+    /// The spline with this index in the path's list of them, perhaps run backwards.
+    Spline {
+        index: usize,
+        reversed: bool,
+        from: DVec3,
+        to: DVec3,
+        from_dir: DVec3,
+        to_dir: DVec3,
+    },
 }
 
 impl Piece {
     fn start(&self) -> DVec3 {
         match *self {
-            Self::Line { from, .. } | Self::Arc { from, .. } => from,
+            Self::Line { from, .. } | Self::Arc { from, .. } | Self::Spline { from, .. } => from,
         }
     }
 
     fn end(&self) -> DVec3 {
         match *self {
-            Self::Line { to, .. } => to,
+            Self::Line { to, .. } | Self::Spline { to, .. } => to,
             Self::Arc {
                 from,
                 center,
@@ -115,6 +142,7 @@ impl Piece {
             Self::Arc {
                 from, center, axis, ..
             } => axis.cross(from - center).normalize_or_zero(),
+            Self::Spline { from_dir, .. } => from_dir,
         }
     }
 
@@ -122,6 +150,7 @@ impl Piece {
         match *self {
             Self::Line { .. } => self.start_dir(),
             Self::Arc { center, axis, .. } => axis.cross(self.end() - center).normalize_or_zero(),
+            Self::Spline { to_dir, .. } => to_dir,
         }
     }
 
@@ -139,15 +168,36 @@ impl Piece {
                 axis: -axis,
                 angle,
             },
+            Self::Spline {
+                index,
+                reversed,
+                from,
+                to,
+                from_dir,
+                to_dir,
+            } => Self::Spline {
+                index,
+                reversed: !reversed,
+                from: to,
+                to: from,
+                from_dir: -to_dir,
+                to_dir: -from_dir,
+            },
         }
     }
 }
 
-/// The path's pieces in order, starting on `start` (the profile's plane).
-fn path_pieces(path: &Sketch, plane: &Plane, start: &Plane) -> Result<Vec<Piece>, FeatureError> {
+/// The path's pieces in order, starting on `start` (the profile's plane), and the
+/// splines among them.
+fn path_pieces(
+    path: &Sketch,
+    plane: &Plane,
+    start: &Plane,
+) -> Result<(Vec<Piece>, Vec<NurbsCurve>), FeatureError> {
     let err = |m: &str| Err(FeatureError(m.to_owned()));
     let at = |p| plane.from_plane_coords(p);
     let mut loose: Vec<Piece> = Vec::new();
+    let mut splines: Vec<NurbsCurve> = Vec::new();
     for (id, e) in path.entities() {
         if e.construction {
             continue;
@@ -196,17 +246,47 @@ fn path_pieces(path: &Sketch, plane: &Plane, start: &Plane) -> Result<Vec<Piece>
                     angle: std::f64::consts::TAU,
                 });
             }
+            Some(Curve::Spline(piece)) => {
+                if piece.is_closed() {
+                    return err(
+                        "A sweep can't follow a closed spline: the path needs two ends. Draw \
+                         it open (leave a gap), or sweep round a circle instead.",
+                    );
+                }
+                let curve = peet_kernel::profile::spline_curve(&piece, at)?;
+                let (lo, hi) = curve.domain();
+                let ([from, d0, _], [to, d1, _]) = (curve.evaluate(lo), curve.evaluate(hi));
+                loose.push(Piece::Spline {
+                    index: splines.len(),
+                    reversed: false,
+                    from,
+                    to,
+                    from_dir: d0.normalize_or_zero(),
+                    to_dir: d1.normalize_or_zero(),
+                });
+                splines.push(curve);
+            }
             _ => {}
         }
     }
     if loose.is_empty() {
         return err(
-            "The path sketch has no lines or arcs. Draw the path the profile should follow.",
+            "The path sketch has no lines, arcs or splines. Draw the path the profile should \
+             follow.",
         );
     }
     // The piece that starts on the profile's plane, heading square out of it.
+    // A spline's end can't be set square exactly, and the general sweep doesn't need it
+    // to be: it only has to leave the plane.
+    let freeform = !splines.is_empty();
     let on_plane = |p: DVec3| start.signed_distance(p).abs() <= JOIN;
-    let square = |d: DVec3| d.cross(start.normal()).length() <= 1e-6;
+    let square = |d: DVec3| {
+        if freeform {
+            d.dot(start.normal()).abs() >= LEAVES
+        } else {
+            d.cross(start.normal()).length() <= 1e-6
+        }
+    };
     let first = loose.iter().enumerate().find_map(|(i, piece)| {
         if on_plane(piece.start()) && square(piece.start_dir()) {
             Some((i, *piece))
@@ -217,6 +297,14 @@ fn path_pieces(path: &Sketch, plane: &Plane, start: &Plane) -> Result<Vec<Piece>
         }
     });
     let Some((i, first)) = first else {
+        if freeform {
+            return err(
+                "The path must start on the profile's plane and leave it: one end of the \
+                 path has to lie on the plane the profile is sketched on, heading away from \
+                 it. Move the path's first point onto that plane, or sketch the profile on \
+                 a plane across the start of the path.",
+            );
+        }
         return err(
             "The path must start on the profile's plane and leave it squarely. Sketch the \
              profile on a plane square to the start of the path (a reference plane helps), \
@@ -240,7 +328,14 @@ fn path_pieces(path: &Sketch, plane: &Plane, start: &Plane) -> Result<Vec<Piece>
         let Some((i, next)) = next else {
             break;
         };
-        if next.start_dir().dot(dir) < 1.0 - SMOOTH {
+        if freeform && next.start_dir().dot(dir) < 1.0 - FREEFORM_SMOOTH {
+            return err(
+                "The path has a corner. A path with a spline in it can't have one: every \
+                 piece has to carry on the way the last one ended. Draw the whole path as \
+                 one spline, or round the corner with more of its points.",
+            );
+        }
+        if !freeform && next.start_dir().dot(dir) < 1.0 - SMOOTH {
             // A corner between two straight pieces is mitred; others can't be.
             let straight = matches!(last, Piece::Line { .. }) && matches!(next, Piece::Line { .. });
             if !straight {
@@ -266,13 +361,100 @@ fn path_pieces(path: &Sketch, plane: &Plane, start: &Plane) -> Result<Vec<Piece>
              join them to it, or make them construction geometry.",
         );
     }
-    Ok(pieces)
+    Ok((pieces, splines))
+}
+
+/// The sweep along a path with a spline in it: the kernel's general sweep, one region
+/// at a time.
+fn freeform_tool(
+    input: &SweepInput<'_>,
+    regions: &[Region],
+    pieces: &[Piece],
+    splines: Vec<NurbsCurve>,
+) -> Result<(Solid, Vec<FaceName>), FeatureError> {
+    let mut splines: Vec<Option<NurbsCurve>> = splines.into_iter().map(Some).collect();
+    let mut path: Vec<PathPiece> = Vec::with_capacity(pieces.len());
+    for piece in pieces {
+        path.push(match *piece {
+            Piece::Line { from, to } => PathPiece::line(from, to)
+                .ok_or_else(|| FeatureError("A line of the path has no length.".to_owned()))?,
+            Piece::Arc {
+                from,
+                center,
+                axis,
+                angle,
+            } => {
+                let frame = Plane::from_origin_normal_x(center, axis, from - center)
+                    .ok_or_else(|| FeatureError("An arc of the path has no size.".to_owned()))?
+                    .frame;
+                PathPiece {
+                    curve: Curve3::Circle(Circle3 {
+                        frame,
+                        radius: from.distance(center),
+                    }),
+                    from: 0.0,
+                    to: angle,
+                }
+            }
+            Piece::Spline {
+                index, reversed, ..
+            } => {
+                let curve = splines[index].take().expect("each spline is used once");
+                let whole = PathPiece::nurbs(curve);
+                if reversed {
+                    PathPiece {
+                        from: whole.to,
+                        to: whole.from,
+                        curve: whole.curve,
+                    }
+                } else {
+                    whole
+                }
+            }
+        });
+    }
+    let mut swept: Option<(Solid, Vec<FaceName>)> = None;
+    for region in regions {
+        let (solid, faces) = sweep_traced(input.profile_plane, region, &path)?;
+        let names: Vec<FaceName> = faces
+            .iter()
+            .map(|f| {
+                FaceName::new(
+                    input.feature,
+                    match *f {
+                        SweepFace::Start => FaceRole::NearCap,
+                        SweepFace::End => FaceRole::FarCap,
+                        SweepFace::Side { loop_index, edge } => {
+                            let l = if loop_index == 0 {
+                                &region.outer
+                            } else {
+                                &region.holes[loop_index - 1]
+                            };
+                            FaceRole::Side(l.edges[edge].entity)
+                        }
+                    },
+                )
+            })
+            .collect();
+        swept = Some(match swept {
+            None => (solid, names),
+            Some((so_far, so_far_names)) => {
+                let traced = boolean_traced(&so_far, &solid, BooleanOp::Union)?;
+                let names = result_names(&traced.sources, &so_far_names, &names);
+                (traced.solid, names)
+            }
+        });
+    }
+    swept.ok_or_else(|| FeatureError("The profile has no closed region to sweep.".to_owned()))
 }
 
 /// The swept tool solid with its face names.
 fn tool(input: &SweepInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> {
     let regions: Vec<Region> = selected_regions(input.profile, &input.def.regions, false)?;
-    let pieces = path_pieces(input.path, input.path_plane, input.profile_plane)?;
+    let (pieces, splines) = path_pieces(input.path, input.path_plane, input.profile_plane)?;
+    if !splines.is_empty() {
+        return freeform_tool(input, &regions, &pieces, splines);
+    }
     let side = |region: usize, loop_index: usize, edge: usize| {
         let r = &regions[region];
         let l = if loop_index == 0 {
@@ -445,6 +627,7 @@ fn tool(input: &SweepInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> 
                 };
                 (solid, names, moved)
             }
+            Piece::Spline { .. } => unreachable!("paths with splines are swept as a whole"),
         };
         plane = Plane { frame: moved };
         swept = Some(match swept {

@@ -33,6 +33,10 @@ const GAUSS: [(f64, f64); 5] = [
 /// general curve (per polynomial span, for a freeform edge).
 const FREEFORM_PIECES: usize = 6;
 
+/// A freeform surface with more knot lines than this across the direction it is
+/// integrated in is in pieces small enough for one Gauss panel each.
+const MANY_PIECES: usize = 8;
+
 /// Curved edges are integrated in pieces of at most this parameter span.
 const MAX_PIECE: f64 = FRAC_PI_8;
 
@@ -105,41 +109,64 @@ pub(crate) fn loop_integrals(solid: &Solid, l: LoopId, reference: DVec3) -> Loop
             (Some(prev), None) => prev,
         };
         see(uv, &mut out);
-        let pieces = match &e.curve {
-            Curve3::Line(_) if !freeform => 1,
+        // The parameters between which the edge is integrated, piece by piece, in the
+        // direction it is walked.
+        let mut cuts = vec![ta];
+        let evenly = |cuts: &mut Vec<f64>, from: f64, to: f64, pieces: usize| {
+            cuts.extend((1..=pieces).map(|k| {
+                if k == pieces {
+                    to
+                } else {
+                    from + (to - from) * k as f64 / pieces as f64
+                }
+            }));
+        };
+        match &e.curve {
+            Curve3::Line(_) if !freeform => cuts.push(tb),
             // Across a freeform face even a straight edge is a curve in its parameters.
-            Curve3::Line(_) => FREEFORM_PIECES,
+            Curve3::Line(_) => evenly(&mut cuts, ta, tb, FREEFORM_PIECES),
             Curve3::Nurbs(n) => {
-                // A few pieces per polynomial span the edge covers.
+                // Each polynomial span the edge covers is one smooth piece, so the
+                // pieces end at the curve's knots: a Gauss panel across a knot would be
+                // integrating a function with a kink in it. Across a freeform face the
+                // span's image bends a little more, and gets two pieces.
                 let (lo, hi) = (ta.min(tb), ta.max(tb));
-                let spans = n
-                    .knots()
-                    .windows(2)
-                    .filter(|w| w[1] > w[0] && w[1] > lo && w[0] < hi)
-                    .count();
-                // Each span is one smooth piece; across a freeform face its image
-                // bends a little more.
-                spans.max(1) * if freeform { 2 } else { 1 }
+                let mut knots: Vec<f64> = Vec::new();
+                for &k in n.knots() {
+                    if k > lo && k < hi && knots.last().is_none_or(|l| k > *l) {
+                        knots.push(k);
+                    }
+                }
+                if tb < ta {
+                    knots.reverse();
+                }
+                knots.push(tb);
+                let per = if freeform { 2 } else { 1 };
+                let mut from = ta;
+                for to in knots {
+                    evenly(&mut cuts, from, to, per);
+                    from = to;
+                }
             }
             _ => {
                 let by_angle = ((tb - ta).abs() / MAX_PIECE).ceil().max(1.0) as usize;
-                if freeform {
+                let pieces = if freeform {
                     by_angle.max(FREEFORM_PIECES)
                 } else {
                     by_angle
-                }
+                };
+                evenly(&mut cuts, ta, tb, pieces);
             }
-        };
-        let span = (tb - ta) / pieces as f64;
-        for k in 0..pieces {
-            let a = ta + span * k as f64;
+        }
+        for piece in cuts.windows(2) {
+            let (a, span) = (piece[0], piece[1] - piece[0]);
             for &(x, w) in &GAUSS {
                 let t = a + span * 0.5 * (x + 1.0);
                 let p = e.curve.point(t);
                 let d = e.curve.derivative(t) * span * 0.5;
                 uv = surface.param_near(surface.param_from(p, uv), uv);
                 see(uv, &mut out);
-                integrand(&surface, p, uv, d, reference, w, &mut out);
+                integrand(&surface, p, uv, start, d, reference, w, &mut out);
             }
         }
         let (raw, pole) = surface.param_toward(&e.curve, tb, ta);
@@ -166,10 +193,18 @@ pub(crate) fn loop_integrals(solid: &Solid, l: LoopId, reference: DVec3) -> Loop
 /// `ρ √(ρ'² + z'²) du dv` and `(x − ref) · N du dv` has the antiderivative in `u` used
 /// below, so both integrals become `∮ F(u, v) dv` along the loop. The runs along a pole's
 /// line have `dv = 0` and add nothing.
+///
+/// A freeform surface has no such antiderivative, so it is integrated numerically from
+/// the line through `origin` (in parameters) to the point. Any line does, as long as it
+/// is the same one all the way round the loop: moving it adds a function of the other
+/// parameter alone, whose integral round a closed loop is zero. The loop's first point
+/// is used, which is never far from the rest of the loop.
+#[allow(clippy::too_many_arguments)]
 fn integrand(
     surface: &Surface,
     p: DVec3,
     uv: DVec2,
+    origin: DVec2,
     d: DVec3,
     reference: DVec3,
     w: f64,
@@ -185,9 +220,9 @@ fn integrand(
             out.volume += (pl.origin() - reference).dot(pl.normal()) * area / 3.0;
         }
         Surface::Nurbs(s) => {
-            // No antiderivative in closed form: integrate along `u` from the edge of the
-            // surface's rectangle to the point, numerically (the integrand is a smooth
-            // rational function between the knots).
+            // No antiderivative in closed form: integrate along `u` from the loop's
+            // starting line to the point, numerically (the integrand is a smooth rational
+            // function between the knots).
             let [_, su, sv, ..] = s.evaluate(uv);
             // The edge's direction in parameters: d = Su du + Sv dv.
             let (e, f, g) = (su.dot(su), su.dot(sv), sv.dot(sv));
@@ -196,36 +231,43 @@ fn integrand(
                 return;
             }
             let dv = (e * d.dot(sv) - f * d.dot(su)) / det;
-            let (lo, _) = s.domain();
             let (breaks, _) = s.breaks();
+            // From the starting line to the point, either way.
+            let (from, to, step) = if uv.x < origin.x {
+                (uv.x, origin.x, -dv)
+            } else {
+                (origin.x, uv.x, dv)
+            };
+            // Two Gauss panels per piece; one is as good where the surface is in many
+            // small pieces, each of them nearly straight.
+            let panels = if breaks.len() > MANY_PIECES { 1 } else { 2 };
             let mut area = 0.0;
             let mut volume = 0.0;
-            let mut from = lo.x;
-            for &to in breaks.iter().skip(1).chain(std::iter::once(&uv.x)) {
-                let to = to.min(uv.x);
-                if to <= from {
+            let mut from = from;
+            for &next in breaks.iter().skip(1).chain(std::iter::once(&to)) {
+                let next = next.min(to);
+                if next <= from {
                     continue;
                 }
-                // Two Gauss panels per span.
-                let half = 0.5 * (to - from);
-                for panel in 0..2 {
-                    let a = from + half * f64::from(panel);
+                let width = (next - from) / f64::from(panels);
+                for panel in 0..panels {
+                    let a = from + width * f64::from(panel);
                     for &(x, w) in &GAUSS {
-                        let u = a + 0.5 * half * (x + 1.0);
-                        let [at, su, sv, ..] = s.evaluate(DVec2::new(u, uv.y));
+                        let t = a + 0.5 * width * (x + 1.0);
+                        let [at, su, sv, ..] = s.evaluate(DVec2::new(t, uv.y));
                         let n = su.cross(sv);
-                        let weight = w * 0.5 * half;
+                        let weight = w * 0.5 * width;
                         area += n.length() * weight;
                         volume += (at - reference).dot(n) * weight;
                     }
                 }
-                from = to;
-                if from >= uv.x {
+                from = next;
+                if from >= to {
                     break;
                 }
             }
-            out.signed_area += area * dv * w;
-            out.volume += volume * dv * w / 3.0;
+            out.signed_area += area * step * w;
+            out.volume += volume * step * w / 3.0;
         }
         _ => {
             let (Some(frame), Some(m)) = (surface.revolution_frame(), surface.meridian(uv.y))

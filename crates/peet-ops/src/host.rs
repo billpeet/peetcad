@@ -147,6 +147,7 @@ word_enum! {
         Offset = "offset",
         Mirror = "mirror",
         Dimension = "dimension",
+        Spline = "spline",
     }
 }
 

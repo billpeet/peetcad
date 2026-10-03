@@ -32,7 +32,8 @@ use crate::sketch::{ConstraintKind, EntityId, EntityKind, Sketch};
 /// Errors: [`OpError::TooLarge`] when an arc or circle would reach zero radius, or an
 /// offset piece would collapse or reverse; [`OpError::NoIntersection`] when two
 /// consecutive offset pieces no longer meet; [`OpError::NotConnected`] when the curves
-/// don't form a single chain; [`OpError::Unsupported`] for a zero distance or non-curves.
+/// don't form a single chain; [`OpError::Unsupported`] for a zero distance, non-curves or
+/// splines (the offset of a spline is not a spline).
 pub fn offset(
     sketch: &mut Sketch,
     curves: &[EntityId],
@@ -46,6 +47,12 @@ pub fn offset(
         let kind = sketch.kind(id).ok_or(OpError::Missing(id))?;
         if !kind.is_curve() {
             return Err(OpError::Unsupported("offsetting points"));
+        }
+        if kind == EntityKind::Spline {
+            return Err(OpError::Unsupported(
+                "offsetting a spline. Draw the offset curve as a spline of its own, or offset \
+                 the lines and arcs without it",
+            ));
         }
         if !ids.contains(&id) {
             ids.push(id);
@@ -169,7 +176,7 @@ fn travel_end(sketch: &Sketch, curve: EntityId, reversed: bool) -> EntityId {
 }
 
 /// A line or arc with its direction of travel in the chain.
-#[derive(Clone, Copy)]
+#[derive(Clone)]
 struct Travel {
     curve: Curve,
     reversed: bool,
@@ -207,7 +214,10 @@ struct Seg {
 impl Seg {
     fn new(sketch: &Sketch, id: EntityId, reversed: bool, distance: f64) -> Result<Self, OpError> {
         let curve = sketch.curve(id).ok_or(OpError::Missing(id))?;
-        let orig = Travel { curve, reversed };
+        let orig = Travel {
+            curve: curve.clone(),
+            reversed,
+        };
         let (a, b) = (orig.start_travel(), orig.end_travel());
         match curve {
             Curve::Line { .. } => {
@@ -247,7 +257,7 @@ impl Seg {
                     naive_end: on(b),
                 })
             }
-            Curve::Circle { .. } => Err(OpError::NotConnected),
+            Curve::Circle { .. } | Curve::Spline(_) => Err(OpError::NotConnected),
         }
     }
 
@@ -269,10 +279,10 @@ impl Seg {
     /// that reversed (or shrank to nothing), or an arc whose sweep flipped.
     fn check(&self, start: DVec2, end: DVec2) -> Result<(), OpError> {
         let (s, e) = self.native(start, end);
-        let ok = match (self.orig.curve, self.carrier) {
-            (Curve::Line { a, b }, _) => (e - s).dot(b - a) > tolerance::LINEAR * a.distance(b),
+        let ok = match (&self.orig.curve, &self.carrier) {
+            (Curve::Line { a, b }, _) => (e - s).dot(*b - *a) > tolerance::LINEAR * a.distance(*b),
             (Curve::Arc { sweep, .. }, Curve::Circle { center, .. }) => {
-                match Curve::arc_from_points(center, s, e) {
+                match Curve::arc_from_points(*center, s, e) {
                     Curve::Arc { sweep: new, .. } => (new - sweep).abs() <= std::f64::consts::PI,
                     _ => false,
                 }
