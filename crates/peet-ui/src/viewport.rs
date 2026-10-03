@@ -482,9 +482,10 @@ impl Viewport {
         for body in &params.document.bodies {
             let id = match old.remove(&body.stamp) {
                 Some(id) => id,
-                None => self
-                    .renderer
-                    .upload_mesh(&params.render_state.device, &body.mesh),
+                None => self.renderer.upload_mesh(
+                    &params.render_state.device,
+                    &crate::bodies::to_mesh_data(body.tess()),
+                ),
             };
             self.body_meshes.push((body.stamp, id));
         }
@@ -722,7 +723,7 @@ impl Viewport {
             [28, 30, 36, 255]
         };
         for body in &params.document.bodies {
-            for [a, b] in body.silhouettes.lines(view) {
+            for [a, b] in body.silhouettes().lines(view) {
                 self.overlay.line(a, b, edge_color);
             }
         }
@@ -774,7 +775,7 @@ impl Viewport {
             };
             match geom {
                 GeomRef::Face { face, .. } => {
-                    if let Some(fm) = body.tess.faces.iter().find(|f| f.face == face) {
+                    if let Some(fm) = body.tess().faces.iter().find(|f| f.face == face) {
                         // Lift slightly along the normal so the highlight wins the depth test.
                         let lift = 1e-3 * body.solid.bounds().size().length().max(1.0);
                         for t in &fm.triangles {
@@ -789,7 +790,7 @@ impl Viewport {
                     }
                 }
                 GeomRef::Edge { edge, .. } => {
-                    if let Some(ep) = body.tess.edges.iter().find(|e| e.edge == edge) {
+                    if let Some(ep) = body.tess().edges.iter().find(|e| e.edge == edge) {
                         for w in ep.points.windows(2) {
                             self.overlay.line(w[0], w[1], line);
                         }

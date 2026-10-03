@@ -164,6 +164,7 @@ crates/
   peet-sheetmetal/ sheet metal: flat layouts of flanges and bends, folding, flat patterns, bend math
   peet-model/     the parametric core: feature tree, persistent naming, rebuilds, sheet metal features, undo
   peet-io/        file formats: native .peet, STL export, DXF flat patterns
+  peet-document/  the open document, headless: model, rebuilds, undo and bodies, shared by the app and scripts
   peet-ui/        egui application shell: panels, commands, viewport interaction
   peetcad/        the application binary (native main and web entry point)
 ```

@@ -2506,6 +2506,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "peet-document"
+version = "0.1.0"
+dependencies = [
+ "peet-io",
+ "peet-kernel",
+ "peet-math",
+ "peet-model",
+ "peet-sketch",
+ "web-time",
+]
+
+[[package]]
 name = "peet-io"
 version = "0.1.0"
 dependencies = [
@@ -2607,6 +2619,7 @@ dependencies = [
  "egui",
  "egui_kittest",
  "log",
+ "peet-document",
  "peet-io",
  "peet-kernel",
  "peet-math",
