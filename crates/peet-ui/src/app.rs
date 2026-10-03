@@ -31,6 +31,8 @@ use crate::tree::{TreeAction, TreeView, tree_ui};
 use crate::viewport::{Viewport, ViewportParams};
 
 mod convert;
+#[cfg(not(target_arch = "wasm32"))]
+mod live;
 pub mod scripting;
 mod solids;
 
@@ -139,6 +141,9 @@ pub struct PeetApp {
     step_import: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
     /// A message to read and dismiss (what an import left out, or why it failed).
     notice: Option<solids::Notice>,
+    /// This session, as `peet` reaches it (not in the browser).
+    #[cfg(not(target_arch = "wasm32"))]
+    live: Option<peet_live::Server>,
 }
 
 impl PeetApp {
@@ -153,7 +158,11 @@ impl PeetApp {
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
             .unwrap_or_default();
 
-        Self::with_renderer(settings, cc.wgpu_render_state.clone(), process_start)
+        #[cfg_attr(target_arch = "wasm32", expect(unused_mut))]
+        let mut app = Self::with_renderer(settings, cc.wgpu_render_state.clone(), process_start);
+        #[cfg(not(target_arch = "wasm32"))]
+        app.start_live(&cc.egui_ctx);
+        app
     }
 
     /// The app without a GPU or a window: commands work, the viewport shows nothing.
@@ -234,6 +243,8 @@ impl PeetApp {
             dxf_import: None,
             step_import: None,
             notice: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            live: None,
         }
     }
 
@@ -3277,6 +3288,13 @@ fn menu_button(ui: &mut Ui, cmd: CommandId, state: CommandState) -> bool {
 
 /// A compact toolbar button for a command. Returns true if clicked.
 impl eframe::App for PeetApp {
+    /// What `peet` sent is applied here and not in `ui`: this runs while the window is
+    /// minimised too, when nothing is drawn.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.serve_live(ctx);
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.perf.begin_frame();
         let ctx = ui.ctx().clone();

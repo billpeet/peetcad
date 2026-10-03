@@ -92,6 +92,8 @@ Stages 1, 2 and 4 give headless builds; stage 5 adds live update.
 | Saving in live mode | Agent edits leave the document unsaved unless the script explicitly saves, as if the user had made them |
 | One exe or two | A separate `peet` console binary next to the GUI exe |
 | Saving from the command line | The part is saved if it changed and every operation was applied: a run that changes a file and doesn't keep the change is no use. Nothing is saved if an operation failed |
+| Finding a running session | By file: a part that is open in a PeetCAD is changed there. `--live` insists on it, `--headless` forbids it |
+| A live run that fails part way | It stops, and what was applied stays (each operation is an undo step). It is not rolled back: the user may have worked in between |
 | Material tables from the command line | The built-in ones, or a CSV given with `--materials`. The command line does not read or change the application's settings |
 
 ## Progress
@@ -100,5 +102,5 @@ Stages 1, 2 and 4 give headless builds; stage 5 adds live update.
 - [x] Stage 2: operation vocabulary, selectors, queries (`peet-ops`: a typed `Op` with JSON as one way of writing it; [reference](scripting.md), [ADR 0007](adr/0007-operations.md)). Every command of the application has an operation: `peet_ui::coverage` is checked by the compiler and by a test
 - [x] Stage 3: UI routed through operations. Every change the application makes to a part is applied as operations: its tools still work out the change on a copy of the model, and `peet_ops::apply_model` translates it (the solid modelling commands, undo, the flat pattern, new, open and the samples build their operations directly). `PeetApp::journal` holds the operations applied. Left: the tools building their operations themselves, so the translation can go; writing the journal out as a script (operations can be read from JSON, not yet written); and saving, STL export and the material tables window, which still act directly
 - [x] Stage 4: headless command line (`peet`, in `peet-cli`: scripts, operations as JSON or by name with `field=value`, JSON replies, exit codes; [reference](scripting.md#the-command-line)). It saves the part if it changed and every operation was applied. `peet skills` prints instructions for agents, kept in `crates/peet-cli/skills/` and built in; `AGENTS.md` asks that every new feature is added to them, and a test checks it
-- [ ] Stage 5: live attach. `PeetApp::apply_op` is the entry point; what is missing is the transport (the pipe and the registry). The "sketch open for editing" rule is already enforced there
+- [x] Stage 5: live attach (`peet-live`: a running PeetCAD listens on a local socket and lists itself in its data folder; `peet` sends the operations of a part that is open there to it, and `peet sessions` lists what is running; [ADR 0010](adr/0010-live-attach.md)). Operations are applied between frames, also while the window is minimised. Left: a whole run as one undo step
 - [ ] Stage 6: scripting language, MCP, screenshots
