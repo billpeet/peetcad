@@ -167,7 +167,7 @@ fn a_resolved_reference_is_used_as_it_is() {
         Op::Add(vec![New {
             name: Some("Front".to_owned()),
             feature: FeatureArgs::EdgeFlange(EdgeFlange {
-                edge: Some(clicked.clone().into()),
+                edge: Some(Some(clicked.clone().into())),
                 length: Some("flange".into()),
                 offset_start: Some(10.into()),
                 offset_end: Some(10.into()),
@@ -201,7 +201,7 @@ fn json_reads_into_the_same_operations() {
         Op::Add(vec![New {
             name: Some("A".to_owned()),
             feature: FeatureArgs::EdgeFlange(EdgeFlange {
-                edge: Some(EdgeSel::between([0.0, 0.0, 8.0], [80.0, 0.0, 8.0])),
+                edge: Some(Some(EdgeSel::between([0.0, 0.0, 8.0], [80.0, 0.0, 8.0]))),
                 length: Some("flange".into()),
                 angle: Some(45.into()),
                 radius: Some(None),

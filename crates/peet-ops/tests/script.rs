@@ -472,7 +472,10 @@ fn every_feature_of_the_samples_reads_back_and_help_covers_every_operation() {
         ops["edge_flange"]["fields"]["position"],
         "material_inside | material_outside | bend_outside"
     );
-    assert_eq!(ops["edge_flange"]["fields"]["edge"], "edge (required)");
+    assert_eq!(
+        ops["edge_flange"]["fields"]["edge"],
+        "edge, or null to pick it afterwards (required)"
+    );
     // Every operation help lists exists: none answers "no operation".
     for name in ops.keys() {
         let reply: Reply = apply_json(&mut doc, &json!({"op": name}), Undo::Step);

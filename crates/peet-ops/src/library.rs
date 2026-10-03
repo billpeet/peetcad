@@ -369,10 +369,11 @@ pub(crate) fn delete_gauge(
 /// Replaces the tables with those of a CSV file.
 pub(crate) fn import_materials(
     library: &mut MaterialLibrary,
-    path: &Path,
+    file: &crate::op::Source,
 ) -> Result<Map<String, Value>, String> {
-    let text = std::fs::read_to_string(path)
-        .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+    let bytes = file.read()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let shown = file.shown();
     let read = MaterialLibrary::from_csv(&text).map_err(|errors| {
         let lines: Vec<String> = errors
             .iter()
@@ -380,8 +381,7 @@ pub(crate) fn import_materials(
             .map(|e| format!("line {}: {}", e.line, e.message))
             .collect();
         format!(
-            "{} is not a gauge table ({} problems): {}.",
-            path.display(),
+            "{shown} is not a gauge table ({} problems): {}.",
             errors.len(),
             lines.join("; ")
         )

@@ -105,11 +105,65 @@ the part has unsaved changes unless told to discard them, as the application ask
 
 ## Consequences
 
-- The application's own buttons still call the model directly, not the operations
-  (stage 3). `PeetApp::apply_op` is the way in for operations, and is tested against the
-  application without a window; nothing calls it yet, because there is no transport
-  (stage 5). Until the buttons use the operations the two can drift, and there is no
-  macro recording.
+- `PeetApp::apply_op` is the way in for operations from outside, and is tested against
+  the application without a window; nothing calls it yet, because there is no transport
+  (stage 5).
+
+## The application's own changes (stage 3)
+
+**Everything the application does to a part is applied as operations.** Its tools
+(start an extrusion from the selection, edit a value in the properties, drag a feature
+up the tree) work out the change on a copy of the model, as they did before.
+`peet_ops::apply_model` then finds the operations that make that change (`diff`) and
+applies them as one undo step with the tool's label. So the tools were not rewritten,
+and yet nothing reaches the part except through operations.
+
+The translation is possible because a feature can be read back as the arguments that
+would set it: each kind of field says how (`Field::arg`), so the one table per feature
+also gives `FeatureArgs::of` (everything a feature has) and `FeatureArgs::changes` (what
+differs between two). Values the application already holds go across exactly:
+`Input::Base` is a value in base units, and a reference that is already resolved is
+passed as it is.
+
+**A gap in the operations can't go unnoticed.** If a change can't be expressed as
+operations, or (in development builds) the operations arrive at a different model than
+the tool asked for, the change is made directly so the user loses nothing, an error is
+logged, and `PeetApp::untranslated` lists it. Tests rebuild all four sample parts from
+nothing through `apply_model`, and make every kind of change the tools make, comparing
+with the same change made directly.
+
+**Features can be waiting for a pick.** The application adds a flange before its edge is
+chosen. So the optional references (a flange's edge, a draft's neutral plane, a sweep's
+path) can be given as `null`: "to be picked afterwards". Leaving one out is still an
+error, so a script that forgets it is told.
+
+**New operations for the application.** `Op::SetSketch` replaces what is drawn in a
+sketch (how the sketch editor commits its work; a script draws with `draw`). Files can
+be given as their contents (`Source`), since file dialogs and the browser hand over
+contents, not paths. `rollback` can go above the first feature (`"start"`). An edit with
+the fields of another form of the same feature (an offset plane made an angled one)
+replaces its definition.
+
+**The journal.** `PeetApp::journal` holds the operations applied, from the interface and
+from outside: what the user did, as a script would do it.
+
+What this leaves:
+
+- The tools still build model changes, not operations. Moving each to build its
+  operations (as the solid modelling commands, undo, the flat pattern and new, open and
+  the samples now do) would make the translation unnecessary; until then a change costs
+  one rebuild per operation it translates to (usually one), and development builds
+  rebuild once more to check.
+- The journal can't be written out as a script yet: operations are read from JSON, not
+  written. A resolved reference would have to be written as a description that finds it
+  again.
+- Not through operations: saving (it goes through the platform's dialogs), STL export
+  (it exports what is shown, flat pattern included), edits in the material tables window
+  (they change the settings directly), importing a DXF into a sketch that is open for
+  editing (it goes into the editor's working copy), and recovering unsaved work at
+  startup.
+- `peet_document`'s `add_revolve` and its siblings are no longer used by the
+  application.
 - There is no command line or live attach yet (stages 4 and 5): `apply` is callable from
   Rust and from tests only.
 - What depends on the part is still checked when an operation is applied, typed or not:

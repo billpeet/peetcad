@@ -43,6 +43,7 @@
 //! - `{"op": "help"}` lists every operation and its fields.
 
 mod args;
+mod diff;
 mod export;
 mod fields;
 mod host;
@@ -53,6 +54,8 @@ pub mod select;
 pub mod sketch;
 mod value;
 
+pub use diff::{Translation, apply_model, diff};
+pub use export::export_bytes;
 pub use fields::{
     AngledPlane, BaseFlange, Blend, CircularPattern, CoordinateSystem, CoordinatesPoint, Corner,
     CylinderAxis, Draft, EdgeAxis, EdgeFlange, Extrude, FeatureArgs, Form, Hem, Hole, Jog,
@@ -61,7 +64,9 @@ pub use fields::{
 };
 pub use host::{AppCommand, Headless, Host, SketchTool, Toggle, View, Window};
 pub use library::{CheckRule, Gauge, GaugeBend};
-pub use op::{DatumSel, DxfPlacement, DxfTarget, Format, New, Op, Place, Query, Sample};
+pub use op::{
+    DatumSel, DxfPlacement, DxfTarget, Format, New, Op, Place, Query, RollTo, Sample, Source,
+};
 pub use sketch::{Draw, DrawItem, Ent, Measure, Relation};
 pub use value::{
     AxisSel, Bend, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel, HoleStandard,
@@ -91,6 +96,8 @@ pub struct Reply {
     pub ok: bool,
     /// Whether it changed the part.
     pub changed: bool,
+    /// The features it added, in the order they were made.
+    pub created: Vec<FeatureId>,
     /// Whether the document was replaced by another (new, open): whatever was known
     /// about the old one (a selection, an open sketch) no longer applies.
     pub replaced: bool,
@@ -183,7 +190,10 @@ fn add(doc: &Document, model: &mut Model, new: &[New]) -> Result<Vec<FeatureId>,
                 s.visible = false;
             }
         }
-        if let Some(name) = &n.name {
+        // (A name that is the automatic one needs no renaming.)
+        if let Some(name) = &n.name
+            && model.name_of(id) != name
+        {
             rename(model, id, name)?;
         }
         ids.push(id);
@@ -309,25 +319,20 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.replaced = true;
             return Ok(done);
         }
-        Op::Open { path, discard } => {
+        Op::Open { file, discard } => {
             guard_unsaved(doc, *discard, "open")?;
-            let bytes = std::fs::read(path)
-                .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+            let bytes = file.read()?;
             let opened = peet_io::document::open(&bytes)
-                .map_err(|e| format!("Couldn't open {}: {}", path.display(), e.message))?;
+                .map_err(|e| format!("Couldn't open {}: {}", file.shown(), e.message))?;
             if !opened.warnings.is_empty() {
                 done.data
                     .insert("warnings".to_owned(), json!(opened.warnings));
             }
-            let name = path.file_name().map_or_else(
-                || path.to_string_lossy().into_owned(),
-                |n| n.to_string_lossy().into_owned(),
-            );
             *doc = Document::from_opened(
                 opened,
                 Some(peet_document::FileLocation {
-                    name,
-                    path: Some(path.clone()),
+                    name: file.name.clone(),
+                    path: file.path.clone(),
                 }),
             );
             doc.finish_loading();
@@ -366,8 +371,8 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.data = library::delete_gauge(host.materials(), material, gauge.as_deref())?;
             return Ok(done);
         }
-        Op::ImportMaterials { path } => {
-            done.data = library::import_materials(host.materials(), path)?;
+        Op::ImportMaterials { file } => {
+            done.data = library::import_materials(host.materials(), file)?;
             return Ok(done);
         }
         Op::ExportMaterials { path } => {
@@ -423,14 +428,13 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             }
         }
         Op::ImportDxf {
-            path,
+            file,
             into,
             unit,
             placement,
         } => {
             use peet_io::dxf_import::{self, ImportOptions, Placement};
-            let bytes = std::fs::read(path)
-                .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+            let bytes = file.read()?;
             let options = ImportOptions {
                 unit: unit.map(dxf_unit),
                 placement: match placement {
@@ -441,7 +445,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 ..ImportOptions::flat_pattern()
             };
             let failed =
-                |e: dxf_import::ImportError| format!("Couldn't import {}: {e}", path.display());
+                |e: dxf_import::ImportError| format!("Couldn't import {}: {e}", file.shown());
             let (id, report, label) = match into {
                 DxfTarget::Sketch(sketch) => {
                     let id = sketch_id(doc, sketch)?;
@@ -499,10 +503,10 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.data = export::save(doc, path.as_ref(), *caches)?;
             return Ok(done);
         }
-        Op::ImportStep { path } => {
-            let text = std::fs::read_to_string(path)
-                .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
-            let imported = doc.import_step(&path.to_string_lossy(), &text)?;
+        Op::ImportStep { file } => {
+            let bytes = file.read()?;
+            let text = String::from_utf8_lossy(&bytes);
+            let imported = doc.import_step(&file.name, &text)?;
             done.changed = true;
             done.created.push(imported.feature);
             done.data
@@ -541,12 +545,24 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             match fields.set(&mut f.kind, doc, false) {
                 Some(result) => result?,
                 None => {
-                    return Err(format!(
-                        "{} ({}) doesn't have the fields of '{}'.",
-                        f.name,
-                        f.kind.type_name(),
-                        fields.word()
-                    ));
+                    // The fields of another form of the same feature (an offset plane
+                    // made an angled one) replace its definition.
+                    let other = fields
+                        .blank()
+                        .filter(|k| std::mem::discriminant(k) == std::mem::discriminant(&f.kind));
+                    let Some(mut other) = other else {
+                        return Err(format!(
+                            "{} ({}) doesn't have the fields of '{}'.",
+                            f.name,
+                            f.kind.type_name(),
+                            fields.word()
+                        ));
+                    };
+                    fields.prepare(&mut other, doc, true)?;
+                    if let Some(result) = fields.set(&mut other, doc, true) {
+                        result?;
+                    }
+                    f.kind = other;
                 }
             }
             done.feature = Some(id);
@@ -555,7 +571,9 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
         Op::Sketch { on, name, draw } => {
             let (plane, placement) = select::plane(doc, on)?;
             let id = model.add_sketch(plane, placement);
-            if let Some(name) = name {
+            if let Some(name) = name
+                && model.name_of(id) != name
+            {
                 rename(&mut model, id, name)?;
             }
             if !draw.is_empty()
@@ -651,16 +669,29 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             format!("Move {}", model.name_of(id))
         }
         Op::Rollback { to } => match to {
-            None => {
+            RollTo::End => {
                 model.set_rollback(None);
                 "Roll to End".to_owned()
             }
-            Some(f) => {
+            RollTo::Start => {
+                model.set_rollback(Some(0));
+                "Roll Back".to_owned()
+            }
+            RollTo::After(f) => {
                 let id = f.resolve(doc)?;
                 model.set_rollback(model.index_of(id).map(|i| i + 1));
                 format!("Roll Back to {}", model.name_of(id))
             }
         },
+        Op::SetSketch { sketch, content } => {
+            let id = sketch_id(doc, sketch)?;
+            if let Some(s) = model.feature_mut(id).and_then(|f| f.sketch_mut()) {
+                s.sketch = (**content).clone();
+            }
+            done.feature = Some(id);
+            done.sketch = Some(id);
+            format!("Edit {}", model.name_of(id))
+        }
         Op::SetParameter { name, value } => {
             model
                 .parameters
@@ -712,6 +743,7 @@ fn failed(name: &str, error: String) -> Reply {
     Reply {
         ok: false,
         changed: false,
+        created: Vec::new(),
         replaced: false,
         json: json!({ "ok": false, "op": name, "error": error }),
     }
@@ -726,6 +758,18 @@ pub fn apply(doc: &mut Document, op: &Op, undo: Undo) -> Reply {
 /// Applies one operation to the document, in `host`: the application, or a [`Headless`]
 /// kept for a whole script so that changes to the material tables last.
 pub fn apply_in(host: &mut dyn Host, doc: &mut Document, op: &Op, undo: Undo) -> Reply {
+    apply_with(host, doc, op, undo, None)
+}
+
+/// [`apply_in`], with the undo step called `label` instead of what the operation would
+/// call it.
+pub(crate) fn apply_with(
+    host: &mut dyn Host,
+    doc: &mut Document,
+    op: &Op,
+    undo: Undo,
+    label: Option<&str>,
+) -> Reply {
     // A part shown from a file's caches is rebuilt first: selectors need its bodies.
     doc.finish_loading();
     let name = op.word();
@@ -733,7 +777,8 @@ pub fn apply_in(host: &mut dyn Host, doc: &mut Document, op: &Op, undo: Undo) ->
         Ok(d) => d,
         Err(e) => return failed(name, e),
     };
-    if let Some((label, model)) = done.commit.take() {
+    if let Some((own, model)) = done.commit.take() {
+        let label = label.map_or(own, str::to_owned);
         let set = |m: &mut Model| *m = model;
         done.changed = match undo {
             Undo::Step => doc.change(&label, set),
@@ -770,6 +815,7 @@ pub fn apply_in(host: &mut dyn Host, doc: &mut Document, op: &Op, undo: Undo) ->
     Reply {
         ok: true,
         changed: done.changed,
+        created: done.created,
         replaced: done.replaced,
         json: Value::Object(out),
     }

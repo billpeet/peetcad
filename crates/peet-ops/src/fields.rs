@@ -50,15 +50,18 @@ pub(crate) trait Field {
     type Arg;
     /// The value in the feature.
     type Target;
-    /// Whether a new feature can't do without it (it has no sensible default).
+    /// Whether a new feature must be given it (it has no sensible default).
     const REQUIRED: bool = false;
-    /// Whether `null` is a value (it means "the default").
+    /// Whether `null` is a value: "the default", or "to be picked afterwards".
     const NULLABLE: bool = false;
     /// What the field takes, for `help`.
     fn describe() -> String;
     fn parse(v: &Value) -> Result<Self::Arg, String>;
     fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String>;
     fn read(target: &Self::Target, doc: &Document) -> Value;
+    /// The value that, assigned, gives exactly `target`: what a feature has, as an
+    /// operation would set it. `None` if there is nothing to set.
+    fn arg(target: &Self::Target, doc: &Document) -> Option<Self::Arg>;
 }
 
 fn scalar_out(s: &Scalar, kind: ScalarKind, doc: &Document) -> Value {
@@ -71,6 +74,14 @@ fn scalar_out(s: &Scalar, kind: ScalarKind, doc: &Document) -> Value {
     match &s.expression {
         Some(e) => json!({ "expression": e, "value": value }),
         None => value,
+    }
+}
+
+/// A stored value as an operation's input, exactly.
+fn input_of(s: &Scalar) -> Input {
+    match &s.expression {
+        Some(e) => Input::Expr(e.clone()),
+        None => Input::Base(s.value),
     }
 }
 
@@ -92,6 +103,9 @@ macro_rules! scalar_field {
             }
             fn read(target: &Scalar, doc: &Document) -> Value {
                 scalar_out(target, $kind, doc)
+            }
+            fn arg(target: &Scalar, _: &Document) -> Option<Input> {
+                Some(input_of(target))
             }
         }
     };
@@ -130,6 +144,9 @@ impl Field for OptLength {
             .as_ref()
             .map_or(Value::Null, |s| scalar_out(s, ScalarKind::Length, doc))
     }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.as_ref().map(input_of))
+    }
 }
 
 pub(crate) struct Flag;
@@ -150,6 +167,9 @@ impl Field for Flag {
     fn read(target: &bool, _: &Document) -> Value {
         json!(*target)
     }
+    fn arg(target: &bool, _: &Document) -> Option<bool> {
+        Some(*target)
+    }
 }
 
 pub(crate) struct Count;
@@ -169,6 +189,9 @@ impl Field for Count {
     }
     fn read(target: &u32, _: &Document) -> Value {
         json!(*target)
+    }
+    fn arg(target: &u32, _: &Document) -> Option<u32> {
+        Some(*target)
     }
 }
 
@@ -255,6 +278,9 @@ impl<T: Words> Field for Choice<T> {
     fn read(target: &T, _: &Document) -> Value {
         json!(target.word())
     }
+    fn arg(target: &T, _: &Document) -> Option<T> {
+        Some(target.clone())
+    }
 }
 
 fn face_out(r: &FaceRef, doc: &Document) -> Value {
@@ -303,15 +329,36 @@ fn each<T, U>(items: &[T], f: impl Fn(&T) -> Result<U, String>) -> Result<Vec<U>
     items.iter().map(f).collect()
 }
 
-/// A reference field: its selector, what it resolves to, and the words for it.
+/// `null`, or what `parse` reads.
+fn or_null<T>(v: &Value, parse: fn(&Value) -> Result<T, String>) -> Result<Option<T>, String> {
+    if v.is_null() {
+        Ok(None)
+    } else {
+        parse(v).map(Some)
+    }
+}
+
+fn a_sketch(sel: &FeatureSel, doc: &Document) -> Result<FeatureId, String> {
+    let id = sel.resolve(doc)?;
+    if doc.model.sketch(id).is_some() {
+        Ok(id)
+    } else {
+        Err(format!("{} is not a sketch", doc.model.name_of(id)))
+    }
+}
+
+/// A field described by four functions: how its value is read from JSON, turned into what
+/// the feature stores, written as JSON, and recovered from what the feature stores.
 macro_rules! reference_field {
-    ($name:ident, $arg:ty, $target:ty, $required:literal, $text:literal,
-     parse: $parse:expr, assign: $assign:expr, read: $read:expr) => {
+    ($name:ident, $arg:ty, $target:ty, required: $required:literal, nullable: $nullable:literal,
+     $text:literal,
+     parse: $parse:expr, assign: $assign:expr, read: $read:expr, arg: $of:expr) => {
         pub(crate) struct $name;
         impl Field for $name {
             type Arg = $arg;
             type Target = $target;
             const REQUIRED: bool = $required;
+            const NULLABLE: bool = $nullable;
             fn describe() -> String {
                 $text.to_owned()
             }
@@ -328,62 +375,85 @@ macro_rules! reference_field {
                 let read: fn(&$target, &Document) -> Value = $read;
                 read(target, doc)
             }
+            fn arg(target: &$target, doc: &Document) -> Option<$arg> {
+                let of: fn(&$target, &Document) -> $arg = $of;
+                Some(of(target, doc))
+            }
         }
     };
 }
 
-reference_field!(PlaneF, PlaneSel, PlaneRef, true, "plane",
+reference_field!(PlaneF, PlaneSel, PlaneRef, required: true, nullable: false, "plane",
     parse: PlaneSel::parse,
     assign: |a, doc| Ok(select::plane(doc, a)?.0),
-    read: plane_out);
-reference_field!(AxisF, AxisSel, AxisRef, true, "axis",
+    read: plane_out,
+    arg: |p, _| p.clone().into());
+reference_field!(AxisF, AxisSel, AxisRef, required: true, nullable: false, "axis",
     parse: AxisSel::parse,
     assign: |a, doc| select::axis(doc, a),
-    read: axis_out);
-reference_field!(PointF, PointSel, PointRef, true, "point",
-parse: PointSel::parse,
-assign: |a, doc| select::point(doc, a),
-read: |p, doc| match p {
-    PointRef::Origin => json!("origin"),
-    PointRef::Feature(id) => json!(doc.model.name_of(*id)),
-    PointRef::Vertex(v) => vertex_out(v, doc),
-});
-reference_field!(FaceF, FaceSel, FaceRef, true, "face",
+    read: axis_out,
+    arg: |a, _| a.clone().into());
+reference_field!(PointF, PointSel, PointRef, required: true, nullable: false, "point",
+    parse: PointSel::parse,
+    assign: |a, doc| select::point(doc, a),
+    read: |p, doc| match p {
+        PointRef::Origin => json!("origin"),
+        PointRef::Feature(id) => json!(doc.model.name_of(*id)),
+        PointRef::Vertex(v) => vertex_out(v, doc),
+    },
+    arg: |p, _| p.clone().into());
+reference_field!(FaceF, FaceSel, FaceRef, required: true, nullable: false, "face",
     parse: FaceSel::parse,
     assign: |a, doc| select::face_ref(doc, a),
-    read: face_out);
-reference_field!(Faces, Vec<FaceSel>, Vec<FaceRef>, false, "list of faces",
+    read: face_out,
+    arg: |f, _| FaceSel::Ref(f.clone()));
+reference_field!(Faces, Vec<FaceSel>, Vec<FaceRef>, required: false, nullable: false,
+    "list of faces",
     parse: |v| each(list(v)?, FaceSel::parse),
     assign: |a, doc| each(a, |f| select::face_ref(doc, f)),
-    read: |f, doc| f.iter().map(|f| face_out(f, doc)).collect());
-reference_field!(EdgeF, EdgeSel, EdgeRef, true, "edge",
+    read: |f, doc| f.iter().map(|f| face_out(f, doc)).collect(),
+    arg: |f, _| f.iter().cloned().map(FaceSel::Ref).collect());
+reference_field!(SomeFaces, Vec<FaceSel>, Vec<FaceRef>, required: true, nullable: false,
+    "list of faces (may be empty: to be picked afterwards)",
+    parse: |v| each(list(v)?, FaceSel::parse),
+    assign: |a, doc| each(a, |f| select::face_ref(doc, f)),
+    read: |f, doc| f.iter().map(|f| face_out(f, doc)).collect(),
+    arg: |f, _| f.iter().cloned().map(FaceSel::Ref).collect());
+reference_field!(EdgeF, EdgeSel, EdgeRef, required: true, nullable: false, "edge",
     parse: EdgeSel::parse,
     assign: |a, doc| select::edge_ref(doc, a),
-    read: edge_out);
-reference_field!(OptEdge, EdgeSel, Option<EdgeRef>, true, "edge",
-    parse: EdgeSel::parse,
-    assign: |a, doc| select::edge_ref(doc, a).map(Some),
-    read: |e, doc| e.as_ref().map_or(Value::Null, |e| edge_out(e, doc)));
-reference_field!(Edges, Vec<EdgeSel>, Vec<EdgeRef>, true, "list of edges",
+    read: edge_out,
+    arg: |e, _| EdgeSel::Ref(e.clone()));
+reference_field!(OptEdge, Option<EdgeSel>, Option<EdgeRef>, required: true, nullable: true,
+    "edge, or null to pick it afterwards",
+    parse: |v| or_null(v, EdgeSel::parse),
+    assign: |a, doc| a.as_ref().map(|e| select::edge_ref(doc, e)).transpose(),
+    read: |e, doc| e.as_ref().map_or(Value::Null, |e| edge_out(e, doc)),
+    arg: |e, _| e.clone().map(EdgeSel::Ref));
+reference_field!(Edges, Vec<EdgeSel>, Vec<EdgeRef>, required: true, nullable: false,
+    "list of edges (may be empty: to be picked afterwards)",
     parse: |v| each(list(v)?, EdgeSel::parse),
     assign: |a, doc| each(a, |e| select::edge_ref(doc, e)),
-    read: |e, doc| e.iter().map(|e| edge_out(e, doc)).collect());
-reference_field!(VertexF, VertexSel, VertexRef, true, "vertex",
+    read: |e, doc| e.iter().map(|e| edge_out(e, doc)).collect(),
+    arg: |e, _| e.iter().cloned().map(EdgeSel::Ref).collect());
+reference_field!(VertexF, VertexSel, VertexRef, required: true, nullable: false, "vertex",
     parse: VertexSel::parse,
     assign: |a, doc| select::vertex_ref(doc, a),
-    read: vertex_out);
-reference_field!(SketchF, FeatureSel, FeatureId, true, "sketch (name or id)",
+    read: vertex_out,
+    arg: |v, _| VertexSel::Ref(v.clone()));
+reference_field!(SketchF, FeatureSel, FeatureId, required: true, nullable: false,
+    "sketch (name or id)",
     parse: FeatureSel::parse,
-    assign: |a, doc| {
-        let id = a.resolve(doc)?;
-        if doc.model.sketch(id).is_some() {
-            Ok(id)
-        } else {
-            Err(format!("{} is not a sketch", doc.model.name_of(id)))
-        }
-    },
-    read: |id, doc| json!(doc.model.name_of(*id)));
-reference_field!(Features, Vec<FeatureSel>, Vec<FeatureId>, true,
+    assign: a_sketch,
+    read: |id, doc| json!(doc.model.name_of(*id)),
+    arg: |id, _| FeatureSel::Id(*id));
+reference_field!(OptSketch, Option<FeatureSel>, Option<FeatureId>, required: true, nullable: true,
+    "sketch (name or id), or null to choose it afterwards",
+    parse: |v| or_null(v, FeatureSel::parse),
+    assign: |a, doc| a.as_ref().map(|s| a_sketch(s, doc)).transpose(),
+    read: |id, doc| id.map_or(Value::Null, |id| json!(doc.model.name_of(id))),
+    arg: |id, _| id.map(FeatureSel::Id));
+reference_field!(Features, Vec<FeatureSel>, Vec<FeatureId>, required: true, nullable: false,
     "list of features (names or ids)",
     parse: |v| each(list(v)?, FeatureSel::parse),
     assign: |a, doc| {
@@ -392,8 +462,18 @@ reference_field!(Features, Vec<FeatureSel>, Vec<FeatureId>, true,
         }
         each(a, |f| f.resolve(doc))
     },
-    read: |ids, doc| ids.iter().map(|id| doc.model.name_of(*id)).collect());
-reference_field!(EndF, End, EndCondition, false,
+    read: |ids, doc| ids.iter().map(|id| doc.model.name_of(*id)).collect(),
+    arg: |ids, _| ids.iter().copied().map(FeatureSel::Id).collect());
+reference_field!(OptPlane, Option<PlaneSel>, Option<PlaneRef>, required: true, nullable: true,
+    "plane, or null to pick it afterwards",
+    parse: |v| or_null(v, PlaneSel::parse),
+    assign: |a, doc| Ok(match a {
+        Some(p) => Some(select::plane(doc, p)?.0),
+        None => None,
+    }),
+    read: |p, doc| p.as_ref().map_or(Value::Null, |p| plane_out(p, doc)),
+    arg: |p, _| p.clone().map(Into::into));
+reference_field!(EndF, End, EndCondition, required: false, nullable: false,
 "blind | mid_plane | through_all | {\"up_to\": plane}",
 parse: End::parse,
 assign: |a, doc| Ok(match a {
@@ -407,8 +487,14 @@ read: |e, doc| match e {
     EndCondition::Symmetric => json!("mid_plane"),
     EndCondition::ThroughAll => json!("through_all"),
     EndCondition::UpTo(p) => json!({ "up_to": plane_out(p, doc) }),
+},
+arg: |e, _| match e {
+    EndCondition::Blind => End::Blind,
+    EndCondition::Symmetric => End::MidPlane,
+    EndCondition::ThroughAll => End::ThroughAll,
+    EndCondition::UpTo(p) => End::UpTo(p.clone().into()),
 });
-reference_field!(RegionsF, Regions, RegionSelection, false,
+reference_field!(RegionsF, Regions, RegionSelection, required: false, nullable: false,
 "\"auto\", or a list of sketch points [x, y] inside the regions to use",
 parse: Regions::parse,
 assign: |a, doc| Ok(match a {
@@ -416,6 +502,7 @@ assign: |a, doc| Ok(match a {
     Regions::Points(p) => RegionSelection::Points(
         p.iter().map(|p| mm2(*p, &doc.model.parameters.units)).collect(),
     ),
+    Regions::PointsMm(p) => RegionSelection::Points(p.clone()),
 }),
 read: |r, doc| match r {
     RegionSelection::Auto => json!("auto"),
@@ -423,8 +510,12 @@ read: |r, doc| match r {
         .iter()
         .map(|p| point2_out(*p, &doc.model.parameters.units))
         .collect(),
+},
+arg: |r, _| match r {
+    RegionSelection::Auto => Regions::Auto,
+    RegionSelection::Points(p) => Regions::PointsMm(p.clone()),
 });
-reference_field!(BendF, Bend, BendModelDef, false,
+reference_field!(BendF, Bend, BendModelDef, required: false, nullable: false,
 "{\"k_factor\": number} | {\"allowance\": length} | {\"deduction\": length}",
 parse: Bend::parse,
 assign: |a, doc| Ok(match a {
@@ -440,33 +531,13 @@ read: |b, doc| match b {
     BendModelDef::Deduction(s) => {
         json!({ "deduction": scalar_out(s, ScalarKind::Length, doc) })
     }
+},
+arg: |b, _| match b {
+    BendModelDef::KFactor(s) => Bend::KFactor(input_of(s)),
+    BendModelDef::Allowance(s) => Bend::Allowance(input_of(s)),
+    BendModelDef::Deduction(s) => Bend::Deduction(input_of(s)),
 });
-
-reference_field!(SomeFaces, Vec<FaceSel>, Vec<FaceRef>, true, "list of faces",
-    parse: |v| each(list(v)?, FaceSel::parse),
-    assign: |a, doc| {
-        if a.is_empty() {
-            return Err("expected at least one face".to_owned());
-        }
-        each(a, |f| select::face_ref(doc, f))
-    },
-    read: |f, doc| f.iter().map(|f| face_out(f, doc)).collect());
-reference_field!(OptPlane, PlaneSel, Option<PlaneRef>, true, "plane",
-    parse: PlaneSel::parse,
-    assign: |a, doc| Ok(Some(select::plane(doc, a)?.0)),
-    read: |p, doc| p.as_ref().map_or(Value::Null, |p| plane_out(p, doc)));
-reference_field!(OptSketch, FeatureSel, Option<FeatureId>, true, "sketch (name or id)",
-    parse: FeatureSel::parse,
-    assign: |a, doc| {
-        let id = a.resolve(doc)?;
-        if doc.model.sketch(id).is_some() {
-            Ok(Some(id))
-        } else {
-            Err(format!("{} is not a sketch", doc.model.name_of(id)))
-        }
-    },
-    read: |id, doc| id.map_or(Value::Null, |id| json!(doc.model.name_of(id))));
-reference_field!(RevolveAxisF, RevolveAxis, RevolveAxisRef, false,
+reference_field!(RevolveAxisF, RevolveAxis, RevolveAxisRef, required: false, nullable: false,
 "sketch_x | sketch_y | {\"line\": id of a line of the sketch} | axis (default: the sketch's first construction line, else sketch_y)",
 parse: RevolveAxis::parse,
 assign: |a, doc| Ok(match a {
@@ -480,6 +551,12 @@ read: |a, doc| match a {
     RevolveAxisRef::SketchY => json!("sketch_y"),
     RevolveAxisRef::SketchLine(id) => json!({ "line": id.0 }),
     RevolveAxisRef::Axis(axis) => axis_out(axis, doc),
+},
+arg: |a, _| match a {
+    RevolveAxisRef::SketchX => RevolveAxis::SketchX,
+    RevolveAxisRef::SketchY => RevolveAxis::SketchY,
+    RevolveAxisRef::SketchLine(id) => RevolveAxis::SketchLine(*id),
+    RevolveAxisRef::Axis(axis) => RevolveAxis::Axis(axis.clone().into()),
 });
 
 fn metric(name: &str) -> Result<&'static peet_model::MetricSize, String> {
@@ -492,14 +569,19 @@ fn metric(name: &str) -> Result<&'static peet_model::MetricSize, String> {
         })
 }
 
-reference_field!(StandardF, HoleStandard, Option<(String, HoleFit)>, false,
-"{\"size\": \"M6\", \"fit\": close | normal | loose | tapped}: sets every size of the hole from a standard screw size",
-parse: HoleStandard::parse,
-// The sizes themselves are set by `FeatureArgs::prepare`, before the other fields.
-assign: |a, _| Ok(Some((metric(&a.size)?.name.to_owned(), a.fit))),
-read: |s, _| s.as_ref().map_or(Value::Null, |(size, fit)| {
-    json!({ "size": size, "fit": fit.word() })
-}));
+reference_field!(StandardF, Option<HoleStandard>, Option<(String, HoleFit)>,
+    required: false, nullable: true,
+    "{\"size\": \"M6\", \"fit\": close | normal | loose | tapped}: sets every size of the hole from a standard screw size; null for a hole of no standard size",
+    parse: |v| or_null(v, HoleStandard::parse),
+    // The sizes themselves are set by `FeatureArgs::prepare`, before the other fields.
+    assign: |a, _| Ok(match a {
+        Some(s) => Some((metric(&s.size)?.name.to_owned(), s.fit)),
+        None => None,
+    }),
+    read: |s, _| s.as_ref().map_or(Value::Null, |(size, fit)| {
+        json!({ "size": size, "fit": fit.word() })
+    }),
+    arg: |s, _| s.clone().map(|(size, fit)| HoleStandard { size, fit }));
 
 /// Text that can be absent.
 pub(crate) struct OptText;
@@ -525,6 +607,9 @@ impl Field for OptText {
     fn read(target: &Self::Target, _: &Document) -> Value {
         json!(target)
     }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.clone())
+    }
 }
 
 fn second_direction() -> LinearDirection {
@@ -533,6 +618,39 @@ fn second_direction() -> LinearDirection {
         spacing: Scalar::new(20.0),
         count: 2,
         flip: false,
+    }
+}
+
+/// The second direction of a linear pattern: giving it makes the pattern a grid, and
+/// `null` makes it a row again.
+pub(crate) struct Direction2;
+
+impl Field for Direction2 {
+    type Arg = Option<AxisSel>;
+    type Target = Option<LinearDirection>;
+    const NULLABLE: bool = true;
+    fn describe() -> String {
+        "axis (the second direction: a grid), or null for a row".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        or_null(v, AxisSel::parse)
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        match arg {
+            Some(axis) => {
+                target.get_or_insert_with(second_direction).direction = select::axis(doc, axis)?;
+            }
+            None => *target = None,
+        }
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target
+            .as_ref()
+            .map_or(Value::Null, |s| axis_out(&s.direction, doc))
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.as_ref().map(|s| s.direction.clone().into()))
     }
 }
 
@@ -562,11 +680,13 @@ macro_rules! second_field {
                     .as_ref()
                     .map_or(Value::Null, |s| <$inner>::read(&s.$member, doc))
             }
+            fn arg(target: &Self::Target, doc: &Document) -> Option<Self::Arg> {
+                target.as_ref().and_then(|s| <$inner>::arg(&s.$member, doc))
+            }
         }
     };
 }
 
-second_field!(Direction2, AxisF, direction);
 second_field!(Spacing2, Length, spacing);
 second_field!(Count2, Count, count);
 second_field!(Flip2, Flag, flip);
@@ -660,6 +780,36 @@ macro_rules! feature_args {
                 } else {
                     None
                 }
+            }
+
+            /// Every field of `kind`, as the arguments that would set it. `None` if
+            /// `kind` is another kind of feature.
+            #[allow(irrefutable_let_patterns)]
+            pub(crate) fn of(kind: &mut FeatureKind, doc: &Document) -> Option<Self> {
+                if let $outer = kind
+                    && let $inner = $src
+                {
+                    Some(Self {
+                        $( $field: <$fk as Field>::arg($target, doc), )*
+                    })
+                } else {
+                    None
+                }
+            }
+
+            /// These arguments without the fields that are the same in `base`.
+            pub(crate) fn only_changes(mut self, base: &Self) -> Self {
+                $(
+                    if self.$field == base.$field {
+                        self.$field = None;
+                    }
+                )*
+                self
+            }
+
+            /// Whether no field is given.
+            pub fn is_empty(&self) -> bool {
+                true $( && self.$field.is_none() )*
             }
 
             /// The fields of `kind` as JSON. `None` if `kind` is another kind of feature.
@@ -808,7 +958,8 @@ feature_args! {
     /// A flange with a bend on an edge of a sheet metal body.
     EdgeFlange: FeatureKind::EdgeFlange(f) => &mut **f,
         EdgeFlangeFeature { edge, length, angle, position, offset_start, offset_end, flip, radius } => {
-    edge: EdgeSel as OptEdge = edge,
+    /// `Some(None)`: to be picked afterwards.
+    edge: Option<EdgeSel> as OptEdge = edge,
     length: Input as Length = length,
     angle: Input as Angle = angle,
     position: FlangePosition as Choice<FlangePosition> = position,
@@ -831,7 +982,8 @@ feature_args! {
     /// An edge of a sheet metal body folded back over itself.
     Hem: FeatureKind::Hem(f) => &mut **f,
         HemFeature { edge, kind, length, gap, radius, angle, inside, offset_start, offset_end, flip } => {
-    edge: EdgeSel as OptEdge = edge,
+    /// `Some(None)`: to be picked afterwards.
+    edge: Option<EdgeSel> as OptEdge = edge,
     kind: HemKind as Choice<HemKind> = kind,
     length: Input as Length = length,
     gap: Input as Length = gap,
@@ -922,7 +1074,8 @@ feature_args! {
     /// How many, the original included.
     count: u32 as Count = count,
     flip: bool as Flag = flip,
-    direction2: AxisSel as Direction2 = second,
+    /// `Some(None)`: a row, not a grid.
+    direction2: Option<AxisSel> as Direction2 = second,
     spacing2: Input as Spacing2 = second,
     count2: u32 as Count2 = second,
     flip2: bool as Flip2 = second,
@@ -991,7 +1144,7 @@ feature_args! {
     Draft: FeatureKind::Draft(f) => &mut **f, DraftFeature { faces, neutral, angle, flip } => {
     faces: Vec<FaceSel> as SomeFaces = faces,
     /// The part keeps its size in this plane; its normal is the direction of pull.
-    neutral: PlaneSel as OptPlane = neutral,
+    neutral: Option<PlaneSel> as OptPlane = neutral,
     angle: Input as Angle = angle,
     flip: bool as Flag = flip,
     }
@@ -1017,7 +1170,7 @@ feature_args! {
         } => {
     sketch: FeatureSel as SketchF = sketch,
     /// Sets every size from a standard screw size; sizes given as well win.
-    standard: HoleStandard as StandardF = standard,
+    standard: Option<HoleStandard> as StandardF = standard,
     kind: HoleKind as Choice<HoleKind> = kind,
     diameter: Input as Length = diameter,
     end: HoleEnd as Choice<HoleEnd> = end,
@@ -1038,7 +1191,8 @@ feature_args! {
     /// A sketch's closed regions swept along the path drawn in another sketch.
     Sweep: FeatureKind::Sweep(f) => &mut **f, SweepFeature { profile, path, operation, regions } => {
     profile: FeatureSel as SketchF = profile,
-    path: FeatureSel as OptSketch = path,
+    /// `Some(None)`: to be chosen afterwards.
+    path: Option<FeatureSel> as OptSketch = path,
     operation: Operation as Choice<Operation> = operation,
     regions: Regions as RegionsF = regions,
     }
@@ -1153,6 +1307,42 @@ macro_rules! feature_ops {
                 match word {
                     $( $word => Some($args::from_args(a).map(Self::$variant)), )*
                     _ => None,
+                }
+            }
+
+            /// Every field of a feature, as the arguments that would set it: what to
+            /// add to make a feature like it. `None` for a kind with no fields (an
+            /// imported body).
+            pub fn of(kind: &FeatureKind, doc: &Document) -> Option<Self> {
+                let mut kind = kind.clone();
+                $(
+                    if let Some(args) = $args::of(&mut kind, doc) {
+                        return Some(Self::$variant(args));
+                    }
+                )*
+                None
+            }
+
+            /// The arguments that turn the feature `old` into `new`: only the fields that
+            /// differ, or every field if `new` is another form of the feature (an offset
+            /// plane made an angled one). `None` for a kind with no fields.
+            pub fn changes(old: &FeatureKind, new: &FeatureKind, doc: &Document) -> Option<Self> {
+                let (mut old, mut new) = (old.clone(), new.clone());
+                $(
+                    if let Some(after) = $args::of(&mut new, doc) {
+                        return Some(Self::$variant(match $args::of(&mut old, doc) {
+                            Some(before) => after.only_changes(&before),
+                            None => after,
+                        }));
+                    }
+                )*
+                None
+            }
+
+            /// Whether no field is given.
+            pub fn is_empty(&self) -> bool {
+                match self {
+                    $( Self::$variant(a) => a.is_empty(), )*
                 }
             }
 
@@ -1371,7 +1561,7 @@ impl FeatureArgs {
         let first_body = creating && doc.evaluation().bodies.is_empty();
         match (self, kind) {
             (Self::Hole(args), FeatureKind::Hole(hole)) => {
-                if let Some(standard) = &args.standard {
+                if let Some(Some(standard)) = &args.standard {
                     hole.set_standard(metric(&standard.size)?, standard.fit);
                 }
             }

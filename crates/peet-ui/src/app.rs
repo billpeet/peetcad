@@ -11,6 +11,8 @@ use peet_model::{
 use peet_platform::Instant;
 use peet_render::{Projection, StandardView};
 
+use peet_ops::Op;
+
 use crate::bodies::GeomRef;
 use crate::commands::{CommandId, CommandState};
 use crate::document::{Document, FileLocation, ItemId, Persistent, SketchItem};
@@ -54,6 +56,14 @@ struct OpenWindows {
     sheet_checks: bool,
     gauges: bool,
     mass_properties: bool,
+}
+
+/// What dragging an edge flange's length handle asks for this frame.
+enum FlangeEdit {
+    /// The flange's length, in mm.
+    Length { id: FeatureId, length: f64 },
+    /// The drag ended: what it changed is one undo step.
+    Done,
 }
 
 /// A drag of an edge flange's length handle in progress.
@@ -105,6 +115,8 @@ pub struct PeetApp {
     /// The window title last set, so it is only sent when it changes.
     title: String,
     flange_drag: Option<FlangeDrag>,
+    /// The operations applied to the part so far.
+    journal: scripting::Journal,
     ribbon_tab: RibbonTab,
     /// The gauge window: the table shown, and what went wrong with the last import.
     gauge_table: usize,
@@ -199,6 +211,7 @@ impl PeetApp {
             quit_requested: false,
             title: String::new(),
             flange_drag: None,
+            journal: scripting::Journal::default(),
             ribbon_tab: RibbonTab::default(),
             gauge_table: 0,
             gauge_message: None,
@@ -220,18 +233,10 @@ impl PeetApp {
     // ---- Document changes ----
 
     /// Applies a change to the model as one undo step, keeping the face/edge selection
-    /// through the rebuild.
+    /// through the rebuild. The change is made by the operations that express it (see
+    /// `scripting`), like every change to the part.
     fn change(&mut self, label: &str, f: impl FnOnce(&mut peet_model::Model)) -> bool {
-        let kept: Vec<Persistent> = self
-            .selected_geom
-            .iter()
-            .filter_map(|g| self.doc.persist(*g))
-            .collect();
-        let changed = self.doc.change(label, f);
-        if changed {
-            self.restore_selection(&kept);
-        }
-        changed
+        self.change_model(label, None, f)
     }
 
     fn restore_selection(&mut self, kept: &[Persistent]) {
@@ -250,19 +255,14 @@ impl PeetApp {
     }
 
     fn undo_redo(&mut self, redo: bool) {
-        let kept: Vec<Persistent> = self
-            .selected_geom
-            .iter()
-            .filter_map(|g| self.doc.persist(*g))
-            .collect();
-        let label = if redo {
-            self.doc.redo()
+        let (op, word, done) = if redo {
+            (Op::Redo, "redo", "Redid")
         } else {
-            self.doc.undo()
+            (Op::Undo, "undo", "Undid")
         };
-        if let Some(label) = label {
-            self.restore_selection(&kept);
-            self.info(format!("{} {label}", if redo { "Redid" } else { "Undid" }));
+        let reply = self.perform(op);
+        if let Some(label) = reply.json[word].as_str() {
+            self.info(format!("{done} {label}"));
         }
     }
 
@@ -437,7 +437,9 @@ impl PeetApp {
     fn open_sketch(&mut self, id: FeatureId) {
         self.close_sketch();
         // Sketches are drawn on the folded part.
-        self.doc.set_flat(false);
+        if self.doc.is_flat() {
+            self.perform(Op::FlatPattern { on: Some(false) });
+        }
         let Some(f) = self.doc.model.sketch(id) else {
             return;
         };
@@ -666,8 +668,7 @@ impl PeetApp {
 
     fn toggle_flat(&mut self) {
         let flat = !self.doc.is_flat();
-        self.doc.set_flat(flat);
-        self.hovered_geom = None;
+        self.perform(Op::FlatPattern { on: Some(flat) });
         if flat {
             self.info("Showing the flat pattern (U to fold it again). Bend lines are dashed.");
         } else {
@@ -684,7 +685,21 @@ impl PeetApp {
         let Some(sheet) = &body.sheet else {
             return;
         };
-        let text = peet_io::dxf::flat_pattern(sheet);
+        let index = self
+            .doc
+            .evaluation()
+            .bodies
+            .iter()
+            .position(|b| std::sync::Arc::ptr_eq(b, &body));
+        let text = match peet_ops::export_bytes(
+            &self.doc,
+            peet_ops::Format::Dxf,
+            index,
+            peet_io::step::StepSchema::default(),
+        ) {
+            Ok((bytes, _)) => bytes,
+            Err(e) => return self.error(e),
+        };
         let title = self.doc.title();
         let stem = title.strip_suffix(".peet").unwrap_or(&title).to_owned();
         let several = self
@@ -702,7 +717,7 @@ impl PeetApp {
         };
         let size = sheet.report().flat_size;
         let units = self.doc.model.parameters.units;
-        match peet_platform::save_file(&name, ("DXF drawing", &["dxf"]), text.as_bytes()) {
+        match peet_platform::save_file(&name, ("DXF drawing", &["dxf"]), &text) {
             Ok(peet_platform::SaveOutcome::Saved(to)) => self.info(format!(
                 "Exported the flat pattern ({} × {}) to {to}",
                 units.format_length(size.x),
@@ -787,34 +802,37 @@ impl PeetApp {
     fn after_discard(&mut self, then: AfterDiscard) {
         match then {
             AfterDiscard::New => {
-                self.set_document(Document::default());
-                self.files.discard_autosave();
+                self.perform(Op::New { discard: true });
             }
             AfterDiscard::Open => {
                 self.files.opening = Some(peet_platform::open_file(files::FILTER));
             }
             AfterDiscard::Sample => {
-                let (model, _) = peet_model::samples::bracket();
-                self.set_document(Document::from_model(model, None));
-                self.files.discard_autosave();
+                self.perform(Op::OpenSample {
+                    sample: peet_ops::Sample::Bracket,
+                    discard: true,
+                });
                 self.info("Opened the sample bracket. Try changing Sketch1's width (d1), or drag the rollback bar.");
             }
             AfterDiscard::SampleEnclosure => {
-                let (model, _) = peet_model::samples::enclosure();
-                self.set_document(Document::from_model(model, None));
-                self.files.discard_autosave();
+                self.perform(Op::OpenSample {
+                    sample: peet_ops::Sample::Enclosure,
+                    discard: true,
+                });
                 self.info("Opened the sample enclosure panel. Press U for its flat pattern, or change the thickness and flange parameters (Tools > Parameters).");
             }
             AfterDiscard::SampleChassis => {
-                let (model, _) = peet_model::samples::chassis();
-                self.set_document(Document::from_model(model, None));
-                self.files.discard_autosave();
+                self.perform(Op::OpenSample {
+                    sample: peet_ops::Sample::Chassis,
+                    discard: true,
+                });
                 self.info("Opened the sample chassis. Press U for its flat pattern; Sheet Metal > Check runs the manufacturing checks.");
             }
             AfterDiscard::SampleHousing => {
-                let (model, _) = peet_model::samples::housing();
-                self.set_document(Document::from_model(model, None));
-                self.files.discard_autosave();
+                self.perform(Op::OpenSample {
+                    sample: peet_ops::Sample::Housing,
+                    discard: true,
+                });
                 self.info("Opened the sample housing: a revolve with a fillet, chamfers and a bolt circle of counterbored holes. Mass on the Model tab weighs it.");
             }
             AfterDiscard::Quit => {
@@ -870,20 +888,16 @@ impl PeetApp {
             self.files.opening = None;
             match result {
                 Ok(Some(file)) => {
-                    let location = FileLocation {
-                        name: file.name.clone(),
-                        path: file.path.clone(),
-                    };
-                    match files::document_from_bytes(&file.bytes, Some(location)) {
-                        Ok((doc, warnings)) => {
-                            self.set_document(doc);
-                            self.files.discard_autosave();
-                            match warnings.first() {
-                                Some(w) => self.error(w.clone()),
-                                None => self.info(format!("Opened {}", file.name)),
-                            }
+                    let name = file.name.clone();
+                    let reply = self.perform(Op::Open {
+                        file: peet_ops::Source::loaded(file.name, file.path, file.bytes),
+                        discard: true,
+                    });
+                    if reply.ok {
+                        match reply.json["warnings"][0].as_str() {
+                            Some(w) => self.error(w.to_owned()),
+                            None => self.info(format!("Opened {name}")),
                         }
-                        Err(e) => self.error(format!("Couldn't open {}: {e}", file.name)),
                     }
                 }
                 Ok(None) => {}
@@ -2827,35 +2841,32 @@ const RELATIONS: [CommandId; 11] = [
 fn flange_handle(
     ui: &mut Ui,
     viewport: &Viewport,
-    doc: &mut Document,
+    doc: &Document,
     selected: Option<ItemId>,
     drag: &mut Option<FlangeDrag>,
-) {
+) -> Option<FlangeEdit> {
     let Some(ItemId::Feature(id)) = selected else {
         *drag = None;
-        return;
+        return None;
     };
     let Some(FeatureKind::EdgeFlange(def)) = doc.feature(id).map(|f| &f.kind) else {
-        return;
+        return None;
     };
     let length = def
         .length
         .evaluate(ScalarKind::Length, &doc.model.parameters)
         .ok();
-    let Some((tip, dir)) = peet_model::sheet::edge_flange_handle(&doc.evaluation().bodies, id)
-    else {
-        return;
-    };
+    let (tip, dir) = peet_model::sheet::edge_flange_handle(&doc.evaluation().bodies, id)?;
     let scene = doc.visible_body_bounds();
     let wpp = viewport.world_per_point();
     let (Some(a), Some(b)) = (
         viewport.project(tip, &scene),
         viewport.project(tip + dir * wpp * 50.0, &scene),
     ) else {
-        return;
+        return None;
     };
     if a.distance(b) < 8.0 {
-        return; // looking straight along the flange: nothing to grab
+        return None; // looking straight along the flange: nothing to grab
     }
     let response = ui
         .interact(
@@ -2918,20 +2929,14 @@ fn flange_handle(
         // Half-millimetre steps.
         let new = (((d.length + s - d.start) * 2.0).round() / 2.0).max(0.5);
         if length.is_none_or(|l| (l - new).abs() > 1e-9) {
-            let label = format!("Drag {} Length", doc.model.name_of(id));
-            doc.change_merging(&label, 0x666c_616e_6765 ^ u64::from(id.0), |m| {
-                if let Some(f) = m.feature_mut(id)
-                    && let FeatureKind::EdgeFlange(e) = &mut f.kind
-                {
-                    e.length = Scalar::new(new);
-                }
-            });
+            return Some(FlangeEdit::Length { id, length: new });
         }
     }
     if response.drag_stopped() {
         *drag = None;
-        doc.seal_history();
+        return Some(FlangeEdit::Done);
     }
+    None
 }
 
 /// An arrow on the selected extrusion showing which way and how far it goes.
@@ -3096,6 +3101,7 @@ impl eframe::App for PeetApp {
 
         let dark = ctx.theme() == egui::Theme::Dark;
         let mut pick_click = None;
+        let mut flange_edit = None;
         let mut sketch_plane_click = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let (Some(viewport), Some(render_state)) = (&mut self.viewport, &self.render_state) else {
@@ -3124,10 +3130,10 @@ impl eframe::App for PeetApp {
                 && self.picking.is_none()
                 && !self.picking_sketch_plane
                 && !self.doc.is_flat();
-            flange_handle(
+            flange_edit = flange_handle(
                 ui,
                 viewport,
-                &mut self.doc,
+                &self.doc,
                 self.selected.filter(|_| handles),
                 &mut self.flange_drag,
             );
@@ -3182,6 +3188,21 @@ impl eframe::App for PeetApp {
             }
         });
 
+        match flange_edit {
+            Some(FlangeEdit::Length { id, length }) => {
+                let label = format!("Drag {} Length", self.doc.model.name_of(id));
+                // One key for the whole drag: its changes are one undo step.
+                self.change_model(&label, Some(0x666c_616e_6765 ^ u64::from(id.0)), |m| {
+                    if let Some(f) = m.feature_mut(id)
+                        && let FeatureKind::EdgeFlange(e) = &mut f.kind
+                    {
+                        e.length = Scalar::new(length);
+                    }
+                });
+            }
+            Some(FlangeEdit::Done) => self.doc.seal_history(),
+            None => {}
+        }
         if let Some((geom, plane)) = pick_click {
             let picked = self.picked(geom, plane);
             self.finish_pick(picked);
@@ -3455,27 +3476,19 @@ impl PeetApp {
         }
         let title = self.doc.title();
         let stem = title.strip_suffix(".peet").unwrap_or(&title).to_owned();
-        let names: Vec<String> = bodies
-            .iter()
-            .map(|b| self.doc.model.name_of(b.origin).to_owned())
-            .collect();
-        let solids: Vec<(&str, &peet_kernel::Solid)> = names
-            .iter()
-            .zip(&bodies)
-            .map(|(n, b)| (n.as_str(), &b.solid))
-            .collect();
-        let options = peet_io::step::StepOptions {
-            schema: peet_io::step::StepSchema::Ap214,
-            product_name: stem.clone(),
-            author: String::new(),
-            organization: String::new(),
-            timestamp: peet_platform::timestamp_iso(),
+        let text = match peet_ops::export_bytes(
+            &self.doc,
+            peet_ops::Format::Step,
+            None,
+            peet_io::step::StepSchema::Ap214,
+        ) {
+            Ok((bytes, _)) => bytes,
+            Err(e) => return self.error(e),
         };
-        let text = peet_io::step::write(&solids, &options);
         match peet_platform::save_file(
             &format!("{stem}.step"),
             ("STEP file", &["step", "stp"]),
-            text.as_bytes(),
+            &text,
         ) {
             Ok(peet_platform::SaveOutcome::Saved(to)) => self.info(format!(
                 "Exported {} as STEP (AP214) to {to}",

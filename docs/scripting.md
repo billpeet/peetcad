@@ -128,7 +128,11 @@ with their defaults' types):
 - `axis`: `edge`, `face` (a round face) or `a` + `b` (two planes). `point`: `x`, `y`, `z`
   or `vertex`.
 - `edge_flange` and `hem` take `edges` to make one feature per edge.
-- `linear_pattern` becomes a grid with `direction2`, `spacing2`, `count2`.
+- `linear_pattern` becomes a grid with `direction2`, `spacing2`, `count2`; `"direction2":
+  null` makes it a row again.
+- A reference that the application lets the user pick afterwards (a flange's or hem's
+  `edge`, a draft's `neutral`, a sweep's `path`) can be `null`: the feature is added
+  waiting for it. Leaving it out is an error.
 - `revolve` takes `axis`: `"sketch_x"`, `"sketch_y"`, `{"line": id}` (a line of its sketch)
   or an axis selector. Left out, it is the sketch's first construction line, else
   `sketch_y`.
@@ -146,7 +150,7 @@ with their defaults' types):
 | `show` | `datum` (`origin`, `front`, `top`, `right`, `planes`), `on`: the built-in reference geometry |
 | `delete` | `feature` or `features` |
 | `move` | `feature`, and `before`, `after` or `index` |
-| `rollback` | `to` (a feature, or `"end"`) |
+| `rollback` | `to` (a feature, `"end"` or `"start"`) |
 
 ### Parameters and history
 
@@ -228,3 +232,6 @@ are refused until it is finished (`exit_sketch`); queries are not.
 `peet_ui::coverage` names the operation that covers each command of the application. It
 matches every command, so a new command does not compile until it has one, and a test
 checks that the operation named exists.
+
+The application itself changes a part only through operations, and keeps the ones it has
+applied (`PeetApp::journal`): see [ADR 0007](adr/0007-operations.md).
