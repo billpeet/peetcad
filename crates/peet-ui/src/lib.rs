@@ -21,4 +21,5 @@ mod tree;
 mod view_cube;
 mod viewport;
 
+pub use app::scripting::{Coverage, command_for, coverage};
 pub use app::{APP_NAME, PeetApp, VERSION};

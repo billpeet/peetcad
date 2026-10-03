@@ -1,0 +1,23 @@
+[package]
+name = "peet-ops"
+description = "PeetCAD's operations: everything a user can do to a part, as JSON commands with selectors, queries and structured replies"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+peet-math.workspace = true
+peet-platform.workspace = true
+peet-sketch.workspace = true
+peet-kernel.workspace = true
+peet-sheetmetal.workspace = true
+peet-model.workspace = true
+peet-document.workspace = true
+peet-io.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[lints]
+workspace = true

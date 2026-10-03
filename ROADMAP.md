@@ -264,7 +264,7 @@ Still to do: the new commands, panels and windows have been compile-checked and 
 - [ ] PDF, DXF and SVG export
 
 ### Later / exploring
-- Scripting API (Rust plugins and/or embedded Python or Lua) and a headless CLI for batch export
+- Scripting and agent access: in progress, see [docs/scripting-plan.md](docs/scripting-plan.md). A scripting language (Rust plugins and/or embedded Python or Lua) comes on top of it
 - Installable Progressive Web App (offline use in the browser)
 - Share-by-link: open a read-only model from a URL in the web build
 - Configurations / design tables (part families)
