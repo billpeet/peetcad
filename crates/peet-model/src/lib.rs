@@ -41,7 +41,7 @@ pub mod sheet;
 mod sweep;
 mod units;
 
-pub use config::{ConfigId, Configuration, Scope};
+pub use config::{ConfigId, Configuration, Scope, Slot, SlotValue};
 pub use convert::ConvertToSheetFeature;
 pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
 pub use extrude::{
@@ -58,7 +58,7 @@ pub use history::History;
 pub use hole::{HoleEnd, HoleFeature, HoleFit, HoleKind, HoleSizes, METRIC, MetricSize};
 pub use import::{ImportFeature, ImportedSolid};
 pub use loft::{LoftFeature, LoftInput, apply_loft};
-pub use model::{Datum, DependencyGraph, Model, ModelV4};
+pub use model::{Datum, DependencyGraph, Model, ModelV4, ModelV5};
 pub use naming::{Body, EdgeRef, FaceName, FaceOrigin, FaceRef, FaceRole, Found, VertexRef};
 pub use placement::face_sketch_plane;
 pub use regen::{Engine, Evaluation, FeatureState, Output, SketchStatus, Stats, Status};

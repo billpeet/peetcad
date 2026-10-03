@@ -1,6 +1,6 @@
 # ADR 0009: Configurations
 
-**Status:** accepted (configurations stage 1, see [the plan](../configurations-plan.md))
+**Status:** accepted (configurations stages 1 and 2, see [the plan](../configurations-plan.md))
 
 ## Context
 
@@ -62,6 +62,44 @@ can't absorb, so earlier models are read as `ModelV4` (a frozen copy of the old 
 and converted. This is the first migration; `peet-io/tests/migration.rs` opens the four
 samples as saved with schema 4. The caches hold the active configuration.
 
+## Stage 2: values of features and dimensions of sketches
+
+**A value that can differ is a slot**: a numeric field of a feature, by the name its
+operations give it (`depth`), or a driving dimension of a sketch, by its id. The model
+lists a feature's slots (`FeatureKind::slots`, written once for reading and for writing)
+and keeps the slots that differ in one more table, swapped on activation like the
+others. Slots are addressed in the model, not through the field tables of `peet-ops`,
+because the swap happens in the model.
+
+Whole definitions of a feature per configuration were considered and rejected: a change
+to a field that doesn't differ would then reach the active configuration only, unless
+every edit knew to copy it to the others. With a table per value, a value that isn't
+listed is the same everywhere by construction, as in stage 1. It is also what a sketch
+needs: what is drawn is the part's, and only its dimensions differ.
+
+**The table's values are an enum** (`Held`), with one kind so far. Stage 3 adds kinds
+(a count, a choice) at its end without changing the layout again.
+
+**Values are compared as entered**: two expressions are the same if their text is, even
+if they evaluate differently because the parameters differ.
+
+**The default scope of `edit` and `set_dimension`** is that of a change to the model:
+the active configuration for a value that already differs, all of them for one that
+doesn't. An edit of a part with configurations then does what it did before there were
+any, until a value is deliberately made to differ. `suppress` and `set_parameter` keep
+`"this"`, as in stage 1 and as SolidWorks suppresses.
+
+**Only numeric fields differ.** An `edit` with a scope other than all that changes
+another field is refused, rather than applied everywhere without saying so. A tool's
+change is split by the translation: its values with the scope asked for, its other
+fields without one.
+
+**A value given is set where it was asked**, even if the active configuration already
+has it: the operation works out which values its fields set, not only which changed.
+
+**The file format** is model schema 6 (one more table in the configurations). Schema 5
+is read through `ModelV5`; `fixtures/v5` holds a part with three configurations.
+
 ## The open questions of the plan
 
 1. *Where solved sketches go.* Into the model, as before: it holds the active
@@ -87,5 +125,8 @@ samples as saved with schema 4. The caches hold the active configuration.
   tagged with the hash of the old layout).
 - Stages 2 and 3 add more kinds of value to what is kept on the side (a feature's
   fields, a sketch's dimensions). The swap on activation and the scopes stay as they are.
-- A tool that edits a value which differs changes this configuration only, without
-  saying so. Stage 2 puts the scope next to every value in the panels.
+- A tool that edits a value which differs changes this configuration only. The
+  properties panel says which configurations a change of value goes to, and the table
+  shows what differs; the panels themselves don't mark a value that differs.
+- A value that ends up the same in every configuration is no longer listed, so it is
+  not remembered as "configured": the next change with the default scope is to all.

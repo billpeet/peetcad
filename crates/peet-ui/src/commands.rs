@@ -48,6 +48,7 @@ pub enum CommandId {
     EditSketch,
     ExitSketch,
     Parameters,
+    ConfigurationTable,
     DeleteSelection,
     SketchSelect,
     SketchLine,
@@ -144,7 +145,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 107] = [
+    pub const ALL: [Self; 108] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -184,6 +185,7 @@ impl CommandId {
         Self::EditSketch,
         Self::ExitSketch,
         Self::Parameters,
+        Self::ConfigurationTable,
         Self::DeleteSelection,
         Self::SketchSelect,
         Self::SketchLine,
@@ -456,6 +458,12 @@ impl CommandId {
                 "Parameters…",
                 "Tools",
                 "Named values you can use in dimension expressions (width = 2 * height).",
+                None,
+            ),
+            Self::ConfigurationTable => (
+                "Configurations Table…",
+                "Tools",
+                "What differs between the part's configurations: suppressed features, parameters, feature values and sketch dimensions, with a column per configuration.",
                 None,
             ),
             Self::DeleteSelection => (

@@ -63,7 +63,9 @@ fn suppressed_in(doc: &Document, id: FeatureId) -> Vec<&str> {
 
 /// The configurations, which one is active, and what differs between them: for each
 /// feature whose suppression differs, the configurations it is suppressed in; for each
-/// parameter whose expression differs, its expression in every configuration.
+/// parameter whose expression differs, its expression in every configuration; for each
+/// feature value and sketch dimension that differs, its value in every configuration (in
+/// document units, or its expression).
 pub fn configurations(doc: &Document) -> Value {
     let model = &doc.model;
     let active = model.active_configuration().id;
@@ -92,11 +94,38 @@ pub fn configurations(doc: &Document) -> Value {
         .into_iter()
         .map(|name| (name.to_owned(), Value::Object(expressions(doc, name))))
         .collect();
+    // Feature values and sketch dimensions, as they would be typed.
+    let mut values: Map<String, Value> = Map::new();
+    for (id, slot) in model.values_that_differ() {
+        let Some((kind, now)) = model.value(id, &slot) else {
+            continue;
+        };
+        let name = model
+            .values(id)
+            .into_iter()
+            .find(|v| v.slot == slot)
+            .map_or_else(String::new, |v| v.name);
+        let each: Map<String, Value> = model
+            .configurations()
+            .iter()
+            .map(|c| {
+                let v = model
+                    .value_in(id, &slot, c.id)
+                    .unwrap_or_else(|| now.clone());
+                (c.name.clone(), json!(v.input_text(kind, &model.parameters)))
+            })
+            .collect();
+        let of = values
+            .entry(model.name_of(id).to_owned())
+            .or_insert_with(|| Value::Object(Map::new()));
+        of[name] = Value::Object(each);
+    }
     json!({
         "active": model.active_configuration().name,
         "configurations": list,
         "suppressed_in": suppressed,
         "parameters": parameters,
+        "values": values,
     })
 }
 

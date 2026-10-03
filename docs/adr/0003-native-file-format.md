@@ -33,6 +33,7 @@ versions and never crashes on bad input, with a readable form for diffs.
   file.
 - The first such change was model schema 5 (configurations): earlier models are read
   through a frozen copy of their layout and converted, with tests against files of the
-  samples saved with schema 4 ([ADR 0009](0009-configurations.md)).
+  samples saved with schema 4 ([ADR 0009](0009-configurations.md)). Schema 6 followed
+  the same way, with files saved with schema 5.
 - The model section uses `postcard`, which is not self-describing, so fields can't be
   added without a schema version bump. That is deliberate: the versioning is explicit.

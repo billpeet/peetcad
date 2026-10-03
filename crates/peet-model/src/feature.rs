@@ -1002,6 +1002,163 @@ impl FeatureKind {
     }
 }
 
+/// Writes [`FeatureKind::slots`] and [`FeatureKind::slots_mut`] from one list, so the two
+/// can't differ.
+macro_rules! slots {
+    ($(#[$doc:meta])* $name:ident $(, $m:tt)?) => {
+        $(#[$doc])*
+        pub fn $name(& $($m)? self) -> Vec<(&'static str, ScalarKind, & $($m)? Scalar)> {
+            use ScalarKind::{Angle, Length, Number};
+            /// A bend model's value, named after the model.
+            macro_rules! bend {
+                ($model:expr) => {
+                    match $model {
+                        BendModelDef::KFactor(s) => ("k_factor", Number, s),
+                        BendModelDef::Allowance(s) => ("allowance", Length, s),
+                        BendModelDef::Deduction(s) => ("deduction", Length, s),
+                    }
+                };
+            }
+            match self {
+                Self::Extrude(e) => vec![("depth", Length, & $($m)? e.params.depth)],
+                Self::Plane(PlaneDef::Offset { distance, .. }) => {
+                    vec![("distance", Length, distance)]
+                }
+                Self::Plane(PlaneDef::Angled { angle, .. }) => vec![("angle", Angle, angle)],
+                Self::Point(PointDef::Coordinates { x, y, z }) => {
+                    vec![("x", Length, x), ("y", Length, y), ("z", Length, z)]
+                }
+                Self::BaseFlange(b) => {
+                    let b = & $($m)? **b;
+                    vec![
+                        ("thickness", Length, & $($m)? b.settings.thickness),
+                        ("radius", Length, & $($m)? b.settings.radius),
+                        bend!(& $($m)? b.settings.model),
+                        ("relief_ratio", Number, & $($m)? b.settings.relief_ratio),
+                        ("depth", Length, & $($m)? b.depth),
+                    ]
+                }
+                Self::EdgeFlange(e) => {
+                    let e = & $($m)? **e;
+                    let mut v = vec![
+                        ("length", Length, & $($m)? e.length),
+                        ("angle", Angle, & $($m)? e.angle),
+                        ("offset_start", Length, & $($m)? e.offset_start),
+                        ("offset_end", Length, & $($m)? e.offset_end),
+                    ];
+                    if let Some(r) = & $($m)? e.radius {
+                        v.push(("radius", Length, r));
+                    }
+                    v
+                }
+                Self::Hem(h) => {
+                    let h = & $($m)? **h;
+                    vec![
+                        ("length", Length, & $($m)? h.length),
+                        ("gap", Length, & $($m)? h.gap),
+                        ("radius", Length, & $($m)? h.radius),
+                        ("angle", Angle, & $($m)? h.angle),
+                        ("offset_start", Length, & $($m)? h.offset_start),
+                        ("offset_end", Length, & $($m)? h.offset_end),
+                    ]
+                }
+                Self::SketchedBend(b) => {
+                    let b = & $($m)? **b;
+                    let mut v = vec![("angle", Angle, & $($m)? b.angle)];
+                    if let Some(r) = & $($m)? b.radius {
+                        v.push(("radius", Length, r));
+                    }
+                    v
+                }
+                Self::Jog(j) => {
+                    let j = & $($m)? **j;
+                    let mut v = vec![
+                        ("offset", Length, & $($m)? j.offset),
+                        ("angle", Angle, & $($m)? j.angle),
+                    ];
+                    if let Some(r) = & $($m)? j.radius {
+                        v.push(("radius", Length, r));
+                    }
+                    v
+                }
+                Self::MiterFlange(f) => {
+                    let f = & $($m)? **f;
+                    vec![
+                        ("gap", Length, & $($m)? f.gap),
+                        ("offset_start", Length, & $($m)? f.offset_start),
+                        ("offset_end", Length, & $($m)? f.offset_end),
+                    ]
+                }
+                Self::Corner(c) => {
+                    let c = & $($m)? **c;
+                    vec![
+                        ("gap", Length, & $($m)? c.gap),
+                        ("relief_size", Length, & $($m)? c.relief_size),
+                    ]
+                }
+                Self::Form(f) => vec![("height", Length, & $($m)? f.height)],
+                Self::Pattern(p) => match & $($m)? p.def {
+                    PatternDef::Linear { first, second } => {
+                        let mut v = vec![("spacing", Length, & $($m)? first.spacing)];
+                        if let Some(s) = second {
+                            v.push(("spacing2", Length, & $($m)? s.spacing));
+                        }
+                        v
+                    }
+                    PatternDef::Circular { angle, .. } => vec![("angle", Angle, angle)],
+                },
+                Self::Revolve(r) => vec![("angle", Angle, & $($m)? r.angle)],
+                Self::Blend(b) => vec![("size", Length, & $($m)? b.size)],
+                Self::Shell(s) => vec![("thickness", Length, & $($m)? s.thickness)],
+                Self::Draft(d) => vec![("angle", Angle, & $($m)? d.angle)],
+                Self::Hole(h) => {
+                    let h = & $($m)? **h;
+                    vec![
+                        ("diameter", Length, & $($m)? h.diameter),
+                        ("depth", Length, & $($m)? h.depth),
+                        ("tip_angle", Angle, & $($m)? h.tip_angle),
+                        ("counterbore_diameter", Length, & $($m)? h.counterbore_diameter),
+                        ("counterbore_depth", Length, & $($m)? h.counterbore_depth),
+                        ("countersink_diameter", Length, & $($m)? h.countersink_diameter),
+                        ("countersink_angle", Angle, & $($m)? h.countersink_angle),
+                    ]
+                }
+                Self::ConvertToSheet(c) => {
+                    let c = & $($m)? **c;
+                    vec![
+                        bend!(& $($m)? c.model),
+                        ("relief_ratio", Number, & $($m)? c.relief_ratio),
+                    ]
+                }
+                Self::Sketch(_)
+                | Self::Axis(_)
+                | Self::CoordSystem(_)
+                | Self::Plane(PlaneDef::Midplane { .. })
+                | Self::Point(PointDef::Vertex(_))
+                | Self::SheetCut(_)
+                | Self::Mirror(_)
+                | Self::Import(_)
+                | Self::Sweep(_)
+                | Self::Loft(_) => Vec::new(),
+            }
+        }
+    };
+}
+
+impl FeatureKind {
+    slots! {
+        /// The feature's numeric values (those of [`FeatureKind::scalars`]), each with
+        /// the name its operations give it and what it measures. These are the values
+        /// that can differ between configurations (see [`crate::config`]). A bend model's
+        /// value goes by the model's name (`k_factor`, `allowance`, `deduction`).
+        slots
+    }
+    slots! {
+        /// [`FeatureKind::slots`], for changing the values.
+        slots_mut, mut
+    }
+}
+
 fn plane_deps(r: &PlaneRef, out: &mut Vec<FeatureId>) {
     match r {
         PlaneRef::Standard(_) => {}

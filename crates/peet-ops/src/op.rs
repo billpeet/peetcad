@@ -221,9 +221,15 @@ pub enum Op {
     /// Add features (several as one step: an edge flange on each of several edges).
     Add(Vec<New>),
     /// Change fields of a feature. `fields` must be of the feature's kind.
+    ///
+    /// Its numeric values can differ between configurations: `configurations` says which
+    /// ones the new values are for. Left out, a value that already differs changes in
+    /// the active configuration and one that doesn't changes in all of them. The other
+    /// fields are the same in every configuration.
     Edit {
         feature: FeatureSel,
         fields: FeatureArgs,
+        configurations: Option<Configs>,
     },
     /// Add a sketch on a plane or a flat face, and draw in it.
     Sketch {
@@ -236,11 +242,13 @@ pub enum Op {
         sketch: FeatureSel,
         draw: Vec<DrawItem>,
     },
-    /// Change a sketch dimension (`"d1"`).
+    /// Change a sketch dimension (`"d1"`), in the configurations given (as for
+    /// [`Op::Edit`]).
     SetDimension {
         sketch: FeatureSel,
         name: String,
         value: Input,
+        configurations: Option<Configs>,
     },
     Rename {
         feature: FeatureSel,
@@ -271,9 +279,13 @@ pub enum Op {
     },
     /// Replace what is drawn in a sketch: how the sketch editor commits its work. A
     /// script draws with `Draw`.
+    ///
+    /// `configurations` says which ones the dimensions whose values changed are changed
+    /// in (as for [`Op::Edit`]); what is drawn is the same in every configuration.
     SetSketch {
         sketch: FeatureSel,
         content: Box<peet_sketch::Sketch>,
+        configurations: Option<Configs>,
     },
     /// Add or change a named value usable in every expression. A new one exists in
     /// every configuration; an existing one changes in the configurations given.
@@ -563,13 +575,13 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "set_dimension",
-        "sketch, name, value",
-        "Change a sketch dimension (\"d1\") to a number or an expression.",
+        "sketch, name, value, configurations (\"this\", \"all\", a name or a list of names; left out: this one if the dimension already differs between configurations, else all)",
+        "Change a sketch dimension (\"d1\") to a number or an expression, in some configurations.",
     ),
     (
         "edit",
-        "feature, then any of the feature's fields ('on' for a sketch: its plane)",
-        "Change fields of a feature.",
+        "feature, then any of the feature's fields ('on' for a sketch: its plane), configurations (\"this\", \"all\", a name or a list of names: for numeric fields only; left out: this one for a value that already differs between configurations, else all)",
+        "Change fields of a feature. Its numeric values can differ between configurations.",
     ),
     ("rename", "feature, name", "Rename a feature."),
     (
@@ -908,9 +920,11 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             sketch: feature(a, "sketch")?,
             name: a.required("name", |v| text(v).map(str::to_owned))?,
             value: a.required("value", Input::parse)?,
+            configurations: a.parsed("configurations", Configs::parse)?,
         },
         "edit" => {
             let target = feature(a, "feature")?;
+            let configurations = a.parsed("configurations", Configs::parse)?;
             let id = target.resolve(doc)?;
             let kind = doc
                 .feature(id)
@@ -919,6 +933,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             Op::Edit {
                 feature: target,
                 fields: FeatureArgs::parse_for(kind, a)?,
+                configurations,
             }
         }
         "rename" => Op::Rename {

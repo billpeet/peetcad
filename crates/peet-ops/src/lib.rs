@@ -54,7 +54,7 @@ pub mod select;
 pub mod sketch;
 mod value;
 
-pub use diff::{Translation, apply_model, diff};
+pub use diff::{Translation, apply_model, apply_model_scoped, diff, diff_scoped};
 pub use export::export_bytes;
 pub use fields::{
     AngledPlane, BaseFlange, Blend, CircularPattern, ConvertToSheet, CoordinateSystem,
@@ -149,6 +149,66 @@ fn rename(model: &mut Model, id: FeatureId, name: &str) -> Result<(), String> {
         name.clone_into(&mut f.name);
     }
     Ok(())
+}
+
+/// Whether nothing but numeric values differs between two definitions of a feature.
+fn only_values_differ(before: &FeatureKind, after: &FeatureKind) -> bool {
+    let mut probe = after.clone();
+    let old = before.slots();
+    for (name, _, value) in probe.slots_mut() {
+        if let Some((_, _, was)) = old.iter().find(|(n, ..)| *n == name) {
+            *value = (*was).clone();
+        }
+    }
+    probe == *before
+}
+
+/// Says which configurations the numeric values of a feature that an operation changed
+/// in `model` are changed in. Without `configurations` they are left as a change to the
+/// model is: in the active configuration where they already differ, in all otherwise.
+///
+/// `given` are the values the operation set, whether or not that changed them in the
+/// active configuration: a value set to what it already is here still has to reach the
+/// other configurations asked for.
+fn rescope(
+    model: &mut Model,
+    doc: &Document,
+    id: FeatureId,
+    configurations: Option<&Configs>,
+    given: &[peet_model::Slot],
+) -> Result<(), String> {
+    let Some(configurations) = configurations else {
+        return Ok(());
+    };
+    let scope = configurations.resolve(doc)?;
+    for v in model.values(id) {
+        if let Some((_, before)) = doc.model.value(id, &v.slot)
+            && (before != v.value || given.contains(&v.slot))
+        {
+            model.rescope_value(id, &v.slot, before, &scope)?;
+        }
+    }
+    Ok(())
+}
+
+/// The numeric values of a feature that `fields` set: found by setting them on a copy
+/// whose values are all marked, and seeing which marks are gone.
+fn values_given(kind: &FeatureKind, fields: &FeatureArgs, doc: &Document) -> Vec<peet_model::Slot> {
+    let mark = peet_model::Scalar {
+        value: 0.0,
+        expression: Some("\u{1}".to_owned()),
+    };
+    let mut probe = kind.clone();
+    for (_, _, value) in probe.slots_mut() {
+        *value = mark.clone();
+    }
+    let _ = fields.set(&mut probe, doc, false);
+    probe
+        .slots()
+        .into_iter()
+        .filter(|(_, _, value)| **value != mark)
+        .map(|(name, ..)| peet_model::Slot::Field(name.to_owned()))
+        .collect()
 }
 
 fn check_copies(doc: &Document, kind: &FeatureKind) -> Result<(), String> {
@@ -546,7 +606,11 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.created = ids;
             label
         }
-        Op::Edit { feature, fields } => {
+        Op::Edit {
+            feature,
+            fields,
+            configurations,
+        } => {
             let id = feature.resolve(doc)?;
             let Some(f) = model.feature_mut(id) else {
                 return Err("The feature no longer exists.".to_owned());
@@ -575,6 +639,23 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                     f.kind = other;
                 }
             }
+            // Only numeric values can differ between configurations.
+            let several = doc.model.configurations().len() > 1;
+            if let (Some(c), Some(before)) = (configurations, doc.feature(id))
+                && several
+                && *c != Configs::All
+                && !only_values_differ(&before.kind, &f.kind)
+            {
+                return Err(format!(
+                    "Only the numeric values of {} can differ between configurations: change its other fields in an 'edit' without 'configurations' (they are the same in every configuration).",
+                    f.name
+                ));
+            }
+            let given = match configurations {
+                Some(_) => values_given(&f.kind, fields, doc),
+                None => Vec::new(),
+            };
+            rescope(&mut model, doc, id, configurations.as_ref(), &given)?;
             done.feature = Some(id);
             format!("Edit {}", model.name_of(id))
         }
@@ -610,11 +691,18 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             sketch,
             name,
             value,
+            configurations,
         } => {
             let id = sketch_id(doc, sketch)?;
             if let Some(s) = model.feature_mut(id).and_then(|f| f.sketch_mut()) {
                 sketch::set_dimension(&mut s.sketch, doc, name, value)?;
             }
+            let given: Vec<peet_model::Slot> = model
+                .slot_named(id, name)
+                .map(|v| v.slot)
+                .into_iter()
+                .collect();
+            rescope(&mut model, doc, id, configurations.as_ref(), &given)?;
             done.feature = Some(id);
             done.sketch = Some(id);
             format!("Edit {}", model.name_of(id))
@@ -695,11 +783,16 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 format!("Roll Back to {}", model.name_of(id))
             }
         },
-        Op::SetSketch { sketch, content } => {
+        Op::SetSketch {
+            sketch,
+            content,
+            configurations,
+        } => {
             let id = sketch_id(doc, sketch)?;
             if let Some(s) = model.feature_mut(id).and_then(|f| f.sketch_mut()) {
                 s.sketch = (**content).clone();
             }
+            rescope(&mut model, doc, id, configurations.as_ref(), &[])?;
             done.feature = Some(id);
             done.sketch = Some(id);
             format!("Edit {}", model.name_of(id))

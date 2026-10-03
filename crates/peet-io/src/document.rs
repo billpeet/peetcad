@@ -37,8 +37,11 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 ///   another layout: they are read as [`peet_model::ModelV4`] and converted, to a part
 ///   with one configuration. Their caches are tagged with the hash of the model as it was
 ///   stored, so they no longer match and the part is rebuilt once.
+/// - Model 6 (configurations stage 2): feature values and sketch dimensions can differ
+///   between configurations, which the configurations hold in one more table. Schema 5
+///   models are read as [`peet_model::ModelV5`] and converted.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 5;
+pub const MODEL_SCHEMA: u16 = 6;
 /// The last model schema without configurations.
 const MODEL_SCHEMA_BEFORE_CONFIGURATIONS: u16 = 4;
 pub const BREP_SCHEMA: u16 = 4;
@@ -152,14 +155,14 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
     check_schema(&r, SectionKind::METADATA, METADATA_SCHEMA)?;
     check_schema(&r, SectionKind::MODEL, MODEL_SCHEMA)?;
     let metadata: Metadata = r.read(SectionKind::METADATA)?.unwrap_or_default();
-    let old = r
-        .schema_version(SectionKind::MODEL)
-        .is_some_and(|v| v <= MODEL_SCHEMA_BEFORE_CONFIGURATIONS);
-    let model: Option<Model> = if old {
-        r.read::<peet_model::ModelV4>(SectionKind::MODEL)?
-            .map(Model::from)
-    } else {
-        r.read(SectionKind::MODEL)?
+    let model: Option<Model> = match r.schema_version(SectionKind::MODEL) {
+        Some(v) if v <= MODEL_SCHEMA_BEFORE_CONFIGURATIONS => r
+            .read::<peet_model::ModelV4>(SectionKind::MODEL)?
+            .map(Model::from),
+        Some(5) => r
+            .read::<peet_model::ModelV5>(SectionKind::MODEL)?
+            .map(Model::from),
+        _ => r.read(SectionKind::MODEL)?,
     };
     let mut model =
         model.ok_or_else(|| PeetError::new("The file is damaged: it has no model in it."))?;
