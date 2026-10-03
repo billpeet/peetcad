@@ -12,6 +12,10 @@
 //! peet export path=flat.dxf --file bracket.peet
 //! ```
 //!
+//! If the part is open in a running PeetCAD, the operations are applied there instead
+//! (`peet_live`): the part changes on screen, each change is an undo step of the
+//! application, and nothing is saved unless the script saves.
+//!
 //! The exit code is 0 if every operation was applied, 1 if one was not (or, with
 //! `--strict`, if the part ends with features that can't be built), and 2 if the command
 //! line or a file was the problem.
@@ -20,6 +24,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 
 use peet_document::Document;
+use peet_live::{Client, Session};
 use peet_ops::{Headless, Op, Reply, Source, Undo, apply_in, apply_json_in};
 use serde_json::{Map, Value, json};
 
@@ -39,6 +44,7 @@ USAGE
   peet OPERATION [field=value...]       apply one operation, by name
   peet ops [OPERATION]                  list the operations, or one with its fields
   peet skills [NAME]                    how to use peet, for an agent: start with 'peet skills core'
+  peet sessions                         list the running PeetCADs and the part each has open
   peet new PART.peet                    make an empty part file
   peet dump PART.peet [OUT.ron]         write a part as readable text
   peet pack IN.ron PART.peet            turn the text back into a part
@@ -52,6 +58,9 @@ OPTIONS
       --keep-going       carry on after an operation that can't be applied
       --strict           fail if the part ends with features that can't be built
       --materials CSV    use these material and gauge tables, not the built-in ones
+      --live             apply to a running PeetCAD, and fail if there is none to apply to
+      --headless         work on the file, even if it is open in a running PeetCAD
+      --pid N            apply to the running PeetCAD with this process id
       --pretty           indent the replies
   -q, --quiet            say nothing on standard error
   -h, --help             this text
@@ -70,6 +79,12 @@ and text otherwise (2mm, Sketch1, flat.dxf).
 One reply per operation is written to standard output, as a line of JSON. The part is
 saved if it changed and every operation was applied.
 
+LIVE
+  If the part given with --file is open in a running PeetCAD, the operations are applied
+  there: it changes on screen, each change is an undo step, and it is saved only by a
+  save operation. --live without --file applies to the one PeetCAD that is running.
+  --new, --out and --materials work on files only: add --headless.
+
 EXIT CODE
   0  every operation was applied
   1  an operation was not applied (nothing is saved), or --strict found features that can't be built
@@ -79,7 +94,7 @@ EXIT CODE
 /// The skills: instructions for an agent on using `peet`, kept in this repository and
 /// built into the binary, so they always describe the version being run. `core` comes
 /// first and points to the others.
-pub const SKILLS: [(&str, &str); 6] = [
+pub const SKILLS: [(&str, &str); 7] = [
     ("core", include_str!("../skills/core.md")),
     ("sketching", include_str!("../skills/sketching.md")),
     ("selectors", include_str!("../skills/selectors.md")),
@@ -89,6 +104,7 @@ pub const SKILLS: [(&str, &str); 6] = [
         "configurations",
         include_str!("../skills/configurations.md"),
     ),
+    ("live", include_str!("../skills/live.md")),
 ];
 
 /// A skill's `description`, from the front matter at its top: what it is for.
@@ -113,6 +129,11 @@ struct Options {
     materials: Option<PathBuf>,
     pretty: bool,
     quiet: bool,
+    live: bool,
+    headless: bool,
+    pid: Option<u32>,
+    /// Where the running sessions are listed, if not the usual folder.
+    sessions: Option<PathBuf>,
 }
 
 #[derive(Debug, PartialEq)]
@@ -129,6 +150,8 @@ enum Command {
     List(Option<String>),
     /// List the skills, or print one.
     Skills(Option<String>),
+    /// List the running sessions.
+    Sessions,
     New(PathBuf),
     Dump(PathBuf, Option<PathBuf>),
     Pack(PathBuf, PathBuf),
@@ -156,6 +179,16 @@ fn parse(args: &[String]) -> Result<(Command, Options), String> {
             "-f" | "--file" => options.file = Some(PathBuf::from(value("--file")?)),
             "-o" | "--out" => options.out = Some(PathBuf::from(value("--out")?)),
             "--materials" => options.materials = Some(PathBuf::from(value("--materials")?)),
+            "--sessions" => options.sessions = Some(PathBuf::from(value("--sessions")?)),
+            "--pid" => {
+                let text = value("--pid")?;
+                options.pid = Some(
+                    text.parse()
+                        .map_err(|_| format!("--pid needs a process id, not '{text}'."))?,
+                );
+            }
+            "--live" => options.live = true,
+            "--headless" => options.headless = true,
             "--new" => options.new = true,
             "--no-save" => options.no_save = true,
             "--no-caches" => options.no_caches = true,
@@ -196,6 +229,7 @@ fn parse(args: &[String]) -> Result<(Command, Options), String> {
         }
         "ops" => Command::List(rest.first().cloned()),
         "skills" => Command::Skills(rest.first().cloned()),
+        "sessions" => Command::Sessions,
         "new" => Command::New(one("the part to make")?),
         "dump" => Command::Dump(one("the part to dump")?, rest.get(1).map(PathBuf::from)),
         "pack" => match &rest[..] {
@@ -302,6 +336,201 @@ fn convert(command: &Command) -> Result<Option<String>, String> {
     }
 }
 
+fn print(out: &mut dyn Write, value: &Value, pretty: bool) {
+    let text = if pretty {
+        serde_json::to_string_pretty(value)
+    } else {
+        serde_json::to_string(value)
+    };
+    let _ = writeln!(out, "{}", text.unwrap_or_default());
+}
+
+/// The features a `status` reply says can't be built, each with why.
+fn failures_of(status: &Value) -> Vec<String> {
+    status["failures"]
+        .as_array()
+        .map(|list| {
+            list.iter()
+                .map(|f| {
+                    format!(
+                        "{}: {}",
+                        f["name"].as_str().unwrap_or("a feature"),
+                        f["message"].as_str().unwrap_or("it can't be built")
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+fn strict_problem(failures: &[String], then: &str) -> String {
+    format!(
+        "--strict: {} can't be built{then}. {}",
+        if failures.len() == 1 {
+            "a feature".to_owned()
+        } else {
+            format!("{} features", failures.len())
+        },
+        failures.join(" ")
+    )
+}
+
+fn describe(session: &Session) -> String {
+    let open = session.file.as_ref().map_or_else(
+        || format!("{} (not saved to a file)", session.name),
+        |f| f.display().to_string(),
+    );
+    format!("process {} has {open} open", session.pid)
+}
+
+fn running(sessions: &[Session]) -> String {
+    if sessions.is_empty() {
+        "No PeetCAD is running.".to_owned()
+    } else {
+        let list: Vec<String> = sessions.iter().map(describe).collect();
+        format!("Running: {}.", list.join("; "))
+    }
+}
+
+/// The running PeetCAD to apply the operations to, if they go to one: the one that has
+/// `--file` open, or the one asked for with `--pid` or `--live`.
+fn attach(options: &Options) -> Result<Option<Client>, String> {
+    let asked = options.live || options.pid.is_some();
+    if options.headless {
+        return if asked {
+            Err("--headless works on the file, and --live and --pid on a running PeetCAD: give one or the other.".to_owned())
+        } else {
+            Ok(None)
+        };
+    }
+    if !asked && options.file.is_none() {
+        return Ok(None);
+    }
+    let Some(dir) = options.sessions.clone().or_else(peet_live::sessions_dir) else {
+        return if asked {
+            Err("Couldn't find the folder the running PeetCADs are listed in.".to_owned())
+        } else {
+            Ok(None)
+        };
+    };
+    let sessions = peet_live::sessions(&dir);
+    let chosen = match (options.pid, &options.file) {
+        (Some(pid), file) => {
+            let session = sessions.iter().find(|s| s.pid == pid).ok_or_else(|| {
+                format!(
+                    "No PeetCAD with process id {pid} is running. {}",
+                    running(&sessions)
+                )
+            })?;
+            if let Some(file) = file.as_ref().filter(|f| !session.has_open(f)) {
+                return Err(format!(
+                    "{} is not what that PeetCAD has open: {}.",
+                    file.display(),
+                    describe(session)
+                ));
+            }
+            session
+        }
+        (None, Some(file)) => match sessions.iter().find(|s| s.has_open(file)) {
+            Some(session) => session,
+            None if options.live => {
+                return Err(format!(
+                    "{} is not open in a running PeetCAD. {}",
+                    file.display(),
+                    running(&sessions)
+                ));
+            }
+            None => return Ok(None),
+        },
+        (None, None) => match &sessions[..] {
+            [session] => session,
+            [] => return Err("No PeetCAD is running.".to_owned()),
+            _ => {
+                return Err(format!(
+                    "Several PeetCADs are running: say which with --file or --pid. {}",
+                    running(&sessions)
+                ));
+            }
+        },
+    };
+    for (given, option) in [
+        (options.new, "--new"),
+        (options.out.is_some(), "--out"),
+        (options.materials.is_some(), "--materials"),
+    ] {
+        if given {
+            return Err(format!(
+                "{option} works on files, and this part is open in PeetCAD ({}). Use operations instead (save, with a path, saves it somewhere else), or add --headless to work on the file anyway: PeetCAD will not see that change.",
+                describe(chosen)
+            ));
+        }
+    }
+    Client::connect(chosen)
+        .map(Some)
+        .map_err(|e| format!("Couldn't reach PeetCAD ({}): {e}", describe(chosen)))
+}
+
+/// Applies the operations to a running PeetCAD. Nothing is saved: that is up to the
+/// script, as it is up to the user in the application.
+fn run_live(
+    mut client: Client,
+    ops: &[Value],
+    options: &Options,
+    out: &mut dyn Write,
+    notes: &mut Notes,
+) -> i32 {
+    notes.say(&format!(
+        "Applying to PeetCAD, where {}. It is saved only by a save operation.",
+        describe(&client.session)
+    ));
+    let mut send = |op: &Value, notes: &mut Notes| match client.send(op) {
+        Ok(reply) => Some(reply),
+        Err(e) => {
+            notes.problem(&format!("PeetCAD stopped answering: {e}"));
+            None
+        }
+    };
+    let mut failed = false;
+    for op in ops {
+        // A file is where this run would find it, not where PeetCAD was started.
+        let mut op = op.clone();
+        if let Some(path) = op.get("path").and_then(Value::as_str)
+            && let Ok(full) = std::path::absolute(path)
+        {
+            op["path"] = json!(full.to_string_lossy());
+        }
+        let Some(reply) = send(&op, notes) else {
+            return FAILED;
+        };
+        print(out, &reply, options.pretty);
+        if reply["ok"] != true {
+            failed = true;
+            if !options.keep_going {
+                break;
+            }
+        }
+    }
+    if failed {
+        notes.say(if options.keep_going {
+            "An operation was not applied. The others were applied in PeetCAD: undo there takes them back."
+        } else {
+            "An operation was not applied: the run stopped there. The ones before it were applied in PeetCAD: undo there takes them back."
+        });
+        return FAILED;
+    }
+    if options.strict {
+        let Some(status) = send(&json!({"op": "status"}), notes) else {
+            return FAILED;
+        };
+        let failures = failures_of(&status);
+        if !failures.is_empty() {
+            notes.problem(&strict_problem(&failures, ""));
+            return FAILED;
+        }
+    }
+    OK
+}
+
 /// Runs the command line `args` (without the program's name). Replies go to `out`, notes
 /// and problems to `err`. Returns the exit code.
 pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut dyn Write) -> i32 {
@@ -315,14 +544,6 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
     let mut notes = Notes {
         err,
         quiet: options.quiet,
-    };
-    let print = |out: &mut dyn Write, value: &Value, pretty: bool| {
-        let text = if pretty {
-            serde_json::to_string_pretty(value)
-        } else {
-            serde_json::to_string(value)
-        };
-        let _ = writeln!(out, "{}", text.unwrap_or_default());
     };
 
     // ---- Commands that are not operations on a part ----
@@ -348,6 +569,30 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
                     USAGE
                 }
             };
+        }
+        Command::Sessions => {
+            let Some(dir) = options.sessions.clone().or_else(peet_live::sessions_dir) else {
+                notes.problem("Couldn't find the folder the running PeetCADs are listed in.");
+                return USAGE;
+            };
+            let sessions: Vec<Value> = peet_live::sessions(&dir)
+                .iter()
+                .map(|s| {
+                    json!({
+                        "pid": s.pid,
+                        "file": s.file.as_ref().map(|f| f.to_string_lossy().into_owned()),
+                        "name": s.name,
+                        "modified": s.modified,
+                        "version": s.version,
+                    })
+                })
+                .collect();
+            print(
+                out,
+                &json!({"ok": true, "sessions": sessions}),
+                options.pretty,
+            );
+            return OK;
         }
         Command::Skills(None) => {
             let mut text =
@@ -474,6 +719,18 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
         _ => Vec::new(),
     };
 
+    // ---- A part that is open in a running PeetCAD is changed there ----
+    if !matches!(command, Command::New(_)) {
+        match attach(&options) {
+            Ok(Some(client)) => return run_live(client, &ops, &options, out, &mut notes),
+            Ok(None) => {}
+            Err(e) => {
+                notes.problem(&e);
+                return USAGE;
+            }
+        }
+    }
+
     // ---- The part ----
     let mut host = Headless::default();
     let mut doc = Document::default();
@@ -554,30 +811,9 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
     }
     if options.strict {
         let status = apply_json_in(&mut host, &mut doc, &json!({"op": "status"}), Undo::Step);
-        let failures: Vec<String> = status.json["failures"]
-            .as_array()
-            .map(|list| {
-                list.iter()
-                    .map(|f| {
-                        format!(
-                            "{}: {}",
-                            f["name"].as_str().unwrap_or("a feature"),
-                            f["message"].as_str().unwrap_or("it can't be built")
-                        )
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let failures = failures_of(&status.json);
         if !failures.is_empty() {
-            notes.problem(&format!(
-                "--strict: {} can't be built, so the part is not saved. {}",
-                if failures.len() == 1 {
-                    "a feature".to_owned()
-                } else {
-                    format!("{} features", failures.len())
-                },
-                failures.join(" ")
-            ));
+            notes.problem(&strict_problem(&failures, ", so the part is not saved"));
             return FAILED;
         }
     }
