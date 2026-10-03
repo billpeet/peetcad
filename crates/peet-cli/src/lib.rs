@@ -38,6 +38,7 @@ USAGE
   peet op JSON... [options]             apply operations given as JSON
   peet OPERATION [field=value...]       apply one operation, by name
   peet ops [OPERATION]                  list the operations, or one with its fields
+  peet skills [NAME]                    how to use peet, for an agent: start with 'peet skills core'
   peet new PART.peet                    make an empty part file
   peet dump PART.peet [OUT.ron]         write a part as readable text
   peet pack IN.ron PART.peet            turn the text back into a part
@@ -75,6 +76,26 @@ EXIT CODE
   2  the command line or a file was the problem
 ";
 
+/// The skills: instructions for an agent on using `peet`, kept in this repository and
+/// built into the binary, so they always describe the version being run. `core` comes
+/// first and points to the others.
+pub const SKILLS: [(&str, &str); 5] = [
+    ("core", include_str!("../skills/core.md")),
+    ("sketching", include_str!("../skills/sketching.md")),
+    ("selectors", include_str!("../skills/selectors.md")),
+    ("solids", include_str!("../skills/solids.md")),
+    ("sheet-metal", include_str!("../skills/sheet-metal.md")),
+];
+
+/// A skill's `description`, from the front matter at its top: what it is for.
+fn skill_description(text: &str) -> &str {
+    text.lines()
+        .skip(1)
+        .take_while(|line| line.trim() != "---")
+        .find_map(|line| line.strip_prefix("description:"))
+        .map_or("", str::trim)
+}
+
 /// What to do, from the command line.
 #[derive(Debug, Default, PartialEq)]
 struct Options {
@@ -102,6 +123,8 @@ enum Command {
     Named(String, Vec<String>),
     /// List the operations, or describe one.
     List(Option<String>),
+    /// List the skills, or print one.
+    Skills(Option<String>),
     New(PathBuf),
     Dump(PathBuf, Option<PathBuf>),
     Pack(PathBuf, PathBuf),
@@ -168,6 +191,7 @@ fn parse(args: &[String]) -> Result<(Command, Options), String> {
             Command::Ops(rest)
         }
         "ops" => Command::List(rest.first().cloned()),
+        "skills" => Command::Skills(rest.first().cloned()),
         "new" => Command::New(one("the part to make")?),
         "dump" => Command::Dump(one("the part to dump")?, rest.get(1).map(PathBuf::from)),
         "pack" => match &rest[..] {
@@ -321,6 +345,33 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
                 }
             };
         }
+        Command::Skills(None) => {
+            let mut text =
+                "Skills: how to use peet, for an agent. Print one with 'peet skills NAME'.\n\n"
+                    .to_owned();
+            for (name, skill) in SKILLS {
+                text.push_str(&format!("{name}\n    {}\n", skill_description(skill)));
+            }
+            text.push_str("\nStart with 'peet skills core'.\n");
+            let _ = write!(out, "{text}");
+            return OK;
+        }
+        Command::Skills(Some(name)) => {
+            return match SKILLS.iter().find(|(n, _)| n == name) {
+                Some((_, skill)) => {
+                    let _ = write!(out, "{skill}");
+                    OK
+                }
+                None => {
+                    let names: Vec<&str> = SKILLS.iter().map(|(n, _)| *n).collect();
+                    notes.problem(&format!(
+                        "There is no skill '{name}'. The skills are: {}.",
+                        names.join(", ")
+                    ));
+                    USAGE
+                }
+            };
+        }
         Command::List(name) => {
             let mut doc = Document::default();
             let help = apply_json_in(
@@ -335,18 +386,28 @@ pub fn run(args: &[String], stdin: &mut dyn Read, out: &mut dyn Write, err: &mut
                     print(out, &help, true);
                     OK
                 }
-                Some(name) => match help["operations"].get(name) {
-                    Some(entry) => {
-                        print(out, &json!({ name: entry }), true);
-                        OK
+                Some(name) => {
+                    // An operation, with what goes in a draw list for the two that take
+                    // one; or one of the other sections of the reference.
+                    let mut entry = Map::new();
+                    if let Some(op) = help["operations"].get(name) {
+                        entry.insert(name.clone(), op.clone());
+                        if matches!(name.as_str(), "draw" | "sketch") {
+                            entry.insert("draw items".to_owned(), help["draw"].clone());
+                        }
+                    } else if matches!(name.as_str(), "selectors" | "values") {
+                        entry.insert(name.clone(), help[name.as_str()].clone());
                     }
-                    None => {
+                    if entry.is_empty() {
                         notes.problem(&format!(
                             "There is no operation '{name}'. 'peet ops' lists them."
                         ));
                         USAGE
+                    } else {
+                        print(out, &Value::Object(entry), true);
+                        OK
                     }
-                },
+                }
             };
         }
         _ => {}

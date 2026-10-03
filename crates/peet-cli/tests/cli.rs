@@ -373,3 +373,137 @@ fn the_binary_runs() {
         .unwrap();
     assert!(String::from_utf8_lossy(&out.stdout).starts_with("peet "));
 }
+
+#[test]
+fn skills_are_listed_and_printed() {
+    let list = peet(&["skills"]);
+    assert_eq!(list.code, OK);
+    for (name, _) in peet_cli::SKILLS {
+        assert!(
+            list.out.contains(&format!("\n{name}\n")),
+            "{name}: {}",
+            list.out
+        );
+        let one = peet(&["skills", name]);
+        assert_eq!(one.code, OK);
+        assert!(
+            one.out.starts_with("---\nname: "),
+            "{name} starts with its front matter"
+        );
+        assert!(one.out.contains("\ndescription: "), "{name}");
+    }
+    assert!(list.out.contains("peet skills core"));
+    let core = peet(&["skills", "core"]).out;
+    // Every skill the core one points to exists.
+    for (name, _) in peet_cli::SKILLS.iter().skip(1) {
+        assert!(
+            core.contains(&format!("peet skills {name}")),
+            "core points to {name}"
+        );
+    }
+    let none = peet(&["skills", "welding"]);
+    assert_eq!(none.code, USAGE);
+    assert!(none.err.contains("core, sketching"), "{}", none.err);
+    assert!(peet(&["--help"]).out.contains("peet skills"));
+}
+
+/// The scripts in a skill: the contents of its ```jsonl blocks.
+fn scripts(skill: &str) -> Vec<String> {
+    let mut found = Vec::new();
+    let mut current: Option<String> = None;
+    for line in skill.lines() {
+        match &mut current {
+            None if line.trim() == "```jsonl" => current = Some(String::new()),
+            None => {}
+            Some(script) if line.trim() == "```" => {
+                found.push(std::mem::take(script));
+                current = None;
+            }
+            Some(script) => {
+                script.push_str(line);
+                script.push('\n');
+            }
+        }
+    }
+    found
+}
+
+#[test]
+fn every_script_in_the_skills_runs_and_builds() {
+    let mut count = 0;
+    for (name, skill) in peet_cli::SKILLS {
+        for script in scripts(skill) {
+            count += 1;
+            // Each is a whole script: it starts from an empty part, every operation is
+            // applied, and every feature it makes is built.
+            let ran = peet_with(&["run", "--strict", "-q"], &script);
+            assert_eq!(ran.code, OK, "{name}:\n{script}\n{}\n{}", ran.out, ran.err);
+            for reply in &ran.replies {
+                assert_eq!(reply["ok"], true, "{name}: {reply}");
+                for made in reply["created"].as_array().into_iter().flatten() {
+                    assert_eq!(made["status"], "ok", "{name}: {reply}");
+                }
+                if let Some(feature) = reply.get("feature") {
+                    assert_eq!(feature["status"], "ok", "{name}: {reply}");
+                }
+                assert_ne!(reply["definition"], "over_defined", "{name}: {reply}");
+            }
+        }
+    }
+    assert!(count >= 5, "each skill has a script");
+}
+
+#[test]
+fn what_the_skills_say_about_operations_is_true() {
+    // An over-defined sketch is a warning, and `remove` fixes it.
+    let ran = peet_with(
+        &["run", "-q"],
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60], "as": "r"}, {"type": "length", "of": ["r.bottom"], "value": 100}, {"type": "length", "of": ["r.top"], "value": 90}]}
+{"op": "draw", "sketch": "Sketch1", "draw": [{"type": "remove", "dimensions": ["d2"]}]}
+{"op": "draw", "sketch": "Sketch1", "draw": [{"type": "remove", "dimensions": ["d9"]}]}
+"#,
+    );
+    assert_eq!(ran.code, FAILED);
+    assert_eq!(ran.replies[0]["definition"], "over_defined");
+    assert_eq!(ran.replies[0]["created"][0]["status"], "warning");
+    assert_eq!(ran.replies[1]["definition"], "under_defined");
+    assert_eq!(ran.replies[1]["feature"]["status"], "ok");
+    assert!(ran.replies[2]["error"].as_str().unwrap().contains("d9"));
+
+    // A flange on an edge of the top face goes up; on one of the bottom face, down.
+    let ran = peet_with(
+        &["run", "-q"],
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 150]}]}
+{"op": "base_flange", "sketch": "Sketch1"}
+{"op": "edge_flange", "edge": {"between": [[0, 0, 1.5], [200, 0, 1.5]]}}
+{"op": "bodies"}
+{"op": "edge_flange", "edge": {"between": [[0, 150, 0], [200, 150, 0]]}}
+{"op": "bodies"}
+{"op": "sketch", "on": {"feature": "Base-Flange1", "side": "top"}, "draw": [{"type": "circle", "center": [50, 50], "radius": 3}]}
+{"op": "cut", "sketch": "Sketch2", "end": "through_all"}
+"#,
+    );
+    assert_eq!(ran.code, OK, "{}", ran.out);
+    assert_eq!(ran.replies[3]["bodies"][0]["min"][2], 0.0);
+    assert!(ran.replies[3]["bodies"][0]["max"][2].as_f64().unwrap() > 10.0);
+    assert!(ran.replies[5]["bodies"][0]["min"][2].as_f64().unwrap() < -10.0);
+    // A plain cut on a sheet metal body is a warning that says to use a sheet metal cut.
+    let cut = &ran.replies[7]["created"][0];
+    assert_eq!(cut["status"], "warning");
+    assert!(cut["message"].as_str().unwrap().contains("sheet metal cut"));
+
+    // The planes a sketch can be on point where the skill says.
+    for (plane, x, y) in [
+        ("top", [1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        ("front", [1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
+        ("right", [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
+    ] {
+        let ran = peet(&["sketch", &format!("on={plane}"), "-q"]);
+        assert_eq!(ran.replies[0]["plane"]["x"], json!(x), "{plane}");
+        assert_eq!(ran.replies[0]["plane"]["y"], json!(y), "{plane}");
+    }
+    // `peet ops draw` includes what goes in a draw list.
+    let draw = peet(&["ops", "draw"]);
+    assert!(draw.out.contains("draw items") && draw.out.contains("polyline"));
+    assert_eq!(peet(&["ops", "selectors"]).code, OK);
+}
