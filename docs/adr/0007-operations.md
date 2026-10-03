@@ -164,8 +164,8 @@ What this leaves:
   startup.
 - `peet_document`'s `add_revolve` and its siblings are no longer used by the
   application.
-- There is no command line or live attach yet (stages 4 and 5): `apply` is callable from
-  Rust and from tests only.
+- From outside Rust, operations are applied with the command line, `peet` (stage 4), to
+  a part file. There is no live attach to a running application yet (stage 5).
 - What depends on the part is still checked when an operation is applied, typed or not:
   feature names, descriptions that match nothing, expressions that don't evaluate, and an
   edit whose fields are of another kind of feature than its target.
@@ -177,8 +177,8 @@ What this leaves:
   that act on a selection are covered by operations that take what was selected as
   fields.
 - Changes a headless script makes to the material tables or the check limits are not
-  saved anywhere: the command line (stage 4) will have to decide whether to load and
-  store the application's settings.
+  saved anywhere. The command line starts from the built-in tables, or a CSV given with
+  `--materials`; it does not read or change the application's settings.
 - Operations that read or write files (`open`, `save`, `export`, the imports) use the
   file system, so they fail cleanly in the
   browser. A web host that wants them needs a variant that returns the bytes.

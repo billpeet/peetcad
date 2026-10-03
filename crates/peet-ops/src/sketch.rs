@@ -5,7 +5,8 @@
 //! (`coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `tangent`,
 //! `equal`, `concentric`, `midpoint`, `symmetric`, `fix`), a dimension (`distance`,
 //! `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle`) or
-//! an edit (`fillet`, `trim`, `extend`, `offset`, `mirror`, `construction`, `delete`).
+//! an edit (`fillet`, `trim`, `extend`, `offset`, `mirror`, `construction`, `delete`,
+//! `remove`).
 //!
 //! Coordinates are sketch coordinates `[x, y]` in document units. Geometry can be given a
 //! label with `as`, and later items refer to entities by label, by id (as replies and the
@@ -16,10 +17,12 @@ use std::collections::HashMap;
 
 use peet_document::Document;
 use peet_sketch::expr;
-use peet_sketch::{ConstraintKind, EntityId, EntityKind, Geometry, Sketch, ops, shapes};
+use peet_sketch::{
+    ConstraintId, ConstraintKind, EntityId, EntityKind, Geometry, Sketch, ops, shapes,
+};
 use serde_json::{Map, Value, json};
 
-use crate::args::{Args, boolean, coordinates, integer, list, mm2, number};
+use crate::args::{Args, boolean, coordinates, integer, list, mm2, number, text};
 use crate::value::Input;
 
 /// A sketch entity: its id, or a path from a label or an id to a part of it
@@ -156,7 +159,7 @@ const GEOMETRY: [(&str, &str); 9] = [
     ("polygon", "center, vertex, sides"),
 ];
 
-const EDITS: [(&str, &str); 7] = [
+const EDITS: [(&str, &str); 8] = [
     (
         "fillet",
         "corner, radius: round the corner at a point where two lines meet",
@@ -179,6 +182,10 @@ const EDITS: [(&str, &str); 7] = [
         "of, on: make entities construction geometry (or not)",
     ),
     ("delete", "of: remove entities"),
+    (
+        "remove",
+        "relations (ids), dimensions (names): remove relations and dimensions",
+    ),
 ];
 
 /// One thing to draw or do in a sketch. Points are `[x, y]` in the sketch plane and
@@ -268,6 +275,11 @@ pub enum Draw {
     Delete {
         of: Vec<Ent>,
     },
+    /// Remove relations (by id) and dimensions (by name), leaving the geometry.
+    Remove {
+        relations: Vec<u32>,
+        dimensions: Vec<String>,
+    },
 }
 
 /// A [`Draw`] with what geometry can also have: a label for later items of the same list,
@@ -324,6 +336,7 @@ impl Draw {
             Self::Mirror { .. } => "mirror",
             Self::Construction { .. } => "construction",
             Self::Delete { .. } => "delete",
+            Self::Remove { .. } => "remove",
         }
     }
 }
@@ -418,6 +431,19 @@ impl DrawItem {
                 },
                 "delete" => Draw::Delete {
                     of: a.required("of", Ent::parse_list)?,
+                },
+                "remove" => Draw::Remove {
+                    relations: a
+                        .parsed("relations", |v| list(v)?.iter().map(integer).collect())?
+                        .unwrap_or_default(),
+                    dimensions: a
+                        .parsed("dimensions", |v| {
+                            list(v)?
+                                .iter()
+                                .map(|n| text(n).map(str::to_owned))
+                                .collect()
+                        })?
+                        .unwrap_or_default(),
                 },
                 other => {
                     let all: Vec<&str> = GEOMETRY
@@ -834,6 +860,30 @@ fn one(
                 }
             }
             reply.insert("removed".to_owned(), ids(&removed));
+            None
+        }
+        Draw::Remove {
+            relations,
+            dimensions,
+        } => {
+            if relations.is_empty() && dimensions.is_empty() {
+                return Err("it needs 'relations' (ids) or 'dimensions' (names)".to_owned());
+            }
+            let mut removed = Vec::new();
+            for id in relations {
+                sketch
+                    .remove_constraint(ConstraintId(*id))
+                    .ok_or_else(|| format!("the sketch has no relation {id}"))?;
+                removed.push(*id);
+            }
+            for name in dimensions {
+                let id = sketch
+                    .dimension_by_name(name)
+                    .ok_or_else(|| format!("the sketch has no dimension '{name}'"))?;
+                sketch.remove_constraint(id);
+                removed.push(id.0);
+            }
+            reply.insert("removed".to_owned(), json!(removed));
             None
         }
     };

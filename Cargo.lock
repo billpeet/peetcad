@@ -2512,6 +2512,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "peet-cli"
+version = "0.1.0"
+dependencies = [
+ "peet-document",
+ "peet-io",
+ "peet-model",
+ "peet-ops",
+ "serde_json",
+]
+
+[[package]]
 name = "peet-document"
 version = "0.1.0"
 dependencies = [
@@ -2662,7 +2673,6 @@ dependencies = [
  "eframe",
  "env_logger",
  "log",
- "peet-io",
  "peet-platform",
  "peet-ui",
  "wasm-bindgen-futures",

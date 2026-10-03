@@ -1,0 +1,24 @@
+[package]
+name = "peet-cli"
+description = "peet: PeetCAD's command line, which builds, edits, queries and exports parts without a window"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[[bin]]
+name = "peet"
+path = "src/main.rs"
+
+[dependencies]
+peet-document.workspace = true
+peet-io.workspace = true
+peet-ops.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+peet-model.workspace = true
+
+[lints]
+workspace = true
