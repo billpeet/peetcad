@@ -95,7 +95,7 @@ Stages 1, 2 and 4 give headless builds; stage 5 adds live update.
 ## Progress
 
 - [x] Stage 1: headless session crate (`peet-document`: `Document` moved out of `peet-ui`; bodies are tessellated on demand, so a run that only edits and saves does no display work; the GPU mesh conversion stays in `peet-ui`)
-- [ ] Stage 2: operation vocabulary, selectors, queries
+- [x] Stage 2: operation vocabulary, selectors, queries (`peet-ops`: a typed `Op` with JSON as one way of writing it; [reference](scripting.md), [ADR 0007](adr/0007-operations.md)). Left for later: DXF import, gauge tables and materials, custom check limits, view state
 - [ ] Stage 3: UI routed through operations
 - [ ] Stage 4: headless command line
 - [ ] Stage 5: live attach

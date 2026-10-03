@@ -1,0 +1,147 @@
+//! Writing files: saving the part and exporting STL, DXF and STEP.
+
+use std::path::{Path, PathBuf};
+
+use peet_document::{Document, FileLocation};
+use peet_io::step::StepSchema;
+use serde_json::{Map, Value, json};
+
+use crate::args::point2_out;
+use crate::op::Format;
+use crate::select;
+
+fn stem(doc: &Document) -> String {
+    let title = doc.title();
+    title.strip_suffix(".peet").unwrap_or(&title).to_owned()
+}
+
+fn written(path: &Path, bytes: usize) -> Map<String, Value> {
+    let mut m = Map::new();
+    m.insert("path".to_owned(), json!(path.to_string_lossy()));
+    m.insert("bytes".to_owned(), json!(bytes));
+    m
+}
+
+/// Writes the part to `path`, or to the file it was opened from.
+pub(crate) fn save(
+    doc: &mut Document,
+    path: Option<&PathBuf>,
+    caches: bool,
+) -> Result<Map<String, Value>, String> {
+    let path = match path {
+        Some(p) => p.clone(),
+        None => doc
+            .file
+            .as_ref()
+            .and_then(|f| f.path.clone())
+            .ok_or_else(|| "The part has no file yet: give 'save' a 'path'.".to_owned())?,
+    };
+    let bytes = doc.save_bytes(caches)?;
+    peet_platform::write_file(&path, &bytes)?;
+    let name = path
+        .file_name()
+        .map_or_else(|| doc.title(), |n| n.to_string_lossy().into_owned());
+    let out = written(&path, bytes.len());
+    doc.mark_saved(Some(FileLocation {
+        name,
+        path: Some(path),
+    }));
+    Ok(out)
+}
+
+/// Writes the bodies as STL or STEP, or a sheet metal body's flat pattern as DXF.
+pub(crate) fn export(
+    doc: &Document,
+    path: &Path,
+    format: Option<Format>,
+    body: Option<usize>,
+    schema: StepSchema,
+) -> Result<Map<String, Value>, String> {
+    let format = match format {
+        Some(f) => f,
+        None => {
+            let extension = path
+                .extension()
+                .map(|e| e.to_string_lossy().to_lowercase())
+                .unwrap_or_default();
+            match extension.as_str() {
+                "stl" => Format::Stl,
+                "dxf" => Format::Dxf,
+                "step" | "stp" => Format::Step,
+                other => {
+                    return Err(format!(
+                        "'{other}' is not a format to export: use stl, dxf or step (or a path ending in one)."
+                    ));
+                }
+            }
+        }
+    };
+    let bodies = &doc.evaluation().bodies;
+    if let Some(b) = body
+        && b >= bodies.len()
+    {
+        return Err(format!(
+            "There is no body {b}: the part has {} bodies.",
+            bodies.len()
+        ));
+    }
+    let chosen: Vec<usize> = match body {
+        Some(b) => vec![b],
+        None => (0..bodies.len()).collect(),
+    };
+    let units = &doc.model.parameters.units;
+    let mut out = Map::new();
+    let (bytes, word) = match format {
+        Format::Stl => {
+            let triangles: Vec<_> = chosen
+                .iter()
+                .flat_map(|b| select::mesh(doc, *b).triangles())
+                .collect();
+            if triangles.is_empty() {
+                return Err("There are no bodies to export.".to_owned());
+            }
+            out.insert("triangles".to_owned(), json!(triangles.len()));
+            (peet_io::stl::write_binary(&stem(doc), &triangles), "stl")
+        }
+        Format::Dxf => {
+            let sheet_body = doc.sheet_body(body).ok_or_else(|| {
+                "There is no sheet metal body to export: start one with base_flange.".to_owned()
+            })?;
+            let Some(sheet) = &sheet_body.sheet else {
+                return Err("That body is not sheet metal.".to_owned());
+            };
+            out.insert(
+                "flat_size".to_owned(),
+                point2_out(sheet.report().flat_size, units),
+            );
+            (peet_io::dxf::flat_pattern(sheet).into_bytes(), "dxf")
+        }
+        Format::Step => {
+            if chosen.is_empty() {
+                return Err("There are no bodies to export.".to_owned());
+            }
+            let names: Vec<String> = chosen
+                .iter()
+                .map(|b| doc.model.name_of(bodies[*b].origin).to_owned())
+                .collect();
+            let solids: Vec<(&str, &peet_kernel::Solid)> = names
+                .iter()
+                .zip(&chosen)
+                .map(|(n, b)| (n.as_str(), &bodies[*b].solid))
+                .collect();
+            let options = peet_io::step::StepOptions {
+                schema,
+                product_name: stem(doc),
+                author: String::new(),
+                organization: String::new(),
+                timestamp: peet_platform::timestamp_iso(),
+            };
+            out.insert("bodies".to_owned(), json!(solids.len()));
+            (peet_io::step::write(&solids, &options).into_bytes(), "step")
+        }
+    };
+    peet_platform::write_file(path, &bytes)?;
+    out.insert("format".to_owned(), json!(word));
+    out.extend(written(path, bytes.len()));
+    Ok(out)
+}

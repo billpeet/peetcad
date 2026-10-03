@@ -182,6 +182,7 @@ crates/
   peet-model/     the parametric core: feature tree, persistent naming, rebuilds, solid and sheet metal features, undo
   peet-io/        file formats: native .peet, STL export, DXF flat patterns and import, STEP export and import
   peet-document/  the open document, headless: model, rebuilds, undo and bodies, shared by the app and scripts
+  peet-ops/       operations: everything a user can do as typed values or JSON, with selectors, queries and replies (docs/scripting.md)
   peet-ui/        egui application shell: panels, commands, viewport interaction
   peetcad/        the application binary (native main and web entry point)
 ```
