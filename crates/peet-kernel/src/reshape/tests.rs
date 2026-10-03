@@ -212,14 +212,94 @@ fn draft_the_walls_of_a_block() {
     // So steep that the walls meet below the top.
     let err = draft(&s, &walls, &Plane::TOP, 60f64.to_radians()).unwrap_err();
     assert!(err.to_string().contains("can't be drafted"), "{err}");
-    // A round wall is refused.
+}
+
+#[test]
+fn draft_round_walls() {
+    let angle = 5f64.to_radians();
+    // A rod becomes a cone frustum, narrowing upwards from its foot.
     let r = rod(5.0, 10.0);
     let side = r
         .face_ids()
         .find(|&f| matches!(r.face(f).surface, Surface::Cylinder(_)))
         .unwrap();
+    let drafted = draft(&r, &[side], &Plane::TOP, angle).unwrap();
+    let top = 5.0 - 10.0 * angle.tan();
+    assert_close(
+        checked(&drafted),
+        PI * 10.0 / 3.0 * (25.0 + 5.0 * top + top * top),
+    );
+    assert!(
+        drafted
+            .faces
+            .iter()
+            .any(|f| matches!(f.surface, Surface::Cone(_)))
+    );
+    // A hole through a plate widens upwards instead.
+    let mut sk = Sketch::new();
+    peet_sketch::shapes::rectangle(&mut sk, DVec2::ZERO, DVec2::new(40.0, 20.0));
+    sk.add_circle(DVec2::new(10.0, 10.0), 3.0);
+    let plate: Vec<_> = find_regions(&sk)
+        .regions
+        .into_iter()
+        .filter(|r| r.holes.len() == 1)
+        .collect();
+    let s = extrude(&Plane::TOP, &plate, 0.0, 6.0).unwrap();
+    let hole = s
+        .face_ids()
+        .find(|&f| matches!(s.face(f).surface, Surface::Cylinder(_)))
+        .unwrap();
+    let drafted = draft(&s, &[hole], &Plane::TOP, angle).unwrap();
+    let wide = 3.0 + 6.0 * angle.tan();
+    assert_close(
+        checked(&drafted),
+        4800.0 - PI * 6.0 / 3.0 * (9.0 + 3.0 * wide + wide * wide),
+    );
+    // A block with rounded upright edges: the walls and the corners draft together and
+    // stay tangent.
+    let b = cuboid(DVec3::ZERO, v3(40.0, 30.0, 20.0));
+    let uprights: Vec<EdgeId> = b
+        .edge_ids()
+        .filter(|&e| (b.edge(e).point_at_fraction(0.5).z - 10.0).abs() < 1e-9)
+        .collect();
+    let rounded = blend(&b, &uprights, Blend::Fillet { radius: 5.0 })
+        .unwrap()
+        .solid;
+    let walls: Vec<FaceId> = rounded
+        .face_ids()
+        .filter(|&f| {
+            let l = rounded.face(f).loops[0];
+            let c = rounded.loop_coedges(l)[0];
+            let p = rounded.edge(rounded.coedge(c).edge).point_at_fraction(0.5);
+            rounded.face_normal_at(f, p).z.abs() < 0.5
+        })
+        .collect();
+    assert_eq!(walls.len(), 8);
+    let drafted = draft(&rounded, &walls, &Plane::TOP, angle).unwrap();
+    // Every section is the rounded rectangle offset inwards by z tan(a): its area is
+    // (w − 2k)(h − 2k) − (4 − π)(r − k)², integrated exactly by Simpson's rule.
+    let section = |z: f64| {
+        let k = z * angle.tan();
+        (40.0 - 2.0 * k) * (30.0 - 2.0 * k) - (4.0 - PI) * (5.0 - k) * (5.0 - k)
+    };
+    assert_close(
+        checked(&drafted),
+        20.0 / 6.0 * (section(0.0) + 4.0 * section(10.0) + section(20.0)),
+    );
+    // An axis across the pull is refused.
+    let lying = crate::transform::solid(
+        &rod(5.0, 10.0),
+        &peet_math::Frame {
+            origin: DVec3::ZERO,
+            rotation: peet_math::DQuat::from_rotation_x(1.0),
+        },
+    );
+    let side = lying
+        .face_ids()
+        .find(|&f| matches!(lying.face(f).surface, Surface::Cylinder(_)))
+        .unwrap();
     assert!(matches!(
-        draft(&r, &[side], &Plane::TOP, angle),
+        draft(&lying, &[side], &Plane::TOP, angle),
         Err(KernelError::Unsupported(_))
     ));
 }

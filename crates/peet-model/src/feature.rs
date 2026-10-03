@@ -15,10 +15,12 @@ use peet_sheetmetal::{
     BendLinePosition, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
 };
 
+use crate::convert::ConvertToSheetFeature;
 use crate::dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
 use crate::extrude::Extrude;
 use crate::hole::HoleFeature;
 use crate::import::ImportFeature;
+use crate::loft::LoftFeature;
 use crate::naming::{EdgeRef, FaceRef, VertexRef};
 use crate::revolve::{RevolveAxisRef, RevolveFeature};
 use crate::sweep::SweepFeature;
@@ -642,6 +644,8 @@ pub enum FeatureKind {
     Hole(Box<HoleFeature>),
     Import(Box<ImportFeature>),
     Sweep(Box<SweepFeature>),
+    Loft(Box<LoftFeature>),
+    ConvertToSheet(Box<ConvertToSheetFeature>),
 }
 
 impl FeatureKind {
@@ -684,6 +688,9 @@ impl FeatureKind {
             Self::Import(_) => "Imported body",
             Self::Sweep(s) if s.operation == crate::Operation::Cut => "Cut-sweep",
             Self::Sweep(_) => "Sweep",
+            Self::Loft(l) if l.operation == crate::Operation::Cut => "Cut-loft",
+            Self::Loft(_) => "Loft",
+            Self::ConvertToSheet(_) => "Convert to sheet metal",
         }
     }
 
@@ -727,6 +734,9 @@ impl FeatureKind {
             Self::Import(_) => "Imported",
             Self::Sweep(s) if s.operation == crate::Operation::Cut => "Cut-Sweep",
             Self::Sweep(_) => "Sweep",
+            Self::Loft(l) if l.operation == crate::Operation::Cut => "Cut-Loft",
+            Self::Loft(_) => "Loft",
+            Self::ConvertToSheet(_) => "Convert-To-Sheet",
         }
     }
 
@@ -753,6 +763,8 @@ impl FeatureKind {
                 | Self::Hole(_)
                 | Self::Import(_)
                 | Self::Sweep(_)
+                | Self::Loft(_)
+                | Self::ConvertToSheet(_)
         )
     }
 
@@ -769,6 +781,7 @@ impl FeatureKind {
                 | Self::MiterFlange(_)
                 | Self::Corner(_)
                 | Self::Form(_)
+                | Self::ConvertToSheet(_)
         )
     }
 
@@ -785,6 +798,7 @@ impl FeatureKind {
             Self::Revolve(r) => Some(r.sketch),
             Self::Hole(h) => Some(h.sketch),
             Self::Sweep(s) => Some(s.profile),
+            Self::Loft(l) => l.sections.first().copied(),
             _ => None,
         }
     }
@@ -907,6 +921,12 @@ impl FeatureKind {
                 out.push(s.profile);
                 out.extend(s.path);
             }
+            Self::Loft(l) => out.extend(&l.sections),
+            Self::ConvertToSheet(c) => {
+                if let Some(f) = &c.face {
+                    out.extend(f.name.features());
+                }
+            }
         }
         out.sort_unstable();
         out.dedup();
@@ -976,7 +996,8 @@ impl FeatureKind {
                 &h.countersink_diameter,
                 &h.countersink_angle,
             ],
-            Self::Import(_) | Self::Sweep(_) => Vec::new(),
+            Self::Import(_) | Self::Sweep(_) | Self::Loft(_) => Vec::new(),
+            Self::ConvertToSheet(c) => c.scalars(),
         }
     }
 }

@@ -265,6 +265,24 @@ impl Writer {
                     real(e.minor)
                 ))
             }
+            Curve3::Nurbs(c) => {
+                let points: Vec<u32> = c.control_points().iter().map(|p| self.point(*p)).collect();
+                let (multiplicities, knots) = knot_lists(c.knots());
+                let form = format!("{},{},.UNSPECIFIED.,.F.,.F.", c.degree(), refs(&points));
+                let with_knots = format!("{multiplicities},{knots},.UNSPECIFIED.");
+                match c.weights() {
+                    None => self.add(format!("B_SPLINE_CURVE_WITH_KNOTS('',{form},{with_knots})")),
+                    // A rational curve is a complex instance, its parts in alphabetical
+                    // order.
+                    Some(w) => self.add(format!(
+                        "( BOUNDED_CURVE() B_SPLINE_CURVE({form}) \
+                         B_SPLINE_CURVE_WITH_KNOTS({with_knots}) CURVE() \
+                         GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_CURVE({}) \
+                         REPRESENTATION_ITEM('') )",
+                        reals(w)
+                    )),
+                }
+            }
         }
     }
 
@@ -321,6 +339,46 @@ impl Writer {
                         real(t.minor)
                     ))
                 }
+            }
+            Surface::Nurbs(s) => self.nurbs_surface(s),
+        }
+    }
+
+    /// A freeform surface: `B_SPLINE_SURFACE_WITH_KNOTS`, or the complex instance with
+    /// `RATIONAL_B_SPLINE_SURFACE` when it has weights. Control points are listed row by
+    /// row in `u`, as the kernel stores them.
+    fn nurbs_surface(&mut self, s: &peet_kernel::nurbs::NurbsSurface) -> u32 {
+        let (count_u, count_v) = s.counts();
+        let rows: Vec<String> = (0..count_u)
+            .map(|i| {
+                let row: Vec<u32> = (0..count_v)
+                    .map(|j| self.point(s.control_points()[i * count_v + j]))
+                    .collect();
+                refs(&row)
+            })
+            .collect();
+        let (degree_u, degree_v) = s.degrees();
+        let (knots_u, knots_v) = s.knots();
+        let (mult_u, list_u) = knot_lists(knots_u);
+        let (mult_v, list_v) = knot_lists(knots_v);
+        let form = format!(
+            "{degree_u},{degree_v},({}),.UNSPECIFIED.,.F.,.F.,.F.",
+            rows.join(",")
+        );
+        let with_knots = format!("{mult_u},{mult_v},{list_u},{list_v},.UNSPECIFIED.");
+        match s.weights() {
+            None => self.add(format!(
+                "B_SPLINE_SURFACE_WITH_KNOTS('',{form},{with_knots})"
+            )),
+            Some(w) => {
+                let weights: Vec<String> = w.chunks(count_v).map(reals).collect();
+                self.add(format!(
+                    "( BOUNDED_SURFACE() B_SPLINE_SURFACE({form}) \
+                     B_SPLINE_SURFACE_WITH_KNOTS({with_knots}) \
+                     GEOMETRIC_REPRESENTATION_ITEM() RATIONAL_B_SPLINE_SURFACE(({})) \
+                     REPRESENTATION_ITEM('') SURFACE() )",
+                    weights.join(",")
+                ))
             }
         }
     }
@@ -456,6 +514,30 @@ fn shell_bounds(s: &Solid, shell: ShellId) -> Aabb {
 }
 
 /// `(#a,#b,...)`.
+/// A list of reals: `(1.0,2.5)`.
+fn reals(values: &[f64]) -> String {
+    let list: Vec<String> = values.iter().map(|v| real(*v)).collect();
+    format!("({})", list.join(","))
+}
+
+/// A knot vector as STEP writes it: the multiplicity of each distinct knot, and the
+/// distinct knots.
+fn knot_lists(knots: &[f64]) -> (String, String) {
+    let mut distinct: Vec<f64> = Vec::new();
+    let mut counts: Vec<usize> = Vec::new();
+    for &k in knots {
+        match distinct.last() {
+            Some(&last) if k == last => *counts.last_mut().expect("one per knot") += 1,
+            _ => {
+                distinct.push(k);
+                counts.push(1);
+            }
+        }
+    }
+    let counts: Vec<String> = counts.iter().map(usize::to_string).collect();
+    (format!("({})", counts.join(",")), reals(&distinct))
+}
+
 fn refs(ids: &[u32]) -> String {
     let mut out = String::from("(");
     for (i, id) in ids.iter().enumerate() {

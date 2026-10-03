@@ -29,6 +29,10 @@ const GAUSS: [(f64, f64); 5] = [
     (0.906_179_845_938_664, 0.236_926_885_056_189_1),
 ];
 
+/// Pieces an edge is integrated in where its image in a freeform face's parameters is a
+/// general curve (per polynomial span, for a freeform edge).
+const FREEFORM_PIECES: usize = 6;
+
 /// Curved edges are integrated in pieces of at most this parameter span.
 const MAX_PIECE: f64 = FRAC_PI_8;
 
@@ -67,9 +71,10 @@ impl Default for LoopIntegrals {
 
 pub(crate) fn loop_integrals(solid: &Solid, l: LoopId, reference: DVec3) -> LoopIntegrals {
     let face = solid.face(solid.loop_(l).face);
-    let surface = face.surface;
+    let surface = face.surface.clone();
     let ccw = !face.reversed;
-    let curved = surface.revolution_frame().is_some();
+    let curved = !matches!(surface, Surface::Plane(_));
+    let freeform = matches!(surface, Surface::Nurbs(_));
     let mut out = LoopIntegrals::default();
     // The lifted parameters of the point last visited, and of the loop's first point.
     let mut at: Option<DVec2> = None;
@@ -100,10 +105,30 @@ pub(crate) fn loop_integrals(solid: &Solid, l: LoopId, reference: DVec3) -> Loop
             (Some(prev), None) => prev,
         };
         see(uv, &mut out);
-        let pieces = if matches!(e.curve, Curve3::Line(_)) {
-            1
-        } else {
-            ((tb - ta).abs() / MAX_PIECE).ceil().max(1.0) as usize
+        let pieces = match &e.curve {
+            Curve3::Line(_) if !freeform => 1,
+            // Across a freeform face even a straight edge is a curve in its parameters.
+            Curve3::Line(_) => FREEFORM_PIECES,
+            Curve3::Nurbs(n) => {
+                // A few pieces per polynomial span the edge covers.
+                let (lo, hi) = (ta.min(tb), ta.max(tb));
+                let spans = n
+                    .knots()
+                    .windows(2)
+                    .filter(|w| w[1] > w[0] && w[1] > lo && w[0] < hi)
+                    .count();
+                // Each span is one smooth piece; across a freeform face its image
+                // bends a little more.
+                spans.max(1) * if freeform { 2 } else { 1 }
+            }
+            _ => {
+                let by_angle = ((tb - ta).abs() / MAX_PIECE).ceil().max(1.0) as usize;
+                if freeform {
+                    by_angle.max(FREEFORM_PIECES)
+                } else {
+                    by_angle
+                }
+            }
         };
         let span = (tb - ta) / pieces as f64;
         for k in 0..pieces {
@@ -112,7 +137,7 @@ pub(crate) fn loop_integrals(solid: &Solid, l: LoopId, reference: DVec3) -> Loop
                 let t = a + span * 0.5 * (x + 1.0);
                 let p = e.curve.point(t);
                 let d = e.curve.derivative(t) * span * 0.5;
-                uv = surface.param_near(surface.param(p), uv);
+                uv = surface.param_near(surface.param_from(p, uv), uv);
                 see(uv, &mut out);
                 integrand(&surface, p, uv, d, reference, w, &mut out);
             }
@@ -159,6 +184,49 @@ fn integrand(
             out.signed_area += area;
             out.volume += (pl.origin() - reference).dot(pl.normal()) * area / 3.0;
         }
+        Surface::Nurbs(s) => {
+            // No antiderivative in closed form: integrate along `u` from the edge of the
+            // surface's rectangle to the point, numerically (the integrand is a smooth
+            // rational function between the knots).
+            let [_, su, sv, ..] = s.evaluate(uv);
+            // The edge's direction in parameters: d = Su du + Sv dv.
+            let (e, f, g) = (su.dot(su), su.dot(sv), sv.dot(sv));
+            let det = e * g - f * f;
+            if det.abs() <= f64::MIN_POSITIVE {
+                return;
+            }
+            let dv = (e * d.dot(sv) - f * d.dot(su)) / det;
+            let (lo, _) = s.domain();
+            let (breaks, _) = s.breaks();
+            let mut area = 0.0;
+            let mut volume = 0.0;
+            let mut from = lo.x;
+            for &to in breaks.iter().skip(1).chain(std::iter::once(&uv.x)) {
+                let to = to.min(uv.x);
+                if to <= from {
+                    continue;
+                }
+                // Two Gauss panels per span.
+                let half = 0.5 * (to - from);
+                for panel in 0..2 {
+                    let a = from + half * f64::from(panel);
+                    for &(x, w) in &GAUSS {
+                        let u = a + 0.5 * half * (x + 1.0);
+                        let [at, su, sv, ..] = s.evaluate(DVec2::new(u, uv.y));
+                        let n = su.cross(sv);
+                        let weight = w * 0.5 * half;
+                        area += n.length() * weight;
+                        volume += (at - reference).dot(n) * weight;
+                    }
+                }
+                from = to;
+                if from >= uv.x {
+                    break;
+                }
+            }
+            out.signed_area += area * dv * w;
+            out.volume += volume * dv * w / 3.0;
+        }
         _ => {
             let (Some(frame), Some(m)) = (surface.revolution_frame(), surface.meridian(uv.y))
             else {
@@ -191,6 +259,34 @@ pub(crate) fn bulge_bounds(solid: &Solid, face: FaceId) -> Aabb {
     let (around, along) = match &f.surface {
         Surface::Sphere(s) => (s.radius, s.radius),
         Surface::Torus(t) => (t.major + t.minor, t.minor),
+        Surface::Nurbs(s) => {
+            // Sampled over the face's part of the parameter rectangle; between samples
+            // the surface leaves their chords by at most |S''| h² / 8.
+            let Some(&outer) = f.loops.first() else {
+                return b;
+            };
+            let m = loop_integrals(solid, outer, DVec3::ZERO);
+            let (lo, hi) = (
+                DVec2::new(m.theta_range.0, m.v_range.0),
+                DVec2::new(m.theta_range.1, m.v_range.1),
+            );
+            if !(lo.x <= hi.x && lo.y <= hi.y) {
+                return b;
+            }
+            for i in 0..=GRID {
+                for j in 0..=GRID {
+                    let at = DVec2::new(i as f64, j as f64) / GRID as f64;
+                    b.extend(s.point(lo + (hi - lo) * at));
+                }
+            }
+            let step = (hi - lo) / GRID as f64;
+            let bend = s.bend();
+            let margin = (bend.x * step.x * step.x + bend.y * step.y * step.y) / 8.0;
+            return Aabb {
+                min: b.min - DVec3::splat(margin),
+                max: b.max + DVec3::splat(margin),
+            };
+        }
         _ => return b,
     };
     let Some(&outer) = f.loops.first() else {

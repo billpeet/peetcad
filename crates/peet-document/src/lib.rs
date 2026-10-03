@@ -10,6 +10,7 @@
 //! cache. A run that only edits and saves the model never tessellates.
 
 mod body;
+mod convert;
 mod document;
 mod solids;
 

@@ -206,7 +206,60 @@ fn surface_hits(surface: &Surface, p: DVec3, dir: DVec3) -> Vec<Option<f64>> {
                 .collect()
         }
         Surface::Torus(t) => torus_hits(surface, t, p, dir),
+        Surface::Nurbs(s) => nurbs_hits(s, p, dir),
     }
+}
+
+/// Hits of a ray on a freeform surface: Newton's method on `S(u, v) = p + t·dir`, started
+/// from every grid point of the surface that is close to the ray for its cell's size.
+fn nurbs_hits(s: &crate::nurbs::NurbsSurface, p: DVec3, dir: DVec3) -> Vec<Option<f64>> {
+    use peet_math::{DMat3, DVec2};
+    let (lo, hi) = s.domain();
+    let (samples, cell) = s.samples();
+    let stretch = s.stretch();
+    // A grid point can start a search if the ray passes within about a cell of it.
+    let reach = 1.5 * (stretch * cell).length();
+    let mut hits: Vec<(f64, bool)> = Vec::new();
+    {
+        for &(start, q) in samples {
+            let along = (q - p).dot(dir);
+            if (q - p - dir * along).length() > reach {
+                continue;
+            }
+            let (mut uv, mut t) = (start, along);
+            let mut converged = false;
+            for _ in 0..24 {
+                let [at, su, sv, ..] = s.evaluate(uv);
+                let f = at - p - dir * t;
+                if f.length() <= 1e-11 {
+                    converged = true;
+                    break;
+                }
+                let jacobian = DMat3::from_cols(su, sv, -dir);
+                if jacobian.determinant().abs() <= 1e-14 * su.length() * sv.length() {
+                    break;
+                }
+                let step = jacobian.inverse() * f;
+                uv -= DVec2::new(step.x, step.y);
+                t -= step.z;
+                // A hit outside the surface's rectangle is not on the surface.
+                if uv.cmplt(lo - cell).any() || uv.cmpgt(hi + cell).any() {
+                    break;
+                }
+            }
+            if !converged || uv.cmplt(lo).any() || uv.cmpgt(hi).any() {
+                continue;
+            }
+            if hits.iter().any(|(known, _)| (known - t).abs() <= LINEAR) {
+                continue;
+            }
+            let shallow = s.normal(uv).dot(dir).abs() < GRAZING;
+            hits.push((t, shallow));
+        }
+    }
+    hits.into_iter()
+        .map(|(t, shallow)| (!shallow).then_some(t))
+        .collect()
 }
 
 /// Samples along the chord of a torus's bounding sphere.

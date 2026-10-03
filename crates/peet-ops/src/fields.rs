@@ -24,8 +24,8 @@ use peet_model::{
     SketchFeature, SketchedBendFeature, StdAxis, StdPlane, VertexRef,
 };
 use peet_model::{
-    BlendFeature, BlendKind, DraftFeature, HoleEnd, HoleFeature, HoleFit, HoleKind, METRIC,
-    RevolveAxisRef, RevolveFeature, ShellFeature, SweepFeature,
+    BlendFeature, BlendKind, ConvertToSheetFeature, DraftFeature, HoleEnd, HoleFeature, HoleFit,
+    HoleKind, LoftFeature, METRIC, RevolveAxisRef, RevolveFeature, ShellFeature, SweepFeature,
 };
 use peet_sheetmetal::corner::{CornerKind, CornerRelief};
 use peet_sheetmetal::{
@@ -447,6 +447,18 @@ reference_field!(SketchF, FeatureSel, FeatureId, required: true, nullable: false
     assign: a_sketch,
     read: |id, doc| json!(doc.model.name_of(*id)),
     arg: |id, _| FeatureSel::Id(*id));
+reference_field!(Sketches, Vec<FeatureSel>, Vec<FeatureId>, required: true, nullable: false,
+    "list of sketches (names or ids), in order (more may be picked afterwards)",
+    parse: |v| each(list(v)?, FeatureSel::parse),
+    assign: |a, doc| each(a, |s| a_sketch(s, doc)),
+    read: |ids, doc| ids.iter().map(|id| doc.model.name_of(*id)).collect(),
+    arg: |ids, _| ids.iter().copied().map(FeatureSel::Id).collect());
+reference_field!(OptFace, Option<FaceSel>, Option<FaceRef>, required: false, nullable: true,
+    "face, or null for the largest flat face of the only body",
+    parse: |v| or_null(v, FaceSel::parse),
+    assign: |a, doc| a.as_ref().map(|f| select::face_ref(doc, f)).transpose(),
+    read: |f, doc| f.as_ref().map_or(Value::Null, |f| face_out(f, doc)),
+    arg: |f, _| f.clone().map(FaceSel::Ref));
 reference_field!(OptSketch, Option<FeatureSel>, Option<FeatureId>, required: true, nullable: true,
     "sketch (name or id), or null to choose it afterwards",
     parse: |v| or_null(v, FeatureSel::parse),
@@ -1140,7 +1152,7 @@ feature_args! {
 }
 
 feature_args! {
-    /// Flat faces tapered about the lines where they cross a neutral plane.
+    /// Faces tapered about the lines where they cross a neutral plane.
     Draft: FeatureKind::Draft(f) => &mut **f, DraftFeature { faces, neutral, angle, flip } => {
     faces: Vec<FaceSel> as SomeFaces = faces,
     /// The part keeps its size in this plane; its normal is the direction of pull.
@@ -1195,6 +1207,27 @@ feature_args! {
     path: Option<FeatureSel> as OptSketch = path,
     operation: Operation as Choice<Operation> = operation,
     regions: Regions as RegionsF = regions,
+    }
+}
+
+feature_args! {
+    /// A body through the closed profiles of several sketches, one after another.
+    Loft: FeatureKind::Loft(f) => &mut **f, LoftFeature { sections, operation } => {
+    /// The profiles in order, each with the same number of edges (a circle adapts).
+    profiles: Vec<FeatureSel> as Sketches = sections,
+    operation: Operation as Choice<Operation> = operation,
+    }
+}
+
+feature_args! {
+    /// A solid of one wall thickness turned into a sheet metal body.
+    ConvertToSheet: FeatureKind::ConvertToSheet(f) => &mut **f,
+        ConvertToSheetFeature { face, model, relief, relief_ratio } => {
+    /// The flat face that stays fixed. Absent: the largest flat face of the only body.
+    face: Option<FaceSel> as OptFace = face,
+    bend: Bend as BendF = model,
+    relief: ReliefType as Choice<ReliefType> = relief,
+    relief_ratio: Input as Number = relief_ratio,
     }
 }
 
@@ -1257,6 +1290,10 @@ fn blend(kind: BlendKind) -> FeatureKind {
 
 fn sweep(operation: Operation) -> FeatureKind {
     FeatureKind::Sweep(Box::new(SweepFeature::new(NO_SKETCH, None, operation)))
+}
+
+fn loft(operation: Operation) -> FeatureKind {
+    FeatureKind::Loft(Box::new(LoftFeature::new(Vec::new(), operation)))
 }
 
 /// Declares the kinds of feature operations add: the variant, its arguments, its word in
@@ -1476,11 +1513,20 @@ feature_ops! {
         "Cut a sketch's closed regions, turned about an axis, out of the bodies."
         => Some(revolve(Operation::Cut)),
     Sweep(Sweep) "sweep"
-        "Sweep a sketch's closed regions along the lines and arcs of another sketch."
+        "Sweep a sketch's closed regions along the lines and arcs of another sketch (corners between lines are mitred)."
         => Some(sweep(Operation::Add)),
     CutSweep(Sweep) "cut_sweep"
         "Cut a sketch's closed regions, swept along a path, out of the bodies."
         => Some(sweep(Operation::Cut)),
+    Loft(Loft) "loft"
+        "Join the closed profiles of two or more sketches, in order, into a body."
+        => Some(loft(Operation::Add)),
+    CutLoft(Loft) "cut_loft"
+        "Cut the shape through the profiles of two or more sketches out of the bodies."
+        => Some(loft(Operation::Cut)),
+    ConvertToSheet(ConvertToSheet) "convert_to_sheet"
+        "Turn a solid of one wall thickness (flat walls, rounded bends) into a sheet metal body."
+        => Some(FeatureKind::ConvertToSheet(Box::new(ConvertToSheetFeature::new(None)))),
     Fillet(Blend) "fillet"
         "Round edges with a radius ('size')."
         => Some(blend(BlendKind::Fillet)),
@@ -1491,7 +1537,7 @@ feature_ops! {
         "Hollow the bodies, leaving walls of one thickness; 'open' faces are removed."
         => Some(FeatureKind::Shell(Box::new(ShellFeature::new(Vec::new())))),
     Draft(Draft) "draft"
-        "Taper flat faces about a neutral plane."
+        "Taper faces about a neutral plane: flat ones, or round ones along the pull."
         => Some(FeatureKind::Draft(Box::new(DraftFeature::new(Vec::new(), None)))),
     Hole(Hole) "hole"
         "Drill a hole at every point of a sketch: plain, counterbored or countersunk, to a standard size or given ones."
@@ -1536,6 +1582,8 @@ fn word_of(kind: &FeatureKind) -> Option<&'static str> {
         FeatureKind::Draft(_) => "draft",
         FeatureKind::Hole(_) => "hole",
         FeatureKind::Sweep(_) => "sweep",
+        FeatureKind::Loft(_) => "loft",
+        FeatureKind::ConvertToSheet(_) => "convert_to_sheet",
         // An imported body is what its file says: it has nothing to set.
         FeatureKind::Import(_) => return None,
     })
@@ -1580,6 +1628,11 @@ impl FeatureArgs {
                 if first_body && args.operation.is_none() && s.operation == Operation::Add =>
             {
                 s.operation = Operation::NewBody;
+            }
+            (Self::Loft(args) | Self::CutLoft(args), FeatureKind::Loft(l))
+                if first_body && args.operation.is_none() && l.operation == Operation::Add =>
+            {
+                l.operation = Operation::NewBody;
             }
             _ => {}
         }

@@ -300,7 +300,7 @@ pub fn faces(doc: &Document, body: Option<usize>) -> Result<Value, String> {
             m.insert("body".to_owned(), json!(bi));
             m.insert("index".to_owned(), json!(f.0));
             m.insert("what".to_owned(), json!(select::describe_face(doc, bi, f)));
-            match b.solid.face(f).surface {
+            match &b.solid.face(f).surface {
                 Surface::Plane(_) => {
                     m.insert("surface".to_owned(), json!("plane"));
                     m.insert(
@@ -321,6 +321,9 @@ pub fn faces(doc: &Document, body: Option<usize>) -> Result<Value, String> {
                 }
                 Surface::Torus(_) => {
                     m.insert("surface".to_owned(), json!("torus"));
+                }
+                Surface::Nurbs(_) => {
+                    m.insert("surface".to_owned(), json!("freeform"));
                 }
             }
             m.insert("center".to_owned(), point3_out(center, units));
@@ -346,10 +349,11 @@ pub fn edges(doc: &Document, body: Option<usize>) -> Result<Value, String> {
             m.insert("index".to_owned(), json!(e.0));
             m.insert(
                 "curve".to_owned(),
-                json!(match edge.curve {
+                json!(match &edge.curve {
                     Curve3::Line(_) => "line",
                     Curve3::Circle(_) => "circle",
                     Curve3::Ellipse(_) => "ellipse",
+                    Curve3::Nurbs(_) => "freeform",
                 }),
             );
             m.insert(

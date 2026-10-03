@@ -448,12 +448,23 @@ impl Validator<'_> {
                 ));
                 continue;
             }
+            if let Some((lo, hi)) = e.curve.domain()
+                && (e.t0 < lo - PERIOD_SLACK || e.t1 > hi + PERIOD_SLACK)
+            {
+                self.report(format!(
+                    "edge {i} runs from {} to {}, past the ends of its curve ({lo} to {hi})",
+                    e.t0, e.t1
+                ));
+                continue;
+            }
             if let Some(problem) = curve_problem(&e.curve) {
                 self.report(format!("edge {i}: {problem}"));
                 continue;
             }
             match (e.is_closed(), e.curve.period()) {
-                (true, None) => self.report(format!("edge {i} is a closed line")),
+                (true, None) if matches!(e.curve, Curve3::Line(_)) => {
+                    self.report(format!("edge {i} is a closed line"));
+                }
                 (true, Some(p)) if ((e.t1 - e.t0) - p).abs() > PERIOD_SLACK => {
                     self.report(format!(
                         "closed edge {i} spans {} rad instead of one full period",
@@ -625,6 +636,8 @@ fn curve_problem(c: &Curve3) -> Option<String> {
             (!(e.minor > tolerance::LINEAR && e.major >= e.minor && e.major.is_finite()))
                 .then(|| format!("ellipse axes {} / {} are invalid", e.major, e.minor))
         }
+        // Checked when it was made.
+        Curve3::Nurbs(_) => None,
     }
 }
 
@@ -653,6 +666,7 @@ fn surface_problem(s: &Surface) -> Option<String> {
             && t.major.is_finite()
             && t.minor.is_finite()))
         .then(|| format!("torus radii {} / {} are invalid", t.major, t.minor)),
+        Surface::Nurbs(_) => None,
     }
 }
 
@@ -663,6 +677,7 @@ fn surface_name(s: &Surface) -> &'static str {
         Surface::Cone(_) => "cone",
         Surface::Sphere(_) => "sphere",
         Surface::Torus(_) => "torus",
+        Surface::Nurbs(_) => "freeform surface",
     }
 }
 

@@ -31,6 +31,7 @@ pub fn surface(s: &Surface, frame: &Frame) -> Surface {
             frame: frame.compose(&t.frame),
             ..*t
         }),
+        Surface::Nurbs(s) => Surface::Nurbs(std::sync::Arc::new(s.transformed(frame))),
     }
 }
 
@@ -50,6 +51,7 @@ pub fn curve(c: &Curve3, frame: &Frame) -> Curve3 {
             major: e.major,
             minor: e.minor,
         }),
+        Curve3::Nurbs(c) => Curve3::Nurbs(std::sync::Arc::new(c.transformed(frame))),
     }
 }
 

@@ -7,8 +7,8 @@
 use egui::Ui;
 use peet_model::{
     AxisRef, BlendFeature, BlendKind, DraftFeature, FeatureId, FeatureKind, HoleEnd, HoleFeature,
-    HoleFit, HoleKind, ImportFeature, METRIC, Operation, RevolveAxisRef, RevolveFeature,
-    ScalarKind, ShellFeature, SweepFeature,
+    HoleFit, HoleKind, ImportFeature, LoftFeature, METRIC, Operation, RevolveAxisRef,
+    RevolveFeature, ScalarKind, ShellFeature, SweepFeature,
 };
 
 use crate::document::Document;
@@ -205,7 +205,7 @@ pub fn revolve_panel(
 }
 
 /// The words under a sweep's panel.
-pub const SWEEP_HINT: &str = "The path is a sketch of lines and arcs joined smoothly, starting on the profile's plane and square to it.";
+pub const SWEEP_HINT: &str = "The path is a sketch of lines and arcs joined end to end, starting on the profile's plane and square to it. Corners between straight pieces are mitred; an arc must meet its neighbours tangent.";
 
 /// Sweep: the path's sketch and the operation.
 pub fn sweep_panel(
@@ -265,6 +265,107 @@ pub fn sweep_panel(
         ui.add_space(4.0);
     }
     ui.weak(SWEEP_HINT);
+    out
+}
+
+/// The words under a loft's panel.
+pub const LOFT_HINT: &str = "Profiles are joined edge to edge, so each needs the same number of edges; a circle adapts. Two profiles are joined straight, more smoothly.";
+
+/// Loft: the profile sketches in order, and the operation.
+pub fn loft_panel(
+    ui: &mut Ui,
+    doc: &Document,
+    own: FeatureId,
+    l: &mut LoftFeature,
+    picking: Option<Slot>,
+) -> PanelResult {
+    let mut out = PanelResult::default();
+    // One change per frame: take a profile out, or swap it with the one after it.
+    let (mut remove, mut swap) = (None, None);
+    egui::Grid::new("loft_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Profiles")
+                .on_hover_text("The sketches the loft passes through, in this order.");
+            ui.vertical(|ui| {
+                if l.sections.is_empty() {
+                    ui.weak("None yet");
+                }
+                let last = l.sections.len().saturating_sub(1);
+                // ⏶ and ⏷ rather than ▲ and ▼, which egui's proportional fonts lack.
+                for (i, section) in l.sections.iter().enumerate() {
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(i > 0, egui::Button::new("⏶").small())
+                            .on_hover_text("Earlier in the loft.")
+                            .clicked()
+                        {
+                            swap = Some(i - 1);
+                        }
+                        if ui
+                            .add_enabled(i < last, egui::Button::new("⏷").small())
+                            .on_hover_text("Later in the loft.")
+                            .clicked()
+                        {
+                            swap = Some(i);
+                        }
+                        if ui
+                            .small_button("✖")
+                            .on_hover_text("Take it out of the loft.")
+                            .clicked()
+                        {
+                            remove = Some(i);
+                        }
+                        short_label(ui, doc.model.name_of(*section).to_owned());
+                    });
+                }
+                ui.horizontal(|ui| {
+                    if picking == Some(Slot::LoftProfile) {
+                        ui.colored_label(PICKING, "click sketches in the tree…");
+                        if ui
+                            .small_button("Done")
+                            .on_hover_text("Stop picking (Esc).")
+                            .clicked()
+                        {
+                            out.stop_pick = true;
+                        }
+                    } else if ui
+                        .small_button("Add profiles")
+                        .on_hover_text(Slot::LoftProfile.prompt())
+                        .clicked()
+                    {
+                        out.pick = Some(Slot::LoftProfile);
+                    }
+                });
+            });
+            ui.end_row();
+
+            ui.label("Operation");
+            egui::ComboBox::from_id_salt("loft_op")
+                .selected_text(l.operation.label())
+                .show_ui(ui, |ui| {
+                    for op in [Operation::NewBody, Operation::Add, Operation::Cut] {
+                        ui.selectable_value(&mut l.operation, op, op.label());
+                    }
+                });
+            ui.end_row();
+        });
+    if let Some(i) = remove {
+        l.sections.remove(i);
+    } else if let Some(i) = swap {
+        l.sections.swap(i, i + 1);
+    }
+    ui.add_space(6.0);
+    if l.sections.len() < 2 {
+        ui.weak(if doc.loft_profile_choices(own).is_empty() {
+            "A loft needs at least two profiles: draw the next one in another sketch, on a different plane, before this feature in the tree."
+        } else {
+            "A loft needs at least two profiles: use Add profiles and click the next sketch in the feature tree."
+        });
+        ui.add_space(4.0);
+    }
+    ui.weak(LOFT_HINT);
     out
 }
 
@@ -434,7 +535,7 @@ pub fn draft_panel(
             }
         });
     ui.add_space(6.0);
-    ui.weak("Only flat faces can be drafted. The neutral plane's normal is the direction of pull; each face turns about the line where it crosses the neutral plane, so the part keeps its size there.");
+    ui.weak("Flat faces can be drafted, and round faces whose axis is along the direction of pull (they become cones). The neutral plane's normal is the direction of pull; each face turns about the line where it crosses the neutral plane, so the part keeps its size there.");
     out
 }
 
@@ -735,11 +836,12 @@ mod tests {
             Slot::DraftFace,
             Slot::DraftNeutral,
             Slot::SweepPath,
+            Slot::LoftProfile,
         ] {
             assert!(slot.prompt().starts_with("Click"), "{slot:?}");
         }
         assert!(Slot::BlendEdge.repeats() && Slot::ShellFace.repeats());
-        assert!(Slot::DraftFace.repeats());
+        assert!(Slot::DraftFace.repeats() && Slot::LoftProfile.repeats());
         assert!(!Slot::DraftNeutral.repeats() && !Slot::FlangeEdge.repeats());
     }
 
@@ -765,9 +867,9 @@ mod tests {
         assert!(matches!(&kind, FeatureKind::Shell(s) if s.open.len() == 1));
         assert!(apply_pick(&mut kind, Slot::ShellFace, Picked::Edge(edge.clone())).is_err());
 
-        // Draft takes flat faces only, and a plane or a flat face as its neutral plane.
+        // Draft takes faces (not edges), and a plane or a flat face as its neutral plane.
         let mut kind = FeatureKind::Draft(Box::new(DraftFeature::new(vec![], None)));
-        assert!(apply_pick(&mut kind, Slot::DraftFace, face(false)).is_err());
+        assert!(apply_pick(&mut kind, Slot::DraftFace, Picked::Edge(edge.clone())).is_err());
         apply_pick(&mut kind, Slot::DraftFace, face(true)).unwrap();
         let top_plane = PlaneRef::Standard(StdPlane::Top);
         apply_pick(
@@ -811,6 +913,17 @@ mod tests {
         assert!(apply_pick(&mut kind, Slot::SweepPath, Picked::Edge(edge)).is_err());
         apply_pick(&mut kind, Slot::SweepPath, Picked::Sketch(path)).unwrap();
         assert!(matches!(&kind, FeatureKind::Sweep(s) if s.path == Some(path)));
+
+        // A loft's profiles: sketches, in the order they are clicked, each once.
+        let mut kind = FeatureKind::Loft(Box::new(LoftFeature::new(vec![profile], Operation::Add)));
+        assert!(apply_pick(&mut kind, Slot::LoftProfile, Picked::Sketch(profile)).is_err());
+        assert!(apply_pick(&mut kind, Slot::LoftProfile, face(true)).is_err());
+        apply_pick(&mut kind, Slot::LoftProfile, Picked::Sketch(path)).unwrap();
+        apply_pick(&mut kind, Slot::LoftProfile, Picked::Sketch(FeatureId(3))).unwrap();
+        assert!(matches!(
+            &kind,
+            FeatureKind::Loft(l) if l.sections == vec![profile, path, FeatureId(3)]
+        ));
     }
 
     #[test]
@@ -902,6 +1015,11 @@ mod tests {
             FeatureKind::Blend(Box::new(BlendFeature::new(BlendKind::Chamfer, vec![]))),
             FeatureKind::Shell(Box::new(ShellFeature::new(vec![top.clone()]))),
             FeatureKind::Sweep(Box::new(SweepFeature::new(sketch, None, Operation::Add))),
+            FeatureKind::Loft(Box::new(LoftFeature::new(vec![sketch], Operation::Add))),
+            FeatureKind::Loft(Box::new(LoftFeature::new(
+                vec![sketch, FeatureId(1), FeatureId(9999)],
+                Operation::Cut,
+            ))),
             FeatureKind::Draft(Box::new(DraftFeature::new(vec![top], None))),
             FeatureKind::Import(Box::new(ImportFeature {
                 source: "bracket.step".to_owned(),
@@ -925,6 +1043,7 @@ mod tests {
                 Some(Slot::BlendEdge),
                 Some(Slot::RevolveAxis),
                 Some(Slot::SweepPath),
+                Some(Slot::LoftProfile),
             ] {
                 let before = kind.clone();
                 let state = (kind.clone(), false);
@@ -942,6 +1061,9 @@ mod tests {
                                 FeatureKind::Import(i) => import_panel(ui, i),
                                 FeatureKind::Sweep(s) => {
                                     sweep_panel(ui, doc, FeatureId(u32::MAX), s, picking)
+                                }
+                                FeatureKind::Loft(l) => {
+                                    loft_panel(ui, doc, FeatureId(u32::MAX), l, picking)
                                 }
                                 _ => unreachable!(),
                             };

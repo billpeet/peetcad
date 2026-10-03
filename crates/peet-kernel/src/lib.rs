@@ -1,12 +1,16 @@
-//! PeetCAD's modelling kernel: an analytic B-rep of planes, cylinders, cones, spheres and
-//! tori, with lines, circles and ellipses as edge curves. That covers extruded and turned
-//! parts and sheet metal completely, and is far more tractable than a general NURBS kernel.
+//! PeetCAD's modelling kernel: a B-rep of planes, cylinders, cones, spheres and tori,
+//! with lines, circles and ellipses as edge curves, plus NURBS curves and surfaces for
+//! what those can't hold. Extruded and turned parts and sheet metal are analytic
+//! throughout, which keeps them exact; freeform geometry comes in with lofts and with
+//! other systems' files.
 //!
 //! - [`geom`]: surfaces and curves
 //! - [`topo`]: the B-rep data structure ([`Solid`])
 //! - [`validate`]: topology and geometry checks (Euler, manifoldness, orientation)
 //! - [`extrude`]: solids from sketch regions
 //! - [`revolve`]: solids from sketch regions turned about an axis
+//! - [`loft`]: solids through a series of profiles
+//! - [`nurbs`]: freeform curves and surfaces
 //! - [`primitive`]: blocks and balls
 //! - [`boolean`]: union / subtract / intersect, for add and cut features
 //! - [`blend`]: fillets and chamfers
@@ -23,6 +27,8 @@ pub mod boolean;
 mod error;
 pub mod extrude;
 pub mod geom;
+pub mod loft;
+pub mod nurbs;
 pub mod primitive;
 pub mod query;
 pub mod reshape;

@@ -10,11 +10,7 @@ use crate::geom::{Curve3, Surface};
 
 /// Second derivative of a curve with respect to its parameter.
 pub(crate) fn second_derivative(c: &Curve3, t: f64) -> DVec3 {
-    match c {
-        Curve3::Line(_) => DVec3::ZERO,
-        Curve3::Circle(ci) => ci.frame.origin - c.point(t),
-        Curve3::Ellipse(e) => e.frame.origin - c.point(t),
-    }
+    c.second_derivative(t)
 }
 
 /// The parameter step that moves a point on `c` by about [`LINEAR`].
@@ -23,6 +19,17 @@ pub(crate) fn param_tol(c: &Curve3) -> f64 {
         Curve3::Line(_) => LINEAR,
         Curve3::Circle(ci) => LINEAR / ci.radius.max(LINEAR),
         Curve3::Ellipse(e) => LINEAR / e.minor.max(LINEAR),
+        Curve3::Nurbs(n) => {
+            // By the curve's average speed: the length of its control polygon over its
+            // parameter range.
+            let (lo, hi) = n.domain();
+            let length: f64 = n
+                .control_points()
+                .windows(2)
+                .map(|w| w[0].distance(w[1]))
+                .sum();
+            LINEAR * (hi - lo) / length.max(LINEAR)
+        }
     }
 }
 
@@ -50,23 +57,36 @@ pub(crate) fn bounded_distance(c: &Curve3, t0: f64, t1: f64, p: DVec3) -> (f64, 
     }
 }
 
-/// Bounds of the part `t0..=t1` of a curve (slightly generous for arcs).
+/// Bounds of the part `t0..=t1` of a curve (slightly generous for curved ones).
 pub(crate) fn curve_bounds(c: &Curve3, t0: f64, t1: f64) -> Aabb {
     let mut b = Aabb::EMPTY;
     b.extend(c.point(t0));
     b.extend(c.point(t1));
-    let size = match c {
+    let (n, sagitta) = match c {
         Curve3::Line(_) => return b,
-        Curve3::Circle(ci) => ci.radius,
-        Curve3::Ellipse(e) => e.major,
+        Curve3::Circle(_) | Curve3::Ellipse(_) => {
+            let size = match c {
+                Curve3::Circle(ci) => ci.radius,
+                Curve3::Ellipse(e) => e.major,
+                _ => 0.0,
+            };
+            let n = (((t1 - t0) / (PI / 16.0)).ceil() as usize).clamp(1, 64);
+            // The curve bulges past its chords by at most the sagitta.
+            let step = (t1 - t0) / n as f64;
+            (n, size * (1.0 - (step * 0.5).cos()))
+        }
+        Curve3::Nurbs(nurbs) => {
+            // A chord of parameter length h leaves the curve by at most |C''| h² / 8.
+            let n = 32;
+            let step = (t1 - t0) / n as f64;
+            (n, nurbs.bend() * step * step / 8.0)
+        }
     };
-    let n = (((t1 - t0) / (PI / 16.0)).ceil() as usize).clamp(1, 64);
     let step = (t1 - t0) / n as f64;
     for i in 1..n {
         b.extend(c.point(t0 + step * i as f64));
     }
-    // The curve bulges past its chords by at most the sagitta.
-    grow(&b, size * (1.0 - (step * 0.5).cos()))
+    grow(&b, sagitta)
 }
 
 /// `b` grown by `margin` on every side.
@@ -99,6 +119,9 @@ pub(crate) fn same_surface(a: &Surface, b: &Surface) -> bool {
         }
         (Surface::Plane(_) | Surface::Cylinder(_), _)
         | (_, Surface::Plane(_) | Surface::Cylinder(_)) => false,
+        // Freeform surfaces are the same only if they are the same definition.
+        (Surface::Nurbs(s), Surface::Nurbs(t)) => std::sync::Arc::ptr_eq(s, t) || s == t,
+        (Surface::Nurbs(_), _) | (_, Surface::Nurbs(_)) => false,
         _ => matches!(
             super::ssi::intersect(a, b, DVec3::ZERO),
             super::ssi::Ssi::Coincident

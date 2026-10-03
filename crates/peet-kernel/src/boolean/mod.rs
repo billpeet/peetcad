@@ -41,6 +41,7 @@ mod classify;
 mod clip;
 mod domain;
 mod faces;
+mod freeform;
 mod roots;
 pub(crate) mod ssi;
 mod util;
@@ -223,7 +224,7 @@ impl<'a> Work<'a> {
             let ids: Vec<u32> = s.vertices.iter().map(|v| pool.insert(v.point)).collect();
             for e in &s.edges {
                 raw.push(GEdge {
-                    curve: e.curve,
+                    curve: e.curve.clone(),
                     t0: e.t0,
                     t1: e.t1,
                     start: ids[e.start.index()],
@@ -262,7 +263,7 @@ impl<'a> Work<'a> {
             return None;
         }
         self.raw.push(GEdge {
-            curve: *curve,
+            curve: curve.clone(),
             t0,
             t1,
             start,
@@ -288,7 +289,13 @@ impl<'a> Work<'a> {
                     max: fa.bounds.max.min(fb.bounds.max),
                 };
                 let mut segments: Vec<(Curve3, f64, f64, bool, bool)> = Vec::new();
-                match ssi::intersect(&fa.surface, &fb.surface, overlap.center()) {
+                let found = ssi::intersect_in(
+                    &fa.surface,
+                    &fb.surface,
+                    overlap.center(),
+                    Some(&grow(&overlap, LINEAR)),
+                );
+                match found {
                     Ssi::None => {}
                     Ssi::Coincident => {
                         // Each face's boundary, where it runs over the other face.
@@ -299,7 +306,7 @@ impl<'a> Work<'a> {
                                 }
                                 for (t0, t1) in clip(&e.curve, Span::Interval(e.t0, e.t1), &[onto])
                                 {
-                                    segments.push((e.curve, t0, t1, on_a, !on_a));
+                                    segments.push((e.curve.clone(), t0, t1, on_a, !on_a));
                                 }
                             }
                         }
@@ -308,12 +315,15 @@ impl<'a> Work<'a> {
                     }
                     Ssi::Curves(curves) => {
                         for c in curves {
-                            let span = match line_range(&c, &grow(&overlap, LINEAR)) {
-                                Some((lo, hi)) => Span::Interval(lo, hi),
-                                None => Span::Periodic,
+                            let span = match (c.domain(), line_range(&c, &grow(&overlap, LINEAR))) {
+                                // A freeform curve has ends of its own.
+                                (Some((lo, hi)), _) | (None, Some((lo, hi))) => {
+                                    Span::Interval(lo, hi)
+                                }
+                                (None, None) => Span::Periodic,
                             };
                             for (t0, t1) in clip(&c, span, &[fa, fb]) {
-                                segments.push((c, t0, t1, true, true));
+                                segments.push((c.clone(), t0, t1, true, true));
                             }
                         }
                     }
@@ -429,7 +439,7 @@ impl<'a> Work<'a> {
                     continue;
                 }
                 let piece = GEdge {
-                    curve: g.curve,
+                    curve: g.curve.clone(),
                     t0: t,
                     t1: tc,
                     start: v,
@@ -479,7 +489,7 @@ impl<'a> Work<'a> {
         if !boxes_overlap(&geom.bounds, &other.bounds) {
             if matches!((op, side), (BooleanOp::Union, _) | (BooleanOp::Subtract, 0)) {
                 out.push(Patch {
-                    surface: geom.surface,
+                    surface: geom.surface.clone(),
                     reversed: geom.reversed,
                     half_edges,
                     sources,
@@ -554,7 +564,7 @@ impl<'a> Work<'a> {
             }
             let all = std::iter::once(&region.outer).chain(&region.holes);
             out.push(Patch {
-                surface: geom.surface,
+                surface: geom.surface.clone(),
                 reversed: geom.reversed != flip,
                 half_edges: all
                     .flat_map(|l| l.half_edges.iter().map(|&(e, f)| (e, f != flip)))

@@ -291,6 +291,111 @@ fn sweeps_and_measurements() {
 }
 
 #[test]
+fn lofts_and_mitred_sweeps() {
+    let mut doc = Document::default();
+    ok(
+        &mut doc,
+        json!({"op": "sketch", "on": "top", "name": "Base", "draw": [
+            {"type": "rectangle", "from": [-20, -15], "to": [20, 15]},
+        ]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "plane", "from": "top", "distance": 30, "name": "Up"}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "sketch", "on": "Up", "name": "Neck", "draw": [
+            {"type": "circle", "center": [0, 0], "radius": 8},
+        ]}),
+    );
+    let e = error(&mut doc, json!({"op": "loft"}));
+    assert!(e.contains("Missing: profiles"), "{e}");
+    let e = error(&mut doc, json!({"op": "loft", "profiles": ["Base", "Up"]}));
+    assert!(e.contains("is not a sketch"), "{e}");
+    let loft = ok(
+        &mut doc,
+        json!({"op": "loft", "profiles": ["Base", "Neck"]}),
+    );
+    built(&loft);
+    // Between the prism on the circle and the one on the rectangle.
+    let v = volume(&doc);
+    assert!(v > 30.0 * PI * 64.0 && v < 30.0 * 1200.0, "{v}");
+    // Its sides are freeform, and both profiles are hidden.
+    let faces = ok(&mut doc, json!({"op": "faces"}));
+    let freeform = faces["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["surface"] == "freeform")
+        .count();
+    assert_eq!(freeform, 4);
+    let read = ok(&mut doc, json!({"op": "feature", "feature": "Loft1"}));
+    assert_eq!(read["fields"]["profiles"], json!(["Base", "Neck"]));
+    let tree = ok(&mut doc, json!({"op": "features"}));
+    let hidden = |name: &str| {
+        tree["features"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|f| f["name"] == name)
+            .unwrap()["hidden"]
+            == true
+    };
+    assert!(hidden("Base") && hidden("Neck"));
+
+    // A pipe round a square corner: the corner is mitred, so the volume is the
+    // section times the length of the centreline.
+    let mut doc = Document::default();
+    ok(
+        &mut doc,
+        json!({"op": "sketch", "on": "top", "name": "Profile", "draw": [
+            {"type": "circle", "center": [0, 0], "radius": 3},
+        ]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "sketch", "on": "front", "name": "Path", "draw": [
+            {"type": "line", "from": [0, 0], "to": [0, 50]},
+            {"type": "line", "from": [0, 50], "to": [40, 50]},
+        ]}),
+    );
+    let sweep = ok(
+        &mut doc,
+        json!({"op": "sweep", "profile": "Profile", "path": "Path"}),
+    );
+    built(&sweep);
+    close(volume(&doc), PI * 9.0 * 90.0);
+}
+
+#[test]
+fn a_plate_is_converted_to_sheet_metal() {
+    let mut doc = Document::default();
+    ok(
+        &mut doc,
+        json!({"op": "sketch", "on": "top", "draw": [
+            {"type": "rectangle", "from": [0, 0], "to": [60, 40]},
+        ]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 2}),
+    );
+    let convert = ok(
+        &mut doc,
+        json!({"op": "convert_to_sheet", "face": {"normal": [0, 0, 1]}, "bend": {"k_factor": 0.4}}),
+    );
+    built(&convert);
+    close(volume(&doc), 60.0 * 40.0 * 2.0);
+    // It is sheet metal now: it takes a flange.
+    let flange = ok(
+        &mut doc,
+        json!({"op": "edge_flange", "length": 15, "edge": {"between": [[0, 0, 2], [60, 0, 2]]}}),
+    );
+    built(&flange);
+}
+
+#[test]
 fn a_step_file_is_imported_as_a_body() {
     let dir = std::env::temp_dir().join(format!("peet-ops-step-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

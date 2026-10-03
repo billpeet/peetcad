@@ -16,16 +16,39 @@ use crate::geom::{Curve3, Surface};
 
 /// An implicit function whose zero set, cut with the host surface, is an edge's curve.
 /// Values are scaled to be about the distance from the curve near it.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Implicit {
-    Plane { origin: DVec3, normal: DVec3 },
-    Sphere { center: DVec3, radius: f64 },
-    Elliptic { frame: Frame, a: f64, b: f64 },
+    Plane {
+        origin: DVec3,
+        normal: DVec3,
+    },
+    Sphere {
+        center: DVec3,
+        radius: f64,
+    },
+    Elliptic {
+        frame: Frame,
+        a: f64,
+        b: f64,
+    },
+    /// For freeform geometry, which has no such form: how far a point is to the side of
+    /// the curve, measured along the host surface (across the curve's direction, in the
+    /// surface's tangent plane). It changes sign across the curve.
+    Lateral {
+        curve: Curve3,
+        host: Surface,
+    },
 }
 
 impl Implicit {
     /// The implicit form of `curve`, which lies on `host`.
     pub fn of(curve: &Curve3, host: &Surface) -> Option<Self> {
+        if matches!(curve, Curve3::Nurbs(_)) || matches!(host, Surface::Nurbs(_)) {
+            return Some(Self::Lateral {
+                curve: curve.clone(),
+                host: host.clone(),
+            });
+        }
         Some(match (curve, host) {
             (Curve3::Line(l), Surface::Plane(p)) => Self::Plane {
                 origin: l.origin,
@@ -60,6 +83,7 @@ impl Implicit {
                 normal: c.axis().cross(l.dir).try_normalize()?,
             },
             (Curve3::Line(_), Surface::Sphere(_) | Surface::Torus(_)) => return None,
+            (_, Surface::Nurbs(_)) => unreachable!("freeform hosts are handled above"),
             // On a curved surface a circle or an ellipse is cut out by its own plane
             // (which may cut out more: callers check hits against the edge itself).
             (Curve3::Circle(ci), _) => Self::Plane {
@@ -70,6 +94,7 @@ impl Implicit {
                 origin: e.frame.origin,
                 normal: e.frame.z_axis(),
             },
+            (Curve3::Nurbs(_), _) => unreachable!("freeform curves are handled above"),
         })
     }
 
@@ -82,6 +107,16 @@ impl Implicit {
             Self::Elliptic { frame, a, b } => {
                 let l = frame.to_local(p);
                 ((l.x / a).powi(2) + (l.y / b).powi(2) - 1.0) * 0.5 * a.min(*b)
+            }
+            Self::Lateral { curve, host } => {
+                let t = curve.param(p);
+                let t = match curve.domain() {
+                    Some((lo, hi)) => t.clamp(lo, hi),
+                    None => t,
+                };
+                let at = curve.point(t);
+                let side = host.normal_at(at).cross(curve.tangent(t));
+                (p - at).dot(side)
             }
         }
     }
@@ -178,6 +213,7 @@ fn conic_axes(curve: &Curve3) -> (DVec3, DVec3, DVec3) {
             e.frame.y_axis() * e.minor,
         ),
         Curve3::Line(l) => (l.origin, l.dir, DVec3::ZERO),
+        Curve3::Nurbs(_) => unreachable!("only conics have axes"),
     }
 }
 

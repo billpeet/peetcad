@@ -22,7 +22,9 @@
 //!
 //! **Draft.** Each drafted face is a plane turned about the line where it crosses the
 //! neutral plane, so the part keeps its size there and tapers along the pull direction
-//! (the neutral plane's normal).
+//! (the neutral plane's normal). A cylinder along the pull direction becomes the cone
+//! through its circle in the neutral plane, so a rounded boss or a hole takes draft
+//! together with the flat walls that run into it.
 
 use std::f64::consts::TAU;
 
@@ -136,6 +138,14 @@ fn offset_surface(surface: &Surface, d: f64) -> Result<Surface, KernelError> {
                 ..*t
             })
         }
+        Surface::Nurbs(_) if d == 0.0 => surface.clone(),
+        Surface::Nurbs(_) => {
+            return Err(KernelError::Unsupported(
+                "freeform faces can't be offset yet: a shell or an offset needs every moved \
+                 face to be flat, cylindrical, conical, spherical or toroidal"
+                    .to_owned(),
+            ));
+        }
     })
 }
 
@@ -188,8 +198,9 @@ pub fn shell(solid: &Solid, open: &[FaceId], thickness: f64) -> Result<Shelled, 
     })
 }
 
-/// Tilts the flat `faces` by `angle` (radians) about the lines where they cross
-/// `neutral`. With a positive angle the body gets narrower along `neutral`'s normal (the
+/// Tilts the `faces` by `angle` (radians) about the lines where they cross `neutral`:
+/// flat faces stay flat, and round faces whose axis is along `neutral`'s normal become
+/// cones. With a positive angle the body gets narrower along `neutral`'s normal (the
 /// direction a mould would be pulled off in).
 pub fn draft(
     solid: &Solid,
@@ -208,16 +219,45 @@ pub fn draft(
         ));
     }
     let pull = neutral.normal();
-    let mut surfaces: Vec<Surface> = solid.faces.iter().map(|f| f.surface).collect();
+    let mut surfaces: Vec<Surface> = solid.faces.iter().map(|f| f.surface.clone()).collect();
     for &face in faces {
         let Some(f) = solid.faces.get(face.index()) else {
             return Err(KernelError::InvalidInput(
                 "a face to draft doesn't exist".to_owned(),
             ));
         };
+        if let Surface::Cylinder(c) = &f.surface {
+            // A round wall along the pull direction becomes a cone through the circle
+            // where it crosses the neutral plane.
+            let along = c.axis().dot(pull);
+            if along.abs() < 1.0 - 1e-9 {
+                return Err(KernelError::Unsupported(
+                    "a round face can be drafted only if its axis is along the direction of \
+                     pull (square to the neutral plane)"
+                        .to_owned(),
+                ));
+            }
+            if angle.abs() <= 1e-12 {
+                continue;
+            }
+            let height = (neutral.origin() - c.axis_origin()).dot(pull) / along;
+            // The outward normal turns towards the pull: a boss narrows, a hole widens.
+            let side = if f.reversed { 1.0 } else { -1.0 };
+            surfaces[face.index()] = Surface::Cone(Cone {
+                frame: peet_math::Frame {
+                    origin: c.axis_origin() + c.axis() * height,
+                    rotation: c.frame.rotation,
+                },
+                radius: c.radius,
+                half_angle: side * angle * along.signum(),
+            });
+            continue;
+        }
         let Surface::Plane(plane) = f.surface else {
             return Err(KernelError::Unsupported(
-                "only flat faces can be drafted for now".to_owned(),
+                "flat faces and round faces along the pull direction can be drafted; this \
+                 face is neither"
+                    .to_owned(),
             ));
         };
         let outward = if f.reversed {
@@ -257,7 +297,7 @@ pub fn draft(
 fn resurface(solid: &Solid, surfaces: &[Surface]) -> Result<Solid, KernelError> {
     let mut out = solid.clone();
     for (f, s) in out.faces.iter_mut().zip(surfaces) {
-        f.surface = *s;
+        f.surface = s.clone();
     }
     let scale = solid.bounds().size().length().max(1.0);
 
@@ -438,7 +478,7 @@ fn seam(
                 }))
             } else if tolerance::directions_parallel(c.frame.z_axis(), axis) {
                 // A circle around the axis, at the tube angle it had.
-                let old = solid.face(solid.coedge_face(e.coedges[0])).surface;
+                let old = &solid.face(solid.coedge_face(e.coedges[0])).surface;
                 let v = old.param(e.point_at_fraction(0.5)).y;
                 let m = new.meridian(v).expect("a torus has a meridian");
                 Ok(Curve3::Circle(Circle3 {
@@ -510,6 +550,7 @@ fn reversed(curve: &Curve3) -> Curve3 {
             frame: flip(&e.frame),
             ..*e
         }),
+        Curve3::Nurbs(c) => Curve3::Nurbs(std::sync::Arc::new(c.reversed())),
     }
 }
 

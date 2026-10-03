@@ -7,6 +7,7 @@
 //! - [`sheet`]: sheet metal features (base flange, edge flange, sheet metal cut, hem,
 //!   sketched bend, jog, mitre flange, corner, forms) on top of `peet-sheetmetal`.
 //! - `pattern`: linear and circular patterns and mirrors of features.
+//! - `convert`: turning a solid of constant wall thickness into a sheet metal body.
 //! - `revolve`, `dressup`, [`hole`], `import`: revolves; fillets, chamfers, shells and
 //!   draft; the hole wizard; bodies imported from other CAD systems.
 //! - [`naming`]: persistent names for faces, edges and vertices, so references survive
@@ -17,6 +18,7 @@
 //!
 //! The crate has no UI or GPU dependency: everything here runs headless.
 
+mod convert;
 mod dressup;
 mod extrude;
 pub mod feature;
@@ -24,6 +26,7 @@ pub mod hash;
 mod history;
 pub mod hole;
 mod import;
+mod loft;
 mod model;
 pub mod naming;
 mod pattern;
@@ -35,6 +38,7 @@ pub mod sheet;
 mod sweep;
 mod units;
 
+pub use convert::ConvertToSheetFeature;
 pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
 pub use extrude::{
     EndCondition, Extrude, ExtrudeInput, Operation, RegionSelection, apply_extrude, default_regions,
@@ -49,6 +53,7 @@ pub use feature::{
 pub use history::History;
 pub use hole::{HoleEnd, HoleFeature, HoleFit, HoleKind, HoleSizes, METRIC, MetricSize};
 pub use import::{ImportFeature, ImportedSolid};
+pub use loft::{LoftFeature, LoftInput, apply_loft};
 pub use model::{Datum, DependencyGraph, Model};
 pub use naming::{Body, EdgeRef, FaceName, FaceOrigin, FaceRef, FaceRole, Found, VertexRef};
 pub use placement::face_sketch_plane;

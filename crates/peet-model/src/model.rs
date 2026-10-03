@@ -291,12 +291,33 @@ impl Model {
         id
     }
 
+    /// Adds a loft through the profiles of `sections` (sketches, in order), which are
+    /// then hidden.
+    pub fn add_loft(&mut self, sections: Vec<FeatureId>, operation: Operation) -> FeatureId {
+        let id = self.add(FeatureKind::Loft(Box::new(crate::LoftFeature::new(
+            sections.clone(),
+            operation,
+        ))));
+        for s in sections {
+            self.hide(s);
+        }
+        id
+    }
+
     /// Adds bodies imported from a file.
     pub fn add_import(&mut self, source: String, solids: Vec<crate::ImportedSolid>) -> FeatureId {
         self.add(FeatureKind::Import(Box::new(crate::ImportFeature {
             source,
             solids,
         })))
+    }
+
+    /// Adds a conversion to sheet metal of the body `face` is on, with that flat face
+    /// fixed (or of the only body, with its largest flat face fixed).
+    pub fn add_convert_to_sheet(&mut self, face: Option<crate::naming::FaceRef>) -> FeatureId {
+        self.add(FeatureKind::ConvertToSheet(Box::new(
+            crate::ConvertToSheetFeature::new(face),
+        )))
     }
 
     /// Adds a base flange (a new sheet metal body) from `sketch`, which is then hidden.

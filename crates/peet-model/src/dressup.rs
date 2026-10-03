@@ -69,7 +69,8 @@ impl ShellFeature {
     }
 }
 
-/// Tapers flat faces about the lines where they cross a neutral plane.
+/// Tapers faces about the lines where they cross a neutral plane: flat faces, and round
+/// faces whose axis is along the direction of pull (they become cones).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DraftFeature {
     pub faces: Vec<FaceRef>,

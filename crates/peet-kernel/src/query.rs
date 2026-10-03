@@ -138,7 +138,7 @@ pub fn edge_length(solid: &Solid, edge: EdgeId) -> f64 {
     match &e.curve {
         Curve3::Line(_) => e.t1 - e.t0,
         Curve3::Circle(c) => c.radius * (e.t1 - e.t0),
-        Curve3::Ellipse(_) => {
+        Curve3::Ellipse(_) | Curve3::Nurbs(_) => {
             // Simpson's rule on the speed: plenty for a smooth integrand.
             const STEPS: usize = 256;
             let h = (e.t1 - e.t0) / STEPS as f64;

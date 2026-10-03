@@ -118,8 +118,8 @@ and the `feature` query give the ids.
 Each adds a feature and takes `name` plus the feature's own fields (`help` lists them all
 with their defaults' types):
 
-`extrude`, `cut`, `revolve`, `cut_revolve`, `sweep`, `cut_sweep`, `hole`, `fillet`,
-`chamfer`, `shell`, `draft`, `plane`, `axis`, `point`, `coordinate_system`, `base_flange`,
+`extrude`, `cut`, `revolve`, `cut_revolve`, `sweep`, `cut_sweep`, `loft`, `cut_loft`,
+`hole`, `fillet`, `chamfer`, `shell`, `draft`, `convert_to_sheet`, `plane`, `axis`, `point`, `coordinate_system`, `base_flange`,
 `edge_flange`, `sheet_cut`, `hem`, `sketched_bend`, `jog`, `miter_flange`, `corner`,
 `dimple`, `emboss`, `louver`, `linear_pattern`, `circular_pattern`, `mirror`.
 
@@ -136,11 +136,18 @@ with their defaults' types):
 - `revolve` takes `axis`: `"sketch_x"`, `"sketch_y"`, `{"line": id}` (a line of its sketch)
   or an axis selector. Left out, it is the sketch's first construction line, else
   `sketch_y`.
-- `sweep` takes `profile` and `path` (two sketches).
+- `sweep` takes `profile` and `path` (two sketches). Corners between straight pieces of
+  the path are mitred.
+- `loft` takes `profiles`: two or more sketches in order, each with the same number of
+  edges (a circle adapts).
+- `convert_to_sheet` turns a solid of one wall thickness into a sheet metal body. It takes
+  `face` (the flat face that stays fixed; left out, the largest flat face of the only
+  body), `bend`, `relief` and `relief_ratio`.
 - `hole` drills at every point of its sketch. `standard` (`{"size": "M6", "fit": "close"
   | "normal" | "loose" | "tapped"}`) sets every size; sizes given as well win.
 - `fillet` and `chamfer` take `edges` and `size`; `shell` takes `open` (faces to remove)
-  and `thickness`; `draft` takes `faces`, `neutral` (a plane) and `angle`.
+  and `thickness`; `draft` takes `faces` (flat, or round along
+  the pull), `neutral` (a plane) and `angle`.
 
 | Operation | Fields |
 |---|---|

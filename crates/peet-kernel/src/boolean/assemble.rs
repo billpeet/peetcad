@@ -165,7 +165,7 @@ fn try_merge(
         sources.sort_unstable();
         sources.dedup();
         (traced.len() == 1).then_some(Patch {
-            surface: a.surface,
+            surface: a.surface.clone(),
             reversed: a.reversed,
             half_edges,
             sources,
@@ -347,7 +347,7 @@ fn merge_edges(patches: &mut [Patch], edges: &mut Vec<GEdge>, points: &[DVec3]) 
                 };
                 (
                     GEdge {
-                        curve: g1.curve,
+                        curve: g1.curve.clone(),
                         t0: g1.t0,
                         t1,
                         start: g1.start,
@@ -365,7 +365,7 @@ fn merge_edges(patches: &mut [Patch], edges: &mut Vec<GEdge>, points: &[DVec3]) 
                 };
                 (
                     GEdge {
-                        curve: g1.curve,
+                        curve: g1.curve.clone(),
                         t0,
                         t1: g1.t1,
                         start: far,
@@ -473,7 +473,7 @@ fn build(
         let shell = solid.add_shell();
         for &pi in members {
             let p = &patches[pi];
-            let face = solid.add_face(shell, p.surface, p.reversed);
+            let face = solid.add_face(shell, p.surface.clone(), p.reversed);
             sources.push(p.sources.clone());
             let t = &traced[pi];
             for l in std::iter::once(&t.outer).chain(&t.holes) {
@@ -489,7 +489,7 @@ fn build(
                                     .or_insert_with(|| solid.add_vertex(points[v as usize]))
                             };
                             let (s, en) = (vertex(g.start), vertex(g.end));
-                            let id = solid.add_edge(g.curve, s, en, g.t0, g.t1);
+                            let id = solid.add_edge(g.curve.clone(), s, en, g.t0, g.t1);
                             edge_ids.insert(e, id);
                             id
                         }

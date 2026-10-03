@@ -113,6 +113,9 @@ pub enum CommandId {
     OpenSampleHousing,
     Sweep,
     CutSweep,
+    Loft,
+    CutLoft,
+    ConvertToSheet,
 }
 
 /// Static description of a command.
@@ -141,7 +144,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 104] = [
+    pub const ALL: [Self; 107] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -246,6 +249,9 @@ impl CommandId {
         Self::OpenSampleHousing,
         Self::Sweep,
         Self::CutSweep,
+        Self::Loft,
+        Self::CutLoft,
+        Self::ConvertToSheet,
     ];
 
     pub fn info(self) -> CommandInfo {
@@ -783,7 +789,7 @@ impl CommandId {
             Self::Draft => (
                 "Draft",
                 "Features",
-                "Taper the selected flat faces by an angle, keeping their size where they cross a neutral plane.",
+                "Taper the selected faces (flat ones, or round ones along the pull) by an angle, keeping their size where they cross a neutral plane.",
                 None,
             ),
             Self::Hole => (
@@ -807,13 +813,31 @@ impl CommandId {
             Self::Sweep => (
                 "Sweep",
                 "Features",
-                "Carry the selected (or open) sketch along a path drawn in another sketch: lines and arcs joined smoothly, starting on the profile's plane and square to it.",
+                "Carry the selected (or open) sketch along a path drawn in another sketch: lines and arcs joined end to end, starting on the profile's plane and square to it. Corners between straight pieces are mitred.",
                 None,
             ),
             Self::CutSweep => (
                 "Cut-Sweep",
                 "Features",
                 "Carry the selected (or open) sketch along a path drawn in another sketch and cut the result out of the bodies.",
+                None,
+            ),
+            Self::Loft => (
+                "Loft",
+                "Features",
+                "Join the outlines of several sketches into a solid, starting with the selected (or open) sketch: then click the other profiles in the feature tree, in order. Each profile needs the same number of edges; a circle adapts.",
+                None,
+            ),
+            Self::CutLoft => (
+                "Cut-Loft",
+                "Features",
+                "Join the outlines of several sketches, starting with the selected (or open) one, and cut the result out of the bodies.",
+                None,
+            ),
+            Self::ConvertToSheet => (
+                "Convert to Sheet Metal",
+                "Sheet Metal",
+                "Turn a solid body of constant wall thickness (flat walls joined by rounded bends) into a sheet metal body, so it unfolds and takes flanges. Select the flat face that stays fixed first, or convert the only body from its largest face.",
                 None,
             ),
             Self::OpenSampleHousing => (

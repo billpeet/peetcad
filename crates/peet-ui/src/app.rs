@@ -28,6 +28,7 @@ use crate::solid_ui;
 use crate::tree::{TreeAction, TreeView, tree_ui};
 use crate::viewport::{Viewport, ViewportParams};
 
+mod convert;
 pub mod scripting;
 mod solids;
 
@@ -332,7 +333,7 @@ impl PeetApp {
         match geom {
             Some(GeomRef::Face { body, face }) => {
                 let b = &self.doc.bodies.get(body)?.source;
-                let surface = b.solid.face(face).surface;
+                let surface = &b.solid.face(face).surface;
                 Some(Picked::Face {
                     face: b.face_ref(face),
                     planar: matches!(surface, Surface::Plane(_)),
@@ -379,11 +380,29 @@ impl PeetApp {
             self.picking = Some((id, slot));
             return;
         }
+        // A loft's profile must be built before the loft, and is hidden once it is used.
+        let profile = match (slot, &picked) {
+            (Slot::LoftProfile, Picked::Sketch(s)) => Some(*s),
+            _ => None,
+        };
+        if let Some(s) = profile
+            && self.doc.model.index_of(s) > self.doc.model.index_of(id)
+        {
+            self.error(format!(
+                "{} comes after {name} in the feature tree. Drag it above {name} to use it as a profile.",
+                self.doc.model.name_of(s)
+            ));
+            self.picking = Some((id, slot));
+            return;
+        }
         match features_ui::apply_pick(&mut kind, slot, picked) {
             Ok(()) => {
                 self.change(&format!("Edit {name}"), |m| {
                     if let Some(f) = m.feature_mut(id) {
                         f.kind = kind;
+                    }
+                    if let Some(f) = profile.and_then(|s| m.feature_mut(s)) {
+                        f.visible = false;
                     }
                 });
                 self.status_message = None;
@@ -957,6 +976,7 @@ impl PeetApp {
             CommandId::Hem | CommandId::CornerTreatment => {
                 enabled(!in_sketch && self.doc.has_sheet_metal())
             }
+            CommandId::ConvertToSheet => enabled(!in_sketch && self.doc.has_plain_solid()),
             CommandId::SketchedBend
             | CommandId::Jog
             | CommandId::MiterFlange
@@ -972,9 +992,12 @@ impl PeetApp {
             | CommandId::ImportDxf
             | CommandId::ImportStep
             | CommandId::MassProperties => enabled(true),
-            CommandId::Revolve | CommandId::CutRevolve | CommandId::Sweep | CommandId::CutSweep => {
-                enabled(self.extrude_source().is_some())
-            }
+            CommandId::Revolve
+            | CommandId::CutRevolve
+            | CommandId::Sweep
+            | CommandId::CutSweep
+            | CommandId::Loft
+            | CommandId::CutLoft => enabled(self.extrude_source().is_some()),
             CommandId::Hole => {
                 enabled(self.extrude_source().is_some() && !self.doc.bodies.is_empty())
             }
@@ -1079,6 +1102,7 @@ impl PeetApp {
             CommandId::Jog => self.start_from_sheet_sketch("Jog", |m, s| m.add_jog(s)),
             CommandId::MiterFlange => self.start_miter_flange(),
             CommandId::CornerTreatment => self.start_corner(),
+            CommandId::ConvertToSheet => self.start_convert_to_sheet(),
             CommandId::Dimple => self.start_from_sheet_sketch("Dimple", |m, s| {
                 m.add_form(s, peet_sheetmetal::FormKind::Dimple)
             }),
@@ -1104,6 +1128,8 @@ impl PeetApp {
             CommandId::CutRevolve => self.start_revolve(peet_model::Operation::Cut),
             CommandId::Sweep => self.start_sweep(peet_model::Operation::Add),
             CommandId::CutSweep => self.start_sweep(peet_model::Operation::Cut),
+            CommandId::Loft => self.start_loft(peet_model::Operation::Add),
+            CommandId::CutLoft => self.start_loft(peet_model::Operation::Cut),
             CommandId::Fillet => self.start_blend(peet_model::BlendKind::Fillet),
             CommandId::Chamfer => self.start_blend(peet_model::BlendKind::Chamfer),
             CommandId::Shell => self.start_shell(),
@@ -1246,7 +1272,7 @@ impl PeetApp {
                             (Slot::RevolveAxis, Some(FeatureKind::Axis(_))) => {
                                 Some(Picked::Axis(peet_model::AxisRef::Feature(id)))
                             }
-                            (Slot::SweepPath, Some(FeatureKind::Sketch(_))) => {
+                            (Slot::SweepPath | Slot::LoftProfile, Some(FeatureKind::Sketch(_))) => {
                                 Some(Picked::Sketch(id))
                             }
                             _ => None,
@@ -1558,6 +1584,10 @@ impl PeetApp {
                                     tool(ui, pending, CommandId::Sweep, "Sweep", Small);
                                     tool(ui, pending, CommandId::CutSweep, "Cut-Sweep", Small);
                                 });
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::Loft, "Loft", Small);
+                                    tool(ui, pending, CommandId::CutLoft, "Cut-Loft", Small);
+                                });
                                 ribbon::dropdown(
                                     ui,
                                     Icon::Reference,
@@ -1769,6 +1799,7 @@ impl PeetApp {
                                 });
                             });
                             ribbon::group(ui, "Flat Pattern", |ui| {
+                                tool(ui, pending, CommandId::ConvertToSheet, "Convert", Large);
                                 tool(ui, pending, CommandId::FlatPattern, "Flatten", Large);
                                 ribbon::stack(ui, |ui| {
                                     tool(ui, pending, CommandId::BendTable, "Bend Table", Small);
@@ -2180,6 +2211,7 @@ impl PeetApp {
                 r
             }
             FeatureKind::Corner(c) => features_ui::corner_panel(ui, &self.doc, c, picking),
+            FeatureKind::ConvertToSheet(c) => features_ui::convert_panel(ui, &self.doc, c, picking),
             FeatureKind::Form(f) => {
                 let r = features_ui::form_panel(ui, &self.doc, f);
                 self.edit_sketch_button(ui, f.sketch, pending);
@@ -2209,6 +2241,7 @@ impl PeetApp {
                 });
                 out
             }
+            FeatureKind::Loft(l) => solid_ui::loft_panel(ui, &self.doc, id, l, picking),
             FeatureKind::Blend(b) => solid_ui::blend_panel(ui, &self.doc, b, picking),
             FeatureKind::Shell(s) => solid_ui::shell_panel(ui, &self.doc, s, picking),
             FeatureKind::Draft(d) => solid_ui::draft_panel(ui, &self.doc, d, picking),
@@ -2281,7 +2314,8 @@ impl PeetApp {
             match *g {
                 GeomRef::Face { face, .. } => {
                     let f = body.solid.face(face);
-                    match f.surface {
+                    match &f.surface {
+                        Surface::Nurbs(_) => ui.label("Freeform face"),
                         Surface::Plane(_) => ui.label("Planar face"),
                         Surface::Cylinder(c) => ui.label(format!(
                             "Cylindrical face, R{}",
@@ -2309,7 +2343,8 @@ impl PeetApp {
                     ui.label("Vertex");
                 }
                 GeomRef::Edge { edge, .. } => {
-                    ui.label(match body.solid.edge(edge).curve {
+                    ui.label(match &body.solid.edge(edge).curve {
+                        peet_kernel::Curve3::Nurbs(_) => "Freeform edge",
                         peet_kernel::Curve3::Line(_) => "Line edge",
                         peet_kernel::Curve3::Circle(_) => "Circular edge",
                         peet_kernel::Curve3::Ellipse(_) => "Elliptical edge",

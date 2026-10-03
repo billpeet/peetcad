@@ -69,6 +69,10 @@ pub enum Slot {
     DraftNeutral,
     /// The sketch a sweep's path is drawn in.
     SweepPath,
+    /// Another profile sketch for a loft.
+    LoftProfile,
+    /// The flat face a conversion to sheet metal keeps fixed.
+    ConvertFace,
 }
 
 impl Slot {
@@ -108,13 +112,19 @@ impl Slot {
                 "Click the faces to remove, opening the hollow, one after the other. Esc when done."
             }
             Self::DraftFace => {
-                "Click the flat faces to taper, one after the other (a picked face again to take it out). Esc when done."
+                "Click the faces to taper (flat ones, or round ones along the pull), one after the other (a picked face again to take it out). Esc when done."
             }
             Self::DraftNeutral => {
                 "Click a flat face or a plane for the neutral plane: the faces keep their size where they cross it."
             }
             Self::SweepPath => {
-                "Click the sketch of the path in the feature tree: lines and arcs joined smoothly, starting on the profile's plane."
+                "Click the sketch of the path in the feature tree: lines and arcs joined end to end, starting on the profile's plane."
+            }
+            Self::LoftProfile => {
+                "Click the sketches of the next profiles in the feature tree, in the order the loft passes through them. Esc when done."
+            }
+            Self::ConvertFace => {
+                "Click the flat face of the solid body that stays fixed: the part unfolds from it."
             }
         }
     }
@@ -122,7 +132,10 @@ impl Slot {
     /// Whether picking carries on after a click, to pick several things in a row (until
     /// Esc or Done).
     pub fn repeats(self) -> bool {
-        matches!(self, Self::BlendEdge | Self::ShellFace | Self::DraftFace)
+        matches!(
+            self,
+            Self::BlendEdge | Self::ShellFace | Self::DraftFace | Self::LoftProfile
+        )
     }
 }
 
@@ -275,13 +288,9 @@ pub fn apply_pick(kind: &mut FeatureKind, slot: Slot, picked: Picked) -> Result<
             _ => return Err("Pick a face of the body to remove.".into()),
         },
         (FeatureKind::Draft(d), Slot::DraftFace) => match picked {
-            Picked::Face {
-                face, planar: true, ..
-            } => toggle(&mut d.faces, face),
-            Picked::Face { .. } => {
-                return Err("Only flat faces can be drafted: pick a flat face.".into());
-            }
-            _ => return Err("Pick a flat face of the body to taper.".into()),
+            // Flat faces, and round ones along the pull: the rebuild says which won't do.
+            Picked::Face { face, .. } => toggle(&mut d.faces, face),
+            _ => return Err("Pick a face of the body to taper.".into()),
         },
         (FeatureKind::Draft(d), Slot::DraftNeutral) => d.neutral = Some(picked.plane()?),
         (FeatureKind::Sweep(s), Slot::SweepPath) => match picked {
@@ -292,6 +301,26 @@ pub fn apply_pick(kind: &mut FeatureKind, slot: Slot, picked: Picked) -> Result<
             }
             Picked::Sketch(id) => s.path = Some(id),
             _ => return Err("Pick the sketch of the path in the feature tree.".into()),
+        },
+        (FeatureKind::Loft(l), Slot::LoftProfile) => match picked {
+            Picked::Sketch(id) if l.sections.contains(&id) => {
+                return Err(
+                    "That sketch is a profile of the loft already. Pick another sketch.".into(),
+                );
+            }
+            Picked::Sketch(id) => l.sections.push(id),
+            _ => return Err("Pick the sketch of a profile in the feature tree.".into()),
+        },
+        (FeatureKind::ConvertToSheet(c), Slot::ConvertFace) => match picked {
+            Picked::Face {
+                face, planar: true, ..
+            } => c.face = Some(face),
+            Picked::Face { .. } => {
+                return Err(
+                    "The fixed face must be flat: pick one of the part's flat walls.".into(),
+                );
+            }
+            _ => return Err("Pick a flat face of the body to convert.".into()),
         },
         _ => return Err("That can't be used here.".into()),
     }
@@ -766,9 +795,71 @@ pub fn reference_panel(
             | FeatureKind::Draft(_)
             | FeatureKind::Hole(_)
             | FeatureKind::Import(_)
-            | FeatureKind::Sweep(_) => {}
+            | FeatureKind::Sweep(_)
+            | FeatureKind::Loft(_)
+            | FeatureKind::ConvertToSheet(_) => {}
         });
     out
+}
+
+/// The bend model of a sheet metal body: which kind, and its value.
+fn bend_model_rows(
+    ui: &mut Ui,
+    model: &mut BendModelDef,
+    params: &Parameters,
+    out: &mut PanelResult,
+) {
+    ui.label("Bend model");
+    let label = match model {
+        BendModelDef::KFactor(_) => "K-factor",
+        BendModelDef::Allowance(_) => "Bend allowance",
+        BendModelDef::Deduction(_) => "Bend deduction",
+    };
+    egui::ComboBox::from_id_salt("sm_model")
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(label == "K-factor", "K-factor")
+                .clicked()
+                && !matches!(model, BendModelDef::KFactor(_))
+            {
+                *model = BendModelDef::KFactor(Scalar::new(0.44));
+            }
+            if ui
+                .selectable_label(label == "Bend allowance", "Bend allowance")
+                .on_hover_text("A fixed flat length for every bend.")
+                .clicked()
+                && !matches!(model, BendModelDef::Allowance(_))
+            {
+                *model = BendModelDef::Allowance(Scalar::new(2.0));
+            }
+            if ui
+                .selectable_label(label == "Bend deduction", "Bend deduction")
+                .on_hover_text("How much shorter than the outside lengths the flat is, per bend.")
+                .clicked()
+                && !matches!(model, BendModelDef::Deduction(_))
+            {
+                *model = BendModelDef::Deduction(Scalar::new(2.0));
+            }
+        });
+    ui.end_row();
+    match model {
+        BendModelDef::KFactor(k) => {
+            ui.label("K-factor").on_hover_text(
+                "Where the neutral axis lies, as a fraction of the thickness from the inside of the bend (0.3 to 0.5 is typical).",
+            );
+            out.committed |= scalar_field(ui, "sm_k", k, ScalarKind::Number, params);
+        }
+        BendModelDef::Allowance(v) => {
+            ui.label("Allowance");
+            out.committed |= scalar_field(ui, "sm_ba", v, ScalarKind::Length, params);
+        }
+        BendModelDef::Deduction(v) => {
+            ui.label("Deduction");
+            out.committed |= scalar_field(ui, "sm_bd", v, ScalarKind::Length, params);
+        }
+    }
+    ui.end_row();
 }
 
 /// A sheet metal body's settings (thickness, radius, bend model, reliefs).
@@ -791,57 +882,7 @@ fn sheet_settings_rows(
     out.committed |= scalar_field(ui, "sm_radius", &mut s.radius, ScalarKind::Length, params);
     ui.end_row();
 
-    ui.label("Bend model");
-    let label = match s.model {
-        BendModelDef::KFactor(_) => "K-factor",
-        BendModelDef::Allowance(_) => "Bend allowance",
-        BendModelDef::Deduction(_) => "Bend deduction",
-    };
-    egui::ComboBox::from_id_salt("sm_model")
-        .selected_text(label)
-        .show_ui(ui, |ui| {
-            if ui
-                .selectable_label(label == "K-factor", "K-factor")
-                .clicked()
-                && !matches!(s.model, BendModelDef::KFactor(_))
-            {
-                s.model = BendModelDef::KFactor(Scalar::new(0.44));
-            }
-            if ui
-                .selectable_label(label == "Bend allowance", "Bend allowance")
-                .on_hover_text("A fixed flat length for every bend.")
-                .clicked()
-                && !matches!(s.model, BendModelDef::Allowance(_))
-            {
-                s.model = BendModelDef::Allowance(Scalar::new(2.0));
-            }
-            if ui
-                .selectable_label(label == "Bend deduction", "Bend deduction")
-                .on_hover_text("How much shorter than the outside lengths the flat is, per bend.")
-                .clicked()
-                && !matches!(s.model, BendModelDef::Deduction(_))
-            {
-                s.model = BendModelDef::Deduction(Scalar::new(2.0));
-            }
-        });
-    ui.end_row();
-    match &mut s.model {
-        BendModelDef::KFactor(k) => {
-            ui.label("K-factor").on_hover_text(
-                "Where the neutral axis lies, as a fraction of the thickness from the inside of the bend (0.3 to 0.5 is typical).",
-            );
-            out.committed |= scalar_field(ui, "sm_k", k, ScalarKind::Number, params);
-        }
-        BendModelDef::Allowance(v) => {
-            ui.label("Allowance");
-            out.committed |= scalar_field(ui, "sm_ba", v, ScalarKind::Length, params);
-        }
-        BendModelDef::Deduction(v) => {
-            ui.label("Deduction");
-            out.committed |= scalar_field(ui, "sm_bd", v, ScalarKind::Length, params);
-        }
-    }
-    ui.end_row();
+    bend_model_rows(ui, &mut s.model, params, out);
 
     ui.label("Relief");
     egui::ComboBox::from_id_salt("sm_relief")
@@ -867,6 +908,65 @@ fn sheet_settings_rows(
         );
         ui.end_row();
     }
+}
+
+/// Convert to sheet metal: the fixed face, the bend model and the reliefs for flanges
+/// added later. The thickness and the bend radii are the solid's own.
+pub fn convert_panel(
+    ui: &mut Ui,
+    doc: &Document,
+    c: &mut peet_model::ConvertToSheetFeature,
+    picking: Option<Slot>,
+) -> PanelResult {
+    let mut out = PanelResult::default();
+    let params = &doc.model.parameters;
+    egui::Grid::new("convert_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            let text = match &c.face {
+                Some(f) => {
+                    let name = doc.model.describe_face(&f.name);
+                    let mut chars = name.chars();
+                    match chars.next() {
+                        Some(first) => first.to_uppercase().chain(chars).collect(),
+                        None => name,
+                    }
+                }
+                None => "Largest flat face".to_owned(),
+            };
+            reference_row(ui, "Fixed face", text, Slot::ConvertFace, picking, &mut out);
+            bend_model_rows(ui, &mut c.model, params, &mut out);
+            ui.label("Relief");
+            egui::ComboBox::from_id_salt("convert_relief")
+                .selected_text(c.relief.label())
+                .show_ui(ui, |ui| {
+                    for r in ReliefType::ALL {
+                        ui.selectable_value(&mut c.relief, r, r.label());
+                    }
+                })
+                .response
+                .on_hover_text(
+                    "For flanges added to the converted body: the cut made where a bend stops short of the end of an edge.",
+                );
+            ui.end_row();
+            if c.relief != ReliefType::Tear {
+                ui.label("Relief ratio").on_hover_text(
+                    "Relief width, and how far it reaches past the bend, as a multiple of the thickness.",
+                );
+                out.committed |= scalar_field(
+                    ui,
+                    "convert_ratio",
+                    &mut c.relief_ratio,
+                    ScalarKind::Number,
+                    params,
+                );
+                ui.end_row();
+            }
+        });
+    ui.add_space(6.0);
+    ui.weak("The body must be a sheet of one thickness: flat walls joined by rounded bends, cut square through the sheet. The thickness and the bend radii are measured from it; the fixed face stays in place when the part is unfolded.");
+    out
 }
 
 /// Base flange: the sheet settings, plus depth for open profiles.

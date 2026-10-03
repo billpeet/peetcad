@@ -17,6 +17,8 @@
 //! - [`report`]: the bend table and flat size
 //! - [`checks`]: manufacturing checks (short flanges, holes near bends and edges, collisions)
 //! - [`gauge`]: gauge and material tables, shareable as CSV
+//! - [`recognize`]: the way back: reading a layout out of a plain solid of constant
+//!   thickness (converting a solid to sheet metal)
 //!
 //! The crate is headless and has no knowledge of features: owners are plain numbers that
 //! the model maps to its feature ids.
@@ -28,6 +30,7 @@ pub mod flange;
 pub mod form;
 pub mod gauge;
 pub mod layout;
+pub mod recognize;
 pub mod report;
 pub mod settings;
 pub mod split;
@@ -44,6 +47,7 @@ pub use gauge::{CsvError, GaugeEntry, GaugeTable, MaterialLibrary};
 pub use layout::{
     Area, Bend, ChainLine, CurveTag, Cut, Edge2, EdgeSite, Layout, Origin, Piece, PieceKind,
 };
+pub use recognize::{Recognized, recognize, recognize_layout};
 pub use report::{BendRow, Report};
 pub use settings::{BendModel, BendValues, FlangePosition, ReliefType, SheetSettings};
 pub use split::{BendLinePosition, JogDimension, JogSpec, SketchedBendSpec, Split};

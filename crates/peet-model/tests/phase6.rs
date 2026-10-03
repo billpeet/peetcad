@@ -832,13 +832,39 @@ fn sweep_a_pipe_along_lines_and_bends() {
     p.rebuild();
     let m = failure(&p, sweep);
     assert!(m.contains("doesn't fit round a bend"), "{m}");
-    // A corner.
+    // A square corner between straight pieces is mitred: the pipe's centreline is 50
+    // long, and a mitre neither adds nor removes volume.
     let s = p.sketch_mut(path);
     *s = Sketch::new();
     s.add_line(v2(0.0, 0.0), v2(30.0, 0.0));
     s.add_line(v2(30.0, 0.0), v2(30.0, 20.0));
     p.rebuild();
-    assert!(failure(&p, sweep).contains("has a corner"));
+    p.assert_ok();
+    assert_close(p.volume(), ring * 50.0);
+    // The two legs' walls meet in ellipses.
+    assert!(
+        p.bodies()[0]
+            .solid
+            .edges
+            .iter()
+            .any(|e| matches!(e.curve, peet_kernel::Curve3::Ellipse(_)))
+    );
+    // Three legs at other angles.
+    let s = p.sketch_mut(path);
+    *s = Sketch::new();
+    s.add_line(v2(0.0, 0.0), v2(30.0, 0.0));
+    s.add_line(v2(30.0, 0.0), v2(50.0, 20.0));
+    s.add_line(v2(50.0, 20.0), v2(50.0, 60.0));
+    p.rebuild();
+    p.assert_ok();
+    assert_close(p.volume(), ring * (30.0 + 800f64.sqrt() + 40.0));
+    // A corner at an arc can't be mitred.
+    let s = p.sketch_mut(path);
+    *s = Sketch::new();
+    s.add_line(v2(0.0, 0.0), v2(30.0, 0.0));
+    s.add_arc(v2(50.0, 0.0), v2(30.0, 0.0), v2(50.0, 20.0));
+    p.rebuild();
+    assert!(failure(&p, sweep).contains("corner where an arc meets it"));
     // A path that starts somewhere else.
     let s = p.sketch_mut(path);
     *s = Sketch::new();
@@ -880,4 +906,191 @@ fn sweep_round_a_circle_and_cut_a_groove() {
     p.rebuild();
     p.assert_ok();
     assert_close(p.volume(), 2.0 * PI * PI * 20.0 * 4.0);
+}
+
+// ---- Loft ----
+
+#[test]
+fn loft_between_sketches_on_offset_planes() {
+    let mut p = Part::default();
+    let base = p.sketch(TOP, |s| {
+        peet_sketch::shapes::rectangle(s, v2(-20.0, -15.0), v2(20.0, 15.0));
+    });
+    let plane = p
+        .model
+        .add(FeatureKind::Plane(peet_model::PlaneDef::Offset {
+            from: PlaneRef::Standard(StdPlane::Top),
+            distance: Scalar::new(30.0),
+            flip: false,
+        }));
+    let top = p.sketch(PlaneRef::Feature(plane), |s| {
+        s.add_circle(DVec2::ZERO, 8.0);
+    });
+    let loft = p.model.add_loft(vec![base, top], Operation::NewBody);
+    p.rebuild();
+    p.assert_ok();
+    assert_eq!(p.bodies().len(), 1);
+    let solid = &p.bodies()[0].solid;
+    // Four freeform sides between the rectangle's edges and the circle's quarters.
+    let sides = solid
+        .faces
+        .iter()
+        .filter(|f| matches!(f.surface, Surface::Nurbs(_)))
+        .count();
+    assert_eq!(sides, 4);
+    let volume = p.volume();
+    assert!(volume > 30.0 * 128.0 && volume < 30.0 * 1200.0, "{volume}");
+    assert!(!p.model.feature(top).unwrap().visible);
+    // Named after the first profile's curves, and the caps.
+    let names = &p.bodies()[0].face_names;
+    assert!(
+        names
+            .iter()
+            .any(|n| n.origins()[0].role == FaceRole::NearCap)
+    );
+    assert!(
+        names
+            .iter()
+            .any(|n| n.origins()[0].role == FaceRole::FarCap)
+    );
+    assert_eq!(
+        names
+            .iter()
+            .filter(|n| matches!(n.origins()[0].role, FaceRole::Side(_)))
+            .count(),
+        4
+    );
+    // The plane moves: the loft follows, and its volume with it.
+    let FeatureKind::Plane(peet_model::PlaneDef::Offset { distance, .. }) =
+        &mut p.model.feature_mut(plane).unwrap().kind
+    else {
+        unreachable!()
+    };
+    *distance = Scalar::new(60.0);
+    p.rebuild();
+    p.assert_ok();
+    assert_close(p.volume(), 2.0 * volume);
+
+    // A third profile makes it smooth through all three.
+    let plane2 = p
+        .model
+        .add(FeatureKind::Plane(peet_model::PlaneDef::Offset {
+            from: PlaneRef::Standard(StdPlane::Top),
+            distance: Scalar::new(90.0),
+            flip: false,
+        }));
+    let end = p.sketch(PlaneRef::Feature(plane2), |s| {
+        peet_sketch::shapes::rectangle(s, v2(-10.0, -10.0), v2(10.0, 10.0));
+    });
+    // The loft comes before the new sketch in the tree: move it to the end.
+    let last = p.model.len() - 1;
+    let FeatureKind::Loft(l) = &mut p.model.feature_mut(loft).unwrap().kind else {
+        unreachable!()
+    };
+    l.sections.push(end);
+    p.model.move_to(loft, last).unwrap();
+    p.rebuild();
+    p.assert_ok();
+    let b = p.bodies()[0].solid.bounds();
+    // Freeform faces' bounds are a hair generous.
+    assert!(
+        (b.max.z - 90.0).abs() < 0.05 && b.min.z.abs() < 0.05,
+        "{b:?}"
+    );
+
+    // Failures say what to do.
+    let FeatureKind::Loft(l) = &mut p.model.feature_mut(loft).unwrap().kind else {
+        unreachable!()
+    };
+    l.sections.truncate(1);
+    p.rebuild();
+    assert!(failure(&p, loft).contains("at least two profile sketches"));
+    let tri = p.sketch(PlaneRef::Feature(plane), |s| {
+        polygon(s, &[v2(0.0, 0.0), v2(10.0, 0.0), v2(0.0, 10.0)]);
+    });
+    let last = p.model.len() - 1;
+    let FeatureKind::Loft(l) = &mut p.model.feature_mut(loft).unwrap().kind else {
+        unreachable!()
+    };
+    l.sections = vec![base, tri];
+    p.model.move_to(loft, last).unwrap();
+    p.rebuild();
+    let m = failure(&p, loft);
+    assert!(m.contains("same number of edges"), "{m}");
+}
+
+/// A loft from a rectangle on `low` up to a circle `rise` above it.
+fn funnel(p: &mut Part, low: f64, rise: f64, operation: Operation) -> FeatureId {
+    let plane_at = |p: &mut Part, distance: f64| {
+        p.model
+            .add(FeatureKind::Plane(peet_model::PlaneDef::Offset {
+                from: PlaneRef::Standard(StdPlane::Top),
+                distance: Scalar::new(distance),
+                flip: false,
+            }))
+    };
+    let a = plane_at(p, low);
+    let b = plane_at(p, low + rise);
+    let base = p.sketch(PlaneRef::Feature(a), |s| {
+        peet_sketch::shapes::rectangle(s, v2(18.0, 11.0), v2(42.0, 29.0));
+    });
+    let top = p.sketch(PlaneRef::Feature(b), |s| {
+        s.add_circle(v2(30.0, 20.0), 6.0);
+    });
+    p.model.add_loft(vec![base, top], operation)
+}
+
+#[test]
+fn lofts_join_and_cut_bodies_and_take_features() {
+    // The funnel alone.
+    let mut alone = Part::default();
+    funnel(&mut alone, 10.0, 20.0, Operation::NewBody);
+    alone.rebuild();
+    alone.assert_ok();
+    let funnel_volume = alone.volume();
+
+    // On top of a block it joins: one body, the two volumes together.
+    let (mut p, _) = block(60.0, 40.0, 10.0);
+    let block_volume = p.volume();
+    let boss = funnel(&mut p, 10.0, 20.0, Operation::Add);
+    p.rebuild();
+    p.assert_ok();
+    assert_eq!(p.bodies().len(), 1);
+    assert!(
+        (p.volume() - block_volume - funnel_volume).abs() < 1e-3 * funnel_volume,
+        "{} vs {}",
+        p.volume(),
+        block_volume + funnel_volume
+    );
+    // A hole drilled down through the boss's flat top and the block.
+    let (_, top) = p.face(DVec3::Z, v3(30.0, 20.0, 30.0));
+    assert_eq!(
+        p.bodies()[0].face_names[top.index()].origins()[0].feature,
+        boss
+    );
+    let top = p.on_face(DVec3::Z, v3(30.0, 20.0, 30.0));
+    let bore = sketch_at(&mut p, top, |s, to| {
+        s.add_circle(to(v3(30.0, 20.0, 30.0)), 3.0);
+    });
+    p.extrude(bore, Operation::Cut, |e| {
+        e.end = peet_model::EndCondition::ThroughAll;
+    });
+    p.rebuild();
+    p.assert_ok();
+    let expected = block_volume + funnel_volume - PI * 9.0 * 30.0;
+    assert!((p.volume() - expected).abs() < 1e-3 * funnel_volume);
+
+    // Sunk into a thick block it cuts a pocket of the funnel's shape.
+    let (mut p, _) = block(60.0, 40.0, 30.0);
+    let block_volume = p.volume();
+    funnel(&mut p, 10.0, 20.0, Operation::Cut);
+    p.rebuild();
+    p.assert_ok();
+    assert_eq!(p.bodies().len(), 1);
+    assert!(
+        (p.volume() - block_volume + funnel_volume).abs() < 1e-3 * funnel_volume,
+        "{} vs {}",
+        p.volume(),
+        block_volume - funnel_volume
+    );
 }

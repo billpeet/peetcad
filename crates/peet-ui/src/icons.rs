@@ -101,6 +101,9 @@ pub enum Icon {
     MassProperties,
     Sweep,
     CutSweep,
+    Loft,
+    CutLoft,
+    ConvertToSheet,
     Search,
     Check,
     Select,
@@ -196,6 +199,9 @@ impl Icon {
             C::MassProperties => Self::MassProperties,
             C::Sweep => Self::Sweep,
             C::CutSweep => Self::CutSweep,
+            C::Loft => Self::Loft,
+            C::CutLoft => Self::CutLoft,
+            C::ConvertToSheet => Self::ConvertToSheet,
             C::CommandPalette => Self::Search,
             C::SketchSelect => Self::Select,
             C::SketchLine => Self::Line,
@@ -276,6 +282,9 @@ impl Icon {
             FeatureKind::Import(_) => Self::ImportStep,
             FeatureKind::Sweep(s) if s.operation == Operation::Cut => Self::CutSweep,
             FeatureKind::Sweep(_) => Self::Sweep,
+            FeatureKind::Loft(l) if l.operation == Operation::Cut => Self::CutLoft,
+            FeatureKind::Loft(_) => Self::Loft,
+            FeatureKind::ConvertToSheet(_) => Self::ConvertToSheet,
         }
     }
 
@@ -323,11 +332,12 @@ impl Icon {
             I::Extrude
             | I::Revolve
             | I::Sweep
+            | I::Loft
             | I::FilletEdge
             | I::Chamfer
             | I::Shell
             | I::Draft => Category::Solid,
-            I::Cut | I::CutRevolve | I::CutSweep | I::Hole => Category::Cut,
+            I::Cut | I::CutRevolve | I::CutSweep | I::CutLoft | I::Hole => Category::Cut,
             I::Reference | I::RefPlane | I::RefAxis | I::RefPoint | I::CoordSystem => {
                 Category::Reference
             }
@@ -340,6 +350,7 @@ impl Icon {
             | I::Jog
             | I::MiterFlange
             | I::Corner
+            | I::ConvertToSheet
             | I::Dimple
             | I::Emboss
             | I::Louver => Category::SheetMetal,
@@ -732,6 +743,13 @@ impl<'a> Pen<'a> {
                 self.face(&[(4.0, 6.0), (10.0, 6.0), (10.0, 12.0), (4.0, 12.0)], ac);
                 self.dashed(&[(10.0, 6.0), (12.0, 4.0)], ac);
             }
+            Icon::ConvertToSheet => {
+                // A solid block on the left turning into a bent sheet on the right.
+                self.face(&[(2.0, 9.0), (9.0, 9.0), (9.0, 19.0), (2.0, 19.0)], fg);
+                self.arrow((10.5, 14.0), (15.0, 14.0), fg);
+                self.line(&[(16.0, 19.0), (22.0, 19.0), (22.0, 6.0)], ac);
+                self.line(&[(16.0, 16.5), (19.5, 16.5), (19.5, 6.0)], ac);
+            }
             Icon::Dimple => {
                 self.line(&[(2.0, 17.0), (7.0, 17.0)], fg);
                 self.line(&[(17.0, 17.0), (22.0, 17.0)], fg);
@@ -823,6 +841,21 @@ impl<'a> Pen<'a> {
                     self.dashed(&[(7.0, 17.0), (9.0, 11.0), (14.0, 6.5), (21.0, 5.0)], ac);
                 } else {
                     self.arrow((9.0, 11.0), (20.0, 5.0), ac);
+                }
+            }
+            Icon::Loft | Icon::CutLoft => {
+                // A wide profile below and a narrow one above, joined by the loft's sides.
+                let low = [(2.0, 18.0), (17.0, 18.0), (22.0, 22.0), (7.0, 22.0)];
+                let high = [(8.0, 3.0), (15.0, 3.0), (17.5, 6.0), (10.5, 6.0)];
+                self.face(&low, ac);
+                self.face(&high, ac);
+                let sides = [[(2.0, 18.0), (8.0, 3.0)], [(22.0, 22.0), (17.5, 6.0)]];
+                for side in sides {
+                    if icon == Icon::CutLoft {
+                        self.dashed(&side, fg);
+                    } else {
+                        self.line(&side, fg);
+                    }
                 }
             }
             Icon::FilletEdge | Icon::Chamfer => {
@@ -1193,6 +1226,8 @@ mod tests {
             C::MassProperties,
             C::Sweep,
             C::CutSweep,
+            C::Loft,
+            C::CutLoft,
             C::OpenSampleHousing,
         ];
         let mut seen = std::collections::HashSet::new();

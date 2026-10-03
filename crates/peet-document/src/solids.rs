@@ -239,6 +239,50 @@ impl Document {
             .collect()
     }
 
+    /// Lofts through the profiles of the sketches `sections`, in order (fewer than two: the
+    /// rest to be picked afterwards). What isn't a sketch, or is there twice, is left out.
+    /// The first body of a part is always a new body.
+    pub fn add_loft(&mut self, sections: &[FeatureId], operation: Operation) -> Option<FeatureId> {
+        let mut profiles: Vec<FeatureId> = Vec::with_capacity(sections.len());
+        for s in sections {
+            if self.model.sketch(*s).is_some() && !profiles.contains(s) {
+                profiles.push(*s);
+            }
+        }
+        if profiles.is_empty() {
+            return None;
+        }
+        let operation = if operation == Operation::Add && self.evaluation().bodies.is_empty() {
+            Operation::NewBody
+        } else {
+            operation
+        };
+        let label = if operation == Operation::Cut {
+            "Add Cut-Loft"
+        } else {
+            "Add Loft"
+        };
+        self.add_feature(label, |m| m.add_loft(profiles, operation))
+    }
+
+    /// The sketches that can be further profiles of the loft `feature`: those before it in
+    /// the tree that aren't profiles of it already.
+    pub fn loft_profile_choices(&self, feature: FeatureId) -> Vec<FeatureId> {
+        let before = self.model.index_of(feature).unwrap_or(usize::MAX);
+        let taken: &[FeatureId] = match self.feature(feature).map(|f| &f.kind) {
+            Some(FeatureKind::Loft(l)) => &l.sections,
+            _ => &[],
+        };
+        self.model
+            .features()
+            .enumerate()
+            .filter(|(i, f)| {
+                *i < before && matches!(f.kind, FeatureKind::Sketch(_)) && !taken.contains(&f.id)
+            })
+            .map(|(_, f)| f.id)
+            .collect()
+    }
+
     /// Adds a fillet or a chamfer on `edges` (none: to be picked afterwards).
     pub fn add_blend(&mut self, kind: BlendKind, edges: Vec<EdgeRef>) -> Option<FeatureId> {
         let label = match kind {
@@ -488,6 +532,66 @@ mod tests {
         assert!((volume - 3000.0).abs() < 1e-6, "{volume}");
         assert_eq!(doc.undo().as_deref(), Some("Add Sweep"));
         assert!(doc.bodies.is_empty());
+    }
+
+    #[test]
+    fn loft_joins_sketches_on_parallel_planes() {
+        let mut doc = Document::default();
+        let (mut low, mut high, mut later) = (FeatureId(0), FeatureId(0), FeatureId(0));
+        let square = |m: &mut peet_model::Model, id: FeatureId| {
+            if let Some(f) = m.feature_mut(id).and_then(|f| f.sketch_mut()) {
+                peet_sketch::shapes::rectangle(
+                    &mut f.sketch,
+                    DVec2::new(-10.0, -10.0),
+                    DVec2::new(10.0, 10.0),
+                );
+            }
+        };
+        doc.change("Sketches", |m| {
+            // Two 20 × 20 squares, 30 apart.
+            low = m.add_sketch(PlaneRef::Standard(StdPlane::Top), Plane::TOP);
+            square(m, low);
+            let plane = m.add(FeatureKind::Plane(peet_model::PlaneDef::Offset {
+                from: PlaneRef::Standard(StdPlane::Top),
+                distance: peet_model::Scalar::new(30.0),
+                flip: false,
+            }));
+            high = m.add_sketch(PlaneRef::Feature(plane), Plane::TOP);
+            square(m, high);
+        });
+        // With one profile the feature waits for more.
+        let waiting = doc.add_loft(&[low, low], Operation::Add).unwrap();
+        let Some(FeatureKind::Loft(l)) = doc.feature(waiting).map(|f| &f.kind) else {
+            panic!("not a loft");
+        };
+        assert_eq!(
+            (l.sections.clone(), l.operation),
+            (vec![low], Operation::NewBody)
+        );
+        assert!(doc.status(waiting).unwrap().message().is_some());
+        // A sketch after the loft can't be one of its profiles.
+        doc.change("Later", |m| {
+            later = m.add_sketch(PlaneRef::Standard(StdPlane::Front), StdPlane::Front.plane());
+        });
+        assert_eq!(doc.loft_profile_choices(waiting), vec![high]);
+        doc.undo();
+        assert_eq!(doc.undo().as_deref(), Some("Add Loft"));
+        assert!(doc.add_loft(&[], Operation::Add).is_none());
+        assert!(doc.add_loft(&[FeatureId(9999)], Operation::Add).is_none());
+
+        let id = doc.add_loft(&[low, high], Operation::Add).unwrap();
+        assert_eq!(doc.status(id), Some(&Status::Ok));
+        assert!(doc.loft_profile_choices(id).is_empty());
+        assert_eq!(doc.bodies.len(), 1);
+        let volume = doc.bodies[0].mass_properties().unwrap().volume;
+        assert!((volume - 12000.0).abs() < 1e-3, "{volume}");
+        assert!(
+            !doc.feature(high).unwrap().visible,
+            "the profiles are hidden"
+        );
+        assert_eq!(doc.undo().as_deref(), Some("Add Loft"));
+        assert!(doc.feature(id).is_none() && doc.bodies.is_empty());
+        assert!(doc.feature(high).unwrap().visible);
     }
 
     #[test]

@@ -1,15 +1,51 @@
 //! STEP import (ISO 10303-21 clear text; AP203, AP214 and AP242) of solids as exact
 //! B-reps: the inverse of [`crate::step`].
 //!
-//! **Scope.** The kernel is analytic, so the reader takes the analytic part of STEP:
-//! `MANIFOLD_SOLID_BREP` and `BREP_WITH_VOIDS` whose faces lie on a `PLANE`,
-//! `CYLINDRICAL_SURFACE`, `CONICAL_SURFACE`, `SPHERICAL_SURFACE`, `TOROIDAL_SURFACE` or
-//! `DEGENERATE_TOROIDAL_SURFACE` and whose edges are a `LINE`, `CIRCLE` or `ELLIPSE` (also
-//! inside a `SURFACE_CURVE`, `SEAM_CURVE`, `INTERSECTION_CURVE` or `TRIMMED_CURVE`).
-//! Anything else on a face or an edge (B-splines, swept and offset surfaces) is an error
-//! that names the entity. Surface bodies (`SHELL_BASED_SURFACE_MODEL`) and faceted bodies
-//! are skipped with a warning. Colours, layers, annotations and everything else in the
-//! file are ignored.
+//! **Scope.** The reader takes what the kernel has: `MANIFOLD_SOLID_BREP` and
+//! `BREP_WITH_VOIDS` whose faces lie on a `PLANE`, `CYLINDRICAL_SURFACE`,
+//! `CONICAL_SURFACE`, `SPHERICAL_SURFACE`, `TOROIDAL_SURFACE`,
+//! `DEGENERATE_TOROIDAL_SURFACE`, a B-spline surface or a swept surface, and whose edges
+//! are a `LINE`, `CIRCLE`, `ELLIPSE` or B-spline curve (also inside a `SURFACE_CURVE`,
+//! `SEAM_CURVE`, `INTERSECTION_CURVE` or `TRIMMED_CURVE`). Anything else on a face or an
+//! edge (offset and trimmed surfaces, edges given only as a `PCURVE`) is an error that
+//! names the entity. Surface bodies (`SHELL_BASED_SURFACE_MODEL`) and faceted bodies are
+//! skipped with a warning. Colours, layers, annotations and everything else in the file
+//! are ignored.
+//!
+//! **Freeform geometry.** B-splines come as `B_SPLINE_CURVE_WITH_KNOTS` and
+//! `B_SPLINE_SURFACE_WITH_KNOTS` (knots with their multiplicities), `BEZIER_`,
+//! `QUASI_UNIFORM_` and `UNIFORM_CURVE` / `_SURFACE` (knots implied), and as complex
+//! instances that add weights (`RATIONAL_B_SPLINE_CURVE` / `_SURFACE`). They become
+//! [`peet_kernel::nurbs`] curves and surfaces, control point for control point (a
+//! surface's are listed a row along `v` for each step in `u`, the kernel's order). What
+//! the kernel does not have is converted, exactly, or refused:
+//!
+//! - *Knots that are not clamped* (uniform ones, the "periodic" way of writing a closed
+//!   curve): knots are inserted at the ends of the curve's range until it is clamped.
+//! - *Closed curves and surfaces.* The kernel's are not periodic: an edge is a stretch
+//!   `t0 < t1` of its curve, and a face a simple region of its surface's parameter
+//!   rectangle. Whether a B-spline closes on itself is seen from its shape (its ends
+//!   meet), not from the file's `closed` flags. An edge that runs across the start of a
+//!   closed curve, or all the way round it from a vertex elsewhere, gets the curve put
+//!   together anew from where the edge starts. A face on a closed surface gets the
+//!   surface cut down to the stretch the face covers (put together across the surface's
+//!   seam, where the face lies across it). A face that goes all the way round, with a
+//!   seam edge used twice, is first cut in two along a line of constant parameter half
+//!   way round from its seam, which splits the edges the line meets (and so adds
+//!   vertices to the neighbouring faces). A face that goes all the way round *without* a
+//!   seam (a band between two closed edges) is refused.
+//! - *Pinched surfaces.* A B-spline surface with an edge squeezed to a point (the tip of
+//!   a curve turned about an axis it ends on, a three-sided patch) has no parameters
+//!   there, which the kernel's freeform faces can't cope with yet: a face that comes to
+//!   such a point is refused. (A sphere or cone written as such is fine: those have
+//!   their poles.)
+//!
+//! `SURFACE_OF_LINEAR_EXTRUSION` and `SURFACE_OF_REVOLUTION` of a line, circle, ellipse or
+//! B-spline become the plane, cylinder, cone, sphere or torus they are, where they are
+//! one (a line swept sideways, a circle turned about a line in its plane), with the face
+//! turned over where that surface faces the other way. Otherwise they become an exact
+//! B-spline surface, as long as the face needs: ruled along the extrusion, or a rational
+//! quadratic round the axis (which closes on itself, and is treated as above).
 //!
 //! **Reading.** The file is tokenised and parsed into a table of entity instances
 //! (`#12=NAME(..);`, or a complex instance `#12=(A(..) B(..));`). Strings understand `''`
@@ -23,9 +59,9 @@
 //! **Units.** Each brep is an item of a representation whose context
 //! (`GLOBAL_UNIT_ASSIGNED_CONTEXT`) names the length unit (an `SI_UNIT` with its prefix,
 //! or a `CONVERSION_BASED_UNIT` such as the inch) and the plane angle unit (radians, or
-//! degrees as a conversion based unit). Lengths are converted to millimetres and angles
-//! (only a cone's semi-angle is one) to radians. A file that names no unit is taken to be
-//! in millimetres and radians, with a warning.
+//! degrees as a conversion based unit). Lengths (a B-spline's control points among them)
+//! are converted to millimetres and angles (only a cone's semi-angle is one) to radians.
+//! A file that names no unit is taken to be in millimetres and radians, with a warning.
 //!
 //! **Orientation.** STEP's conventions are the kernel's (see [`crate::step`] and
 //! [`peet_kernel::topo`]), so most of the mapping is direct: `Face.reversed` is
@@ -36,8 +72,9 @@
 //! - *Edges.* A kernel edge runs along its curve in the direction of increasing parameter.
 //!   An `EDGE_CURVE` with `same_sense = .F.` (or a line whose vertices are given against
 //!   its direction) gets its curve turned round: a line's direction is negated, a circle's
-//!   or ellipse's frame is turned half a turn about its X axis. The parameter range comes
-//!   from the vertices; a closed edge spans one period.
+//!   or ellipse's frame is turned half a turn about its X axis, a B-spline's control
+//!   points are listed backwards. The parameter range comes from the vertices; a closed
+//!   edge spans one period, or the whole of a closed B-spline.
 //! - *Outer loops.* The kernel wants a face's outer loop first. `FACE_OUTER_BOUND` is not
 //!   reliable (many writers use plain `FACE_BOUND` throughout), so the outer loop is the
 //!   one that runs counter-clockwise seen from outside: the one with a positive area in the
@@ -77,10 +114,12 @@
 
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
+use std::sync::Arc;
 
 use peet_kernel::geom::{
     Circle3, Cone, Curve3, Cylinder, Ellipse3, Line3, Sphere, Surface, Torus, pole_exit,
 };
+use peet_kernel::nurbs::{NurbsCurve, NurbsError, NurbsSurface};
 use peet_kernel::topo::{EdgeId, ShellId, Solid, VertexId};
 use peet_kernel::validate::{measure, validate};
 use peet_math::{DQuat, DVec2, DVec3, Frame, Plane, tolerance};
@@ -135,6 +174,27 @@ const ALONG_SEAM: f64 = 1e-9;
 
 /// How many evenly spaced angles are tried for a seam after the loops' own vertices.
 const SEAM_TRIES: usize = 16;
+
+/// The highest degree of a B-spline the kernel works with.
+const MAX_DEGREE: usize = 15;
+
+/// A B-spline curve or surface is closed when its ends are this close together (mm).
+const CLOSED: f64 = VERTEX_MERGE;
+
+/// A face covers a closed freeform surface all the way round when it leaves less than
+/// this fraction of the surface's period free.
+const FULL_TURN: f64 = 1e-6;
+
+/// A closed freeform surface is cut down to its face with at most this fraction of its
+/// period to spare on either side.
+const TRIM_MARGIN: f64 = 1.0 / 16.0;
+
+/// Where a face that goes all the way round a closed freeform surface is tried for a
+/// cut, as fractions of the period from the face's seam.
+const CUT_TRIES: [f64; 7] = [0.5, 0.375, 0.625, 0.25, 0.75, 0.4375, 0.5625];
+
+/// How often a face on a closed freeform surface is cut or trimmed before giving up.
+const UNWRAP_PASSES: usize = 16;
 
 /// One solid of the file, in millimetres.
 #[derive(Clone, Debug, PartialEq)]
@@ -858,6 +918,27 @@ impl<'a> Ent<'a> {
         }
     }
 
+    /// A whole number that is not negative (a degree).
+    fn count(&self, i: usize) -> Result<usize> {
+        match self.param(i)? {
+            Value::Int(v) => match usize::try_from(*v) {
+                Ok(v) => Ok(v),
+                Err(_) => self.bad(i, "a whole number that is not negative"),
+            },
+            _ => self.bad(i, "a whole number"),
+        }
+    }
+
+    /// The numbers of a list.
+    fn reals_in(&self, i: usize, list: &[Value]) -> Result<Vec<f64>> {
+        list.iter()
+            .map(|v| match number(v) {
+                Some(x) => Ok(x),
+                None => self.bad(i, "a list of numbers"),
+            })
+            .collect()
+    }
+
     fn logical(&self, i: usize) -> Result<bool> {
         match self.param(i)? {
             Value::Enum(e) if e == "T" => Ok(true),
@@ -1514,6 +1595,28 @@ struct Sample {
     uv: DVec2,
 }
 
+/// A loop followed across a freeform surface that closes on itself.
+struct FreeLift {
+    /// The loop's samples; `coedge` indexes its uses.
+    samples: Vec<Sample>,
+    /// Whole turns the loop makes round the surface in `u` and in `v`.
+    turns: [i32; 2],
+    /// The lowest and the highest parameters the loop reaches.
+    low: DVec2,
+    high: DVec2,
+}
+
+/// What a step of bringing a face on a closed freeform surface into the kernel's form
+/// did.
+enum Unwrapped {
+    /// Nothing: the surface does not close on itself (any more).
+    Open,
+    /// The surface was cut down to the face.
+    Trimmed,
+    /// The face was cut in two; the other half is the shell's face with this index.
+    Cut(usize),
+}
+
 /// Where a seam meets a loop: on raw edge `edge` at parameter `t`.
 #[derive(Clone, Copy)]
 struct Hit {
@@ -1632,6 +1735,9 @@ impl<'a> Builder<'a> {
             id,
             rec: &records[0],
         };
+        if records.iter().any(|r| is_spline(&r.name, "SURFACE")) {
+            return self.spline_surface(id, records);
+        }
         if records.len() != 1 {
             return Err(unsupported(id, records, "surface"));
         }
@@ -1701,6 +1807,9 @@ impl<'a> Builder<'a> {
             "INTERSECTION_CURVE",
             "BOUNDED_SURFACE_CURVE",
         ];
+        if records.iter().any(|r| is_spline(&r.name, "CURVE")) {
+            return Ok((self.spline_curve(id, records)?, true));
+        }
         let rec = match records {
             [only] => only,
             _ => records
@@ -1760,8 +1869,223 @@ impl<'a> Builder<'a> {
                 let agrees = !matches!(e.rec.params.get(4), Some(Value::Enum(s)) if s == "F");
                 (curve, forward == agrees)
             }
+            "PCURVE" => {
+                return Err(error(format!(
+                    "This STEP file has an edge that is given only as a curve in its surface's \
+                     parameters (entity #{id} PCURVE), which PeetCAD can't import yet. Export \
+                     the model with its edges as curves in space."
+                )));
+            }
             _ => return Err(unsupported(id, records, "curve")),
         })
+    }
+
+    /// A `SURFACE_OF_LINEAR_EXTRUSION` or `SURFACE_OF_REVOLUTION` as a surface of the
+    /// kernel's: the plane, cylinder, cone, sphere or torus it is, where it is one, or
+    /// else an exact B-spline surface, long enough for the face bounded by `loops`. Also
+    /// returns whether the kernel's surface faces the other way than the file's.
+    fn swept_surface(&self, e: &Ent, loops: &[Vec<Use>]) -> Result<(Surface, bool)> {
+        let (curve, forward) = self.curve(e.reference(1)?, e, 0)?;
+        let curve = if forward { curve } else { turned_round(&curve) };
+        // Points of the face, to see how far the surface has to reach.
+        let mut points = Vec::new();
+        for &(edge, _) in loops.iter().flatten() {
+            let edge = &self.edges[edge];
+            points.extend((0..=8).map(|k| {
+                edge.curve
+                    .point(edge.t0 + (edge.t1 - edge.t0) * f64::from(k) / 8.0)
+            }));
+        }
+        let made = if e.name() == "SURFACE_OF_LINEAR_EXTRUSION" {
+            let vector = e.child(2, &["VECTOR"])?;
+            let dir = self.direction(vector.reference(1)?, Some(&vector))?;
+            extruded(&curve, dir, &points)
+        } else {
+            let axis = e.child(2, &["AXIS1_PLACEMENT"])?;
+            let origin = self.point(axis.reference(1)?, Some(&axis))?;
+            let dir = match axis.optional(2)? {
+                Some(d) => self.direction(d, Some(&axis))?,
+                None => DVec3::Z,
+            };
+            revolved(&curve, origin, dir, &points)
+        };
+        match made {
+            Some((surface, at, normal)) => {
+                let flipped = surface.normal_at(at).dot(normal) < 0.0;
+                Ok((surface, flipped))
+            }
+            None => Err(error(format!(
+                "This STEP file has a swept surface PeetCAD can't import (entity #{} {}): its \
+                 curve is swept along itself, or the face on it has no edges to say how far \
+                 it reaches. Try exporting the model again, or from a different program.",
+                e.id,
+                e.name()
+            ))),
+        }
+    }
+
+    /// A B-spline curve: `B_SPLINE_CURVE_WITH_KNOTS`, `BEZIER_CURVE`,
+    /// `QUASI_UNIFORM_CURVE` or `UNIFORM_CURVE`, or the complex instance that adds
+    /// weights (`RATIONAL_B_SPLINE_CURVE`) to one of them.
+    fn spline_curve(&self, id: u32, records: &'a [Record]) -> Result<Curve3> {
+        let file = self.file;
+        let part = |name: &str| {
+            records
+                .iter()
+                .find(|r| r.name == name)
+                .map(|rec| Ent { file, id, rec })
+        };
+        // The record with the degree and the control points, and where they start in it:
+        // after the name in a simple instance.
+        let simple = records.len() == 1;
+        let (base, at) = match (simple, part("B_SPLINE_CURVE")) {
+            (true, _) => (
+                Ent {
+                    file,
+                    id,
+                    rec: &records[0],
+                },
+                1,
+            ),
+            (false, Some(e)) => (e, 0),
+            (false, None) => return Err(unsupported(id, records, "curve")),
+        };
+        let degree = base.count(at)?;
+        let points = base
+            .refs(at + 1)?
+            .into_iter()
+            .map(|p| self.point(p, Some(&base)))
+            .collect::<Result<Vec<_>>>()?;
+        check_spline_size(&base, degree, points.len(), "")?;
+        let knots = if let Some(k) = part("B_SPLINE_CURVE_WITH_KNOTS") {
+            let first = if simple { at + 5 } else { 0 };
+            given_knots(&k, first, first + 1, degree, points.len(), "")?
+        } else if part("BEZIER_CURVE").is_some() {
+            regular_knots(&base, KnotKind::Bezier, degree, points.len())?
+        } else if part("QUASI_UNIFORM_CURVE").is_some() {
+            regular_knots(&base, KnotKind::QuasiUniform, degree, points.len())?
+        } else if part("UNIFORM_CURVE").is_some() {
+            regular_knots(&base, KnotKind::Uniform, degree, points.len())?
+        } else {
+            return Err(no_knots(id, records, "curve"));
+        };
+        let weights = match part("RATIONAL_B_SPLINE_CURVE") {
+            Some(r) if !simple => {
+                let weights = r.reals_in(0, r.list(0)?)?;
+                if weights.len() != points.len() {
+                    return Err(damaged(format!(
+                        "#{id} RATIONAL_B_SPLINE_CURVE has {} weights for {} control points",
+                        weights.len(),
+                        points.len()
+                    )));
+                }
+                Some(weights)
+            }
+            _ => None,
+        };
+        match NurbsCurve::from_unclamped(degree, knots, points, weights) {
+            Ok(curve) => Ok(Curve3::Nurbs(Arc::new(curve))),
+            Err(why) => Err(bad_spline(id, records, "curve", &why)),
+        }
+    }
+
+    /// A B-spline surface: `B_SPLINE_SURFACE_WITH_KNOTS`, `BEZIER_SURFACE`,
+    /// `QUASI_UNIFORM_SURFACE` or `UNIFORM_SURFACE`, or the complex instance that adds
+    /// weights (`RATIONAL_B_SPLINE_SURFACE`) to one of them. The control points are a list
+    /// of rows, one per step in `u`, each running along `v`: the kernel's order.
+    fn spline_surface(&self, id: u32, records: &'a [Record]) -> Result<Surface> {
+        let file = self.file;
+        let part = |name: &str| {
+            records
+                .iter()
+                .find(|r| r.name == name)
+                .map(|rec| Ent { file, id, rec })
+        };
+        let simple = records.len() == 1;
+        let (base, at) = match (simple, part("B_SPLINE_SURFACE")) {
+            (true, _) => (
+                Ent {
+                    file,
+                    id,
+                    rec: &records[0],
+                },
+                1,
+            ),
+            (false, Some(e)) => (e, 0),
+            (false, None) => return Err(unsupported(id, records, "surface")),
+        };
+        let (degree_u, degree_v) = (base.count(at)?, base.count(at + 1)?);
+        let rows = base.list(at + 2)?;
+        let mut points = Vec::new();
+        let mut count_v = None;
+        for row in rows {
+            let Value::List(row) = row else {
+                return base.bad(at + 2, "a list of rows of control points");
+            };
+            if *count_v.get_or_insert(row.len()) != row.len() {
+                return Err(damaged(format!(
+                    "the rows of control points of #{id} {} are not all the same length",
+                    base.name()
+                )));
+            }
+            for v in row {
+                let Value::Ref(p) = v else {
+                    return base.bad(at + 2, "a list of rows of references to points");
+                };
+                points.push(self.point(*p, Some(&base))?);
+            }
+        }
+        let (count_u, count_v) = (rows.len(), count_v.unwrap_or(0));
+        check_spline_size(&base, degree_u, count_u, " in u")?;
+        check_spline_size(&base, degree_v, count_v, " in v")?;
+        let (knots_u, knots_v) = if let Some(k) = part("B_SPLINE_SURFACE_WITH_KNOTS") {
+            let first = if simple { at + 7 } else { 0 };
+            (
+                given_knots(&k, first, first + 2, degree_u, count_u, " in u")?,
+                given_knots(&k, first + 1, first + 3, degree_v, count_v, " in v")?,
+            )
+        } else {
+            let kind = if part("BEZIER_SURFACE").is_some() {
+                KnotKind::Bezier
+            } else if part("QUASI_UNIFORM_SURFACE").is_some() {
+                KnotKind::QuasiUniform
+            } else if part("UNIFORM_SURFACE").is_some() {
+                KnotKind::Uniform
+            } else {
+                return Err(no_knots(id, records, "surface"));
+            };
+            (
+                regular_knots(&base, kind, degree_u, count_u)?,
+                regular_knots(&base, kind, degree_v, count_v)?,
+            )
+        };
+        let weights = match part("RATIONAL_B_SPLINE_SURFACE") {
+            Some(r) if !simple => {
+                let mut weights = Vec::with_capacity(points.len());
+                let rows = r.list(0)?;
+                for row in rows {
+                    let Value::List(row) = row else {
+                        return r.bad(0, "a list of rows of weights");
+                    };
+                    if row.len() != count_v {
+                        break;
+                    }
+                    weights.extend(r.reals_in(0, row)?);
+                }
+                if rows.len() != count_u || weights.len() != points.len() {
+                    return Err(damaged(format!(
+                        "the weights of #{id} RATIONAL_B_SPLINE_SURFACE are not one for each of \
+                         its {count_u} by {count_v} control points"
+                    )));
+                }
+                Some(weights)
+            }
+            _ => None,
+        };
+        match NurbsSurface::from_unclamped(degree_u, degree_v, knots_u, knots_v, points, weights) {
+            Ok(surface) => Ok(Surface::Nurbs(Arc::new(surface))),
+            Err(why) => Err(bad_spline(id, records, "surface", &why)),
+        }
     }
 
     // -- Topology --
@@ -1845,6 +2169,14 @@ impl<'a> Builder<'a> {
                     (t0, if t1 <= t0 { t1 + TAU } else { t1 })
                 }
             }
+            Curve3::Nurbs(ref spline) => {
+                if coincide {
+                    self.merge(start, end);
+                }
+                let (spline, t0, t1) = spline_edge(id, spline, a, b, coincide)?;
+                curve = Curve3::Nurbs(spline);
+                (t0, t1)
+            }
         };
         self.edges.push(RawEdge {
             curve,
@@ -1871,8 +2203,16 @@ impl<'a> Builder<'a> {
             .file
             .expect(id, &["ADVANCED_FACE", "FACE_SURFACE"], Some(from))?;
         let bounds = e.refs(1)?;
-        let surface = self.surface(e.reference(2)?, &e)?;
-        let reversed = !e.logical(3)?;
+        // A swept surface is made to fit the face: it waits for the face's edges.
+        let swept = self.file.find(
+            e.reference(2)?,
+            &["SURFACE_OF_LINEAR_EXTRUSION", "SURFACE_OF_REVOLUTION"],
+        );
+        let surface = match swept {
+            Some(_) => None,
+            None => Some(self.surface(e.reference(2)?, &e)?),
+        };
+        let mut reversed = !e.logical(3)?;
         let mut loops = Vec::new();
         for bound in bounds {
             let bound = self
@@ -1930,6 +2270,15 @@ impl<'a> Builder<'a> {
             }
             loops.push(uses);
         }
+        let surface = match (surface, swept) {
+            (Some(surface), _) => surface,
+            (None, Some(swept)) => {
+                let (surface, flipped) = self.swept_surface(&swept, &loops)?;
+                reversed ^= flipped;
+                surface
+            }
+            (None, None) => self.surface(e.reference(2)?, &e)?,
+        };
         Ok(RawFace {
             id,
             surface,
@@ -1974,18 +2323,26 @@ impl<'a> Builder<'a> {
         }
         self.split_at_poles()?;
         for s in 0..self.shells.len() {
-            for f in 0..self.shells[s].len() {
+            // Cutting a face in two adds one to the shell: the count is not fixed.
+            let mut f = 0;
+            while f < self.shells[s].len() {
                 if self.shells[s][f].surface.is_periodic_u() {
                     self.close_periodic(s, f)?;
+                } else if matches!(self.shells[s][f].surface, Surface::Nurbs(_)) {
+                    self.refuse_pinched(s, f)?;
+                    self.unwrap_freeform(s, f)?;
                 }
                 self.outer_loop_first(s, f)?;
+                f += 1;
             }
         }
         let mut emitter = Emitter::default();
         for faces in &self.shells {
             let shell = emitter.solid.add_shell();
             for face in faces {
-                let f = emitter.solid.add_face(shell, face.surface, face.reversed);
+                let f = emitter
+                    .solid
+                    .add_face(shell, face.surface.clone(), face.reversed);
                 for uses in &face.loops {
                     let uses = emitter.uses(self, uses);
                     emitter.solid.add_loop(f, &uses);
@@ -2136,6 +2493,8 @@ impl<'a> Builder<'a> {
             });
             let steps = match edge.curve {
                 Curve3::Line(_) => LINE_STEPS,
+                // A B-spline's parameter says nothing about how far it goes.
+                Curve3::Nurbs(_) => freeform_steps(&edge.curve, ta, tb),
                 _ => ((tb - ta).abs() / SAMPLE_STEP).ceil().clamp(1.0, 256.0) as usize,
             };
             for k in 1..steps {
@@ -2426,7 +2785,7 @@ impl<'a> Builder<'a> {
     fn close_periodic(&mut self, s: usize, f: usize) -> Result<()> {
         let (surface, reversed) = {
             let face = &self.shells[s][f];
-            (face.surface, face.reversed)
+            (face.surface.clone(), face.reversed)
         };
         let mut lifts = Vec::new();
         for uses in &self.shells[s][f].loops {
@@ -2557,12 +2916,362 @@ impl<'a> Builder<'a> {
         Ok(())
     }
 
+    /// Follows a loop across a freeform surface that closes on itself: every sample takes
+    /// the parameters closest to those of the one before.
+    fn lift_freeform(&self, closed: &Closed, uses: &[Use]) -> FreeLift {
+        let mut samples: Vec<Sample> = Vec::new();
+        let mut near = None;
+        for (i, &(e, against)) in uses.iter().enumerate() {
+            let edge = &self.edges[e];
+            let (ta, tb) = if against {
+                (edge.t1, edge.t0)
+            } else {
+                (edge.t0, edge.t1)
+            };
+            let steps = freeform_steps(&edge.curve, ta, tb);
+            for k in 0..=steps {
+                let t = if k == steps {
+                    tb
+                } else {
+                    ta + (tb - ta) * k as f64 / steps as f64
+                };
+                let uv = closed.lifted(edge.curve.point(t), near);
+                samples.push(Sample { coedge: i, t, uv });
+                near = Some(uv);
+            }
+        }
+        let mut turns = [0; 2];
+        let (mut low, mut high) = (DVec2::INFINITY, DVec2::NEG_INFINITY);
+        for sample in &samples {
+            low = low.min(sample.uv);
+            high = high.max(sample.uv);
+        }
+        if let (Some(first), Some(last)) = (samples.first(), samples.last()) {
+            for (axis, turns) in turns.iter_mut().enumerate() {
+                if let Some(period) = closed.periods[axis] {
+                    *turns = ((last.uv[axis] - first.uv[axis]) / period).round() as i32;
+                }
+            }
+        }
+        FreeLift {
+            samples,
+            turns,
+            low,
+            high,
+        }
+    }
+
+    /// Where a loop followed across a closed freeform surface crosses the line
+    /// `uv[axis] = cut`. `None` when an edge runs along the line.
+    fn freeform_crossings(
+        &self,
+        closed: &Closed,
+        uses: &[Use],
+        lift: &FreeLift,
+        axis: usize,
+        cut: f64,
+    ) -> Option<Vec<Hit>> {
+        let along = 1e-9 * closed.periods[axis]?;
+        let above = |x: f64| x >= cut;
+        let mut hits = Vec::new();
+        for pair in lift.samples.windows(2) {
+            let (a, b) = (&pair[0], &pair[1]);
+            if a.coedge != b.coedge {
+                // The same vertex, seen from both its edges.
+                continue;
+            }
+            let (xa, xb) = (a.uv[axis], b.uv[axis]);
+            if (xa - cut).abs() < along && (xb - cut).abs() < along {
+                return None;
+            }
+            if above(xa) == above(xb) {
+                continue;
+            }
+            let (edge, _) = uses[a.coedge];
+            let curve = &self.edges[edge].curve;
+            let (mut ta, mut tb) = (a.t, b.t);
+            for _ in 0..48 {
+                let mid = 0.5 * (ta + tb);
+                let uv = closed.lifted(curve.point(mid), Some(a.uv));
+                if above(uv[axis]) == above(xa) {
+                    ta = mid;
+                } else {
+                    tb = mid;
+                }
+            }
+            hits.push(Hit {
+                edge,
+                t: 0.5 * (ta + tb),
+            });
+            if hits.len() > 8 {
+                return None;
+            }
+        }
+        Some(hits)
+    }
+
+    /// Refuses a face that comes to a point where its B-spline surface is pinched
+    /// together (one of the surface's edges is a single point: the tip of a curve turned
+    /// about an axis it ends on, a three-sided patch). The kernel's freeform faces can't
+    /// have such a corner yet: their parameters mean nothing there.
+    fn refuse_pinched(&self, s: usize, f: usize) -> Result<()> {
+        let face = &self.shells[s][f];
+        let Surface::Nurbs(surface) = &face.surface else {
+            return Ok(());
+        };
+        let (lo, hi) = surface.domain();
+        let ends = [(true, lo.y), (true, hi.y), (false, lo.x), (false, hi.x)];
+        for (along_u, at) in ends {
+            let edge = surface.iso_curve(along_u, at);
+            let bounds = edge.bounds();
+            if (bounds.max - bounds.min).length() > CLOSED {
+                continue;
+            }
+            let pole = edge.point(edge.domain().0);
+            let touches = face.loops.iter().flatten().any(|&(e, _)| {
+                let e = &self.edges[e];
+                let t = e.curve.param(pole).clamp(e.t0, e.t1);
+                [t, e.t0, e.t1]
+                    .iter()
+                    .any(|&t| e.curve.point(t).distance(pole) <= CLOSED)
+            });
+            if touches {
+                return Err(error(format!(
+                    "This STEP file has a freeform face that comes to a point where its \
+                     surface is pinched together (entity #{}: the tip of a turned curve, or a \
+                     three-sided patch), which PeetCAD can't import yet. Try exporting the \
+                     model from a different program.",
+                    face.id
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// Makes a face on a B-spline surface that closes on itself (a tube, a ring) a simple
+    /// region of a surface that does not, as the kernel wants its freeform faces: the
+    /// surface is cut down to the stretch the face covers, and a face that goes all the
+    /// way round (one with a seam) is first cut in two. See the module docs.
+    fn unwrap_freeform(&mut self, s: usize, f: usize) -> Result<()> {
+        let id = self.shells[s][f].id;
+        let mut work = vec![f];
+        while let Some(f) = work.pop() {
+            let mut passes = 0;
+            for axis in 0..2 {
+                loop {
+                    passes += 1;
+                    if passes > UNWRAP_PASSES {
+                        return Err(wraps_freeform(id));
+                    }
+                    match self.unwrap_axis(s, f, axis)? {
+                        Unwrapped::Open => break,
+                        Unwrapped::Trimmed => {}
+                        Unwrapped::Cut(other) => work.push(other),
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// One step of [`Builder::unwrap_freeform`] in `u` (`axis == 0`) or `v`.
+    fn unwrap_axis(&mut self, s: usize, f: usize, axis: usize) -> Result<Unwrapped> {
+        let Surface::Nurbs(surface) = self.shells[s][f].surface.clone() else {
+            return Ok(Unwrapped::Open);
+        };
+        let closed = Closed::of(&surface);
+        let Some(period) = closed.periods[axis] else {
+            return Ok(Unwrapped::Open);
+        };
+        let id = self.shells[s][f].id;
+        let (lo, hi) = surface.domain();
+        let lifts: Vec<FreeLift> = self.shells[s][f]
+            .loops
+            .iter()
+            .map(|uses| self.lift_freeform(&closed, uses))
+            .collect();
+        // A loop that goes round the surface: a band between two of them, with no seam
+        // to cut along.
+        if lifts.iter().any(|l| l.turns[axis] != 0) {
+            return Err(wraps_freeform(id));
+        }
+        // The outer loop reaches furthest.
+        let width = |l: &FreeLift| l.high[axis] - l.low[axis];
+        let Some(outer) =
+            (0..lifts.len()).max_by(|&a, &b| width(&lifts[a]).total_cmp(&width(&lifts[b])))
+        else {
+            return Err(wraps_freeform(id));
+        };
+        let (a, b) = (lifts[outer].low[axis], lifts[outer].high[axis]);
+        if !(a.is_finite() && b.is_finite()) {
+            return Err(wraps_freeform(id));
+        }
+        if b - a > period * (1.0 - FULL_TURN) {
+            return self
+                .cut_freeform(s, f, &closed, axis, &lifts, outer)
+                .map(Unwrapped::Cut);
+        }
+        // The stretch the face covers, with some to spare but never the whole turn, and
+        // counted from the surface's own range.
+        let margin = (0.25 * (period - (b - a))).min(TRIM_MARGIN * period);
+        let shift = ((a - lo[axis]) / period + 1e-9).floor() * period;
+        let (a, b) = (a - shift, b - shift);
+        let from = (a - margin).max(lo[axis]);
+        let to = if b <= hi[axis] + 1e-9 * period {
+            (b + margin).min(hi[axis])
+        } else {
+            b + margin
+        };
+        let band =
+            band_of_closed(&surface, axis, from, to).map_err(|why| freeform_failed(id, &why))?;
+        self.shells[s][f].surface = Surface::Nurbs(Arc::new(band));
+        Ok(Unwrapped::Trimmed)
+    }
+
+    /// Cuts a face that goes all the way round a closed freeform surface in two, along a
+    /// line of constant `uv[axis]` from one side of its outer loop to the other. The new
+    /// face is added to the shell; its index is returned.
+    fn cut_freeform(
+        &mut self,
+        s: usize,
+        f: usize,
+        closed: &Closed,
+        axis: usize,
+        lifts: &[FreeLift],
+        outer: usize,
+    ) -> Result<usize> {
+        let id = self.shells[s][f].id;
+        let other = 1 - axis;
+        let surface = closed.surface;
+        let (lo, hi) = surface.domain();
+        let period = hi[axis] - lo[axis];
+        let seam = lifts[outer].low[axis];
+        let clearance = 1e-6 * period;
+        // A line that crosses the outer loop twice and no hole.
+        let mut found = None;
+        for fraction in CUT_TRIES {
+            let cut = seam + period * fraction;
+            let through_a_hole = lifts.iter().enumerate().any(|(l, lift)| {
+                let (low, high) = (lift.low[axis] - clearance, lift.high[axis] + clearance);
+                l != outer && cut + ((low - cut) / period).ceil() * period <= high
+            });
+            if through_a_hole {
+                continue;
+            }
+            let uses = &self.shells[s][f].loops[outer];
+            if let Some(hits) = self.freeform_crossings(closed, uses, &lifts[outer], axis, cut)
+                && hits.len() == 2
+            {
+                found = Some((fraction, cut, hits));
+                break;
+            }
+        }
+        let Some((fraction, cut, mut hits)) = found else {
+            return Err(wraps_freeform(id));
+        };
+        // On one edge, the later crossing first: splitting there leaves the earlier one
+        // where it was.
+        if hits[0].edge == hits[1].edge && hits[0].t < hits[1].t {
+            hits.swap(0, 1);
+        }
+        self.vertex_at(hits[0])?;
+        self.vertex_at(hits[1])?;
+
+        // The loop's edges on either side of the line: two runs.
+        let mut uses = self.shells[s][f].loops[outer].clone();
+        let lift = self.lift_freeform(closed, &uses);
+        let line = lift.low[axis] + period * fraction;
+        let mut beyond = Vec::with_capacity(uses.len());
+        let mut at = 0;
+        for i in 0..uses.len() {
+            let count = lift.samples[at..]
+                .iter()
+                .take_while(|sample| sample.coedge == i)
+                .count();
+            let Some(middle) = lift.samples.get(at + count / 2) else {
+                return Err(wraps_freeform(id));
+            };
+            beyond.push(middle.uv[axis] > line);
+            at += count;
+        }
+        let n = uses.len();
+        let starts: Vec<usize> = (0..n)
+            .filter(|&i| beyond[i] && !beyond[(i + n - 1) % n])
+            .collect();
+        let [first] = starts[..] else {
+            return Err(wraps_freeform(id));
+        };
+        uses.rotate_left(first);
+        beyond.rotate_left(first);
+        let run = beyond.iter().take_while(|b| **b).count();
+
+        // The edge along the line, from the run's one end to its other, in the direction
+        // the line's own parameter grows.
+        let lift = self.lift_freeform(closed, &uses);
+        let end = lift.samples.iter().rev().find(|x| x.coedge + 1 == run);
+        let (Some(start), Some(end)) = (lift.samples.first(), end) else {
+            return Err(wraps_freeform(id));
+        };
+        let (x, y) = (self.use_start(uses[0]), self.use_end(uses[run - 1]));
+        let (from, to, a, b, back) = if end.uv[other] > start.uv[other] {
+            (start.uv[other], end.uv[other], x, y, true)
+        } else {
+            (end.uv[other], start.uv[other], y, x, false)
+        };
+        // (Not so for a NaN either.)
+        let has_length = to - from > 1e-9 * (hi[other] - lo[other]);
+        if !has_length {
+            return Err(wraps_freeform(id));
+        }
+        let iso = surface.iso_curve(axis == 1, lo[axis] + (cut - lo[axis]).rem_euclid(period));
+        let (curve, t0, t1) = if closed.periods[other].is_some() {
+            arc_of_closed(&iso, from, to).map_err(|why| freeform_failed(id, &why))?
+        } else {
+            (iso, from.max(lo[other]), to.min(hi[other]))
+        };
+        self.edges.push(RawEdge {
+            curve: Curve3::Nurbs(Arc::new(curve)),
+            start: a,
+            end: b,
+            t0,
+            t1,
+        });
+        let cut_edge = self.edges.len() - 1;
+        let mut kept = vec![uses[..run].to_vec()];
+        let mut moved = vec![uses[run..].to_vec()];
+        kept[0].push((cut_edge, back));
+        moved[0].push((cut_edge, !back));
+        // Each hole goes with the side it is on.
+        let face = &mut self.shells[s][f];
+        for (l, hole) in face.loops.iter().enumerate() {
+            let Some(sample) = lifts[l].samples.first().filter(|_| l != outer) else {
+                continue;
+            };
+            if (sample.uv[axis] - cut).rem_euclid(period) < period * (1.0 - fraction) {
+                kept.push(hole.clone());
+            } else {
+                moved.push(hole.clone());
+            }
+        }
+        face.loops = kept;
+        let half = RawFace {
+            id,
+            surface: face.surface.clone(),
+            reversed: face.reversed,
+            loops: moved,
+        };
+        self.shells[s].push(half);
+        Ok(self.shells[s].len() - 1)
+    }
+
     /// The area a loop encloses in its face's parameter space, signed: positive when it
     /// runs counter-clockwise seen from outside, as an outer loop does.
     fn loop_area(&self, face: &RawFace, uses: &[Use]) -> f64 {
         let mut emitter = Emitter::default();
         let shell = emitter.solid.add_shell();
-        let f = emitter.solid.add_face(shell, face.surface, face.reversed);
+        let f = emitter
+            .solid
+            .add_face(shell, face.surface.clone(), face.reversed);
         let uses = emitter.uses(self, uses);
         emitter.solid.add_loop(f, &uses);
         measure::face_area(&emitter.solid, f)
@@ -2631,9 +3340,9 @@ impl Emitter {
                     None => {
                         let edge = &b.edges[e];
                         let (start, end) = (self.vertex(b, edge.start), self.vertex(b, edge.end));
-                        let id = self
-                            .solid
-                            .add_edge(edge.curve, start, end, edge.t0, edge.t1);
+                        let id =
+                            self.solid
+                                .add_edge(edge.curve.clone(), start, end, edge.t0, edge.t1);
                         self.edges.insert(e, id);
                         id
                     }
@@ -2674,6 +3383,7 @@ fn turned_round(curve: &Curve3) -> Curve3 {
             frame: half_turn(&e.frame),
             ..*e
         }),
+        Curve3::Nurbs(c) => Curve3::Nurbs(std::sync::Arc::new(c.reversed())),
     }
 }
 
@@ -2730,25 +3440,558 @@ fn seam_failed(face: u32) -> StepImportError {
 
 /// The error for a surface or curve the kernel has no counterpart for.
 fn unsupported(id: u32, records: &[Record], what: &str) -> StepImportError {
-    let freeform = records.iter().find(|r| {
-        ["B_SPLINE", "BEZIER", "NURBS"]
-            .iter()
-            .any(|k| r.name.contains(k))
-    });
-    match freeform {
-        Some(r) => error(format!(
-            "This STEP file has freeform (NURBS) {what}s, which PeetCAD can't import yet \
-             (entity #{id} {}). PeetCAD reads solids made of planes, cylinders, cones, spheres \
-             and tori.",
-            r.name
-        )),
-        None => error(format!(
-            "This STEP file has a {what} of a kind PeetCAD can't import yet (entity #{id} {}). \
-             PeetCAD reads solids made of planes, cylinders, cones, spheres and tori, with \
-             straight, circular and elliptical edges.",
-            describe(records)
-        )),
+    error(format!(
+        "This STEP file has a {what} of a kind PeetCAD can't import yet (entity #{id} {}). \
+         PeetCAD reads solids whose faces are planes, cylinders, cones, spheres, tori and \
+         B-spline surfaces, with straight, circular, elliptical and B-spline edges.",
+        describe(records)
+    ))
+}
+
+// ---- Swept surfaces ----
+
+/// A curve as a B-spline curve: a whole circle or ellipse, or the stretch of a line
+/// between the parameters `range`.
+fn as_spline(curve: &Curve3, range: Option<(f64, f64)>) -> Option<NurbsCurve> {
+    match curve {
+        Curve3::Line(l) => {
+            let (a, b) = range?;
+            Some(NurbsCurve::line(
+                l.origin + l.dir * a,
+                l.origin + l.dir * b,
+                1,
+            ))
+        }
+        Curve3::Circle(c) => Some(NurbsCurve::arc(&c.frame, c.radius, 0.0, TAU)),
+        Curve3::Ellipse(e) => {
+            // A circle stretched: stretching maps control points to control points.
+            let unit = NurbsCurve::arc(&Frame::WORLD, 1.0, 0.0, TAU);
+            Some(unit.mapped(|p| {
+                e.frame
+                    .to_world(DVec3::new(p.x * e.major, p.y * e.minor, 0.0))
+            }))
+        }
+        Curve3::Nurbs(c) => Some(NurbsCurve::clone(c)),
     }
+}
+
+/// Parameters of a curve to try for a point where a surface swept from it has a normal.
+fn sweep_samples(curve: &Curve3, range: Option<(f64, f64)>) -> Vec<f64> {
+    let fractions = [0.5, 0.25, 0.75, 0.1, 0.9, 0.0, 1.0];
+    match (curve.domain().or(range), curve) {
+        (Some((lo, hi)), _) => fractions.iter().map(|f| lo + (hi - lo) * f).collect(),
+        (None, Curve3::Line(_)) => vec![0.0, 1.0, -1.0],
+        // A circle or an ellipse: from where its parameter starts.
+        (None, _) => (0..8).map(|k| TAU * f64::from(k) / 8.0).collect(),
+    }
+}
+
+/// The sample with the longest normal: the first of them, where several are as long.
+fn steadiest(samples: impl Iterator<Item = (DVec3, DVec3)>) -> Option<(DVec3, DVec3)> {
+    let mut best: Option<(DVec3, DVec3)> = None;
+    for sample in samples {
+        let longer = |b: &(DVec3, DVec3)| sample.1.length() > b.1.length() * (1.0 + 1e-9);
+        if best.as_ref().is_none_or(longer) {
+            best = Some(sample);
+        }
+    }
+    let (at, normal) = best?;
+    Some((at, normal.try_normalize()?))
+}
+
+/// The range `values` cover, widened a little; `None` when there are none.
+fn padded_range(values: impl Iterator<Item = f64>) -> Option<(f64, f64)> {
+    let (lo, hi) = values.fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), v| {
+        (lo.min(v), hi.max(v))
+    });
+    let pad = 0.05 * (hi - lo) + 1e-3;
+    (lo.is_finite() && hi.is_finite()).then_some((lo - pad, hi + pad))
+}
+
+/// The surface `curve` sweeps along `dir`: `curve(u) + v dir`. With it come a point of the
+/// surface and the surface's normal there as STEP has it (`∂/∂u × ∂/∂v`), from which to
+/// tell whether the surface made faces the same way. `points` are points of the face.
+fn extruded(curve: &Curve3, dir: DVec3, points: &[DVec3]) -> Option<(Surface, DVec3, DVec3)> {
+    let (at, normal) = steadiest(
+        sweep_samples(curve, None)
+            .into_iter()
+            .map(|t| (curve.point(t), curve.derivative(t).cross(dir))),
+    )?;
+    let surface = match curve {
+        Curve3::Line(l) => Surface::Plane(Plane::from_origin_normal_x(l.origin, normal, l.dir)?),
+        Curve3::Circle(c) if c.frame.z_axis().cross(dir).length() <= tolerance::ANGULAR => {
+            Surface::Cylinder(Cylinder {
+                frame: c.frame,
+                radius: c.radius,
+            })
+        }
+        _ => {
+            // Ruled between the curve at the face's two ends along the direction. The
+            // curve lies within its control points, which bounds how far along it is.
+            let base = as_spline(curve, None)?;
+            let (low, high) = padded_range(points.iter().map(|p| p.dot(dir)))?;
+            let (first, last) = padded_range(base.control_points().iter().map(|p| p.dot(dir)))?;
+            let (from, to) = (low - last, high - first);
+            let ends = [
+                base.mapped(|p| p + dir * from),
+                base.mapped(|p| p + dir * to),
+            ];
+            Surface::Nurbs(Arc::new(NurbsSurface::skin(&ends).ok()?))
+        }
+    };
+    Some((surface, at, normal))
+}
+
+/// The surface `curve` sweeps when it is turned about the axis through `origin` along
+/// `axis`: `u` is the angle, `v` the curve's parameter. See [`extruded`] for the rest.
+fn revolved(
+    curve: &Curve3,
+    origin: DVec3,
+    axis: DVec3,
+    points: &[DVec3],
+) -> Option<(Surface, DVec3, DVec3)> {
+    let frame = Frame::from_origin_z_x(origin, axis, DVec3::X)
+        .or_else(|| Frame::from_origin_z_x(origin, axis, DVec3::Y))?;
+    let height = |p: DVec3| (p - origin).dot(axis);
+    let radial = |p: DVec3| (p - origin) - axis * height(p);
+    // A line is turned as far along it as the face reaches.
+    let range = match curve {
+        Curve3::Line(l) if l.dir.dot(axis).abs() > tolerance::ANGULAR => padded_range(
+            points
+                .iter()
+                .map(|p| (height(*p) - height(l.origin)) / l.dir.dot(axis)),
+        ),
+        _ => None,
+    };
+    let (at, normal) = steadiest(sweep_samples(curve, range).into_iter().map(|t| {
+        let p = curve.point(t);
+        (p, axis.cross(radial(p)).cross(curve.derivative(t)))
+    }))?;
+    let analytic = match curve {
+        Curve3::Line(l) => {
+            let along = l.dir.dot(axis);
+            let across = l.dir.cross(axis);
+            // How close the line comes to the axis.
+            let gap = match across.try_normalize() {
+                Some(n) => (l.origin - origin).dot(n).abs(),
+                None => radial(l.origin).length(),
+            };
+            if across.length() <= tolerance::ANGULAR {
+                (gap > 2.0 * tolerance::LINEAR)
+                    .then_some(Surface::Cylinder(Cylinder { frame, radius: gap }))
+            } else if along.abs() <= tolerance::ANGULAR {
+                // Square to the axis: a plane across it.
+                Plane::from_origin_normal_x(l.origin, normal, l.dir).map(Surface::Plane)
+            } else if gap <= tolerance::LINEAR {
+                // Through the axis: a cone, of which the kernel has the half the face is
+                // on. The line meets the axis where its distance from it is nothing.
+                let sideways = l.dir - axis * along;
+                let t = -radial(l.origin).dot(sideways) / sideways.length_squared();
+                let apex = origin + axis * height(l.origin + l.dir * t);
+                let side: f64 = points.iter().map(|p| (*p - apex).dot(axis)).sum();
+                let up = if side < 0.0 { -axis } else { axis };
+                Frame::from_origin_z_x(apex, up, frame.x_axis()).map(|frame| {
+                    Surface::Cone(Cone {
+                        frame,
+                        radius: 0.0,
+                        half_angle: along.abs().min(1.0).acos(),
+                    })
+                })
+            } else {
+                None
+            }
+        }
+        Curve3::Circle(c) => {
+            let centre = c.frame.origin;
+            // The circle's plane holds the axis.
+            let in_plane = c.frame.z_axis().dot(axis).abs() <= tolerance::ANGULAR
+                && (centre - origin).dot(c.frame.z_axis()).abs() <= tolerance::LINEAR;
+            let major = radial(centre).length();
+            let frame = Frame {
+                origin: origin + axis * height(centre),
+                rotation: frame.rotation,
+            };
+            if in_plane && major <= tolerance::LINEAR {
+                Some(Surface::Sphere(Sphere {
+                    frame,
+                    radius: c.radius,
+                }))
+            } else if in_plane && major > c.radius + tolerance::LINEAR {
+                Some(Surface::Torus(Torus {
+                    frame,
+                    major,
+                    minor: c.radius,
+                }))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    };
+    let surface = match analytic {
+        Some(surface) => surface,
+        None => {
+            // The curve's control points turned about the axis: a circle is a rational
+            // quadratic, and turning is linear in the cosine and sine of the angle.
+            let profile = as_spline(curve, range)?;
+            let round = NurbsCurve::arc(&Frame::WORLD, 1.0, 0.0, TAU);
+            let round_weights = round.weights()?;
+            let mut net = Vec::new();
+            let mut weights = Vec::new();
+            for (corner, weight) in round.control_points().iter().zip(round_weights) {
+                for (j, p) in profile.control_points().iter().enumerate() {
+                    let l = frame.to_local(*p);
+                    net.push(frame.to_world(DVec3::new(
+                        l.x * corner.x - l.y * corner.y,
+                        l.x * corner.y + l.y * corner.x,
+                        l.z,
+                    )));
+                    weights.push(weight * profile.weights().map_or(1.0, |w| w[j]));
+                }
+            }
+            let surface = NurbsSurface::new(
+                2,
+                profile.degree(),
+                round.knots().to_vec(),
+                profile.knots().to_vec(),
+                net,
+                Some(weights),
+            );
+            Surface::Nurbs(Arc::new(surface.ok()?))
+        }
+    };
+    Some((surface, at, normal))
+}
+
+// ---- B-splines ----
+
+/// Whether `name` is one of the B-spline entities of `kind` (`CURVE` or `SURFACE`).
+fn is_spline(name: &str, kind: &str) -> bool {
+    ["B_SPLINE_", "BEZIER_", "QUASI_UNIFORM_", "UNIFORM_"]
+        .iter()
+        .any(|prefix| name.strip_prefix(prefix) == Some(kind))
+        || name
+            .strip_prefix("B_SPLINE_")
+            .and_then(|n| n.strip_suffix("_WITH_KNOTS"))
+            == Some(kind)
+        || name.strip_prefix("RATIONAL_B_SPLINE_") == Some(kind)
+}
+
+/// The knot vectors STEP gives no numbers for.
+#[derive(Clone, Copy)]
+enum KnotKind {
+    /// Bézier pieces end to end: whole numbers, each as often as the degree.
+    Bezier,
+    /// Whole numbers, clamped at both ends.
+    QuasiUniform,
+    /// Whole numbers, none repeated: not clamped.
+    Uniform,
+}
+
+/// Checks a B-spline's degree and its number of control points (`direction` is empty for
+/// a curve, " in u" or " in v" for a surface), so that what follows is bounded.
+fn check_spline_size(e: &Ent, degree: usize, count: usize, direction: &str) -> Result<()> {
+    if degree == 0 || degree > MAX_DEGREE {
+        return Err(error(format!(
+            "This STEP file has a B-spline of degree {degree}{direction} (entity #{} {}), which \
+             PeetCAD can't import: it reads degrees 1 to {MAX_DEGREE}. The file may be damaged; \
+             try exporting it again.",
+            e.id,
+            e.name()
+        )));
+    }
+    if count <= degree {
+        return Err(damaged(format!(
+            "#{} {} has {count} control point{}{direction}, too few for its degree of {degree}",
+            e.id,
+            e.name(),
+            if count == 1 { "" } else { "s" }
+        )));
+    }
+    Ok(())
+}
+
+/// A knot vector written as multiplicities (parameter `multiplicities` of `e`) and
+/// distinct knots (parameter `values`), for `count` control points of `degree`.
+fn given_knots(
+    e: &Ent,
+    multiplicities: usize,
+    values: usize,
+    degree: usize,
+    count: usize,
+    direction: &str,
+) -> Result<Vec<f64>> {
+    let repeats = e.list(multiplicities)?;
+    let values_at = values;
+    let values = e.reals_in(values_at, e.list(values_at)?)?;
+    if repeats.len() != values.len() {
+        return Err(damaged(format!(
+            "#{} {} lists {} knot multiplicities for {} knots{direction}",
+            e.id,
+            e.name(),
+            repeats.len(),
+            values.len()
+        )));
+    }
+    let need = count + degree + 1;
+    let mut total = 0usize;
+    let mut knots = Vec::with_capacity(need);
+    for (repeat, &knot) in repeats.iter().zip(&values) {
+        let repeat = match repeat {
+            Value::Int(n) if *n >= 1 => usize::try_from(*n).unwrap_or(usize::MAX),
+            _ => return e.bad(multiplicities, "a list of whole numbers, 1 or more"),
+        };
+        total = total.saturating_add(repeat);
+        // Only as many as are needed: a wrong count must not fill the memory.
+        knots.extend(std::iter::repeat_n(
+            knot,
+            repeat.min(need + 1 - knots.len()),
+        ));
+    }
+    if total != need {
+        return Err(damaged(format!(
+            "#{} {} has {total} knots{direction} (counting how often each is repeated) where \
+             its {count} control points of degree {degree} need {need}",
+            e.id,
+            e.name()
+        )));
+    }
+    Ok(knots)
+}
+
+/// The knot vector of a Bézier, quasi-uniform or uniform B-spline.
+fn regular_knots(e: &Ent, kind: KnotKind, degree: usize, count: usize) -> Result<Vec<f64>> {
+    let ends = |pieces: usize, inner: usize| {
+        let mut knots = vec![0.0; degree + 1];
+        for k in 1..pieces {
+            knots.extend(std::iter::repeat_n(k as f64, inner));
+        }
+        knots.extend(std::iter::repeat_n(pieces as f64, degree + 1));
+        knots
+    };
+    Ok(match kind {
+        KnotKind::Bezier => {
+            if !(count - 1).is_multiple_of(degree) {
+                return Err(damaged(format!(
+                    "#{} {} has {count} control points, which don't make whole Bézier pieces \
+                     of degree {degree}",
+                    e.id,
+                    e.name()
+                )));
+            }
+            ends((count - 1) / degree, degree)
+        }
+        KnotKind::QuasiUniform => ends(count - degree, 1),
+        KnotKind::Uniform => (0..count + degree + 1)
+            .map(|k| k as f64 - degree as f64)
+            .collect(),
+    })
+}
+
+fn no_knots(id: u32, records: &[Record], what: &str) -> StepImportError {
+    error(format!(
+        "This STEP file has a B-spline {what} without a knot vector (entity #{id} {}), which \
+         PeetCAD can't import. Try exporting the model again, or from a different program.",
+        describe(records)
+    ))
+}
+
+/// The error for a B-spline the kernel refuses.
+fn bad_spline(id: u32, records: &[Record], what: &str, why: &NurbsError) -> StepImportError {
+    // The kernel's messages start with what they are about ("curve: ...").
+    let why = why.0.split_once(": ").map_or(why.0.as_str(), |(_, w)| w);
+    error(format!(
+        "This STEP file has a B-spline {what} PeetCAD can't use (entity #{id} {}): {why}. The \
+         file may be damaged; try exporting it again.",
+        describe(records)
+    ))
+}
+
+/// The stretch of a B-spline curve that the edge #`id` from `a` to `b` is: the curve to
+/// give the edge and its parameter range there. An edge runs the way its curve does, so
+/// on a closed curve it may start anywhere and run across the curve's own start: the
+/// curve is then put together anew, starting where the edge does. An open curve whose
+/// vertices are given against its direction is turned round, like a line.
+fn spline_edge(
+    id: u32,
+    curve: &Arc<NurbsCurve>,
+    a: DVec3,
+    b: DVec3,
+    closed_edge: bool,
+) -> Result<(Arc<NurbsCurve>, f64, f64)> {
+    let (lo, hi) = curve.domain();
+    let closed = curve.is_closed(CLOSED);
+    let seam = curve.point(lo);
+    // A vertex where a closed curve starts and ends is at whichever end suits.
+    let at_seam = |p: DVec3| closed && p.distance(seam) <= CLOSED;
+    let failed = |why: NurbsError| {
+        error(format!(
+            "PeetCAD could not put the closed B-spline curve of an edge in this STEP file \
+             together again from where the edge starts (entity #{id}): {}. Try exporting the \
+             model again.",
+            why.0
+        ))
+    };
+    if closed_edge {
+        if !closed {
+            return Err(error(format!(
+                "The STEP file has an edge that starts and ends at the same point, on a curve \
+                 that isn't closed (#{id}), which PeetCAD can't import. Try exporting the \
+                 model again."
+            )));
+        }
+        // All the way round, from the edge's vertex.
+        let t = curve.param(a);
+        let near_end = 1e-9 * (hi - lo);
+        if at_seam(a) || t - lo <= near_end || hi - t <= near_end {
+            return Ok((curve.clone(), lo, hi));
+        }
+        let (turned, t0, t1) = arc_of_closed(curve, t, t + (hi - lo)).map_err(failed)?;
+        return Ok((Arc::new(turned), t0, t1));
+    }
+    let ta = if at_seam(a) { lo } else { curve.param(a) };
+    let tb = if at_seam(b) { hi } else { curve.param(b) };
+    if tb > ta {
+        return Ok((curve.clone(), ta, tb));
+    }
+    if closed {
+        // Across the curve's start.
+        let (turned, t0, t1) = arc_of_closed(curve, ta, tb + (hi - lo)).map_err(failed)?;
+        return Ok((Arc::new(turned), t0, t1));
+    }
+    let reversed = curve.reversed();
+    let (ta, tb) = (reversed.param(a), reversed.param(b));
+    if tb > ta {
+        Ok((Arc::new(reversed), ta, tb))
+    } else {
+        Err(error(format!(
+            "The STEP file has a freeform edge with no length (#{id}), which PeetCAD can't \
+             import. Try exporting the model again."
+        )))
+    }
+}
+
+/// The part of a closed curve from the parameter `from` on to `to` (at most one period
+/// further), which may run across the curve's ends: then the curve is put together anew
+/// from its tail and its head. The curve comes with the part's parameter range in it.
+fn arc_of_closed(
+    curve: &NurbsCurve,
+    from: f64,
+    to: f64,
+) -> std::result::Result<(NurbsCurve, f64, f64), NurbsError> {
+    let (lo, hi) = curve.domain();
+    let period = hi - lo;
+    let slack = 1e-9 * period;
+    let shift = ((from + slack - lo) / period).floor() * period;
+    let (from, to) = ((from - shift).max(lo), to - shift);
+    if to <= hi + slack {
+        return Ok((curve.clone(), from, to.min(hi)));
+    }
+    let rest = (to - period).min(from);
+    if rest - lo <= slack {
+        return Ok((curve.clone(), from, hi));
+    }
+    let joined = curve
+        .sub_curve(from, hi)?
+        .joined(&curve.sub_curve(lo, rest)?)?;
+    Ok((joined, from, hi + (rest - lo)))
+}
+
+/// The part of a surface that is closed in `u` (`axis == 0`) or `v` between `from` and
+/// `to` there (at most one period further), which may run across the surface's seam:
+/// then the part is put together from the stretch up to the seam and the stretch after
+/// it, and its parameter runs on past the seam.
+fn band_of_closed(
+    surface: &NurbsSurface,
+    axis: usize,
+    from: f64,
+    to: f64,
+) -> std::result::Result<NurbsSurface, NurbsError> {
+    let (lo, hi) = surface.domain();
+    let (lo, hi) = (lo[axis], hi[axis]);
+    let period = hi - lo;
+    let slack = 1e-9 * period;
+    let shift = ((from + slack - lo) / period).floor() * period;
+    let (from, to) = ((from - shift).max(lo), to - shift);
+    let along_u = axis == 0;
+    if to <= hi + slack {
+        return surface.sub_surface(along_u, from, to.min(hi));
+    }
+    let rest = (to - period).min(from);
+    if rest - lo <= slack {
+        return surface.sub_surface(along_u, from, hi);
+    }
+    surface
+        .sub_surface(along_u, from, hi)?
+        .joined(&surface.sub_surface(along_u, lo, rest)?, along_u)
+}
+
+/// A freeform surface that closes on itself, for following a face's loops across it.
+struct Closed<'s> {
+    surface: &'s NurbsSurface,
+    /// The surface's period in `u` and in `v`; `None` for a direction it is open in.
+    periods: [Option<f64>; 2],
+}
+
+impl<'s> Closed<'s> {
+    fn of(surface: &'s NurbsSurface) -> Self {
+        let (lo, hi) = surface.domain();
+        let size = hi - lo;
+        Self {
+            surface,
+            periods: [
+                surface.is_closed(true, CLOSED).then_some(size.x),
+                surface.is_closed(false, CLOSED).then_some(size.y),
+            ],
+        }
+    }
+
+    /// The parameters of the point `p` of the surface: of the values that differ by whole
+    /// periods, the ones closest to `near`.
+    fn lifted(&self, p: DVec3, near: Option<DVec2>) -> DVec2 {
+        let mut uv = self.surface.param(p);
+        if let Some(near) = near {
+            for axis in 0..2 {
+                if let Some(period) = self.periods[axis] {
+                    uv[axis] += ((near[axis] - uv[axis]) / period).round() * period;
+                }
+            }
+        }
+        uv
+    }
+}
+
+/// How many steps an edge is sampled in when it is followed across a freeform surface.
+fn freeform_steps(curve: &Curve3, ta: f64, tb: f64) -> usize {
+    match curve {
+        Curve3::Line(_) => 8,
+        Curve3::Nurbs(c) => {
+            let (lo, hi) = (ta.min(tb), ta.max(tb));
+            let spans = c
+                .knots()
+                .windows(2)
+                .filter(|w| w[1] > w[0] && w[1] > lo && w[0] < hi)
+                .count();
+            (4 * spans).clamp(8, 128)
+        }
+        _ => ((tb - ta).abs() / (PI / 16.0)).ceil().clamp(4.0, 128.0) as usize,
+    }
+}
+
+fn wraps_freeform(face: u32) -> StepImportError {
+    error(format!(
+        "This STEP file has a freeform face that wraps all the way round its surface (entity \
+         #{face}) without a seam edge PeetCAD could split it at, which it can't import yet. \
+         Try exporting the model from a different program, or with periodic faces split."
+    ))
+}
+
+fn freeform_failed(face: u32, why: &NurbsError) -> StepImportError {
+    error(format!(
+        "PeetCAD could not cut the closed B-spline surface of a face in this STEP file down \
+         to the face (entity #{face}): {}. Try exporting the model with periodic faces split.",
+        why.0
+    ))
 }
 
 #[cfg(test)]

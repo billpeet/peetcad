@@ -57,10 +57,10 @@ mod value;
 pub use diff::{Translation, apply_model, diff};
 pub use export::export_bytes;
 pub use fields::{
-    AngledPlane, BaseFlange, Blend, CircularPattern, CoordinateSystem, CoordinatesPoint, Corner,
-    CylinderAxis, Draft, EdgeAxis, EdgeFlange, Extrude, FeatureArgs, Form, Hem, Hole, Jog,
-    LinearPattern, MidPlane, Mirror, MiterFlange, OffsetPlane, PlanesAxis, Revolve, SheetCut,
-    Shell, SketchPlane, SketchedBend, Sweep, VertexPoint,
+    AngledPlane, BaseFlange, Blend, CircularPattern, ConvertToSheet, CoordinateSystem,
+    CoordinatesPoint, Corner, CylinderAxis, Draft, EdgeAxis, EdgeFlange, Extrude, FeatureArgs,
+    Form, Hem, Hole, Jog, LinearPattern, Loft, MidPlane, Mirror, MiterFlange, OffsetPlane,
+    PlanesAxis, Revolve, SheetCut, Shell, SketchPlane, SketchedBend, Sweep, VertexPoint,
 };
 pub use host::{AppCommand, Headless, Host, SketchTool, Toggle, View, Window};
 pub use library::{CheckRule, Gauge, GaugeBend};
@@ -183,6 +183,9 @@ fn add(doc: &Document, model: &mut Model, new: &[New]) -> Result<Vec<FeatureId>,
         let mut sources: Vec<FeatureId> = kind.sketch().into_iter().collect();
         if let FeatureKind::Sweep(sweep) = &kind {
             sources.extend(sweep.path);
+        }
+        if let FeatureKind::Loft(loft) = &kind {
+            sources.extend(loft.sections.iter().skip(1));
         }
         let id = model.add(kind);
         for source in sources {

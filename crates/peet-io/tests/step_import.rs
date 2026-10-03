@@ -1,19 +1,23 @@
 //! STEP import: PeetCAD's own exports read back as the same solids, files written the way
 //! other programs write them (inch units, edges against their curves, unmarked outer
-//! bounds, periodic faces without seams, vertex loops, degrees) come out as valid kernel
+//! bounds, periodic faces without seams, vertex loops, degrees; B-splines with every kind
+//! of knot vector, rational ones, closed ones, swept surfaces) come out as valid kernel
 //! solids, and broken files give errors rather than panics.
 
 use std::collections::HashMap;
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use peet_io::step::{self, StepOptions, StepSchema};
 use peet_io::step_import::{StepImport, read};
 use peet_kernel::boolean::{BooleanOp, boolean};
 use peet_kernel::extrude::extrude;
+use peet_kernel::loft::{LoftSection, loft};
+use peet_kernel::nurbs::{NurbsCurve, NurbsSurface};
 use peet_kernel::revolve::{RevolveAxis, revolve};
 use peet_kernel::validate::{Counts, measure, validate};
-use peet_kernel::{Solid, Surface};
+use peet_kernel::{Curve3, Solid, Surface};
 use peet_math::{DQuat, DVec2, DVec3, Frame, Plane};
 use peet_sketch::region::{Region, find_regions};
 use peet_sketch::{Sketch, shapes};
@@ -88,6 +92,13 @@ fn options(schema: StepSchema) -> StepOptions {
 /// several lumps comes back as a body per lump; the first is returned.
 #[track_caller]
 fn round_trip_as(solid: &Solid, schema: StepSchema) -> Solid {
+    round_trip_within(solid, schema, 1e-9)
+}
+
+/// [`round_trip_as`] with the volume and the area the same to within `tolerance`
+/// (relative).
+#[track_caller]
+fn round_trip_within(solid: &Solid, schema: StepSchema, tolerance: f64) -> Solid {
     valid(solid);
     let text = step::write(&[("Part", solid)], &options(schema));
     let imported = import(&text);
@@ -129,8 +140,12 @@ fn round_trip_as(solid: &Solid, schema: StepSchema) -> Solid {
         ],
         "vertices, edges, coedges, loops, faces, shells"
     );
-    assert_close(volume, measure::volume(solid));
-    assert_close(total_area, area(solid));
+    for (got, expected) in [(volume, measure::volume(solid)), (total_area, area(solid))] {
+        assert!(
+            (got - expected).abs() <= tolerance * expected.abs().max(1.0),
+            "{got} instead of {expected}"
+        );
+    }
     imported.bodies[0].solid.clone()
 }
 
@@ -372,6 +387,145 @@ fn names_and_several_bodies() {
     // A brep without a name takes its product's.
     assert_eq!(names, ["Körper", "Bill's Größe"]);
     assert_close(measure::volume(&imported.bodies[1].solid), 2.0);
+}
+
+// ---- Freeform solids through PeetCAD's own exporter ----
+
+fn plane_at(z: f64) -> Plane {
+    Plane::from_origin_normal_x(v3(0.0, 0.0, z), DVec3::Z, DVec3::X).unwrap()
+}
+
+fn rectangle(w: f64, h: f64) -> Region {
+    let mut s = Sketch::new();
+    shapes::rectangle(&mut s, v2(-w / 2.0, -h / 2.0), v2(w / 2.0, h / 2.0));
+    regions(&s).remove(0)
+}
+
+fn disc(r: f64) -> Region {
+    let mut s = Sketch::new();
+    s.add_circle(DVec2::ZERO, r);
+    regions(&s).remove(0)
+}
+
+#[track_caller]
+fn lofted(sections: &[(Plane, Region)]) -> Solid {
+    let list: Vec<LoftSection<'_>> = sections
+        .iter()
+        .map(|(plane, region)| LoftSection { plane, region })
+        .collect();
+    match loft(&list) {
+        Ok(solid) => solid,
+        Err(e) => panic!("loft failed: {e}"),
+    }
+}
+
+fn freeform_faces(s: &Solid) -> usize {
+    s.faces
+        .iter()
+        .filter(|f| matches!(f.surface, Surface::Nurbs(_)))
+        .count()
+}
+
+fn freeform_edges(s: &Solid) -> usize {
+    s.edges
+        .iter()
+        .filter(|e| matches!(e.curve, Curve3::Nurbs(_)))
+        .count()
+}
+
+/// [`round_trip`] for a solid with freeform faces, whose measures come from numerical
+/// integration: the same to seven digits. The freeform faces and edges come back as
+/// freeform ones, on the same surfaces and curves.
+#[track_caller]
+fn freeform_round_trip(solid: &Solid) -> Solid {
+    for schema in [StepSchema::Ap242, StepSchema::Ap214] {
+        let back = round_trip_within(solid, schema, 1e-7);
+        assert_eq!(freeform_faces(&back), freeform_faces(solid));
+        assert_eq!(freeform_edges(&back), freeform_edges(solid));
+        for (a, b) in solid.faces.iter().zip(&back.faces) {
+            if matches!(a.surface, Surface::Nurbs(_)) {
+                assert_eq!(a.surface, b.surface);
+            }
+            assert_eq!(a.reversed, b.reversed);
+        }
+        // (The importer numbers edges in the order the faces use them.)
+        for a in solid.edges.iter().filter(|e| e.curve.domain().is_some()) {
+            let same = |b: &&peet_kernel::topo::Edge| {
+                b.curve == a.curve && (a.t0 - b.t0).abs() < 1e-9 && (a.t1 - b.t1).abs() < 1e-9
+            };
+            assert!(back.edges.iter().any(|b| same(&b)), "{:?}", a.curve);
+        }
+    }
+    round_trip_within(solid, StepSchema::Ap214, 1e-7)
+}
+
+#[test]
+fn twisted_loft_round_trips() {
+    // A rectangle turned by 30 degrees on the way up: four ruled freeform sides.
+    let top = Plane {
+        frame: Frame {
+            origin: v3(0.0, 0.0, 10.0),
+            rotation: DQuat::from_rotation_z(30f64.to_radians()),
+        },
+    };
+    let solid = lofted(&[
+        (plane_at(0.0), rectangle(12.0, 8.0)),
+        (top, rectangle(12.0, 8.0)),
+    ]);
+    assert_eq!(freeform_faces(&solid), 4);
+    let back = freeform_round_trip(&solid);
+    assert_eq!(tuple(valid(&back)), (8, 12, 6, 0, 1, 0));
+}
+
+#[test]
+fn lofts_between_circles_and_squares_round_trip() {
+    // A cone frustum between two circles: rational sides.
+    let frustum = lofted(&[(plane_at(0.0), disc(10.0)), (plane_at(15.0), disc(4.0))]);
+    assert_eq!(freeform_faces(&frustum), 4);
+    assert!(frustum.faces.iter().any(|f| match &f.surface {
+        Surface::Nurbs(s) => s.weights().is_some(),
+        _ => false,
+    }));
+    let back = freeform_round_trip(&frustum);
+    assert!(
+        (measure::volume(&back) - PI * 15.0 / 3.0 * (100.0 + 40.0 + 16.0)).abs() < 1e-5,
+        "{}",
+        measure::volume(&back)
+    );
+    // A square duct that becomes round.
+    let duct = lofted(&[
+        (plane_at(0.0), rectangle(20.0, 20.0)),
+        (plane_at(25.0), disc(8.0)),
+    ]);
+    freeform_round_trip(&duct);
+}
+
+#[test]
+fn smooth_lofts_round_trip() {
+    // A vase through four circles: cubic in the direction of the loft, with freeform
+    // rails for edges.
+    let vase = lofted(&[
+        (plane_at(0.0), disc(6.0)),
+        (plane_at(10.0), disc(10.0)),
+        (plane_at(22.0), disc(5.0)),
+        (plane_at(30.0), disc(7.0)),
+    ]);
+    assert_eq!(freeform_edges(&vase), 4);
+    freeform_round_trip(&vase);
+    // Three pentagons, the middle one bigger and turned.
+    let pentagon = |r: f64, turn: f64| {
+        let points: Vec<DVec2> = (0..5)
+            .map(|k| DVec2::from_angle(turn + f64::from(k) * TAU / 5.0) * r)
+            .collect();
+        regions(&polygon(&points)).remove(0)
+    };
+    let solid = lofted(&[
+        (plane_at(0.0), pentagon(8.0, 0.0)),
+        (plane_at(12.0), pentagon(12.0, 0.3)),
+        (plane_at(20.0), pentagon(6.0, 0.6)),
+    ]);
+    assert_eq!(solid.faces.len(), 7);
+    freeform_round_trip(&solid);
 }
 
 // ---- Files written by hand, the way other programs write them ----
@@ -1000,7 +1154,7 @@ fn cone_with_a_vertex_loop_at_its_apex_in_degrees() {
         let Some(Surface::Cone(c)) = s
             .faces
             .iter()
-            .map(|f| f.surface)
+            .map(|f| f.surface.clone())
             .find(|s| matches!(s, Surface::Cone(_)))
         else {
             panic!("no cone");
@@ -1487,6 +1641,1477 @@ fn brep_in_a_related_representation_takes_the_product_name_and_units() {
     );
 }
 
+// ---- Freeform files written by hand ----
+
+/// `( a, b, c )`.
+fn real_list(values: &[f64]) -> String {
+    let list: Vec<String> = values.iter().map(|v| step::real(*v)).collect();
+    format!("( {} )", list.join(", "))
+}
+
+/// A knot vector as STEP writes it: how often each distinct knot is repeated, and the
+/// distinct knots.
+fn knot_lists(knots: &[f64]) -> (String, String) {
+    let mut distinct: Vec<f64> = Vec::new();
+    let mut repeats: Vec<usize> = Vec::new();
+    for &k in knots {
+        if distinct.last() == Some(&k) {
+            *repeats.last_mut().unwrap() += 1;
+        } else {
+            distinct.push(k);
+            repeats.push(1);
+        }
+    }
+    let repeats: Vec<String> = repeats.iter().map(usize::to_string).collect();
+    (format!("( {} )", repeats.join(", ")), real_list(&distinct))
+}
+
+impl Step {
+    fn points(&mut self, points: &[DVec3], scale: f64) -> String {
+        let ids: Vec<u32> = points.iter().map(|p| self.point(*p * scale)).collect();
+        refs(&ids)
+    }
+
+    /// A B-spline curve with its knots written out; a rational one as a complex instance
+    /// (with its parts in an order of its own, and "unknown" for the flags).
+    fn spline_curve(&mut self, c: &NurbsCurve, scale: f64) -> u32 {
+        let points = self.points(c.control_points(), scale);
+        let (repeats, knots) = knot_lists(c.knots());
+        let degree = c.degree();
+        match c.weights() {
+            None => self.add(format!(
+                "B_SPLINE_CURVE_WITH_KNOTS ( 'NONE', {degree}, {points}, .UNSPECIFIED., .F., \
+                 .F., {repeats}, {knots}, .UNSPECIFIED. )"
+            )),
+            Some(w) => self.add(format!(
+                "( BOUNDED_CURVE ( ) B_SPLINE_CURVE ( {degree}, {points}, .CIRCULAR_ARC., .U., \
+                 .U. ) CURVE ( ) GEOMETRIC_REPRESENTATION_ITEM ( ) RATIONAL_B_SPLINE_CURVE ( {} \
+                 ) REPRESENTATION_ITEM ( 'arc' ) B_SPLINE_CURVE_WITH_KNOTS ( {repeats}, {knots}, \
+                 .PIECEWISE_BEZIER_KNOTS. ) )",
+                real_list(w)
+            )),
+        }
+    }
+
+    /// The control points of a surface as STEP lists them: a row along `v` for each step
+    /// in `u`.
+    fn net(&mut self, s: &NurbsSurface, scale: f64) -> String {
+        let (_, count_v) = s.counts();
+        let rows: Vec<String> = s
+            .control_points()
+            .chunks(count_v)
+            .map(|row| self.points(row, scale))
+            .collect();
+        format!("( {} )", rows.join(", "))
+    }
+
+    fn spline_surface(&mut self, s: &NurbsSurface, scale: f64) -> u32 {
+        let net = self.net(s, scale);
+        let (degree_u, degree_v) = s.degrees();
+        let (knots_u, knots_v) = s.knots();
+        let (repeats_u, knots_u) = knot_lists(knots_u);
+        let (repeats_v, knots_v) = knot_lists(knots_v);
+        let knots = format!("{repeats_u}, {repeats_v}, {knots_u}, {knots_v}, .UNSPECIFIED.");
+        match s.weights() {
+            None => self.add(format!(
+                "B_SPLINE_SURFACE_WITH_KNOTS ( 'NONE', {degree_u}, {degree_v}, {net}, \
+                 .UNSPECIFIED., .F., .F., .F., {knots} )"
+            )),
+            Some(w) => {
+                let (_, count_v) = s.counts();
+                let rows: Vec<String> = w.chunks(count_v).map(real_list).collect();
+                self.add(format!(
+                    "( B_SPLINE_SURFACE ( {degree_u}, {degree_v}, {net}, .UNSPECIFIED., .U., \
+                     .U., .U. ) B_SPLINE_SURFACE_WITH_KNOTS ( {knots} ) BOUNDED_SURFACE ( ) \
+                     GEOMETRIC_REPRESENTATION_ITEM ( ) RATIONAL_B_SPLINE_SURFACE ( ( {} ) ) \
+                     REPRESENTATION_ITEM ( '' ) SURFACE ( ) )",
+                    rows.join(", ")
+                ))
+            }
+        }
+    }
+}
+
+type CurveWriter<'a> = &'a dyn Fn(&mut Step, &Curve3) -> Option<u32>;
+type SurfaceWriter<'a> = &'a dyn Fn(&mut Step, &Surface) -> Option<u32>;
+
+/// How a kernel solid is written out by hand.
+#[derive(Clone, Copy)]
+struct Foreign<'a> {
+    /// File units per millimetre.
+    scale: f64,
+    /// Every other edge is written from its far end, with `same_sense = .F.`.
+    backwards: bool,
+    /// Writes the curves it wants to write its own way.
+    curve: CurveWriter<'a>,
+    surface: SurfaceWriter<'a>,
+}
+
+const PLAIN: Foreign = Foreign {
+    scale: 1.0,
+    backwards: false,
+    curve: &|_, _| None,
+    surface: &|_, _| None,
+};
+
+/// Writes a solid of planes and freeform faces with the test's own writer: the entities
+/// spaced and named the way other exporters do, no bound marked as the outer one and the
+/// outer one listed last.
+fn foreign_brep(w: &mut Step, name: &str, solid: &Solid, style: &Foreign) -> u32 {
+    let scale = style.scale;
+    let vertices: Vec<u32> = solid
+        .vertices
+        .iter()
+        .map(|v| w.vertex(v.point * scale))
+        .collect();
+    let edges: Vec<(u32, bool)> = solid
+        .edges
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let curve = (style.curve)(w, &e.curve).unwrap_or_else(|| match &e.curve {
+                Curve3::Line(l) => w.line(l.origin * scale, (l.origin + l.dir) * scale),
+                Curve3::Circle(c) => w.circle(
+                    c.frame.origin * scale,
+                    c.frame.z_axis(),
+                    c.frame.x_axis(),
+                    c.radius * scale,
+                ),
+                Curve3::Nurbs(c) => w.spline_curve(c, scale),
+                Curve3::Ellipse(_) => unimplemented!("no test writes an ellipse this way"),
+            });
+            let backwards = style.backwards && i % 2 == 1;
+            let (a, b) = (vertices[e.start.index()], vertices[e.end.index()]);
+            if backwards {
+                (w.edge(b, a, curve, false), true)
+            } else {
+                (w.edge(a, b, curve, true), false)
+            }
+        })
+        .collect();
+    let mut faces = Vec::new();
+    for f in solid.face_ids() {
+        let face = solid.face(f);
+        let surface = (style.surface)(w, &face.surface).unwrap_or_else(|| match &face.surface {
+            Surface::Plane(p) => w.plane(p.origin() * scale, p.normal(), p.frame.x_axis()),
+            Surface::Nurbs(s) => w.spline_surface(s, scale),
+            Surface::Cylinder(c) => {
+                let axis = w.axis(c.frame.origin * scale, c.frame.z_axis(), c.frame.x_axis());
+                w.add(format!(
+                    "CYLINDRICAL_SURFACE('',#{axis},{})",
+                    step::real(c.radius * scale)
+                ))
+            }
+            _ => unimplemented!("no test writes this surface this way"),
+        });
+        let bounds: Vec<u32> = face
+            .loops
+            .iter()
+            .map(|&l| {
+                let uses: Vec<EdgeUse> = solid
+                    .loop_coedges(l)
+                    .into_iter()
+                    .map(|c| {
+                        let c = solid.coedge(c);
+                        let (edge, backwards) = edges[c.edge.index()];
+                        (edge, c.reversed == backwards)
+                    })
+                    .collect();
+                w.bound("FACE_BOUND", &uses, true)
+            })
+            .rev()
+            .collect();
+        faces.push(w.face(&bounds, surface, !face.reversed));
+    }
+    w.solid(name, &faces)
+}
+
+/// A prism on a "D": the curve `profile` (in the plane z = 0, bulging to the right of
+/// the way it runs) closed by its chord, `height` tall. One freeform side, one flat one,
+/// and two caps with a freeform edge each.
+fn d_prism(profile: &NurbsCurve, height: f64) -> Solid {
+    let up = DVec3::Z * height;
+    let raised = profile.mapped(|p| p + up);
+    let (lo, hi) = profile.domain();
+    let (a, b) = (profile.point(lo), profile.point(hi));
+    let corners = [a, b, a + up, b + up];
+    let mut s = Solid::new();
+    let shell = s.add_shell();
+    let v = corners.map(|p| s.add_vertex(p));
+    let line = |s: &mut Solid, from: usize, to: usize| {
+        let (p, q) = (corners[from], corners[to]);
+        let curve = Curve3::line_through(p, q).unwrap();
+        s.add_edge(curve, v[from], v[to], 0.0, p.distance(q))
+    };
+    let spline = |c: &NurbsCurve| Curve3::Nurbs(Arc::new(c.clone()));
+    let bottom_curve = s.add_edge(spline(profile), v[0], v[1], lo, hi);
+    let top_curve = s.add_edge(spline(&raised), v[2], v[3], lo, hi);
+    let bottom_chord = line(&mut s, 1, 0);
+    let top_chord = line(&mut s, 3, 2);
+    let up_a = line(&mut s, 0, 2);
+    let up_b = line(&mut s, 1, 3);
+    let along = (b - a).normalize();
+    let plane = |origin: DVec3, normal: DVec3| {
+        Surface::Plane(Plane::from_origin_normal_x(origin, normal, along).unwrap())
+    };
+    let side = NurbsSurface::skin(&[profile.clone(), raised]).unwrap();
+    let f = s.add_face(shell, plane(a, -DVec3::Z), false);
+    s.add_loop(f, &[(bottom_chord, true), (bottom_curve, true)]);
+    let f = s.add_face(shell, plane(a + up, DVec3::Z), false);
+    s.add_loop(f, &[(top_curve, false), (top_chord, false)]);
+    let f = s.add_face(shell, plane(a, DVec3::Z.cross(along)), false);
+    s.add_loop(
+        f,
+        &[
+            (bottom_chord, false),
+            (up_a, false),
+            (top_chord, true),
+            (up_b, true),
+        ],
+    );
+    let f = s.add_face(shell, Surface::Nurbs(Arc::new(side)), false);
+    s.add_loop(
+        f,
+        &[
+            (bottom_curve, false),
+            (up_b, false),
+            (top_curve, true),
+            (up_a, true),
+        ],
+    );
+    valid(&s);
+    s
+}
+
+fn flat(points: &[(f64, f64)]) -> Vec<DVec3> {
+    points.iter().map(|&(x, y)| v3(x, y, 0.0)).collect()
+}
+
+/// A cubic with two knots inside, from the origin to (10, 0), bulging towards −Y.
+fn wavy_profile() -> NurbsCurve {
+    NurbsCurve::new(
+        3,
+        vec![0.0, 0.0, 0.0, 0.0, 0.4, 0.7, 1.0, 1.0, 1.0, 1.0],
+        flat(&[
+            (0.0, 0.0),
+            (2.0, -4.0),
+            (4.0, -5.0),
+            (6.0, -2.0),
+            (8.0, -5.0),
+            (10.0, 0.0),
+        ]),
+        None,
+    )
+    .unwrap()
+}
+
+/// Half a disc of radius 5 as a prism: its profile is an exact (rational) half circle.
+fn half_disc() -> Solid {
+    let centre = Frame {
+        origin: v3(5.0, 0.0, 0.0),
+        ..Frame::WORLD
+    };
+    d_prism(&NurbsCurve::arc(&centre, 5.0, PI, PI), 4.0)
+}
+
+/// Imports a one-body file and checks the body against the solid it was written from:
+/// valid, of the same size, with the same numbers of everything.
+#[track_caller]
+fn same_body(text: &str, expected: &Solid) -> Solid {
+    let imported = import(text);
+    assert_eq!(imported.warnings, Vec::<String>::new());
+    assert_eq!(imported.bodies.len(), 1);
+    let s = imported.bodies[0].solid.clone();
+    assert_eq!(tuple(valid(&s)), tuple(valid(expected)));
+    for (got, expected) in [
+        (measure::volume(&s), measure::volume(expected)),
+        (area(&s), area(expected)),
+    ] {
+        assert!(
+            (got - expected).abs() <= 1e-7 * expected.abs().max(1.0),
+            "{got} instead of {expected}"
+        );
+    }
+    s
+}
+
+#[test]
+fn spline_face_with_spline_edges() {
+    let solid = d_prism(&wavy_profile(), 6.0);
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "D", &solid, &PLAIN);
+    let text = w.part(&[brep], UnitStyle::Millimetres);
+    assert!(text.contains("B_SPLINE_SURFACE_WITH_KNOTS ( 'NONE', 3, 1,"));
+    assert!(text.contains("( 4, 1, 1, 4 ), ( 0.0, 0.4, 0.7, 1.0 )"));
+    let s = same_body(&text, &solid);
+    assert_eq!((freeform_faces(&s), freeform_edges(&s)), (1, 2));
+    // The surface and the curves are the file's, as they are.
+    assert_eq!(s.faces[3].surface, solid.faces[3].surface);
+    assert!(s.edges.iter().any(|e| e.curve == solid.edges[0].curve));
+
+    // Every other edge from its far end, with same_sense = .F., in inches: the curves
+    // are turned round and scaled.
+    let backwards = Foreign {
+        scale: 1.0 / 25.4,
+        backwards: true,
+        ..PLAIN
+    };
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "D", &solid, &backwards);
+    let text = w.part(&[brep], UnitStyle::Inches);
+    let s = same_body(&text, &solid);
+    assert_eq!(freeform_edges(&s), 2);
+    for e in &s.edges {
+        let (a, b) = (s.vertex(e.start).point, s.vertex(e.end).point);
+        assert!(e.t1 > e.t0);
+        assert!(e.curve.point(e.t0).distance(a) < 1e-9);
+        assert!(e.curve.point(e.t1).distance(b) < 1e-9);
+    }
+    // The top curve (edge 1 of the solid) was written backwards: it comes back running
+    // from (10, 0, 6) to (0, 0, 6).
+    assert!(s.edges.iter().any(|e| {
+        e.curve.domain().is_some()
+            && e.curve.point(e.t0).abs_diff_eq(v3(10.0, 0.0, 6.0), 1e-9)
+            && e.curve.point(e.t1).abs_diff_eq(v3(0.0, 0.0, 6.0), 1e-9)
+    }));
+    let far = s.vertices.iter().fold(DVec3::ZERO, |m, v| m.max(v.point));
+    assert!(far.abs_diff_eq(v3(10.0, 0.0, 6.0), 1e-9), "{far}");
+}
+
+#[test]
+fn spline_face_with_a_hole() {
+    // A plate with a hole whose flat faces are written as B-spline patches (flat ones,
+    // bigger than the plate, their control points unevenly spaced): faces with two
+    // bounds, neither marked as the outer one, the hole listed first.
+    let mut sketch = Sketch::new();
+    shapes::rectangle(&mut sketch, DVec2::ZERO, v2(40.0, 20.0));
+    sketch.add_circle(v2(10.0, 10.0), 3.0);
+    let plate: Vec<Region> = regions(&sketch)
+        .into_iter()
+        .filter(|r| r.holes.len() == 1)
+        .collect();
+    let solid = extrude(&Plane::TOP, &plate, 0.0, 2.0).unwrap();
+    let patches = Foreign {
+        surface: &|w, s| match s {
+            Surface::Plane(p) if p.normal().z.abs() > 0.5 => {
+                let knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 1.0];
+                let mut net = Vec::new();
+                for x in [-60.0, -10.0, 70.0] {
+                    for y in [-50.0, 5.0, 60.0] {
+                        net.push(p.from_plane_coords(v2(x, y)));
+                    }
+                }
+                let patch = NurbsSurface::new(2, 2, knots.clone(), knots, net, None).unwrap();
+                Some(w.spline_surface(&patch, 1.0))
+            }
+            _ => None,
+        },
+        ..PLAIN
+    };
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "Plate", &solid, &patches);
+    let text = w.part(&[brep], UnitStyle::Millimetres);
+    assert_eq!(text.matches("B_SPLINE_SURFACE_WITH_KNOTS").count(), 2);
+    let s = same_body(&text, &solid);
+    assert_eq!(freeform_faces(&s), 2);
+    for face in s
+        .faces
+        .iter()
+        .filter(|f| matches!(f.surface, Surface::Nurbs(_)))
+    {
+        // The outer loop (four lines) comes first, the hole (a circle) second.
+        let sizes: Vec<usize> = face
+            .loops
+            .iter()
+            .map(|&l| s.loop_coedges(l).len())
+            .collect();
+        assert_eq!(sizes, [4, 1]);
+    }
+    assert_close(measure::volume(&s), (800.0 - PI * 9.0) * 2.0);
+}
+
+#[test]
+fn rational_splines_as_complex_instances() {
+    let solid = half_disc();
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "Half", &solid, &PLAIN);
+    let text = w.part(&[brep], UnitStyle::Millimetres);
+    assert!(text.contains("RATIONAL_B_SPLINE_CURVE"));
+    assert!(text.contains("RATIONAL_B_SPLINE_SURFACE"));
+    let s = same_body(&text, &solid);
+    let volume = PI * 25.0 / 2.0 * 4.0;
+    let got = measure::volume(&s);
+    assert!(
+        (got - volume).abs() < 1e-7 * volume,
+        "{got} instead of {volume}"
+    );
+    assert!(s.faces.iter().any(|f| match &f.surface {
+        Surface::Nurbs(n) => n.weights().is_some(),
+        _ => false,
+    }));
+    // In centimetres, edges backwards.
+    let mut w = Step::default();
+    let style = Foreign {
+        scale: 0.1,
+        backwards: true,
+        ..PLAIN
+    };
+    let brep = foreign_brep(&mut w, "Half", &solid, &style);
+    same_body(&w.part(&[brep], UnitStyle::CentimetresDegrees), &solid);
+}
+
+#[test]
+fn bezier_and_quasi_uniform_splines() {
+    // One cubic Bézier piece: no knots are written at all.
+    let knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0];
+    let points = flat(&[(0.0, 0.0), (2.0, -6.0), (8.0, -6.0), (10.0, 0.0)]);
+    let solid = d_prism(&NurbsCurve::new(3, knots, points, None).unwrap(), 5.0);
+    let bezier = Foreign {
+        curve: &|w, c| match c {
+            Curve3::Nurbs(c) => {
+                let points = w.points(c.control_points(), 1.0);
+                Some(w.add(format!(
+                    "BEZIER_CURVE('',{},{points},.UNSPECIFIED.,.F.,.F.)",
+                    c.degree()
+                )))
+            }
+            _ => None,
+        },
+        surface: &|w, s| match s {
+            Surface::Nurbs(s) => {
+                let net = w.net(s, 1.0);
+                Some(w.add(format!(
+                    "BEZIER_SURFACE('',3,1,{net},.UNSPECIFIED.,.F.,.F.,.F.)"
+                )))
+            }
+            _ => None,
+        },
+        ..PLAIN
+    };
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "Bezier", &solid, &bezier);
+    let text = w.part(&[brep], UnitStyle::Millimetres);
+    assert!(text.contains("= BEZIER_SURFACE('',3,1,"));
+    assert!(!text.contains("WITH_KNOTS"));
+    let s = same_body(&text, &solid);
+    assert_eq!(s.faces[3].surface, solid.faces[3].surface);
+
+    // Two Bézier pieces end to end, and the rational kind as a complex instance.
+    let knots = vec![0.0, 0.0, 0.0, 1.0, 1.0, 2.0, 2.0, 2.0];
+    let points = flat(&[
+        (0.0, 0.0),
+        (1.0, -4.0),
+        (5.0, -5.0),
+        (9.0, -6.0),
+        (10.0, 0.0),
+    ]);
+    let weights = vec![1.0, 0.8, 1.0, 1.3, 1.0];
+    let solid = d_prism(
+        &NurbsCurve::new(2, knots, points, Some(weights)).unwrap(),
+        5.0,
+    );
+    let pieces = Foreign {
+        curve: &|w, c| match c {
+            Curve3::Nurbs(c) => {
+                let points = w.points(c.control_points(), 1.0);
+                Some(w.add(format!(
+                    "(BEZIER_CURVE()B_SPLINE_CURVE(2,{points},.UNSPECIFIED.,.F.,.F.)\
+                     BOUNDED_CURVE()CURVE()GEOMETRIC_REPRESENTATION_ITEM()\
+                     RATIONAL_B_SPLINE_CURVE({})REPRESENTATION_ITEM(''))",
+                    real_list(c.weights().unwrap())
+                )))
+            }
+            _ => None,
+        },
+        ..PLAIN
+    };
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "Pieces", &solid, &pieces);
+    same_body(&w.part(&[brep], UnitStyle::Millimetres), &solid);
+
+    // Quasi-uniform: clamped, with the whole numbers between as knots.
+    let knots = vec![0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 3.0, 3.0, 3.0];
+    let points = wavy_profile().control_points().to_vec();
+    let solid = d_prism(&NurbsCurve::new(3, knots, points, None).unwrap(), 5.0);
+    let quasi = Foreign {
+        curve: &|w, c| match c {
+            Curve3::Nurbs(c) => {
+                let points = w.points(c.control_points(), 1.0);
+                Some(w.add(format!(
+                    "QUASI_UNIFORM_CURVE('',3,{points},.UNSPECIFIED.,.F.,.F.)"
+                )))
+            }
+            _ => None,
+        },
+        surface: &|w, s| match s {
+            Surface::Nurbs(s) => {
+                let net = w.net(s, 1.0);
+                Some(w.add(format!(
+                    "QUASI_UNIFORM_SURFACE('',3,1,{net},.UNSPECIFIED.,.F.,.F.,.F.)"
+                )))
+            }
+            _ => None,
+        },
+        ..PLAIN
+    };
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "Quasi", &solid, &quasi);
+    let text = w.part(&[brep], UnitStyle::Millimetres);
+    assert!(text.contains("QUASI_UNIFORM_SURFACE") && text.contains("QUASI_UNIFORM_CURVE"));
+    same_body(&text, &solid);
+}
+
+#[test]
+fn unclamped_knot_vectors() {
+    // A uniform cubic: no knot repeated, so the curve starts and ends away from its
+    // control points. The kernel's curve is the clamped one that is the same shape.
+    let net = flat(&[
+        (-2.0, 3.0),
+        (0.0, -1.5),
+        (2.0, -4.0),
+        (5.0, -6.0),
+        (8.0, -4.0),
+        (10.0, -1.5),
+        (12.0, 3.0),
+    ]);
+    let uniform: Vec<f64> = (0..11).map(|k| f64::from(k) - 3.0).collect();
+    let profile = NurbsCurve::from_unclamped(3, uniform.clone(), net.clone(), None).unwrap();
+    assert_eq!(profile.domain(), (0.0, 4.0));
+    let height = 5.0;
+    let solid = d_prism(&profile, height);
+    // The file has the unclamped definitions: the curves with their knots written out
+    // (each once), or as a UNIFORM_CURVE; the surface as a UNIFORM_SURFACE.
+    let raised = |z: f64| -> Vec<DVec3> { net.iter().map(|p| *p + DVec3::Z * z).collect() };
+    let (repeats, values) = knot_lists(&uniform);
+    let style = Foreign {
+        curve: &|w, c| match c {
+            Curve3::Nurbs(c) if c.control_points()[0].z == 0.0 => {
+                let points = w.points(&raised(0.0), 1.0);
+                Some(w.add(format!(
+                    "B_SPLINE_CURVE_WITH_KNOTS('',3,{points},.UNSPECIFIED.,.F.,.F.,{repeats},\
+                     {values},.UNIFORM_KNOTS.)"
+                )))
+            }
+            Curve3::Nurbs(_) => {
+                let points = w.points(&raised(height), 1.0);
+                Some(w.add(format!(
+                    "UNIFORM_CURVE('',3,{points},.UNSPECIFIED.,.F.,.F.)"
+                )))
+            }
+            _ => None,
+        },
+        surface: &|w, s| match s {
+            Surface::Nurbs(_) => {
+                let rows: Vec<String> = net
+                    .iter()
+                    .map(|p| w.points(&[*p, *p + DVec3::Z * height], 1.0))
+                    .collect();
+                // In v, the two rows of a uniform surface of degree 1 are its ends.
+                Some(w.add(format!(
+                    "UNIFORM_SURFACE('',3,1,({}),.UNSPECIFIED.,.F.,.F.,.F.)",
+                    rows.join(",")
+                )))
+            }
+            _ => None,
+        },
+        ..PLAIN
+    };
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "Uniform", &solid, &style);
+    let text = w.part(&[brep], UnitStyle::Millimetres);
+    assert!(
+        text.contains("( 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 )"),
+        "{text}"
+    );
+    let s = same_body(&text, &solid);
+    // Clamped on the way in.
+    for e in s.edges.iter().filter(|e| e.curve.domain().is_some()) {
+        let Curve3::Nurbs(c) = &e.curve else {
+            unreachable!()
+        };
+        assert_eq!(c.knots()[..4], [0.0; 4]);
+        assert_eq!((e.t0, e.t1), (0.0, 4.0));
+    }
+}
+
+/// The area a closed curve in a plane of constant z encloses.
+fn enclosed_area(c: &NurbsCurve) -> f64 {
+    let (lo, hi) = c.domain();
+    let n = 20_000;
+    let at = |k: usize| c.point(lo + (hi - lo) * k as f64 / n as f64);
+    (0..n)
+        .map(|k| {
+            let (p, q) = (at(k), at(k + 1));
+            0.5 * (p.x * q.y - q.x * p.y)
+        })
+        .sum()
+}
+
+/// How the side of [`spline_tube`] is written.
+#[derive(Clone, Copy, PartialEq)]
+enum Tube {
+    /// One face all the way round, with a seam edge used twice.
+    Seam,
+    /// One face between its two closed edges, with no seam.
+    Seamless,
+    /// Two faces, each half the way round.
+    Halves,
+}
+
+/// A tapering tube with a closed, periodic B-spline surface for a side, written the way
+/// exporters with periodic surfaces write it: uniform knots, the first control points
+/// repeated at the end, `closed` flags set. The vertices are at the closed direction's
+/// parameter `at` (0 is where the curves and the surface start and end; the range is 0
+/// to 8). With `across`, the surface's `u` and `v` are swapped (it closes in `v`).
+/// Returns the file and the volume.
+fn spline_tube(kind: Tube, at: f64, across: bool) -> (String, f64) {
+    let (height, taper) = (10.0, 0.5);
+    let ring = |z: f64, scale: f64| -> Vec<DVec3> {
+        let mut points: Vec<DVec3> = (0..8)
+            .map(|k| {
+                let a = f64::from(k) * TAU / 8.0;
+                v3(6.0 * a.cos() * scale, 4.0 * a.sin() * scale, z)
+            })
+            .collect();
+        points.extend_from_within(..3);
+        points
+    };
+    let (bottom, top) = (ring(0.0, 1.0), ring(height, taper));
+    let uniform: Vec<f64> = (0..15).map(|k| f64::from(k) - 3.0).collect();
+    let curve = |points: &[DVec3]| {
+        NurbsCurve::from_unclamped(3, uniform.clone(), points.to_vec(), None).unwrap()
+    };
+    let (c0, c1) = (curve(&bottom), curve(&top));
+    assert!(c0.is_closed(1e-12));
+    let volume = enclosed_area(&c0) * height * (1.0 + taper + taper * taper) / 3.0;
+
+    let mut w = Step::default();
+    let (repeats, values) = knot_lists(&uniform);
+    let closed_curve = |w: &mut Step, points: &[DVec3]| {
+        let points = w.points(points, 1.0);
+        w.add(format!(
+            "B_SPLINE_CURVE_WITH_KNOTS('',3,{points},.UNSPECIFIED.,.T.,.F.,{repeats},{values},\
+             .UNIFORM_KNOTS.)"
+        ))
+    };
+    let (curve0, curve1) = (closed_curve(&mut w, &bottom), closed_curve(&mut w, &top));
+    // The natural normal is outwards when u goes round and v up, inwards when swapped.
+    let surface = if across {
+        let rows = [w.points(&bottom, 1.0), w.points(&top, 1.0)];
+        w.add(format!(
+            "B_SPLINE_SURFACE_WITH_KNOTS('',1,3,({}),.UNSPECIFIED.,.F.,.T.,.F.,(2,2),{repeats},\
+             (0.,1.),{values},.UNSPECIFIED.)",
+            rows.join(",")
+        ))
+    } else {
+        let rows: Vec<String> = (0..11)
+            .map(|i| w.points(&[bottom[i], top[i]], 1.0))
+            .collect();
+        w.add(format!(
+            "B_SPLINE_SURFACE_WITH_KNOTS('',3,1,({}),.UNSPECIFIED.,.T.,.F.,.F.,{repeats},(2,2),\
+             {values},(0.,1.),.UNSPECIFIED.)",
+            rows.join(",")
+        ))
+    };
+    let below = w.plane(DVec3::ZERO, -DVec3::Z, DVec3::X);
+    let above = w.plane(v3(0.0, 0.0, height), DVec3::Z, DVec3::X);
+    let mut faces = Vec::new();
+    if kind == Tube::Halves {
+        let other = (at + 4.0) % 8.0;
+        let (a0, a1) = (w.vertex(c0.point(at)), w.vertex(c1.point(at)));
+        let (b0, b1) = (w.vertex(c0.point(other)), w.vertex(c1.point(other)));
+        // Each ring in two edges: one of them runs across the curve's start.
+        let e0 = [w.edge(a0, b0, curve0, true), w.edge(b0, a0, curve0, true)];
+        let e1 = [w.edge(a1, b1, curve1, true), w.edge(b1, a1, curve1, true)];
+        let seam_a = w.line(c0.point(at), c1.point(at));
+        let seam_a = w.edge(a0, a1, seam_a, true);
+        let seam_b = w.line(c0.point(other), c1.point(other));
+        let seam_b = w.edge(b0, b1, seam_b, true);
+        let bound = w.bound("FACE_BOUND", &[(e0[0], false), (e0[1], false)], true);
+        faces.push(w.face(&[bound], below, true));
+        let bound = w.bound("FACE_BOUND", &[(e1[0], true), (e1[1], true)], true);
+        faces.push(w.face(&[bound], above, true));
+        for (k, (first, second)) in [(seam_a, seam_b), (seam_b, seam_a)].into_iter().enumerate() {
+            let uses = [
+                (e0[k], true),
+                (second, true),
+                (e1[k], false),
+                (first, false),
+            ];
+            let bound = w.bound("FACE_OUTER_BOUND", &uses, true);
+            faces.push(w.face(&[bound], surface, !across));
+        }
+    } else {
+        let (v0, v1) = (w.vertex(c0.point(at)), w.vertex(c1.point(at)));
+        let e0 = w.edge(v0, v0, curve0, true);
+        let e1 = w.edge(v1, v1, curve1, true);
+        let bound = w.bound("FACE_BOUND", &[(e0, false)], true);
+        faces.push(w.face(&[bound], below, true));
+        let bound = w.bound("FACE_BOUND", &[(e1, true)], true);
+        faces.push(w.face(&[bound], above, true));
+        let bounds = if kind == Tube::Seam {
+            let seam = w.line(c0.point(at), c1.point(at));
+            let seam = w.edge(v0, v1, seam, true);
+            let uses = [(e0, true), (seam, true), (e1, false), (seam, false)];
+            vec![w.bound("FACE_OUTER_BOUND", &uses, true)]
+        } else {
+            vec![
+                w.bound("FACE_BOUND", &[(e0, true)], true),
+                w.bound("FACE_BOUND", &[(e1, false)], true),
+            ]
+        };
+        faces.push(w.face(&bounds, surface, !across));
+    }
+    let brep = w.solid("Tube", &faces);
+    (w.part(&[brep], UnitStyle::Millimetres), volume)
+}
+
+#[test]
+fn closed_spline_surface_with_a_seam() {
+    // The seam where the surface's parameter starts and ends, and elsewhere; closed in u
+    // and in v.
+    for across in [false, true] {
+        for at in [0.0, 2.6, 7.5] {
+            let (text, volume) = spline_tube(Tube::Seam, at, across);
+            let imported = import(&text);
+            assert_eq!(imported.warnings, Vec::<String>::new());
+            let s = &imported.bodies[0].solid;
+            // The side comes in two halves: the kernel's freeform faces don't go all
+            // the way round. Each cap's edge is split where the cut meets it.
+            assert_eq!(tuple(valid(s)), (4, 6, 4, 0, 1, 0), "at {at}");
+            assert_eq!(freeform_faces(s), 2);
+            let got = measure::volume(s);
+            assert!(
+                (got - volume).abs() < 1e-6 * volume,
+                "{got} instead of {volume}"
+            );
+            for face in &s.faces {
+                if let Surface::Nurbs(surface) = &face.surface {
+                    assert!(!surface.is_closed(true, 1e-6) && !surface.is_closed(false, 1e-6));
+                }
+            }
+            for e in &s.edges {
+                let (a, b) = (s.vertex(e.start).point, s.vertex(e.end).point);
+                assert!(e.t1 > e.t0);
+                assert!(e.curve.point(e.t0).distance(a) < 1e-7, "at {at}");
+                assert!(e.curve.point(e.t1).distance(b) < 1e-7, "at {at}");
+                if let Some((lo, hi)) = e.curve.domain() {
+                    assert!(lo <= e.t0 && e.t1 <= hi);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn closed_spline_surface_in_halves() {
+    // Faces that stop at seams of their own: one of the two runs across the surface's
+    // start, and so do its edges across their curves'.
+    for across in [false, true] {
+        for at in [0.0, 1.3, 6.0] {
+            let (text, volume) = spline_tube(Tube::Halves, at, across);
+            let imported = import(&text);
+            let s = &imported.bodies[0].solid;
+            assert_eq!(tuple(valid(s)), (4, 6, 4, 0, 1, 0), "at {at}");
+            let got = measure::volume(s);
+            assert!(
+                (got - volume).abs() < 1e-6 * volume,
+                "{got} instead of {volume}"
+            );
+            for e in &s.edges {
+                if let Some((lo, hi)) = e.curve.domain() {
+                    assert!(lo <= e.t0 && e.t0 < e.t1 && e.t1 <= hi);
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn closed_spline_surface_without_a_seam_is_refused() {
+    for across in [false, true] {
+        let (text, _) = spline_tube(Tube::Seamless, 1.0, across);
+        let message = import_error(&text);
+        assert!(
+            message.contains("a freeform face that wraps all the way round its surface"),
+            "{message}"
+        );
+        assert!(message.contains("(entity #"), "{message}");
+    }
+}
+
+/// A torus as one rational B-spline face that closes both ways, with its two seams.
+fn spline_torus(major: f64, minor: f64) -> String {
+    let tube_frame = Frame::from_origin_z_x(v3(major, 0.0, 0.0), -DVec3::Y, DVec3::X).unwrap();
+    let tube = NurbsCurve::arc(&tube_frame, minor, 0.0, TAU);
+    let round = NurbsCurve::arc(&Frame::WORLD, 1.0, 0.0, TAU);
+    let (tube_weights, round_weights) = (tube.weights().unwrap(), round.weights().unwrap());
+    let mut points = Vec::new();
+    let mut weights = Vec::new();
+    for (i, corner) in round.control_points().iter().enumerate() {
+        for (j, p) in tube.control_points().iter().enumerate() {
+            points.push(v3(p.x * corner.x, p.x * corner.y, p.z));
+            weights.push(round_weights[i] * tube_weights[j]);
+        }
+    }
+    let surface = NurbsSurface::new(
+        2,
+        2,
+        round.knots().to_vec(),
+        tube.knots().to_vec(),
+        points,
+        Some(weights),
+    )
+    .unwrap();
+    let mut w = Step::default();
+    let surface = w.spline_surface(&surface, 1.0);
+    let corner = v3(major + minor, 0.0, 0.0);
+    let v = w.vertex(corner);
+    let around = w.circle(DVec3::ZERO, DVec3::Z, DVec3::X, major + minor);
+    let around = w.edge(v, v, around, true);
+    let through = w.spline_curve(&tube, 1.0);
+    let through = w.edge(v, v, through, true);
+    let uses = [
+        (around, true),
+        (through, true),
+        (around, false),
+        (through, false),
+    ];
+    let bound = w.bound("FACE_OUTER_BOUND", &uses, true);
+    let face = w.face(&[bound], surface, true);
+    let brep = w.solid("Ring", &[face]);
+    w.part(&[brep], UnitStyle::Millimetres)
+}
+
+#[test]
+fn spline_torus_is_cut_into_four() {
+    let imported = import(&spline_torus(10.0, 3.0));
+    let s = &imported.bodies[0].solid;
+    // Cut once each way: four faces round four vertices.
+    assert_eq!(tuple(valid(s)), (4, 8, 4, 0, 1, 1));
+    assert_eq!(freeform_faces(s), 4);
+    let volume = 2.0 * PI * PI * 10.0 * 9.0;
+    let got = measure::volume(s);
+    assert!(
+        (got - volume).abs() < 1e-6 * volume,
+        "{got} instead of {volume}"
+    );
+    let surface = 4.0 * PI * PI * 10.0 * 3.0;
+    assert!((area(s) - surface).abs() < 1e-6 * surface, "{}", area(s));
+}
+
+#[test]
+fn broken_splines_give_errors() {
+    let solid = d_prism(&wavy_profile(), 6.0);
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "D", &solid, &PLAIN);
+    let text = w.part(&[brep], UnitStyle::Millimetres);
+    import(&text);
+    let curve_knots = "( 4, 1, 1, 4 ), ( 0.0, 0.4, 0.7, 1.0 ), .UNSPECIFIED. )";
+    assert_eq!(text.matches(curve_knots).count(), 2);
+    let curve = "B_SPLINE_CURVE_WITH_KNOTS ( 'NONE', 3,";
+    let cases: [(&str, &str, &str); 11] = [
+        // Knots against control points.
+        (
+            curve_knots,
+            "( 4, 1, 4 ), ( 0.0, 0.4, 1.0 ), .UNSPECIFIED. )",
+            "has 9 knots",
+        ),
+        (
+            curve_knots,
+            "( 4, 1, 1, 4 ), ( 0.0, 0.4, 1.0 ), .UNSPECIFIED. )",
+            "lists 4 knot multiplicities for 3 knots",
+        ),
+        (
+            curve_knots,
+            "( 4, 2, 1, 4 ), ( 0.0, 0.4, 0.7, 1.0 ), .UNSPECIFIED. )",
+            "has 11 knots",
+        ),
+        (
+            curve_knots,
+            "( 4, 1, 999999999999, 4 ), ( 0.0, 0.4, 0.7, 1.0 ), .UNSPECIFIED. )",
+            "where its 6 control points of degree 3 need 10",
+        ),
+        (
+            curve_knots,
+            "( 4, 1, 0, 5 ), ( 0.0, 0.4, 0.7, 1.0 ), .UNSPECIFIED. )",
+            "whole numbers, 1 or more",
+        ),
+        (
+            curve_knots,
+            "( 4, 1, 1, 4 ), ( 0.0, 0.7, 0.4, 1.0 ), .UNSPECIFIED. )",
+            "the knots must be finite and not decrease",
+        ),
+        (
+            curve_knots,
+            "( 4, 1, 1, 4 ), ( 0.0, 0.4, 'x', 1.0 ), .UNSPECIFIED. )",
+            "a list of numbers",
+        ),
+        // The degree.
+        (
+            curve,
+            "B_SPLINE_CURVE_WITH_KNOTS ( 'NONE', 0,",
+            "a B-spline of degree 0",
+        ),
+        (
+            curve,
+            "B_SPLINE_CURVE_WITH_KNOTS ( 'NONE', 7,",
+            "too few for its degree of 7",
+        ),
+        (
+            curve,
+            "B_SPLINE_CURVE_WITH_KNOTS ( 'NONE', 3.5,",
+            "should be a whole number",
+        ),
+        (
+            "B_SPLINE_SURFACE_WITH_KNOTS ( 'NONE', 3, 1,",
+            "B_SPLINE_SURFACE_WITH_KNOTS ( 'NONE', 3, 99,",
+            "a B-spline of degree 99 in v",
+        ),
+    ];
+    for (from, to, expected) in cases {
+        assert!(text.contains(from), "{from}");
+        let message = import_error(&text.replacen(from, to, 1));
+        assert!(message.contains(expected), "{to}: {message}");
+        assert!(message.contains("B_SPLINE_"), "{message}");
+    }
+    let surface_knots = "( 4, 1, 1, 4 ), ( 2, 2 ), ( 0.0,";
+    assert!(text.contains(surface_knots), "{text}");
+    let message =
+        import_error(&text.replacen(surface_knots, "( 4, 1, 1, 4 ), ( 2, 3 ), ( 0.0,", 1));
+    assert!(message.contains("has 5 knots in v"), "{message}");
+    let message = import_error(&text.replacen(surface_knots, "( 4, 1, 4 ), ( 2, 2 ), ( 0.0,", 1));
+    assert!(
+        message.contains("lists 3 knot multiplicities for 4 knots in u"),
+        "{message}"
+    );
+    // A row of control points short of one.
+    let net = text
+        .find("B_SPLINE_SURFACE_WITH_KNOTS ( 'NONE', 3, 1, ( (")
+        .unwrap();
+    let comma = net + text[net..].find(",#").unwrap();
+    let end = comma + text[comma..].find(')').unwrap();
+    let message = import_error(&format!("{}{}", &text[..comma], &text[end..]));
+    assert!(message.contains("not all the same length"), "{message}");
+
+    // Weights against control points, and weights that are no use.
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "Half", &half_disc(), &PLAIN);
+    let text = w.part(&[brep], UnitStyle::Millimetres);
+    import(&text);
+    let half = "0.7071067811865476";
+    let curve_weights = format!("RATIONAL_B_SPLINE_CURVE ( ( 1.0, {half}, 1.0, {half}, 1.0 ) )");
+    let surface_weights =
+        format!("RATIONAL_B_SPLINE_SURFACE ( ( ( 1.0, 1.0 ), ( {half}, {half} ),");
+    let rows = "RATIONAL_B_SPLINE_SURFACE ( ( ( 1.0, 1.0 ),";
+    let cases: [(&str, String, &str); 7] = [
+        (
+            &curve_weights,
+            format!("RATIONAL_B_SPLINE_CURVE ( ( 1.0, {half}, 1.0, 1.0 ) )"),
+            "has 4 weights for 5 control points",
+        ),
+        (
+            &curve_weights,
+            "RATIONAL_B_SPLINE_CURVE ( ( 1.0, 0.7, 1.0, -0.7, 1.0 ) )".to_owned(),
+            "one positive weight per control point",
+        ),
+        (
+            &curve_weights,
+            "RATIONAL_B_SPLINE_CURVE ( ( 1.0, 0.7, 1.0, #5, 1.0 ) )".to_owned(),
+            "a list of numbers",
+        ),
+        (
+            &curve_weights,
+            "RATIONAL_B_SPLINE_CURVE ( 1.0 )".to_owned(),
+            "should be a list",
+        ),
+        (
+            &surface_weights,
+            rows.to_owned(),
+            "are not one for each of its 5 by 2 control points",
+        ),
+        (
+            rows,
+            "RATIONAL_B_SPLINE_SURFACE ( ( ( 1.0, 1.0, 1.0 ),".to_owned(),
+            "are not one for each",
+        ),
+        (
+            rows,
+            "RATIONAL_B_SPLINE_SURFACE ( ( ( 1.0, 0.0 ),".to_owned(),
+            "one positive weight per control point",
+        ),
+    ];
+    for (from, to, expected) in cases {
+        assert!(text.contains(from), "{from}: {text}");
+        let message = import_error(&text.replacen(from, &to, 1));
+        assert!(message.contains(expected), "{to}: {message}");
+    }
+    // A B-spline with no knots to go by, and Bézier pieces that don't come out even.
+    let knots = "B_SPLINE_CURVE_WITH_KNOTS ( ( 3, 2, 3 ), ( 0.0, 0.5, 1.0 ), \
+                 .PIECEWISE_BEZIER_KNOTS. )";
+    assert!(text.contains(knots), "{text}");
+    let message = import_error(&text.replacen(knots, "", 1));
+    assert!(message.contains("without a knot vector"), "{message}");
+    // (Five control points of degree 2 are two Bézier pieces: the same curve.)
+    import(&text.replacen(knots, "BEZIER_CURVE ( )", 1));
+    let odd = text
+        .replacen("B_SPLINE_CURVE ( 2, (", "B_SPLINE_CURVE ( 3, (", 1)
+        .replacen(knots, "BEZIER_CURVE ( )", 1);
+    let message = import_error(&odd);
+    assert!(
+        message.contains("don't make whole Bézier pieces"),
+        "{message}"
+    );
+}
+
+// ---- Swept surfaces ----
+
+impl Step {
+    fn extrusion(&mut self, curve: u32, dir: DVec3) -> u32 {
+        let d = self.dir(dir);
+        let vector = self.add(format!("VECTOR('',#{d},1.)"));
+        self.add(format!(
+            "SURFACE_OF_LINEAR_EXTRUSION('',#{curve},#{vector})"
+        ))
+    }
+
+    /// The surface `curve` sweeps when turned about the world's Z axis.
+    fn revolution(&mut self, curve: u32) -> u32 {
+        let origin = self.point(DVec3::ZERO);
+        // Without a direction, the axis is along Z.
+        let axis = self.add(format!("AXIS1_PLACEMENT('',#{origin},$)"));
+        self.add(format!("SURFACE_OF_REVOLUTION('',#{curve},#{axis})"))
+    }
+}
+
+#[test]
+fn extruded_surfaces() {
+    // The D prism's sides as swept surfaces: the B-spline swept up is a freeform
+    // surface, the chord swept up is a plane.
+    let profile = wavy_profile();
+    let solid = d_prism(&profile, 6.0);
+    let swept = Foreign {
+        surface: &|w, s| match s {
+            Surface::Nurbs(_) => {
+                let curve = w.spline_curve(&profile, 1.0);
+                Some(w.extrusion(curve, DVec3::Z))
+            }
+            Surface::Plane(p) if p.normal().abs_diff_eq(DVec3::Y, 1e-12) => {
+                // From the far end: the surface then faces +Y, as the plane does.
+                let chord = w.line(v3(10.0, 0.0, 0.0), DVec3::ZERO);
+                Some(w.extrusion(chord, DVec3::Z))
+            }
+            _ => None,
+        },
+        ..PLAIN
+    };
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "Swept", &solid, &swept);
+    let text = w.part(&[brep], UnitStyle::Millimetres);
+    assert_eq!(text.matches("SURFACE_OF_LINEAR_EXTRUSION").count(), 2);
+    let s = same_body(&text, &solid);
+    assert_eq!(freeform_faces(&s), 1);
+    let Surface::Nurbs(side) = &s.faces[3].surface else {
+        panic!("the swept B-spline should be a freeform surface");
+    };
+    assert_eq!(side.degrees(), (3, 1));
+    // Swept the other way the surface faces inwards: the face says so, or the body
+    // would come out wrong.
+    let down = Foreign {
+        scale: 1.0 / 25.4,
+        surface: &|w, s| match s {
+            Surface::Nurbs(_) => {
+                let curve = w.spline_curve(&profile, 1.0 / 25.4);
+                Some(w.extrusion(curve, -DVec3::Z))
+            }
+            _ => None,
+        },
+        ..PLAIN
+    };
+    let mut inwards = solid.clone();
+    inwards.faces[3].reversed = true;
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "Swept", &inwards, &down);
+    same_body(&w.part(&[brep], UnitStyle::Inches), &solid);
+
+    // A circle swept along its axis is a cylinder.
+    let solid = half_disc();
+    let round = Foreign {
+        surface: &|w, s| match s {
+            Surface::Nurbs(_) => {
+                let circle = w.circle(v3(5.0, 0.0, 0.0), DVec3::Z, DVec3::X, 5.0);
+                Some(w.extrusion(circle, DVec3::Z))
+            }
+            _ => None,
+        },
+        ..PLAIN
+    };
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "Half", &solid, &round);
+    let s = same_body(&w.part(&[brep], UnitStyle::Millimetres), &solid);
+    assert!(matches!(s.faces[3].surface, Surface::Cylinder(c) if c.radius == 5.0));
+    // A circle that runs the other way round sweeps a surface that faces inwards; the
+    // kernel's cylinder faces outwards, so the face is turned over.
+    let clockwise = Foreign {
+        surface: &|w, s| match s {
+            Surface::Nurbs(_) => {
+                let circle = w.circle(v3(5.0, 0.0, 0.0), -DVec3::Z, DVec3::X, 5.0);
+                Some(w.extrusion(circle, DVec3::Z))
+            }
+            _ => None,
+        },
+        ..PLAIN
+    };
+    let mut inwards = solid.clone();
+    inwards.faces[3].reversed = true;
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "Half", &inwards, &clockwise);
+    let s = same_body(&w.part(&[brep], UnitStyle::Millimetres), &solid);
+    assert!(matches!(s.faces[3].surface, Surface::Cylinder(_)) && !s.faces[3].reversed);
+    // Swept askew it is not: a freeform surface, cut down from the whole tube to the
+    // half the face is on. (The body is no longer closed: the caps don't fit.)
+    let askew = Foreign {
+        surface: &|w, s| match s {
+            Surface::Nurbs(_) => {
+                let circle = w.circle(v3(5.0, 0.0, 0.0), DVec3::Z, DVec3::X, 5.0);
+                Some(w.extrusion(circle, v3(0.0, 0.3, 1.0)))
+            }
+            _ => None,
+        },
+        ..PLAIN
+    };
+    let mut w = Step::default();
+    let brep = foreign_brep(&mut w, "Askew", &solid, &askew);
+    let message = import_error(&w.part(&[brep], UnitStyle::Millimetres));
+    assert!(message.contains("not a closed, valid solid"), "{message}");
+}
+
+/// The volume of the solid a curve in the XZ plane sweeps when turned about Z, between
+/// the planes through its ends.
+fn turned_volume(c: &NurbsCurve) -> f64 {
+    let (lo, hi) = c.domain();
+    let n = 20_000;
+    let at = |k: usize| c.point(lo + (hi - lo) * k as f64 / n as f64);
+    (0..n)
+        .map(|k| {
+            let (p, q) = (at(k), at(k + 1));
+            PI * (p.x * p.x + p.x * q.x + q.x * q.x) / 3.0 * (q.z - p.z)
+        })
+        .sum()
+}
+
+/// A body of revolution: `profile` (from the bottom to the top, in the XZ plane) turned
+/// about Z, with a seam along it and flat ends. `side` writes the profile's curve.
+fn turned_body(a: DVec3, b: DVec3, side: &dyn Fn(&mut Step) -> u32, flat_ends: bool) -> String {
+    let mut w = Step::default();
+    let curve = side(&mut w);
+    let surface = w.revolution(curve);
+    let (below, above) = if flat_ends {
+        (
+            w.plane(DVec3::ZERO, -DVec3::Z, DVec3::X),
+            w.plane(v3(0.0, 0.0, b.z), DVec3::Z, DVec3::X),
+        )
+    } else {
+        // Lines square to the axis, turned: planes that face −Z.
+        let low = w.line(v3(1.0, 0.0, a.z), v3(3.0, 0.0, a.z));
+        let high = w.line(v3(1.0, 0.0, b.z), v3(3.0, 0.0, b.z));
+        (w.revolution(low), w.revolution(high))
+    };
+    let (v0, v1) = (w.vertex(a), w.vertex(b));
+    let c0 = w.circle(v3(0.0, 0.0, a.z), DVec3::Z, DVec3::X, a.x);
+    let c1 = w.circle(v3(0.0, 0.0, b.z), DVec3::Z, DVec3::X, b.x);
+    let (e0, e1) = (w.edge(v0, v0, c0, true), w.edge(v1, v1, c1, true));
+    let seam = side(&mut w);
+    let seam = w.edge(v0, v1, seam, true);
+    let mut faces = Vec::new();
+    let bound = w.bound("FACE_BOUND", &[(e0, false)], true);
+    faces.push(w.face(&[bound], below, true));
+    let bound = w.bound("FACE_BOUND", &[(e1, true)], true);
+    faces.push(w.face(&[bound], above, flat_ends));
+    let uses = [(e0, true), (seam, true), (e1, false), (seam, false)];
+    let bound = w.bound("FACE_BOUND", &uses, true);
+    faces.push(w.face(&[bound], surface, true));
+    let brep = w.solid("Turned", &faces);
+    w.part(&[brep], UnitStyle::Millimetres)
+}
+
+fn vase_profile() -> NurbsCurve {
+    NurbsCurve::new(
+        3,
+        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        vec![
+            v3(4.0, 0.0, 0.0),
+            v3(8.0, 0.0, 3.0),
+            v3(1.0, 0.0, 8.0),
+            v3(3.0, 0.0, 12.0),
+        ],
+        None,
+    )
+    .unwrap()
+}
+
+fn turned_vase() -> String {
+    let profile = vase_profile();
+    turned_body(
+        v3(4.0, 0.0, 0.0),
+        v3(3.0, 0.0, 12.0),
+        &|w| w.spline_curve(&profile, 1.0),
+        true,
+    )
+}
+
+#[test]
+fn revolved_surfaces() {
+    // Lines turned about an axis: a cone from the slanted one, planes from the ones
+    // square to it.
+    let (a, b) = (v3(5.0, 0.0, 0.0), v3(2.0, 0.0, 10.0));
+    let text = turned_body(a, b, &|w| w.line(a, b), false);
+    assert_eq!(text.matches("SURFACE_OF_REVOLUTION").count(), 3);
+    let imported = import(&text);
+    assert_eq!(imported.warnings, Vec::<String>::new());
+    let s = &imported.bodies[0].solid;
+    assert_eq!(tuple(valid(s)), (2, 3, 3, 0, 1, 0));
+    assert_close(measure::volume(s), PI * 10.0 / 3.0 * (25.0 + 10.0 + 4.0));
+    let kinds: Vec<&str> = s
+        .faces
+        .iter()
+        .map(|f| match f.surface {
+            Surface::Plane(_) => "plane",
+            Surface::Cone(_) => "cone",
+            _ => "other",
+        })
+        .collect();
+    assert_eq!(kinds, ["plane", "plane", "cone"]);
+    // A line along the axis: a cylinder.
+    let (a, b) = (v3(5.0, 0.0, 0.0), v3(5.0, 0.0, 10.0));
+    let imported = import(&turned_body(a, b, &|w| w.line(a, b), true));
+    let s = &imported.bodies[0].solid;
+    assert!(matches!(s.faces[2].surface, Surface::Cylinder(c) if (c.radius - 5.0).abs() < 1e-12));
+    assert_close(measure::volume(s), PI * 250.0);
+
+    // A B-spline turned: a rational freeform surface, closed round the axis, so the
+    // face is cut in two.
+    let profile = vase_profile();
+    let imported = import(&turned_vase());
+    assert_eq!(imported.warnings, Vec::<String>::new());
+    let s = &imported.bodies[0].solid;
+    assert_eq!(tuple(valid(s)), (4, 6, 4, 0, 1, 0));
+    assert_eq!(freeform_faces(s), 2);
+    let (got, volume) = (measure::volume(s), turned_volume(&profile));
+    assert!(
+        (got - volume).abs() < 1e-6 * volume,
+        "{got} instead of {volume}"
+    );
+}
+
+#[test]
+fn faces_at_pinched_points_are_refused() {
+    // A dome: the profile ends on the axis, where the surface is pinched to a point.
+    // The side's loop is the base circle, the seam up to the tip and the seam back. The
+    // kernel's freeform faces can't have a corner there yet.
+    let profile = NurbsCurve::new(
+        3,
+        vec![0.0, 0.0, 0.0, 0.0, 1.0, 1.0, 1.0, 1.0],
+        vec![
+            v3(4.0, 0.0, 0.0),
+            v3(5.0, 0.0, 3.0),
+            v3(2.0, 0.0, 6.0),
+            v3(0.0, 0.0, 6.0),
+        ],
+        None,
+    )
+    .unwrap();
+    let mut w = Step::default();
+    let curve = w.spline_curve(&profile, 1.0);
+    let surface = w.revolution(curve);
+    let below = w.plane(DVec3::ZERO, -DVec3::Z, DVec3::X);
+    let (v0, tip) = (w.vertex(v3(4.0, 0.0, 0.0)), w.vertex(v3(0.0, 0.0, 6.0)));
+    let c0 = w.circle(DVec3::ZERO, DVec3::Z, DVec3::X, 4.0);
+    let e0 = w.edge(v0, v0, c0, true);
+    let seam = w.edge(v0, tip, curve, true);
+    let bound = w.bound("FACE_BOUND", &[(e0, false)], true);
+    let bottom = w.face(&[bound], below, true);
+    let uses = [(e0, true), (seam, true), (seam, false)];
+    let bound = w.bound("FACE_BOUND", &uses, true);
+    let side = w.face(&[bound], surface, true);
+    let brep = w.solid("Dome", &[bottom, side]);
+    let message = import_error(&w.part(&[brep], UnitStyle::Millimetres));
+    assert!(
+        message.contains("comes to a point where its surface is pinched together"),
+        "{message}"
+    );
+    assert!(message.contains("(entity #"), "{message}");
+
+    // A three-sided patch: a B-spline surface with one edge squeezed to a point, as the
+    // slanted side of a pyramid on the rectangle a, b, b1, a1 with its tip c above a.
+    let (a, b, c) = (DVec3::ZERO, v3(4.0, 0.0, 0.0), v3(0.0, 0.0, 3.0));
+    let (a1, b1) = (a + DVec3::Y * 5.0, b + DVec3::Y * 5.0);
+    let corners = [a, b, c, a1, b1];
+    // u from b to b1, v from that edge up to the tip.
+    let knots = vec![0.0, 0.0, 1.0, 1.0];
+    let patch = NurbsSurface::new(1, 1, knots.clone(), knots, vec![b, c, b1, c], None).unwrap();
+    assert!(patch.normal(v2(0.5, 0.5)).x > 0.0);
+    let mut w = Step::default();
+    let slanted = w.spline_surface(&patch, 1.0);
+    let ids = corners.map(|p| w.vertex(p));
+    let line = |w: &mut Step, from: usize, to: usize| {
+        let curve = w.line(corners[from], corners[to]);
+        w.edge(ids[from], ids[to], curve, true)
+    };
+    let (ab, bb1, b1a1, a1a) = (
+        line(&mut w, 0, 1),
+        line(&mut w, 1, 4),
+        line(&mut w, 4, 3),
+        line(&mut w, 3, 0),
+    );
+    let (ac, bc, b1c, a1c) = (
+        line(&mut w, 0, 2),
+        line(&mut w, 1, 2),
+        line(&mut w, 4, 2),
+        line(&mut w, 3, 2),
+    );
+    let sides: [(u32, Vec<EdgeUse>); 5] = [
+        (
+            w.plane(a, -DVec3::Z, DVec3::X),
+            vec![(a1a, false), (b1a1, false), (bb1, false), (ab, false)],
+        ),
+        (
+            w.plane(a, -DVec3::Y, DVec3::X),
+            vec![(ab, true), (bc, true), (ac, false)],
+        ),
+        (
+            w.plane(a, -DVec3::X, DVec3::Y),
+            vec![(ac, true), (a1c, false), (a1a, true)],
+        ),
+        (
+            w.plane(a1, (c - a1).cross(b1 - a1), DVec3::X),
+            vec![(b1a1, true), (a1c, true), (b1c, false)],
+        ),
+        (slanted, vec![(bb1, true), (b1c, true), (bc, false)]),
+    ];
+    let faces: Vec<u32> = sides
+        .iter()
+        .map(|(surface, uses)| {
+            let bound = w.bound("FACE_BOUND", uses, true);
+            w.face(&[bound], *surface, true)
+        })
+        .collect();
+    let brep = w.solid("Pyramid", &faces);
+    let message = import_error(&w.part(&[brep], UnitStyle::Millimetres));
+    assert!(
+        message.contains("comes to a point where its surface is pinched together"),
+        "{message}"
+    );
+    // With a plane for the slanted side, the same file is a pyramid.
+    let mut w = Step::default();
+    let ids = corners.map(|p| w.vertex(p));
+    let line = |w: &mut Step, from: usize, to: usize| {
+        let curve = w.line(corners[from], corners[to]);
+        w.edge(ids[from], ids[to], curve, true)
+    };
+    let (ab, bb1, b1a1, a1a) = (
+        line(&mut w, 0, 1),
+        line(&mut w, 1, 4),
+        line(&mut w, 4, 3),
+        line(&mut w, 3, 0),
+    );
+    let (ac, bc, b1c, a1c) = (
+        line(&mut w, 0, 2),
+        line(&mut w, 1, 2),
+        line(&mut w, 4, 2),
+        line(&mut w, 3, 2),
+    );
+    let sides: [(u32, Vec<EdgeUse>); 5] = [
+        (
+            w.plane(a, -DVec3::Z, DVec3::X),
+            vec![(a1a, false), (b1a1, false), (bb1, false), (ab, false)],
+        ),
+        (
+            w.plane(a, -DVec3::Y, DVec3::X),
+            vec![(ab, true), (bc, true), (ac, false)],
+        ),
+        (
+            w.plane(a, -DVec3::X, DVec3::Y),
+            vec![(ac, true), (a1c, false), (a1a, true)],
+        ),
+        (
+            w.plane(a1, (c - a1).cross(b1 - a1), DVec3::X),
+            vec![(b1a1, true), (a1c, true), (b1c, false)],
+        ),
+        (
+            w.plane(b, (b1 - b).cross(c - b), DVec3::Y),
+            vec![(bb1, true), (b1c, true), (bc, false)],
+        ),
+    ];
+    let faces: Vec<u32> = sides
+        .iter()
+        .map(|(surface, uses)| {
+            let bound = w.bound("FACE_BOUND", uses, true);
+            w.face(&[bound], *surface, true)
+        })
+        .collect();
+    let brep = w.solid("Pyramid", &faces);
+    let imported = import(&w.part(&[brep], UnitStyle::Millimetres));
+    assert_close(measure::volume(&imported.bodies[0].solid), 20.0);
+}
+
+#[test]
+fn revolved_circles() {
+    // A circle beside the axis, turned: a torus, as the kernel has it, with its seams.
+    let (major, minor) = (10.0, 3.0);
+    let mut w = Step::default();
+    let tube = w.circle(v3(major, 0.0, 0.0), -DVec3::Y, DVec3::X, minor);
+    let surface = w.revolution(tube);
+    let v = w.vertex(v3(major + minor, 0.0, 0.0));
+    let around = w.circle(DVec3::ZERO, DVec3::Z, DVec3::X, major + minor);
+    let around = w.edge(v, v, around, true);
+    let through = w.edge(v, v, tube, true);
+    let uses = [
+        (around, true),
+        (through, true),
+        (around, false),
+        (through, false),
+    ];
+    let bound = w.bound("FACE_OUTER_BOUND", &uses, true);
+    let face = w.face(&[bound], surface, true);
+    let brep = w.solid("Ring", &[face]);
+    let imported = import(&w.part(&[brep], UnitStyle::Millimetres));
+    assert_eq!(imported.warnings, Vec::<String>::new());
+    let s = &imported.bodies[0].solid;
+    assert_eq!(tuple(valid(s)), (1, 2, 1, 0, 1, 1));
+    assert!(matches!(s.faces[0].surface, Surface::Torus(t) if t.major == major));
+    assert_close(measure::volume(s), 2.0 * PI * PI * major * minor * minor);
+
+    // A circle about a point of the axis, turned: a sphere. With no bounds at all it
+    // gets the kernel's seam.
+    let mut w = Step::default();
+    let circle = w.circle(v3(0.0, 0.0, 2.0), -DVec3::Y, DVec3::X, 5.0);
+    let surface = w.revolution(circle);
+    let face = w.face(&[], surface, true);
+    let brep = w.solid("Ball", &[face]);
+    let imported = import(&w.part(&[brep], UnitStyle::Millimetres));
+    assert_eq!(imported.warnings, Vec::<String>::new());
+    let s = &imported.bodies[0].solid;
+    assert!(matches!(s.faces[0].surface, Surface::Sphere(b) if b.radius == 5.0));
+    valid(s);
+    assert_close(measure::volume(s), 4.0 / 3.0 * PI * 125.0);
+    let b = s.bounds();
+    assert!((0.5 * (b.min + b.max)).abs_diff_eq(v3(0.0, 0.0, 2.0), 1e-9));
+
+    // A line swept along itself, or turned about itself, is no surface.
+    let mut w = Step::default();
+    let line = w.line(DVec3::ZERO, DVec3::Z);
+    let surface = w.revolution(line);
+    let face = w.face(&[], surface, true);
+    let brep = w.solid("Nothing", &[face]);
+    let message = import_error(&w.part(&[brep], UnitStyle::Millimetres));
+    assert!(
+        message.contains("a swept surface PeetCAD can't import"),
+        "{message}"
+    );
+    assert!(message.contains("SURFACE_OF_REVOLUTION"), "{message}");
+}
+
 // ---- Files that can't be imported ----
 
 fn exported_plate() -> String {
@@ -1738,8 +3363,48 @@ fn reference_cycles() {
 }
 
 #[test]
-fn freeform_and_other_unsupported_geometry() {
+fn unsupported_geometry() {
     let text = exported_plate();
+    // Surfaces and curves the kernel has nothing for.
+    for surface in [
+        "OFFSET_SURFACE('',#1,1.0,.F.)",
+        "CURVE_BOUNDED_SURFACE('',#1,(#2),.T.)",
+        "RECTANGULAR_TRIMMED_SURFACE('',#1,0.,1.,0.,1.,.T.,.T.)",
+    ] {
+        let message = import_error(
+            &with_params(&text, "CYLINDRICAL_SURFACE", "X")
+                .replace("=CYLINDRICAL_SURFACE(X)", &format!("={surface}")),
+        );
+        assert!(
+            message.contains("a surface of a kind PeetCAD can't import yet"),
+            "{message}"
+        );
+        let name = surface.split('(').next().unwrap();
+        assert!(
+            message.contains(name) && message.contains("(entity #"),
+            "{message}"
+        );
+        assert!(message.contains("B-spline surfaces"), "{message}");
+    }
+    let message = import_error(
+        &with_params(&text, "CIRCLE", "X")
+            .replace("=CIRCLE(X)", "=OFFSET_CURVE_3D('',#1,1.0,.F.,#2)"),
+    );
+    assert!(
+        message.contains("a curve of a kind PeetCAD can't import yet"),
+        "{message}"
+    );
+    assert!(message.contains("OFFSET_CURVE_3D"), "{message}");
+    // An edge with only a curve in its surface's parameters.
+    let message =
+        import_error(&with_params(&text, "CIRCLE", "X").replace("=CIRCLE(X)", "=PCURVE('',#1,#2)"));
+    assert!(
+        message.contains("only as a curve in its surface's parameters"),
+        "{message}"
+    );
+    assert!(message.contains("PCURVE") && message.contains("(entity #"));
+    // B-splines are read, so what is wrong with one is said: here its control points
+    // are not points.
     let spline = "'',1,1,((#1,#2),(#3,#4)),.UNSPECIFIED.,.F.,.F.,.F.,(2,2),(2,2),(0.,1.),(0.,1.),\
                   .UNSPECIFIED.";
     let message = import_error(&with_params(&text, "CYLINDRICAL_SURFACE", "X").replace(
@@ -1747,10 +3412,10 @@ fn freeform_and_other_unsupported_geometry() {
         &format!("=B_SPLINE_SURFACE_WITH_KNOTS({spline})"),
     ));
     assert!(
-        message.contains("freeform (NURBS) surfaces, which PeetCAD can't import yet"),
+        message.contains("where a CARTESIAN_POINT should be"),
         "{message}"
     );
-    assert!(message.contains("B_SPLINE_SURFACE_WITH_KNOTS") && message.contains("(entity #"));
+    assert!(message.contains("B_SPLINE_SURFACE_WITH_KNOTS"), "{message}");
     // A rational B-spline is a complex entity.
     let message = import_error(&with_params(&text, "CIRCLE", "X").replace(
         "=CIRCLE(X)",
@@ -1759,17 +3424,20 @@ fn freeform_and_other_unsupported_geometry() {
          GEOMETRIC_REPRESENTATION_ITEM()RATIONAL_B_SPLINE_CURVE((1.,0.7,1.))\
          REPRESENTATION_ITEM(''))",
     ));
-    assert!(message.contains("freeform (NURBS) curves"), "{message}");
+    assert!(
+        message.contains("where a CARTESIAN_POINT should be"),
+        "{message}"
+    );
     assert!(message.contains("B_SPLINE_CURVE"), "{message}");
+    // A surface swept from something that is no curve.
     let message = import_error(&with_params(&text, "CYLINDRICAL_SURFACE", "X").replace(
         "=CYLINDRICAL_SURFACE(X)",
         "=SURFACE_OF_REVOLUTION('',#1,#2)",
     ));
     assert!(
-        message.contains("a surface of a kind PeetCAD can't import yet"),
+        message.contains("a curve of a kind PeetCAD can't import yet"),
         "{message}"
     );
-    assert!(message.contains("SURFACE_OF_REVOLUTION"), "{message}");
 
     // Surface bodies and faceted bodies.
     let mut w = Step::default();
@@ -1895,6 +3563,23 @@ fn mutated_files_never_panic() {
     let mut ring = Sketch::new();
     ring.add_circle(v2(10.0, 0.0), 3.0);
     let ring = turned(&ring, v2(10.5, 0.5), 0.0, 4.0);
+    let top = Plane {
+        frame: Frame {
+            origin: v3(0.0, 0.0, 10.0),
+            rotation: DQuat::from_rotation_z(0.5),
+        },
+    };
+    let twisted = lofted(&[
+        (plane_at(0.0), rectangle(12.0, 8.0)),
+        (top, rectangle(12.0, 8.0)),
+    ]);
+    let mut w = Step::default();
+    let style = Foreign {
+        backwards: true,
+        ..PLAIN
+    };
+    let brep = foreign_brep(&mut w, "Half", &half_disc(), &style);
+    let rational = w.part(&[brep], UnitStyle::Inches);
     let sources = [
         exported_plate(),
         step::write(
@@ -1902,12 +3587,26 @@ fn mutated_files_never_panic() {
             &options(StepSchema::Ap242),
         ),
         seamless_cylinder(1.0, UnitStyle::Inches),
+        // Freeform faces and edges: PeetCAD's own, other exporters', closed surfaces
+        // that are cut and trimmed, swept surfaces.
+        step::write(&[("Loft", &twisted)], &options(StepSchema::Ap214)),
+        rational,
+        spline_tube(Tube::Seam, 2.6, false).0,
+        spline_tube(Tube::Halves, 1.3, true).0,
+        spline_torus(10.0, 3.0),
+        turned_vase(),
     ];
     let mut random = Random(0x5EED);
     let (mut ok, mut failed) = (0, 0);
     for source in &sources {
         let bytes = source.as_bytes();
-        for round in 0..1000 {
+        // The files with freeform faces take longer to read: fewer rounds each.
+        let rounds = if source.contains("B_SPLINE") {
+            150
+        } else {
+            1000
+        };
+        for round in 0..rounds {
             let mut out = bytes.to_vec();
             for _ in 0..1 + random.below(3) {
                 let at = random.below(out.len());

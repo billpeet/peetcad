@@ -64,7 +64,7 @@ impl Silhouettes {
         }
         let samples = sample_edges(solid, BOUNDARY_TOLERANCE);
         for id in solid.face_ids() {
-            let surface = solid.face(id).surface;
+            let surface = solid.face(id).surface.clone();
             if matches!(surface, Surface::Plane(_)) {
                 continue;
             }
@@ -106,7 +106,9 @@ impl Silhouettes {
                     }
                 }
                 Surface::Cone(c) => f.generators(&cone_angles(c, view), &mut out),
-                Surface::Sphere(_) | Surface::Torus(_) => f.contour(view, &mut out),
+                Surface::Sphere(_) | Surface::Torus(_) | Surface::Nurbs(_) => {
+                    f.contour(view, &mut out);
+                }
                 Surface::Plane(_) => {}
             }
         }

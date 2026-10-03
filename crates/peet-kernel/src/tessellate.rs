@@ -144,6 +144,26 @@ pub(crate) struct EdgeSamples {
 fn max_step(curve: &Curve3, tolerance: f64) -> f64 {
     let radius = match curve {
         Curve3::Line(_) => return f64::INFINITY,
+        Curve3::Nurbs(n) => {
+            // A chord of parameter length h leaves the curve by about |C''| h² / 8 and
+            // turns it by about |C''| h / |C'|.
+            let (lo, hi) = n.domain();
+            let bend = n.bend();
+            if bend <= f64::MIN_POSITIVE {
+                return f64::INFINITY;
+            }
+            let speed = n
+                .control_points()
+                .windows(2)
+                .map(|w| w[0].distance(w[1]))
+                .sum::<f64>()
+                / (hi - lo);
+            let by_chord = (8.0 * tolerance / bend).sqrt();
+            let by_angle = MAX_ANGLE * speed / bend;
+            return by_chord
+                .min(by_angle)
+                .max((hi - lo) / MAX_SEGMENTS_PER_TURN);
+        }
         Curve3::Circle(c) => c.radius,
         // Largest radius of curvature of an ellipse: a² / b (at the minor axis ends).
         Curve3::Ellipse(e) => e.major * e.major / e.minor.max(tolerance::LINEAR),
@@ -222,6 +242,27 @@ pub(crate) fn face_chart(solid: &Solid, face: FaceId, tolerance: f64) -> Option<
             max_du: arc_step(t.major + t.minor, tolerance),
             max_dv: Some(arc_step(t.minor, tolerance)),
         },
+        Surface::Nurbs(s) => {
+            // As for a freeform curve, in each direction. A direction the surface is
+            // straight in (a ruled surface's rulings) needs no steps.
+            let (lo, hi) = s.domain();
+            let stretch = s.stretch().max(DVec2::splat(1e-9));
+            let bend = s.bend();
+            let step = |bend: f64, stretch: f64, size: f64| {
+                if bend <= 1e-12 * stretch {
+                    return size;
+                }
+                (8.0 * tolerance / bend)
+                    .sqrt()
+                    .min(MAX_ANGLE * stretch / bend)
+                    .clamp(size / MAX_SEGMENTS_PER_TURN, size)
+            };
+            Chart {
+                scale: stretch,
+                max_du: step(bend.x, stretch.x, hi.x - lo.x),
+                max_dv: Some(step(bend.y, stretch.y, hi.y - lo.y)),
+            }
+        }
     })
 }
 
@@ -259,11 +300,33 @@ pub(crate) fn sample_edges(solid: &Solid, tolerance: f64) -> Vec<EdgeSamples> {
                     step = step.min(chart.max_du);
                 }
             }
-            let n = if span.is_finite() && span > 0.0 {
+            let mut n = if span.is_finite() && span > 0.0 {
                 (span / step).ceil().max(1.0) as usize
             } else {
                 1
             };
+            // An edge of a freeform face is stepped as finely as the face needs across
+            // the parameters the edge covers, however straight the edge itself is: the
+            // face twists along a ruling.
+            for &c in &e.coedges {
+                let face = solid.coedge_face(c);
+                let surface = &solid.face(face).surface;
+                if let (Some(chart), Surface::Nurbs(_)) = (&charts[face.index()], surface) {
+                    let pieces = 8;
+                    let mut covered = DVec2::ZERO;
+                    let mut last = surface.param(e.curve.point(e.t0));
+                    for k in 1..=pieces {
+                        let at =
+                            surface.param(e.point_at_fraction(f64::from(k) / f64::from(pieces)));
+                        covered += (at - last).abs();
+                        last = at;
+                    }
+                    let by_u = covered.x / chart.max_du;
+                    let by_v = chart.max_dv.map_or(0.0, |dv| covered.y / dv);
+                    let needed = by_u.max(by_v).ceil().min(MAX_SEGMENTS_PER_TURN);
+                    n = n.max(needed as usize);
+                }
+            }
             let mut points = Vec::with_capacity(n + 1);
             for k in 0..=n {
                 let t = e.t0 + span * k as f64 / n as f64;

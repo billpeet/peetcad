@@ -22,8 +22,12 @@
 
 use std::f64::consts::{FRAC_PI_2, TAU};
 
+use std::sync::Arc;
+
 use peet_math::{DVec2, DVec3, Frame, Plane, tolerance};
 use serde::{Deserialize, Serialize};
+
+use crate::nurbs::{NurbsCurve, NurbsSurface};
 
 /// A right circular cylinder of infinite length. The frame's Z axis is the cylinder axis
 /// and its origin lies on the axis.
@@ -108,13 +112,16 @@ pub struct Torus {
 /// sphere's centre, or away from a torus's tube centre.
 ///
 /// New kinds go at the end: the B-rep cache stores the variant's index.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Surface {
     Plane(Plane),
     Cylinder(Cylinder),
     Cone(Cone),
     Sphere(Sphere),
     Torus(Torus),
+    /// A freeform surface ([`crate::nurbs`]). Its natural normal is `∂S/∂u × ∂S/∂v`.
+    /// Shared, not copied: cloning a surface is cheap for every kind.
+    Nurbs(Arc<NurbsSurface>),
 }
 
 /// A point of a surface of revolution's meridian (the curve that is turned about the
@@ -143,7 +150,7 @@ impl Surface {
     /// about its Z axis.
     pub fn revolution_frame(&self) -> Option<&Frame> {
         match self {
-            Self::Plane(_) => None,
+            Self::Plane(_) | Self::Nurbs(_) => None,
             Self::Cylinder(c) => Some(&c.frame),
             Self::Cone(c) => Some(&c.frame),
             Self::Sphere(s) => Some(&s.frame),
@@ -154,7 +161,7 @@ impl Surface {
     /// The meridian of a surface of revolution at `v` (`None` for planes).
     pub fn meridian(&self, v: f64) -> Option<Meridian> {
         Some(match self {
-            Self::Plane(_) => return None,
+            Self::Plane(_) | Self::Nurbs(_) => return None,
             Self::Cylinder(c) => Meridian {
                 rho: c.radius,
                 z: v,
@@ -192,6 +199,7 @@ impl Surface {
     pub fn point(&self, uv: DVec2) -> DVec3 {
         match self {
             Self::Plane(p) => p.from_plane_coords(uv),
+            Self::Nurbs(s) => s.point(uv),
             _ => {
                 let (Some(frame), Some(m)) = (self.revolution_frame(), self.meridian(uv.y)) else {
                     unreachable!("every other surface is a surface of revolution")
@@ -208,6 +216,7 @@ impl Surface {
     pub fn param(&self, p: DVec3) -> DVec2 {
         match self {
             Self::Plane(pl) => pl.to_plane_coords(p),
+            Self::Nurbs(s) => s.param(p),
             Self::Cylinder(c) => {
                 let l = c.frame.to_local(p);
                 DVec2::new(l.y.atan2(l.x), l.z)
@@ -249,6 +258,7 @@ impl Surface {
     pub fn normal(&self, uv: DVec2) -> DVec3 {
         match self {
             Self::Plane(pl) => pl.normal(),
+            Self::Nurbs(s) => s.normal(uv),
             _ => {
                 let (Some(frame), Some(m)) = (self.revolution_frame(), self.meridian(uv.y)) else {
                     unreachable!("every other surface is a surface of revolution")
@@ -265,6 +275,10 @@ impl Surface {
     pub fn signed_distance(&self, p: DVec3) -> f64 {
         match self {
             Self::Plane(pl) => pl.signed_distance(p),
+            Self::Nurbs(s) => {
+                let uv = s.param(p);
+                (p - s.point(uv)).dot(s.normal(uv))
+            }
             Self::Cylinder(c) => {
                 let l = c.frame.to_local(p);
                 DVec2::new(l.x, l.y).length() - c.radius
@@ -288,7 +302,7 @@ impl Surface {
 
     /// Whether `u` wraps around (every surface of revolution).
     pub fn is_periodic_u(&self) -> bool {
-        !matches!(self, Self::Plane(_))
+        self.revolution_frame().is_some()
     }
 
     /// Whether `v` wraps around (tori).
@@ -347,6 +361,10 @@ impl Surface {
     pub fn derivatives(&self, uv: DVec2) -> (DVec3, DVec3) {
         match self {
             Self::Plane(pl) => (pl.frame.x_axis(), pl.frame.y_axis()),
+            Self::Nurbs(s) => {
+                let [_, su, sv, ..] = s.evaluate(uv);
+                (su, sv)
+            }
             _ => {
                 let (Some(frame), Some(m)) = (self.revolution_frame(), self.meridian(uv.y)) else {
                     unreachable!("every other surface is a surface of revolution")
@@ -363,6 +381,20 @@ impl Surface {
     /// Curvature vector of the surface's normal section at `p` in the unit tangent
     /// direction `dir`: a point moving that way along the surface accelerates by this.
     pub fn section_curvature(&self, p: DVec3, dir: DVec3) -> DVec3 {
+        if let Self::Nurbs(s) = self {
+            // The second fundamental form along `dir = a Su + b Sv`.
+            let uv = s.param(p);
+            let [_, su, sv, suu, suv, svv] = s.evaluate(uv);
+            let n = s.normal(uv);
+            let (e, f, g) = (su.dot(su), su.dot(sv), sv.dot(sv));
+            let det = e * g - f * f;
+            if det.abs() <= f64::MIN_POSITIVE {
+                return DVec3::ZERO;
+            }
+            let (du, dv) = (dir.dot(su), dir.dot(sv));
+            let (a, b) = ((g * du - f * dv) / det, (e * dv - f * du) / det);
+            return n * (suu.dot(n) * a * a + 2.0 * suv.dot(n) * a * b + svv.dot(n) * b * b);
+        }
         let Some(frame) = self.revolution_frame() else {
             return DVec3::ZERO;
         };
@@ -414,11 +446,14 @@ pub struct Ellipse3 {
 }
 
 /// An unbounded 3D curve. Edges are parameter ranges of these.
-#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum Curve3 {
     Line(Line3),
     Circle(Circle3),
     Ellipse(Ellipse3),
+    /// A freeform curve ([`crate::nurbs`]), shared rather than copied. Its parameter runs
+    /// over its knot range.
+    Nurbs(Arc<NurbsCurve>),
 }
 
 impl Curve3 {
@@ -434,6 +469,7 @@ impl Curve3 {
     pub fn point(&self, t: f64) -> DVec3 {
         match self {
             Self::Line(l) => l.origin + l.dir * t,
+            Self::Nurbs(c) => c.point(t),
             Self::Circle(c) => {
                 let (s, co) = t.sin_cos();
                 c.frame
@@ -450,6 +486,7 @@ impl Curve3 {
     pub fn derivative(&self, t: f64) -> DVec3 {
         match self {
             Self::Line(l) => l.dir,
+            Self::Nurbs(c) => c.evaluate(t)[1],
             Self::Circle(c) => {
                 let (s, co) = t.sin_cos();
                 c.frame
@@ -463,6 +500,24 @@ impl Curve3 {
         }
     }
 
+    /// Second derivative at `t`.
+    pub fn second_derivative(&self, t: f64) -> DVec3 {
+        match self {
+            Self::Line(_) => DVec3::ZERO,
+            Self::Circle(c) => c.frame.origin - self.point(t),
+            Self::Ellipse(e) => e.frame.origin - self.point(t),
+            Self::Nurbs(c) => c.evaluate(t)[2],
+        }
+    }
+
+    /// The parameter range of a curve that has ends of its own (a freeform curve).
+    pub fn domain(&self) -> Option<(f64, f64)> {
+        match self {
+            Self::Nurbs(c) => Some(c.domain()),
+            _ => None,
+        }
+    }
+
     /// Unit tangent at `t`, in the direction of increasing `t`.
     pub fn tangent(&self, t: f64) -> DVec3 {
         self.derivative(t).normalize_or(DVec3::X)
@@ -473,6 +528,7 @@ impl Curve3 {
     pub fn param(&self, p: DVec3) -> f64 {
         match self {
             Self::Line(l) => (p - l.origin).dot(l.dir),
+            Self::Nurbs(c) => c.param(p),
             Self::Circle(c) => {
                 let q = c.frame.to_local(p);
                 q.y.atan2(q.x)
@@ -507,7 +563,7 @@ impl Curve3 {
     /// Period of the parameter for closed curves.
     pub fn period(&self) -> Option<f64> {
         match self {
-            Self::Line(_) => None,
+            Self::Line(_) | Self::Nurbs(_) => None,
             Self::Circle(_) | Self::Ellipse(_) => Some(TAU),
         }
     }
@@ -515,7 +571,7 @@ impl Curve3 {
     /// The plane the curve lies in (circles and ellipses only).
     pub fn plane(&self) -> Option<Plane> {
         match self {
-            Self::Line(_) => None,
+            Self::Line(_) | Self::Nurbs(_) => None,
             Self::Circle(c) => Some(Plane { frame: c.frame }),
             Self::Ellipse(e) => Some(Plane { frame: e.frame }),
         }
@@ -564,6 +620,19 @@ impl Surface {
             self.param(curve.point(t + (toward - t) * 1e-3)).x
         };
         (DVec2::new(u, pole.v), Some(pole))
+    }
+
+    /// [`Surface::param`] for a point `p` of the surface, given the parameters `near` of
+    /// a point close by (the one before it along an edge). On a freeform surface that
+    /// saves the search for where to start.
+    pub fn param_from(&self, p: DVec3, near: DVec2) -> DVec2 {
+        if let Self::Nurbs(s) = self {
+            let uv = s.param_from(p, near);
+            if s.point(uv).distance_squared(p) <= 1e-10 {
+                return uv;
+            }
+        }
+        self.param(p)
     }
 
     /// `uv` moved by whole turns so it is as close as possible to `near`.

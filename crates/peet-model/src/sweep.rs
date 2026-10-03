@@ -7,8 +7,10 @@
 //! a cylinder, a cone, a sphere or a torus, exact like the rest of the kernel. A path that
 //! is one full circle makes a ring.
 //!
-//! A path with a corner, or one that twists out of its sketch plane, needs surfaces the
-//! kernel doesn't have yet: round the corners with arcs.
+//! A corner between two straight pieces is mitred: each piece runs on past the corner
+//! and is cut back with the plane that halves the angle, as a picture frame or a welded
+//! pipe elbow is made. A corner at an arc is refused (make the pieces tangent), and so
+//! is a path that leaves its sketch plane.
 
 use std::sync::Arc;
 
@@ -16,7 +18,7 @@ use peet_kernel::Solid;
 use peet_kernel::boolean::{BooleanOp, boolean_traced};
 use peet_kernel::extrude::{ExtrudeFace, extrude_traced};
 use peet_kernel::revolve::{RevolveAxis, RevolveFace, revolve_traced};
-use peet_math::{DQuat, DVec3, Frame, Plane, tolerance};
+use peet_math::{DQuat, DVec2, DVec3, Frame, Plane, tolerance};
 use peet_sketch::region::Region;
 use peet_sketch::{Curve, Sketch};
 use serde::{Deserialize, Serialize};
@@ -67,6 +69,9 @@ const JOIN: f64 = 100.0 * tolerance::LINEAR;
 
 /// Directions within this of each other (as 1 − cosine) continue smoothly.
 const SMOOTH: f64 = 1e-9;
+
+/// The cosine of the sharpest corner that is mitred (150° between the directions).
+const SHARPEST: f64 = -0.866;
 
 /// One piece of the path, in model space, in the direction it is followed.
 #[derive(Clone, Copy, Debug)]
@@ -236,10 +241,21 @@ fn path_pieces(path: &Sketch, plane: &Plane, start: &Plane) -> Result<Vec<Piece>
             break;
         };
         if next.start_dir().dot(dir) < 1.0 - SMOOTH {
-            return err(
-                "The path has a corner. A sweep follows a smooth path: round the corner with \
-                 an arc (a sketch fillet), or make sure the pieces are tangent.",
-            );
+            // A corner between two straight pieces is mitred; others can't be.
+            let straight = matches!(last, Piece::Line { .. }) && matches!(next, Piece::Line { .. });
+            if !straight {
+                return err(
+                    "The path has a corner where an arc meets it at an angle. A sweep can \
+                     mitre a corner between two straight pieces; where an arc is involved, \
+                     make the pieces tangent.",
+                );
+            }
+            if next.start_dir().dot(dir) < SHARPEST {
+                return err(
+                    "The path doubles back on itself at a corner too sharp to mitre. Open \
+                     the corner up, or round it with an arc.",
+                );
+            }
         }
         loose.swap_remove(i);
         pieces.push(next);
@@ -266,6 +282,18 @@ fn tool(input: &SweepInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> 
         };
         FaceRole::Side(l.edges[edge].entity)
     };
+    // How far the profile reaches from the path, for the length of the mitres.
+    let on_path = input.profile_plane.to_plane_coords(pieces[0].start());
+    let reach = regions
+        .iter()
+        .map(|r| {
+            let (lo, hi) = r.outer.bounds();
+            [lo, hi, DVec2::new(lo.x, hi.y), DVec2::new(hi.x, lo.y)]
+                .iter()
+                .map(|c| c.distance(on_path))
+                .fold(0.0, f64::max)
+        })
+        .fold(0.0, f64::max);
     // The profile's plane, carried along the path.
     let mut plane = *input.profile_plane;
     let mut swept: Option<(Solid, Vec<FaceName>)> = None;
@@ -286,13 +314,28 @@ fn tool(input: &SweepInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> 
         let (solid, names, moved) = match *piece {
             Piece::Line { from, to } => {
                 let length = from.distance(to);
-                let (lo, hi) = if forward {
-                    (0.0, length)
-                } else {
-                    (-length, 0.0)
+                let dir = piece.start_dir();
+                // At a corner the piece runs on past it, to be cut back along the mitre.
+                let corner_before = (k > 0)
+                    .then(|| pieces[k - 1].end_dir())
+                    .filter(|d| d.dot(dir) < 1.0 - SMOOTH);
+                let corner_after = pieces
+                    .get(k + 1)
+                    .map(Piece::start_dir)
+                    .filter(|d| d.dot(dir) < 1.0 - SMOOTH);
+                let past = |other: DVec3| {
+                    let half = 0.5 * other.dot(dir).clamp(-1.0, 1.0).acos();
+                    reach * half.tan() * 1.5 + 1.0
                 };
-                let (solid, faces) = extrude_traced(&plane, &regions, lo, hi)?;
-                let names: Vec<FaceName> = faces
+                let before = corner_before.map_or(0.0, past);
+                let after = corner_after.map_or(0.0, past);
+                let (lo, hi) = if forward {
+                    (-before, length + after)
+                } else {
+                    (-length - after, before)
+                };
+                let (mut solid, faces) = extrude_traced(&plane, &regions, lo, hi)?;
+                let mut names: Vec<FaceName> = faces
                     .iter()
                     .map(|f| {
                         name(match *f {
@@ -309,10 +352,57 @@ fn tool(input: &SweepInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> 
                         })
                     })
                     .collect();
-                let moved = Frame {
+                // Cut back along each mitre: the plane through the corner that halves
+                // the angle between the two pieces.
+                let size = 4.0 * (reach + length + before + after + 1.0);
+                for (at, normal, keep_behind) in [
+                    (from, corner_before.map(|d| d + dir), false),
+                    (to, corner_after.map(|d| dir + d), true),
+                ] {
+                    let Some(normal) = normal else {
+                        continue;
+                    };
+                    let mitre =
+                        Plane::from_origin_normal_x(at, normal, normal.any_orthonormal_vector())
+                            .ok_or_else(|| {
+                                FeatureError("The path has a degenerate corner.".to_owned())
+                            })?;
+                    let (z0, z1) = if keep_behind {
+                        (-size, 0.0)
+                    } else {
+                        (0.0, size)
+                    };
+                    let block = peet_kernel::transform::solid(
+                        &peet_kernel::primitive::cuboid(
+                            DVec3::new(-size, -size, z0),
+                            DVec3::new(size, size, z1),
+                        ),
+                        &mitre.frame,
+                    );
+                    // The mitre's face vanishes against the next piece's.
+                    let cut = name(if keep_behind {
+                        FaceRole::FarCap
+                    } else {
+                        FaceRole::NearCap
+                    });
+                    let block_names = vec![cut; block.faces.len()];
+                    let traced = boolean_traced(&solid, &block, BooleanOp::Intersect)?;
+                    names = result_names(&traced.sources, &names, &block_names);
+                    solid = traced.solid;
+                }
+                // The profile's plane at the end of the piece, turned round the corner
+                // if there is one.
+                let mut moved = Frame {
                     origin: plane.origin() + (to - from),
                     rotation: plane.frame.rotation,
                 };
+                if let Some(next) = corner_after {
+                    let turn = DQuat::from_rotation_arc(dir, next);
+                    moved = Frame {
+                        origin: to + turn * (moved.origin - to),
+                        rotation: (turn * moved.rotation).normalize(),
+                    };
+                }
                 (solid, names, moved)
             }
             Piece::Arc {

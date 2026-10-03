@@ -12,7 +12,7 @@ use peet_math::DVec3;
 use peet_model::{BlendKind, FeatureId, Operation};
 use peet_sketch::expr::{LengthUnit, Units};
 
-use peet_ops::{Blend, Draft, FeatureArgs, Hole, Op, Revolve, Shell, Source, Sweep};
+use peet_ops::{Blend, Draft, FeatureArgs, Hole, Loft, Op, Revolve, Shell, Source, Sweep};
 
 use super::PeetApp;
 use crate::bodies::GeomRef;
@@ -172,7 +172,7 @@ fn mass_rows(
 
 impl PeetApp {
     /// Adds one feature by an operation. Returns it, or shows why it couldn't be added.
-    fn add_by_operation(&mut self, feature: FeatureArgs) -> Option<FeatureId> {
+    pub(super) fn add_by_operation(&mut self, feature: FeatureArgs) -> Option<FeatureId> {
         let reply = self.perform(Op::add(feature));
         reply.created.first().copied()
     }
@@ -241,6 +241,42 @@ impl PeetApp {
         }
     }
 
+    /// Lofts from the open or selected sketch, the first profile. If a sketch is open and
+    /// another one is selected in the tree, that one is the second; further profiles are
+    /// then clicked in the tree, one after the other.
+    pub(super) fn start_loft(&mut self, operation: Operation) {
+        let Some(first) = self.extrude_source() else {
+            return;
+        };
+        let mut sections = vec![first];
+        sections.extend(self.selected_sketch().filter(|s| *s != first));
+        self.close_sketch();
+        // The operation hides the profiles and, for the first body of a part, makes it a
+        // new body.
+        let loft = Loft {
+            profiles: Some(sections.iter().map(|s| (*s).into()).collect()),
+            ..Default::default()
+        };
+        let id = self.add_by_operation(if operation == Operation::Cut {
+            FeatureArgs::CutLoft(loft)
+        } else {
+            FeatureArgs::Loft(loft)
+        });
+        self.select_new(id);
+        let Some(id) = id else {
+            return;
+        };
+        if sections.len() > 1 {
+            self.show_in_3d(first, 1.0);
+        }
+        if !self.doc.loft_profile_choices(id).is_empty() {
+            self.picking = Some((id, Slot::LoftProfile));
+            self.status_message = None;
+        } else if sections.len() < 2 {
+            self.error("A loft needs at least two profiles: draw the next one in another sketch, on a different plane, then use Add profiles in the properties.");
+        }
+    }
+
     /// Adds a fillet or a chamfer on the selected edges, or one waiting for edges.
     pub(super) fn start_blend(&mut self, kind: BlendKind) {
         let edges = self.doc.edge_refs(&self.selected_geom);
@@ -274,15 +310,9 @@ impl PeetApp {
         }
     }
 
-    /// Drafts the selected flat faces; the neutral plane is picked next.
+    /// Drafts the selected faces; the neutral plane is picked next.
     pub(super) fn start_draft(&mut self) {
-        let selected = self
-            .selected_geom
-            .iter()
-            .filter(|g| matches!(g, GeomRef::Face { .. }))
-            .count();
-        let faces = self.doc.face_refs(&self.selected_geom, true);
-        let curved = selected - faces.len();
+        let faces = self.doc.face_refs(&self.selected_geom, false);
         let first = if faces.is_empty() {
             Slot::DraftFace
         } else {
@@ -298,12 +328,6 @@ impl PeetApp {
         if let Some(id) = id {
             self.picking = Some((id, first));
             self.status_message = None;
-            if curved > 0 {
-                self.info(format!(
-                    "Only flat faces can be drafted: {curved} curved face{} left out.",
-                    if curved == 1 { " was" } else { "s were" }
-                ));
-            }
         }
     }
 
@@ -705,6 +729,8 @@ mod tests {
             CommandId::CutRevolve,
             CommandId::Sweep,
             CommandId::CutSweep,
+            CommandId::Loft,
+            CommandId::CutLoft,
             CommandId::Fillet,
             CommandId::Chamfer,
             CommandId::Shell,
@@ -825,6 +851,136 @@ mod tests {
         run(&mut app, CommandId::Undo);
         assert!(app.doc.feature(id).is_none());
         assert!(app.doc.bodies.is_empty());
+    }
+
+    #[test]
+    fn loft_command_takes_its_profiles_from_the_tree() {
+        let mut app = PeetApp::headless();
+        let (mut low, mut high) = (FeatureId(0), FeatureId(0));
+        let square = |m: &mut peet_model::Model, id: FeatureId, half: f64| {
+            if let Some(f) = m.feature_mut(id).and_then(|f| f.sketch_mut()) {
+                peet_sketch::shapes::rectangle(
+                    &mut f.sketch,
+                    DVec2::new(-half, -half),
+                    DVec2::new(half, half),
+                );
+            }
+        };
+        app.doc.change("Sketches", |m| {
+            // Two 20 × 20 squares on parallel planes, 30 apart.
+            low = m.add_sketch(PlaneRef::Standard(StdPlane::Top), Plane::TOP);
+            square(m, low, 10.0);
+            let plane = m.add(FeatureKind::Plane(peet_model::PlaneDef::Offset {
+                from: PlaneRef::Standard(StdPlane::Top),
+                distance: peet_model::Scalar::new(30.0),
+                flip: false,
+            }));
+            high = m.add_sketch(PlaneRef::Feature(plane), Plane::TOP);
+            square(m, high, 10.0);
+        });
+        let select = |app: &mut PeetApp, id: FeatureId| {
+            app.apply_tree(vec![crate::tree::TreeAction::Select(Some(
+                ItemId::Feature(id),
+            ))]);
+        };
+        app.selected = Some(ItemId::Feature(low));
+        run(&mut app, CommandId::Loft);
+        let id = app.selected_feature().unwrap();
+        assert!(matches!(
+            selected_kind(&app),
+            FeatureKind::Loft(l) if l.sections == vec![low] && l.operation == Operation::NewBody
+        ));
+        assert_eq!(app.picking, Some((id, Slot::LoftProfile)));
+        assert!(app.doc.status(id).unwrap().message().is_some());
+
+        // A profile again is refused; the other sketch is added, and picking carries on.
+        select(&mut app, low);
+        assert!(matches!(&app.status_message, Some((_, true))));
+        assert_eq!(app.picking, Some((id, Slot::LoftProfile)));
+        select(&mut app, high);
+        assert_eq!(app.picking, Some((id, Slot::LoftProfile)), "still picking");
+        assert_eq!(app.selected, Some(ItemId::Feature(id)));
+        assert!(
+            matches!(selected_kind(&app), FeatureKind::Loft(l) if l.sections == vec![low, high])
+        );
+        assert_eq!(app.doc.status(id), Some(&Status::Ok));
+        assert_eq!(app.doc.bodies.len(), 1);
+        let volume = app.doc.bodies[0].mass_properties().unwrap().volume;
+        assert!((volume - 12000.0).abs() < 1e-3, "{volume}");
+        assert!(!app.doc.feature(high).unwrap().visible, "used, so hidden");
+
+        // A sketch drawn after the loft can't be one of its profiles.
+        let mut later = FeatureId(0);
+        app.doc.change("Later", |m| {
+            later = m.add_sketch(PlaneRef::Standard(StdPlane::Front), StdPlane::Front.plane());
+        });
+        select(&mut app, later);
+        assert!(matches!(&app.status_message, Some((m, true)) if m.contains("after")));
+        assert!(matches!(selected_kind(&app), FeatureKind::Loft(l) if l.sections.len() == 2));
+        run(&mut app, CommandId::Undo);
+
+        // One step for the profile, one for the loft.
+        run(&mut app, CommandId::Undo);
+        assert!(matches!(selected_kind(&app), FeatureKind::Loft(l) if l.sections == vec![low]));
+        assert!(app.doc.feature(high).unwrap().visible);
+        run(&mut app, CommandId::Undo);
+        assert!(app.doc.feature(id).is_none());
+        assert!(app.doc.bodies.is_empty());
+
+        // With nothing else to loft to, the command says what is missing.
+        app.doc.change("Fewer", |m| {
+            m.remove(high);
+        });
+        app.picking = None;
+        app.selected = Some(ItemId::Feature(low));
+        run(&mut app, CommandId::CutLoft);
+        assert!(matches!(
+            selected_kind(&app),
+            FeatureKind::Loft(l) if l.operation == Operation::Cut
+        ));
+        assert_eq!(app.picking, None);
+        assert!(matches!(&app.status_message, Some((_, true))));
+    }
+
+    /// The loft's panel, as the app shows it: the list, its buttons and the failure message.
+    #[test]
+    fn loft_properties_draw() {
+        let mut app = PeetApp::headless();
+        let mut low = FeatureId(0);
+        app.doc.change("Sketch", |m| {
+            low = m.add_sketch(PlaneRef::Standard(StdPlane::Top), Plane::TOP);
+            if let Some(f) = m.feature_mut(low).and_then(|f| f.sketch_mut()) {
+                peet_sketch::shapes::rectangle(&mut f.sketch, DVec2::ZERO, DVec2::new(20.0, 20.0));
+            }
+            m.add_sketch(PlaneRef::Standard(StdPlane::Front), StdPlane::Front.plane());
+        });
+        app.selected = Some(ItemId::Feature(low));
+        run(&mut app, CommandId::Loft);
+        let id = app.selected_feature().unwrap();
+        assert_eq!(app.picking, Some((id, Slot::LoftProfile)));
+        let steps = app.doc.revision;
+        let mut frame = 0;
+        let mut harness = egui_kittest::Harness::builder()
+            .with_size(egui::vec2(320.0, 700.0))
+            .build_ui(|ui| {
+                // Picking, then not.
+                if frame == 2 {
+                    app.picking = None;
+                }
+                frame += 1;
+                let mut pending = Vec::new();
+                app.properties(ui, &mut pending);
+                assert!(pending.is_empty(), "nothing was clicked");
+            });
+        for _ in 0..4 {
+            harness.step();
+        }
+        for text in ["Profiles", "Add profiles", "Operation"] {
+            use egui_kittest::kittest::Queryable as _;
+            assert!(harness.query_by_label(text).is_some(), "no {text}");
+        }
+        drop(harness);
+        assert_eq!(app.doc.revision, steps, "drawing changed nothing");
     }
 
     #[test]

@@ -24,17 +24,29 @@ use crate::topo::{EdgeId, FaceId, Solid};
 /// not a boundary, the face continues on both sides.
 const SEAM_NUDGE: f64 = 16.0 * LINEAR;
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Domain {
     pub surface: Surface,
     pub flip: bool,
+    /// Domain units per unit of `(u, v)`, before mirroring.
+    scale: DVec2,
 }
 
 impl Domain {
     pub fn new(surface: &Surface, reversed: bool) -> Self {
+        let scale = match surface {
+            Surface::Plane(_) => DVec2::ONE,
+            Surface::Cylinder(c) => DVec2::new(c.radius, 1.0),
+            Surface::Cone(c) => DVec2::new(c.radius.max(1.0), 1.0),
+            Surface::Sphere(s) => DVec2::splat(s.radius),
+            Surface::Torus(t) => DVec2::new(t.major + t.minor, t.minor),
+            // Millimetres per unit of each parameter, where the surface stretches most.
+            Surface::Nurbs(s) => s.stretch().max(DVec2::splat(1e-9)),
+        };
         Self {
-            surface: *surface,
+            surface: surface.clone(),
             flip: reversed,
+            scale,
         }
     }
 
@@ -54,13 +66,7 @@ impl Domain {
     /// cylinder's domain is isometric: the others are just as good for telling what is
     /// inside a loop, which is all a domain is for.
     fn scales(&self) -> DVec2 {
-        let s = match &self.surface {
-            Surface::Plane(_) => DVec2::ONE,
-            Surface::Cylinder(c) => DVec2::new(c.radius, 1.0),
-            Surface::Cone(c) => DVec2::new(c.radius.max(1.0), 1.0),
-            Surface::Sphere(s) => DVec2::splat(s.radius),
-            Surface::Torus(t) => DVec2::new(t.major + t.minor, t.minor),
-        };
+        let s = self.scale;
         if self.flip { DVec2::new(-s.x, s.y) } else { s }
     }
 
@@ -86,7 +92,9 @@ impl Domain {
     }
 
     pub fn map_near(&self, p: DVec3, near: DVec2) -> DVec2 {
-        self.shift_near(self.map(p), near)
+        // On a freeform surface the search starts from the neighbouring point.
+        let uv = self.surface.param_from(p, near / self.scales());
+        self.shift_near(self.scaled(uv), near)
     }
 
     /// The surface point at domain coordinates `q`.
@@ -124,7 +132,7 @@ impl Domain {
                         && (frame.origin - c.frame.origin).dot(normal).abs() <= LINEAR
                 }
             }
-            Curve3::Ellipse(_) => false,
+            Curve3::Ellipse(_) | Curve3::Nurbs(_) => false,
         }
     }
 
@@ -139,7 +147,16 @@ impl Domain {
     /// How many straight pieces approximate a part of `curve` spanning `span` of parameter.
     pub fn segments(&self, curve: &Curve3, span: f64) -> usize {
         match curve {
-            Curve3::Line(_) => 1,
+            Curve3::Line(_) if self.is_straight(curve) => 1,
+            // A line across a freeform surface is curved in its parameters.
+            Curve3::Line(_) => 8,
+            // A freeform curve: by how much of it the part is, a few pieces per span.
+            Curve3::Nurbs(n) => {
+                let (lo, hi) = n.domain();
+                let spans = n.knots().windows(2).filter(|w| w[1] > w[0]).count();
+                let whole = (spans * 8).clamp(8, 256) as f64;
+                ((whole * span.abs() / (hi - lo)).ceil() as usize).max(4)
+            }
             // Straight in the domain, but the angle must be tracked around the turn.
             _ if self.is_straight(curve) => ((span.abs() / (PI / 3.0)).ceil() as usize).max(1),
             // Curved in the domain. Even a short arc gets a few pieces, so thin regions
@@ -268,7 +285,8 @@ impl ExactLoop {
         let mut lo = DVec2::splat(f64::INFINITY);
         let mut hi = DVec2::splat(f64::NEG_INFINITY);
         let mut bulge = 0.0_f64;
-        for &(curve, ta, tb) in parts {
+        for (curve, ta, tb) in parts {
+            let (curve, ta, tb) = (curve.clone(), *ta, *tb);
             let n = domain.segments(&curve, tb - ta);
             let straight = domain.is_straight(&curve);
             let mut ts = Vec::with_capacity(n + 1);
@@ -422,7 +440,7 @@ impl FaceGeom {
                 bounds = bounds.union(&b);
                 edges.push(BoundaryEdge {
                     id: eid,
-                    curve: e.curve,
+                    curve: e.curve.clone(),
                     t0: e.t0,
                     t1: e.t1,
                     bounds: b,
@@ -441,9 +459,9 @@ impl FaceGeom {
                     let co = solid.coedge(c);
                     let e = solid.edge(co.edge);
                     if co.reversed {
-                        (e.curve, e.t1, e.t0)
+                        (e.curve.clone(), e.t1, e.t0)
                     } else {
-                        (e.curve, e.t0, e.t1)
+                        (e.curve.clone(), e.t0, e.t1)
                     }
                 })
                 .collect();
@@ -451,7 +469,7 @@ impl FaceGeom {
         }
         let bounds = bounds.union(&crate::validate::measure::bulge_bounds(solid, id));
         Self {
-            surface: face.surface,
+            surface: face.surface.clone(),
             reversed: face.reversed,
             domain,
             bounds: grow(&bounds, LINEAR),

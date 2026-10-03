@@ -341,6 +341,9 @@ impl Job {
             Curve3::Ellipse(_) => {
                 return unsupported("an elliptical edge can't be blended yet");
             }
+            Curve3::Nurbs(_) => {
+                return unsupported("a freeform edge can't be blended yet");
+            }
         }
         let section = Section {
             corner,
@@ -484,7 +487,9 @@ impl Job {
                         .collect(),
                 }
             }
-            Curve3::Ellipse(_) => unreachable!("refused when the job was made"),
+            Curve3::Ellipse(_) | Curve3::Nurbs(_) => {
+                unreachable!("refused when the job was made")
+            }
         };
         // Cut the tool back with the slanted faces at its ends.
         let size = 4.0 * (solid.bounds().size().length() + self.reach);

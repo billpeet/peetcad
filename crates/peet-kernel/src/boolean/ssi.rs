@@ -30,7 +30,21 @@ pub(crate) enum Ssi {
 /// in a circle, a cone in a circle, an ellipse or rulings, and a torus in circles when it
 /// is square to the axis or contains it.
 pub(crate) fn intersect(a: &Surface, b: &Surface, near: DVec3) -> Ssi {
+    intersect_in(a, b, near, None)
+}
+
+/// [`intersect`], for freeform surfaces only looking within `region`: their curves are
+/// traced, and tracing all of a large surface for a small face would be wasted.
+pub(crate) fn intersect_in(
+    a: &Surface,
+    b: &Surface,
+    near: DVec3,
+    region: Option<&peet_math::Aabb>,
+) -> Ssi {
     match (a, b) {
+        (Surface::Nurbs(s), other) | (other, Surface::Nurbs(s)) => {
+            super::freeform::intersect(s, other, region)
+        }
         (Surface::Plane(p), Surface::Plane(q)) => plane_plane(p, q, near),
         (Surface::Plane(p), Surface::Cylinder(c)) | (Surface::Cylinder(c), Surface::Plane(p)) => {
             plane_cylinder(p, c, near)
@@ -75,6 +89,10 @@ fn plane_sphere(p: &Plane, s: &Sphere) -> Ssi {
     Ssi::Curves(vec![circle(center, p.frame.rotation, radius)])
 }
 
+/// A plane through a cone's apex within this of touching it (as a cosine) meets it in
+/// one ruling.
+const TANGENT_RULING: f64 = 1e-9;
+
 fn plane_cone(p: &Plane, c: &Cone, near: DVec3) -> Ssi {
     let (axis, k) = (c.axis(), c.slope());
     let n = c.frame.vector_to_local(p.normal());
@@ -101,7 +119,9 @@ fn plane_cone(p: &Plane, c: &Cone, near: DVec3) -> Ssi {
         // nx cos u + ny sin u = −nz / k.
         let cos = -n.z / (k * nh);
         let phi = n.y.atan2(n.x);
-        let angles = if (cos.abs() - 1.0).abs() <= ANGULAR {
+        // Touching along one ruling: within what the plane's and the cone's own
+        // directions are good for (a drafted wall next to a drafted round corner).
+        let angles = if (cos.abs() - 1.0).abs() <= TANGENT_RULING {
             vec![if cos > 0.0 { phi } else { phi + PI }]
         } else if cos.abs() < 1.0 {
             let w = cos.acos();
@@ -288,7 +308,7 @@ fn profile(s: &Surface, axis: &Frame) -> Option<Profile> {
     // The surface's own axis may point the other way.
     let flip = frame.z_axis().dot(axis.z_axis()).signum();
     Some(match s {
-        Surface::Plane(_) => return None,
+        Surface::Plane(_) | Surface::Nurbs(_) => return None,
         Surface::Cylinder(c) => Profile::Line {
             at: DVec2::new(c.radius, z0),
             dir: DVec2::Y,

@@ -781,6 +781,48 @@ impl Engine {
                     }
                 }
             }
+            FeatureKind::Loft(l) => {
+                let inputs = (|| {
+                    let mut sections = Vec::with_capacity(l.sections.len());
+                    let mut keys = Vec::with_capacity(l.sections.len());
+                    for (k, &s) in l.sections.iter().enumerate() {
+                        let (plane, sketch) = ctx
+                            .sketch_input(s)
+                            .map_err(|m| m.replace("Its sketch", &format!("Profile {}", k + 1)))?;
+                        sections.push((plane, sketch, model.name_of(s)));
+                        keys.push(run.out_keys.get(&s).copied().unwrap_or(0));
+                    }
+                    Ok::<_, String>((sections, keys))
+                })();
+                match inputs {
+                    Err(m) => fail(m, Output::None),
+                    Ok((sections, keys)) => {
+                        let key = hash::of(&(21u8, id, &**l, keys, run.body_key));
+                        self.solid_feature(id, key, run, |bodies| {
+                            let out = crate::apply_loft(&crate::LoftInput {
+                                feature: id,
+                                bodies,
+                                sections: &sections,
+                                def: l,
+                                stamp: key,
+                            })?;
+                            let warning = lost_sheet(model, bodies, &out, &feature.name);
+                            Ok((out, warning))
+                        })
+                    }
+                }
+            }
+            FeatureKind::ConvertToSheet(c) => {
+                match crate::convert::convert_settings(c, &model.parameters) {
+                    Err(m) => fail(m, Output::None),
+                    Ok(settings) => {
+                        let key = hash::of(&(22u8, id, &**c, run.body_key, &settings));
+                        self.solid_feature(id, key, run, |bodies| {
+                            crate::convert::apply_convert(id, model, bodies, c, &settings, key)
+                        })
+                    }
+                }
+            }
             FeatureKind::Import(i) => {
                 let key = hash::of(&(19u8, id, &**i, run.body_key));
                 self.solid_feature(id, key, run, |bodies| {
@@ -1119,7 +1161,14 @@ impl<'m> Ctx<'m, '_> {
                         .to_owned()
                 })?;
                 let e = self.bodies[found.body].solid.edge(found.id);
-                Ok(match e.curve {
+                Ok(match &e.curve {
+                    Curve3::Nurbs(_) => {
+                        return Err(
+                            "The edge it refers to is a freeform curve now, which has no \
+                             axis. Pick a straight or a round edge."
+                                .to_owned(),
+                        );
+                    }
                     Curve3::Line(l) => Axis {
                         origin: e.point_at_fraction(0.0),
                         dir: l.dir,

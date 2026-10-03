@@ -19,7 +19,7 @@ pub(crate) mod shapes {
     use peet_sketch::region::find_regions;
 
     use crate::Solid;
-    use crate::geom::{Circle3, Curve3, Cylinder, Ellipse3, Line3, Surface};
+    use crate::geom::{Circle3, Curve3, Cylinder, Surface};
     pub(crate) use crate::topo::test_shapes::cuboid;
 
     /// A hand-built cylinder (independent of the extrude code): `base` is the centre of
@@ -82,30 +82,7 @@ pub(crate) mod shapes {
 
     /// The solid moved by `frame` (as a placement of its local coordinates).
     pub fn placed(solid: &Solid, frame: &Frame) -> Solid {
-        let mut s = solid.clone();
-        for v in &mut s.vertices {
-            v.point = frame.to_world(v.point);
-        }
-        for e in &mut s.edges {
-            e.curve = match e.curve {
-                Curve3::Line(l) => Curve3::Line(Line3 {
-                    origin: frame.to_world(l.origin),
-                    dir: frame.vector_to_world(l.dir),
-                }),
-                Curve3::Circle(c) => Curve3::Circle(Circle3 {
-                    frame: frame.compose(&c.frame),
-                    radius: c.radius,
-                }),
-                Curve3::Ellipse(c) => Curve3::Ellipse(Ellipse3 {
-                    frame: frame.compose(&c.frame),
-                    ..c
-                }),
-            };
-        }
-        for f in &mut s.faces {
-            f.surface = crate::transform::surface(&f.surface, frame);
-        }
-        s
+        crate::transform::solid(solid, frame)
     }
 }
 

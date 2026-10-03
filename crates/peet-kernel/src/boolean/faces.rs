@@ -360,9 +360,9 @@ pub(crate) fn interior_points(
                 .map(|&(e, forward)| {
                     let g = &edges[e as usize];
                     if forward {
-                        (g.curve, g.t0, g.t1)
+                        (g.curve.clone(), g.t0, g.t1)
                     } else {
-                        (g.curve, g.t1, g.t0)
+                        (g.curve.clone(), g.t1, g.t0)
                     }
                 })
                 .collect();
