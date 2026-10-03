@@ -126,6 +126,9 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
                 if !c.visible {
                     ops.push(component(c, ComponentChange::Show(false)));
                 }
+                if c.color.is_some() {
+                    ops.push(component(c, ComponentChange::Color(c.color)));
+                }
             }
             for c in after.components() {
                 let Some(o) = before.component(c.id) else {
@@ -157,6 +160,55 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
                 }
                 if o.visible != c.visible {
                     ops.push(component(c, ComponentChange::Show(c.visible)));
+                }
+                if o.color != c.color {
+                    ops.push(component(c, ComponentChange::Color(c.color)));
+                }
+            }
+            // The exploded view's steps. What a deleted component took with it (itself
+            // out of its steps, and the steps it left empty) needs no operation.
+            let edit = |s: &peet_model::ExplodeStep, change| Op::EditExplodeStep {
+                step: s.id.into(),
+                change,
+            };
+            let left = |s: &peet_model::ExplodeStep| -> Vec<peet_model::CompId> {
+                s.components
+                    .iter()
+                    .copied()
+                    .filter(|c| after.component(*c).is_some())
+                    .collect()
+            };
+            let selectors = |ids: &[peet_model::CompId]| -> Vec<crate::CompSel> {
+                ids.iter().map(|c| (*c).into()).collect()
+            };
+            for s in before.explode_steps() {
+                if after.explode_step(s.id).is_none() && !left(s).is_empty() {
+                    ops.push(edit(s, crate::ExplodeChange::Delete));
+                }
+            }
+            let mut added: Vec<&peet_model::ExplodeStep> = after
+                .explode_steps()
+                .filter(|s| before.explode_step(s.id).is_none())
+                .collect();
+            added.sort_by_key(|s| s.id);
+            for s in added {
+                ops.push(Op::ExplodeStep {
+                    components: selectors(&s.components),
+                    by: crate::Point3::Mm(s.offset),
+                    name: Some(s.name.clone()),
+                });
+            }
+            for s in after.explode_steps() {
+                let Some(o) = before.explode_step(s.id) else {
+                    continue;
+                };
+                if o.name != s.name {
+                    ops.push(edit(s, crate::ExplodeChange::Rename(s.name.clone())));
+                }
+                let components = (left(o) != s.components).then(|| selectors(&s.components));
+                let by = (o.offset != s.offset).then_some(crate::Point3::Mm(s.offset));
+                if by.is_some() || components.is_some() {
+                    ops.push(edit(s, crate::ExplodeChange::Edit { by, components }));
                 }
             }
         }

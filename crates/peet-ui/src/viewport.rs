@@ -262,10 +262,10 @@ impl Viewport {
                 let component = placed.component();
                 ObjectDraw {
                     mesh: *mesh,
-                    transform: if placed.frame == peet_math::Frame::WORLD {
+                    transform: if placed.shown == peet_math::Frame::WORLD {
                         DMat4::IDENTITY
                     } else {
-                        placed.frame.to_mat4()
+                        placed.shown.to_mat4()
                     },
                     show_edges: true,
                     highlight: if component.is_some() && component == params.selected_component {
@@ -764,7 +764,7 @@ impl Viewport {
                 continue;
             }
             // Seen from where the viewer is in the body's own coordinates.
-            let frame = &placed.frame;
+            let frame = &placed.shown;
             let local = match view {
                 peet_kernel::tessellate::View::Orthographic { dir } => {
                     peet_kernel::tessellate::View::Orthographic {
@@ -827,7 +827,7 @@ impl Viewport {
                 .document
                 .placed
                 .get(geom.body())
-                .map_or(peet_math::Frame::WORLD, |p| p.frame);
+                .map_or(peet_math::Frame::WORLD, |p| p.shown);
             let (fill, line): ([u8; 4], [u8; 4]) = if selected {
                 ([255, 150, 30, 110], [255, 150, 30, 255])
             } else {

@@ -140,6 +140,10 @@ pub struct PeetApp {
     component_name: Option<(peet_model::CompId, String)>,
     /// In an assembly: the selected mate.
     selected_mate: Option<peet_model::MateId>,
+    /// In an assembly: the selected step of the exploded view.
+    selected_explode: Option<peet_model::ExplodeId>,
+    /// How far exploded the assembly is on its way to being shown (0 or 1).
+    explode_target: Option<f64>,
     /// In an assembly: a component being dragged in the view.
     component_drag: Option<assembly::ComponentDrag>,
     /// What the last interference check found, with the revision of the assembly it
@@ -218,6 +222,8 @@ impl PeetApp {
             hovered_component: None,
             component_name: None,
             selected_mate: None,
+            selected_explode: None,
+            explode_target: None,
             component_drag: None,
             interference: None,
             bom_top_level: false,
@@ -323,6 +329,8 @@ impl PeetApp {
         self.hovered_component = None;
         self.component_name = None;
         self.selected_mate = None;
+        self.selected_explode = None;
+        self.explode_target = None;
         self.component_drag = None;
     }
 
@@ -1162,7 +1170,23 @@ impl PeetApp {
                         .assembly()
                         .is_some_and(|a| a.definitions().any(|d| d.link.is_some())),
             ),
-            CommandId::EditComponent => enabled(self.selected_component().is_some()),
+            CommandId::EditComponent | CommandId::IsolateComponent | CommandId::AddExplodeStep => {
+                enabled(self.selected_component().is_some())
+            }
+            CommandId::ShowAllComponents => enabled(
+                self.doc
+                    .model
+                    .assembly()
+                    .is_some_and(|a| a.components().any(|c| !c.visible)),
+            ),
+            CommandId::ExplodeView => CommandState {
+                enabled: self
+                    .doc
+                    .model
+                    .assembly()
+                    .is_some_and(|a| a.explode_steps().len() > 0),
+                checked: Some(self.explode_target.unwrap_or(self.doc.explode()) > 0.5),
+            },
             CommandId::MateCoincident
             | CommandId::MateConcentric
             | CommandId::MateParallel
@@ -1374,6 +1398,18 @@ impl PeetApp {
             CommandId::InsertLinkedComponent => self.start_insert_component(true),
             CommandId::UpdateLinks => self.update_links(),
             CommandId::EditComponent => self.open_selected_component(),
+            CommandId::ShowAllComponents => {
+                self.perform(peet_ops::Op::ShowAll);
+            }
+            CommandId::IsolateComponent => {
+                if let Some(id) = self.selected_component() {
+                    self.perform(peet_ops::Op::Isolate {
+                        components: vec![id.into()],
+                    });
+                }
+            }
+            CommandId::AddExplodeStep => self.add_explode_step(),
+            CommandId::ExplodeView => self.toggle_explode(),
             CommandId::MateCoincident
             | CommandId::MateConcentric
             | CommandId::MateParallel
@@ -1847,6 +1883,34 @@ impl PeetApp {
                                     tool(ui, pending, CommandId::MateDistance, "Distance", Small);
                                     tool(ui, pending, CommandId::MateAngle, "Angle", Small);
                                     tool(ui, pending, CommandId::MateFasten, "Fasten", Small);
+                                });
+                            });
+                            ribbon::group(ui, "Show", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::IsolateComponent,
+                                        "Isolate",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::ShowAllComponents,
+                                        "Show All",
+                                        Small,
+                                    );
+                                });
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::AddExplodeStep,
+                                        "Explode Step",
+                                        Small,
+                                    );
+                                    tool(ui, pending, CommandId::ExplodeView, "Explode", Small);
                                 });
                             });
                             ribbon::group(ui, "Samples", |ui| {
@@ -2369,6 +2433,10 @@ impl PeetApp {
         }
         if let Some(id) = self.selected_component() {
             egui::ScrollArea::vertical().show(ui, |ui| self.component_properties(ui, id));
+            return;
+        }
+        if let Some(id) = self.selected_explode() {
+            egui::ScrollArea::vertical().show(ui, |ui| self.explode_properties(ui, id));
             return;
         }
         if self.doc.is_assembly() {
@@ -3432,6 +3500,7 @@ impl eframe::App for PeetApp {
         self.poll_imports(&ctx);
         self.poll_insert();
         self.watch_links(&ctx);
+        self.animate_explode(&ctx);
         // A part opened with cached bodies was shown last frame; now build it for real.
         if self.doc.finish_loading() {
             ctx.request_repaint();
@@ -3534,6 +3603,7 @@ impl eframe::App for PeetApp {
             if self.doc.is_assembly() && events.clicked_background {
                 self.selected_component = component_at(events.clicked_geom);
                 self.selected_mate = None;
+                self.selected_explode = None;
             }
             let handles = self.sketch.is_none()
                 && self.picking.is_none()

@@ -222,6 +222,8 @@ pub enum Query {
     Components,
     /// The mates of an assembly, and the freedom they leave.
     Mates,
+    /// The steps of an assembly's exploded view.
+    ExplodeSteps,
     /// Where the components of an assembly run into each other: every pair, or those
     /// one component is in.
     Interference {
@@ -467,6 +469,29 @@ pub enum Op {
         mate: MateSel,
         change: MateChange,
     },
+    /// Add a step to an assembly's exploded view: components shown moved by a distance.
+    ExplodeStep {
+        components: Vec<CompSel>,
+        /// How far, in the assembly's directions.
+        by: crate::assembly::Point3,
+        /// An automatic name (`Explode1`) if absent.
+        name: Option<String>,
+    },
+    /// Change a step of an assembly's exploded view.
+    EditExplodeStep {
+        step: crate::explode::ExplodeSel,
+        change: crate::explode::ExplodeChange,
+    },
+    /// Show an assembly exploded, or as it is (`None`: the other way). A view.
+    Explode {
+        on: Option<bool>,
+    },
+    /// Show every hidden component of an assembly.
+    ShowAll,
+    /// Show these components of an assembly and hide every other.
+    Isolate {
+        components: Vec<CompSel>,
+    },
     /// Open a component's part as a document of its own (see
     /// [`crate::apply_session`]): saving that document stores it back.
     OpenComponent {
@@ -545,6 +570,11 @@ impl Op {
             Self::Drag { .. } => "drag",
             Self::Mate { .. } => "mate",
             Self::EditMate { change, .. } => change.word(),
+            Self::ExplodeStep { .. } => "explode_step",
+            Self::EditExplodeStep { change, .. } => change.word(),
+            Self::Explode { .. } => "explode",
+            Self::ShowAll => "show_all",
+            Self::Isolate { .. } => "isolate",
             Self::SetPart { .. } => "set_part",
             Self::OpenComponent { .. } => "open_component",
             Self::Undo => "undo",
@@ -565,6 +595,7 @@ impl Op {
                 Query::Measure { .. } => "measure",
                 Query::Components => "components",
                 Query::Mates => "mates",
+                Query::ExplodeSteps => "explode_steps",
                 Query::Interference { .. } => "interference",
                 Query::Bom { .. } => "bom",
             },
@@ -852,6 +883,9 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
 ];
 
 fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
+    if let Some(found) = crate::explode::parse(op, a) {
+        return found;
+    }
     if let Some(found) = crate::mate::parse(op, a) {
         return found;
     }
@@ -1132,6 +1166,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             all.extend(crate::assembly::ASSEMBLY_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::mate::MATE_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::links::LINK_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::explode::EXPLODE_OPS.iter().map(|(n, ..)| *n));
             all.sort_unstable();
             all.dedup();
             return Err(format!(

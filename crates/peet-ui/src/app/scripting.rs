@@ -48,6 +48,10 @@ pub fn coverage(cmd: CommandId) -> Coverage {
         | C::MateDistance
         | C::MateAngle
         | C::MateFasten => Op("mate"),
+        C::ShowAllComponents => Op("show_all"),
+        C::IsolateComponent => Op("isolate"),
+        C::AddExplodeStep => Op("explode_step"),
+        C::ExplodeView => Op("explode"),
         C::OpenDocument => Op("open"),
         C::SaveDocument | C::SaveDocumentAs => Op("save"),
         C::OpenSample | C::OpenSampleEnclosure | C::OpenSampleChassis | C::OpenSampleHousing => {

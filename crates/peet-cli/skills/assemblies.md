@@ -1,6 +1,6 @@
 ---
 name: assemblies
-description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
+description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
 ---
 
 # Assemblies
@@ -154,6 +154,49 @@ far as its mates let it. Use it to open a lid, swing an arm, or slide a part alo
 `rename`, `suppress`, `show` and `delete` take `component` instead of `feature`.
 `replace` makes a component an instance of another part, where it is. Deleting the last
 component of a part removes the part from the assembly.
+
+## Showing, hiding, colouring, exploding
+
+None of these moves a component or changes a mate: they are about what is seen.
+
+```jsonl
+{"op": "new", "assembly": true}
+{"op": "insert", "sample": "bracket", "name": "Base"}
+{"op": "insert", "component": "Base", "at": [0, 0, 40], "name": "Top"}
+{"op": "insert", "sample": "housing", "name": "Bearing", "at": [60, 40, 80]}
+{"op": "set_color", "component": "Top", "color": "#c82828"}
+{"op": "isolate", "components": ["Bearing"]}
+{"op": "show_all"}
+{"op": "explode_step", "components": ["Top", "Bearing"], "by": [0, 0, 60]}
+{"op": "explode_step", "components": ["Bearing"], "by": [0, 0, 50], "name": "Lift bearing"}
+{"op": "explode"}
+{"op": "explode_steps"}
+```
+
+- **Hidden is not suppressed.** `show` with `"on": false` (or `isolate`, which hides
+  every component but the ones named) only stops a component being drawn: it is still
+  mated, checked for interference, counted in the bill of materials, weighed and
+  exported. To take a component out of the assembly without deleting it, `suppress` it.
+  `show_all` shows everything again; `components` marks hidden ones `"hidden": true`.
+- **`set_color` with `component`** colours that one component, in place of its part's
+  colour: use it to tell instances of one part apart. `"color": null` goes back to the
+  part's. Without `component`, `set_color` is the part's own colour, set in the part's
+  document (`open_component`), and it reaches every instance.
+- **An exploded view is a list of steps**, stored in the assembly. `explode_step` names
+  components and how far they go (`by`, along the assembly's axes, in its units). A
+  component in several steps is moved by their sum, so pull a group away first and then
+  one of them further, as above: `Bearing` ends 110 above where it is.
+- **`explode` only changes what is drawn.** `components`, `mates`, `interference`,
+  `mass` and `export` always mean the assembly as it is put together, whether it is
+  shown exploded or not. `explode_steps` lists the steps and, under `moved`, where each
+  component is drawn when exploded (`at`). `explode` is not an undo step and is not
+  saved: a file opens put together.
+- Steps move the assembly's own components. A sub-assembly moves as one thing; to
+  take it apart, give it steps in its own document.
+- `edit_explode_step` (`explode_step`, and `by` or `components`) changes a step;
+  `rename` and `delete` take `explode_step` in place of `feature`. Deleting a component
+  takes it out of its steps, and a step left with none goes too.
+- `explode` with no steps fails: add one first.
 
 ## Changing a part of an assembly
 

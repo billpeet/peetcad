@@ -65,6 +65,10 @@ pub struct Placed {
     /// Where the body's coordinates are in the document's: the world for a part's own
     /// bodies, the component's placement in an assembly.
     pub frame: Frame,
+    /// Where the body is drawn: `frame`, moved by the exploded view while it is on (see
+    /// [`Document::set_explode`]). Only what is seen and picked uses this; what is
+    /// measured, checked and exported uses `frame`.
+    pub shown: Frame,
     /// In an assembly: the component the body belongs to (and below it, through
     /// sub-assemblies, the component of the part itself).
     pub path: Vec<CompId>,
@@ -130,6 +134,9 @@ pub struct Document {
     pending_rebuild: bool,
     /// Sheet metal bodies are shown as flat patterns.
     flat: bool,
+    /// How far an assembly is shown exploded: 0 as it is, 1 with every explode step
+    /// taken in full.
+    explode: f64,
 }
 
 impl Default for Document {
@@ -155,6 +162,7 @@ impl Document {
             current_hash: hash,
             pending_rebuild: false,
             flat: false,
+            explode: 0.0,
         };
         doc.rebuild();
         doc
@@ -186,6 +194,7 @@ impl Document {
             current_hash: hash,
             pending_rebuild: true,
             flat: false,
+            explode: 0.0,
         };
         // The caches are of a part's own bodies: an assembly is rebuilt at once.
         match opened.bodies.filter(|_| !doc.model.is_assembly()) {
@@ -195,6 +204,7 @@ impl Document {
                     .iter()
                     .map(|_| Placed {
                         frame: Frame::WORLD,
+                        shown: Frame::WORLD,
                         path: Vec::new(),
                         color,
                     })
@@ -278,11 +288,13 @@ impl Document {
             .iter()
             .map(|_| Placed {
                 frame: Frame::WORLD,
+                shown: Frame::WORLD,
                 path: Vec::new(),
                 color,
             })
             .chain(built.instances.iter().map(|i| Placed {
                 frame: i.frame,
+                shown: i.frame,
                 path: i.path.clone(),
                 color: i.color,
             }))
@@ -293,6 +305,7 @@ impl Document {
             .chain(built.instances.iter().map(|i| &i.body))
             .map(&mut view)
             .collect();
+        self.place_exploded();
         self.revision = next_revision();
     }
 
@@ -315,6 +328,59 @@ impl Document {
         self.bodies_of(component)
             .map(|i| placed_bounds(&self.bodies[i].solid.bounds(), &self.placed[i].frame))
             .fold(Aabb::EMPTY, |a, b| a.union(&b))
+    }
+
+    /// How far the assembly is shown exploded: 0 as it is, 1 in full.
+    pub fn explode(&self) -> f64 {
+        self.explode
+    }
+
+    /// Shows the assembly exploded by `amount` of its explode steps (0: as it is, 1: in
+    /// full; in between for moving from one to the other). A view: nothing is rebuilt,
+    /// and nothing but where the bodies are drawn changes.
+    pub fn set_explode(&mut self, amount: f64) {
+        let amount = if amount.is_finite() {
+            amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if self.explode != amount {
+            self.explode = amount;
+            if self.place_exploded() {
+                self.revision = next_revision();
+            }
+        }
+    }
+
+    /// Puts each shown body where the exploded view has it. Returns whether any moved.
+    fn place_exploded(&mut self) -> bool {
+        let Some(assembly) = self.model.assembly() else {
+            return false;
+        };
+        let amount = self.explode;
+        let mut moved = false;
+        for placed in &mut self.placed {
+            let offset = match placed.path.first() {
+                Some(c) if amount > 0.0 => assembly.explode_offset(*c) * amount,
+                _ => DVec3::ZERO,
+            };
+            let shown = Frame {
+                origin: placed.frame.origin + offset,
+                ..placed.frame
+            };
+            moved |= shown != placed.shown;
+            placed.shown = shown;
+        }
+        moved
+    }
+
+    /// Whether a shown body is of a component that is hidden.
+    pub fn is_hidden(&self, body: usize) -> bool {
+        let component = self.placed.get(body).and_then(Placed::component);
+        match (self.model.assembly(), component) {
+            (Some(assembly), Some(c)) => assembly.component(c).is_some_and(|c| !c.visible),
+            _ => false,
+        }
     }
 
     /// Whether sheet metal bodies are shown flat.
@@ -596,7 +662,9 @@ impl Document {
         self.bodies
             .iter()
             .zip(&self.placed)
-            .map(|(b, p)| placed_bounds(&b.solid.bounds(), &p.frame))
+            .enumerate()
+            .filter(|(i, _)| !self.is_hidden(*i))
+            .map(|(_, (b, p))| placed_bounds(&b.solid.bounds(), &p.shown))
             .fold(Aabb::EMPTY, |a, b| a.union(&b))
     }
 

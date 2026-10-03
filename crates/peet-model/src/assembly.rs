@@ -15,7 +15,7 @@
 use std::path::{Component as Step, Path, PathBuf};
 use std::sync::Arc;
 
-use peet_math::Frame;
+use peet_math::{DVec3, Frame};
 use serde::{Deserialize, Serialize};
 
 use crate::Model;
@@ -176,6 +176,29 @@ pub struct Component {
     pub visible: bool,
     /// Left out of the assembly (not drawn, not counted) without being deleted.
     pub suppressed: bool,
+    /// A colour of its own, in place of its part's: for telling instances apart. A
+    /// sub-assembly's goes for everything in it.
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+}
+
+/// Identifies a step of an assembly's exploded view.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+pub struct ExplodeId(pub u32);
+
+/// One step of an assembly's exploded view: some components moved away from where
+/// they are, to show how the assembly goes together. A view only: the components'
+/// placements and the mates are not touched.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ExplodeStep {
+    pub id: ExplodeId,
+    /// Unique in the assembly: "Explode1".
+    pub name: String,
+    /// The components of the assembly it moves.
+    pub components: Vec<CompId>,
+    /// How far, in the assembly's coordinates (mm). A component in several steps is
+    /// moved by the sum of them.
+    pub offset: DVec3,
 }
 
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -190,6 +213,11 @@ pub struct Assembly {
     /// In the order they were added: when they can't all hold, the earlier ones win.
     mates: Vec<Arc<Mate>>,
     next_mate: u32,
+    /// The steps of the exploded view, in the order they were added.
+    #[serde(default)]
+    explode: Vec<Arc<ExplodeStep>>,
+    #[serde(default)]
+    next_explode: u32,
 }
 
 impl Assembly {
@@ -241,6 +269,23 @@ impl Assembly {
     pub fn mates_of(&self, id: CompId) -> impl Iterator<Item = &Mate> {
         self.mates()
             .filter(move |m| m.a.component() == Some(id) || m.b.component() == Some(id))
+    }
+
+    pub fn explode_steps(&self) -> impl ExactSizeIterator<Item = &ExplodeStep> {
+        self.explode.iter().map(|s| &**s)
+    }
+
+    pub fn explode_step(&self, id: ExplodeId) -> Option<&ExplodeStep> {
+        self.explode.iter().find(|s| s.id == id).map(|s| &**s)
+    }
+
+    /// How far the exploded view moves a component: the sum of its steps.
+    pub fn explode_offset(&self, id: CompId) -> DVec3 {
+        self.explode
+            .iter()
+            .filter(|s| s.components.contains(&id))
+            .map(|s| s.offset)
+            .sum()
     }
 
     /// The definition a component is an instance of.
@@ -329,6 +374,7 @@ impl Assembly {
             fixed,
             visible: true,
             suppressed: false,
+            color: None,
         }));
         Some(id)
     }
@@ -370,6 +416,56 @@ impl Assembly {
             .map(Arc::make_mut)
     }
 
+    /// Adds a step to the exploded view, with an automatic name (`Explode1`). The
+    /// components that are not of this assembly are left out, and each is taken once.
+    pub fn add_explode_step(&mut self, components: &[CompId], offset: DVec3) -> ExplodeId {
+        self.next_explode += 1;
+        let id = ExplodeId(self.next_explode);
+        let name = (1..)
+            .map(|n| format!("Explode{n}"))
+            .find(|name| !self.explode.iter().any(|s| s.name == *name))
+            .unwrap_or_default();
+        let mut own = Vec::new();
+        for c in components {
+            if self.component(*c).is_some() && !own.contains(c) {
+                own.push(*c);
+            }
+        }
+        self.explode.push(Arc::new(ExplodeStep {
+            id,
+            name,
+            components: own,
+            offset,
+        }));
+        id
+    }
+
+    /// The step, for changing it. Other snapshots of the assembly are not affected.
+    pub fn explode_step_mut(&mut self, id: ExplodeId) -> Option<&mut ExplodeStep> {
+        self.explode
+            .iter_mut()
+            .find(|s| s.id == id)
+            .map(Arc::make_mut)
+    }
+
+    pub fn remove_explode_step(&mut self, id: ExplodeId) -> Option<ExplodeStep> {
+        let index = self.explode.iter().position(|s| s.id == id)?;
+        Some(Arc::unwrap_or_clone(self.explode.remove(index)))
+    }
+
+    /// Takes components that no longer exist out of the explode steps, and drops the
+    /// steps that are left with none.
+    fn prune_explode(&mut self) {
+        let components = &self.components;
+        let known = |id: &CompId| components.iter().any(|c| c.id == *id);
+        for step in &mut self.explode {
+            if !step.components.iter().all(known) {
+                Arc::make_mut(step).components.retain(known);
+            }
+        }
+        self.explode.retain(|s| !s.components.is_empty());
+    }
+
     pub fn remove_mate(&mut self, id: MateId) -> Option<Mate> {
         let index = self.mates.iter().position(|m| m.id == id)?;
         Some(Arc::unwrap_or_clone(self.mates.remove(index)))
@@ -381,6 +477,7 @@ impl Assembly {
         let removed = self.components.remove(index);
         self.mates
             .retain(|m| m.a.component() != Some(id) && m.b.component() != Some(id));
+        self.prune_explode();
         self.prune();
         Some(Arc::unwrap_or_clone(removed))
     }
@@ -476,6 +573,25 @@ impl Assembly {
         self.next_mate = self
             .next_mate
             .max(max(&mut self.mates.iter().map(|m| m.id.0)));
+        let mut seen = std::collections::HashSet::new();
+        for s in &self.explode {
+            if !seen.insert(s.id.0) {
+                return Err(format!(
+                    "The assembly is damaged: two explode steps have the id {}.",
+                    s.id.0
+                ));
+            }
+            if !s.offset.is_finite() {
+                return Err(format!(
+                    "The assembly is damaged: {} moves its components by something that is not a distance.",
+                    s.name
+                ));
+            }
+        }
+        self.prune_explode();
+        self.next_explode = self
+            .next_explode
+            .max(max(&mut self.explode.iter().map(|s| s.id.0)));
         for d in &mut self.definitions {
             let mut model = (*d.model).clone();
             model.validate()?;
@@ -490,7 +606,6 @@ impl Assembly {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peet_math::DVec3;
 
     fn part(name: &str) -> Arc<Model> {
         let mut m = Model::new();

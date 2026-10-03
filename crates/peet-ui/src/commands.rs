@@ -129,6 +129,10 @@ pub enum CommandId {
     MateDistance,
     MateAngle,
     MateFasten,
+    ShowAllComponents,
+    IsolateComponent,
+    AddExplodeStep,
+    ExplodeView,
 }
 
 /// Static description of a command.
@@ -157,7 +161,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 120] = [
+    pub const ALL: [Self; 124] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -278,6 +282,10 @@ impl CommandId {
         Self::MateDistance,
         Self::MateAngle,
         Self::MateFasten,
+        Self::ShowAllComponents,
+        Self::IsolateComponent,
+        Self::AddExplodeStep,
+        Self::ExplodeView,
     ];
 
     pub fn info(self) -> CommandInfo {
@@ -942,6 +950,30 @@ impl CommandId {
                 "Fasten",
                 "Assembly",
                 "Hold the two selected components together as they are now: the second keeps its place relative to the first.",
+                None,
+            ),
+            Self::ShowAllComponents => (
+                "Show All Components",
+                "Assembly",
+                "Show every hidden component again.",
+                None,
+            ),
+            Self::IsolateComponent => (
+                "Isolate Component",
+                "Assembly",
+                "Show the selected component alone: every other is hidden. Show All brings them back.",
+                None,
+            ),
+            Self::AddExplodeStep => (
+                "Add Explode Step",
+                "Assembly",
+                "Add a step to the exploded view that moves the selected component away from where it is. Set how far, and add other components, in the step's properties. The component itself and its mates are not touched.",
+                None,
+            ),
+            Self::ExplodeView => (
+                "Explode",
+                "Assembly",
+                "Show the assembly exploded (every explode step taken), or as it is put together.",
                 None,
             ),
             Self::OpenSampleHousing => (

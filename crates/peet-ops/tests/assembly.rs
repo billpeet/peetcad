@@ -1928,3 +1928,295 @@ fn step_keeps_an_assemblys_structure() {
     assert!(!e.is_empty());
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn components_are_shown_hidden_and_coloured() {
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "sample": "bracket"}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "component": "Bracket-1", "at": [0, 200, 0]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "sample": "housing", "at": [300, 0, 0]}),
+    );
+    let part = doc.placed[0].color;
+
+    // A colour of its own, for one instance; the other keeps the part's.
+    let red = ok(
+        &mut doc,
+        json!({"op": "set_color", "component": "Bracket-2", "color": "#c82828"}),
+    );
+    assert_eq!(red["component"]["color"], "#c82828");
+    assert_eq!(doc.undo_label(), Some("Colour Bracket-2"));
+    assert_eq!(doc.placed[0].color, part);
+    assert_eq!(doc.placed[1].color, Some([200, 40, 40]));
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert!(listed["components"][0].get("color").is_none());
+    assert_eq!(listed["components"][1]["color"], "#c82828");
+    let back = ok(
+        &mut doc,
+        json!({"op": "set_color", "component": "Bracket-2", "color": null}),
+    );
+    assert!(back["component"].get("color").is_none());
+    assert_eq!(doc.placed[1].color, part);
+    let e = error(
+        &mut doc,
+        json!({"op": "set_color", "component": "Bracket-2"}),
+    );
+    assert!(e.contains("null for the part's colour"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "set_color", "component": "Bracket-2", "color": "red"}),
+    );
+    assert!(e.contains("#c82828"), "{e}");
+
+    // Isolate: the others are hidden, in one undo step. What is hidden is still there:
+    // counted, weighed and exported.
+    let all = doc.visible_body_bounds();
+    let alone = ok(
+        &mut doc,
+        json!({"op": "isolate", "components": ["Housing-1"]}),
+    );
+    assert_eq!(alone["hidden"], json!(["Bracket-1", "Bracket-2"]));
+    assert_eq!(doc.undo_label(), Some("Isolate Housing-1"));
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(listed["components"][0]["hidden"], true);
+    assert!(listed["components"][2].get("hidden").is_none());
+    assert_eq!(doc.bodies.len(), 3);
+    assert!((0..2).all(|i| doc.is_hidden(i)) && !doc.is_hidden(2));
+    // Zoom to fit frames what is shown.
+    let shown = doc.visible_body_bounds();
+    assert!(shown.min.x > all.min.x + 100.0, "{shown:?} / {all:?}");
+    let bom = ok(&mut doc, json!({"op": "bom"}));
+    assert_eq!(bom["quantity"], 3);
+    // The same again changes nothing.
+    ok(
+        &mut doc,
+        json!({"op": "isolate", "components": "Housing-1"}),
+    );
+    ok(&mut doc, json!({"op": "undo"}));
+    assert!((0..3).all(|i| !doc.is_hidden(i)), "one undo step");
+    ok(&mut doc, json!({"op": "redo"}));
+
+    let shown = ok(&mut doc, json!({"op": "show_all"}));
+    assert_eq!(shown["shown"], json!(["Bracket-1", "Bracket-2"]));
+    assert_eq!(doc.undo_label(), Some("Show All"));
+    assert!((0..3).all(|i| !doc.is_hidden(i)));
+    let nothing = ok(&mut doc, json!({"op": "show_all"}));
+    assert_eq!(nothing["shown"], json!([]));
+    assert_eq!(doc.undo_label(), Some("Show All"));
+    ok(&mut doc, json!({"op": "undo"}));
+    assert!(doc.is_hidden(0));
+
+    let e = error(&mut doc, json!({"op": "isolate", "components": ["Lid"]}));
+    assert!(e.contains("Bracket-1"), "{e}");
+    let e = error(&mut doc, json!({"op": "isolate", "components": []}));
+    assert!(e.contains("at least one"), "{e}");
+    let mut part = Document::default();
+    let e = error(&mut part, json!({"op": "show_all"}));
+    assert!(e.contains("works on an assembly"), "{e}");
+}
+
+#[test]
+fn an_exploded_view_is_stored_steps_that_move_nothing() {
+    let dir = temp("explode");
+    let (plate, pin) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "path": plate}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "at": [30, 30, 40]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "at": [0, 0, 100], "name": "Lid"}),
+    );
+    let before = ok(&mut doc, json!({"op": "components"}));
+    let mates = ok(&mut doc, json!({"op": "mates"}));
+
+    // Two steps: the lid up, then the lid and the pin further.
+    let first = ok(
+        &mut doc,
+        json!({"op": "explode_step", "components": ["Lid"], "by": [0, 0, 50]}),
+    );
+    assert_eq!(
+        first["explode_step"],
+        json!({"id": 1, "name": "Explode1", "components": ["Lid"], "by": [0.0, 0.0, 50.0]})
+    );
+    assert_eq!(doc.undo_label(), Some("Add Explode1"));
+    let second = ok(
+        &mut doc,
+        json!({"op": "explode_step", "components": ["Lid", "pin-1", "Lid"], "by": [20, 0, 30], "name": "Apart"}),
+    );
+    assert_eq!(
+        second["explode_step"]["components"],
+        json!(["Lid", "pin-1"])
+    );
+
+    // Stored, and nothing moved: the components and the mates are as they were.
+    assert_eq!(ok(&mut doc, json!({"op": "components"})), before);
+    assert_eq!(ok(&mut doc, json!({"op": "mates"})), mates);
+    let steps = ok(&mut doc, json!({"op": "explode_steps"}));
+    assert_eq!(steps["exploded"], false);
+    assert_eq!(steps["steps"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        steps["moved"],
+        json!([
+            {"component": "pin-1", "by": [20.0, 0.0, 30.0], "at": [50.0, 30.0, 70.0]},
+            {"component": "Lid", "by": [20.0, 0.0, 80.0], "at": [20.0, 0.0, 180.0]},
+        ])
+    );
+
+    // Shown exploded: a view. The bodies are drawn moved; everything asked about the
+    // assembly still means it as it is.
+    let hash = peet_model::hash::of(&doc.model);
+    let shown = ok(&mut doc, json!({"op": "explode"}));
+    assert_eq!(shown["exploded"], true);
+    assert_eq!(doc.undo_label(), Some("Add Apart"));
+    assert_eq!(peet_model::hash::of(&doc.model), hash);
+    let lid = doc
+        .placed
+        .iter()
+        .rposition(|p| p.path == [peet_model::CompId(3)])
+        .unwrap();
+    assert_eq!(doc.placed[lid].frame.origin, DVec3::new(0.0, 0.0, 100.0));
+    assert_eq!(doc.placed[lid].shown.origin, DVec3::new(20.0, 0.0, 180.0));
+    assert_eq!(doc.placed[0].shown, doc.placed[0].frame);
+    assert_eq!(ok(&mut doc, json!({"op": "components"})), before);
+    assert_eq!(
+        ok(&mut doc, json!({"op": "explode_steps"}))["exploded"],
+        true
+    );
+    // Half way, as the application moves between the two.
+    doc.set_explode(0.5);
+    assert_eq!(doc.placed[lid].shown.origin, DVec3::new(10.0, 0.0, 140.0));
+    doc.set_explode(1.0);
+
+    // A change to a step shows at once.
+    let edited = ok(
+        &mut doc,
+        json!({"op": "edit_explode_step", "explode_step": "Explode1", "by": [0, 0, 10]}),
+    );
+    assert_eq!(edited["explode_step"]["by"], json!([0.0, 0.0, 10.0]));
+    assert_eq!(doc.placed[lid].shown.origin, DVec3::new(20.0, 0.0, 140.0));
+    ok(
+        &mut doc,
+        json!({"op": "edit_explode_step", "explode_step": "Apart", "components": ["pin-1"]}),
+    );
+    assert_eq!(doc.placed[lid].shown.origin, DVec3::new(0.0, 0.0, 110.0));
+    ok(
+        &mut doc,
+        json!({"op": "rename", "explode_step": 1, "name": "Lift lid"}),
+    );
+    assert_eq!(doc.undo_label(), Some("Rename Explode1"));
+    let off = ok(&mut doc, json!({"op": "explode", "on": false}));
+    assert_eq!(off["exploded"], false);
+    assert_eq!(doc.placed[lid].shown, doc.placed[lid].frame);
+
+    // Saved with the assembly.
+    let file = dir.join("exploded.peet").to_string_lossy().into_owned();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let mut opened = Document::default();
+    ok(&mut opened, json!({"op": "open", "path": file}));
+    assert_eq!(opened.model, doc.model);
+    let steps = ok(&mut opened, json!({"op": "explode_steps"}));
+    assert_eq!(steps["steps"][0]["name"], "Lift lid");
+
+    // A deleted component leaves its steps; a step with nothing left goes with it.
+    ok(&mut doc, json!({"op": "delete", "component": "pin-1"}));
+    let steps = ok(&mut doc, json!({"op": "explode_steps"}));
+    assert_eq!(steps["steps"].as_array().unwrap().len(), 1);
+    ok(&mut doc, json!({"op": "undo"}));
+    let gone = ok(&mut doc, json!({"op": "delete", "explode_step": "Apart"}));
+    assert_eq!(gone["deleted"], json!(["Apart"]));
+
+    // Mistakes.
+    let e = error(
+        &mut doc,
+        json!({"op": "explode_step", "components": ["Lid"], "by": [0, 0, 0]}),
+    );
+    assert!(e.contains("moves nothing"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "explode_step", "components": ["Cover"], "by": [0, 0, 5]}),
+    );
+    assert!(e.contains("Lid"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "explode_step", "components": ["Lid"]}),
+    );
+    assert!(e.contains("by"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_explode_step", "explode_step": "Apart", "by": [1, 0, 0]}),
+    );
+    assert!(e.contains("Lift lid"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_explode_step", "explode_step": 1}),
+    );
+    assert!(e.contains("'by' or a 'components'"), "{e}");
+    let mut bare = assembly();
+    let e = error(&mut bare, json!({"op": "explode"}));
+    assert!(e.contains("explode_step"), "{e}");
+    let mut part = Document::default();
+    let e = error(&mut part, json!({"op": "explode_steps"}));
+    assert!(e.contains("works on an assembly"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn the_applications_colours_and_explode_steps_are_made_by_operations() {
+    let mut host = Headless::default();
+    let mut direct = Document::from_model(Model::new_assembly(), None);
+    let mut through = Document::from_model(Model::new_assembly(), None);
+    let bracket = Arc::new(peet_model::samples::bracket().0);
+    let mut key = 100;
+    let mut change = |label: &str, f: &dyn Fn(&mut Model)| {
+        direct.change(label, f);
+        let mut new = through.model.clone();
+        f(&mut new);
+        key += 1;
+        let done = apply_model(&mut host, &mut through, new, label, key);
+        through.seal_history();
+        assert_eq!(done.untranslated, None, "{label}: {:?}", done.ops);
+        assert_eq!(through.model, direct.model, "{label}");
+        done.ops
+    };
+    let (one, two) = (peet_model::CompId(1), peet_model::CompId(2));
+    change("Insert", &|m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.define(bracket.clone());
+        a.insert(d, Frame::WORLD);
+        a.insert(d, Frame::WORLD);
+    });
+    let ops = change("Colour", &|m| {
+        m.assembly_mut().unwrap().component_mut(two).unwrap().color = Some([1, 2, 3]);
+    });
+    assert_eq!(ops.len(), 1);
+    let ops = change("Explode", &|m| {
+        let a = m.assembly_mut().unwrap();
+        a.add_explode_step(&[one, two], DVec3::new(0.0, 0.0, 40.0));
+        a.add_explode_step(&[two], DVec3::X);
+    });
+    assert_eq!(ops.len(), 2);
+    let step = peet_model::ExplodeId(1);
+    let ops = change("Edit step", &|m| {
+        let s = m.assembly_mut().unwrap().explode_step_mut(step).unwrap();
+        s.offset.z = 60.0;
+        s.components = vec![one];
+        s.name = "Up".to_owned();
+    });
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    // A deleted component takes itself out of its steps: one operation.
+    let ops = change("Delete component", &|m| {
+        m.assembly_mut().unwrap().remove(two);
+    });
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    let ops = change("Delete step", &|m| {
+        m.assembly_mut().unwrap().remove_explode_step(step);
+    });
+    assert_eq!(ops.len(), 1, "{ops:?}");
+}

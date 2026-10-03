@@ -309,6 +309,14 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `fix` | `component`, `on` (default true) |
 | `replace` | `component`, and `path`, `sample` or `part`: another part, in the same place |
 | `rename`, `suppress`, `show`, `delete` | `component` in place of `feature` |
+| `set_color` with `component` | `color` (`"#rrggbb"`, `[r, g, b]`, or `null` for its part's): a colour for that component alone |
+| `show_all` | shows every hidden component; replies `shown` |
+| `isolate` | `components` (names or ids): shows these and hides every other; replies `hidden` |
+| `explode_step` | `components`, `by` (`[x, y, z]`: how far, along the assembly's axes), `name`: adds a step to the exploded view |
+| `edit_explode_step` | `explode_step`, and `by` or `components` |
+| `rename`, `delete` | `explode_step` in place of `feature` |
+| `explode` | `on` (left out: the other way): shows the assembly exploded, or as it is. A view, not an undo step |
+| `explode_steps` | every step (`id`, `name`, `components`, `by`), whether the assembly is shown `exploded`, and under `moved` each component the steps move with its total `by` and where it is drawn exploded (`at`) |
 | `open_component` | `component`: opens its part as a document of its own and makes it current. `save` without a `path` on that document stores it back, as one undo step of the assembly, for every component of the part. Needs a session |
 | `components` | every component (`id`, `name`, `part`, `at`, `rotate`, `fixed`, `freedom`, `mates`, `status`, `message`, `min`, `max`) and every part (`id`, `name`, `kind`, how many `components`, `material`); how many `mates`, and the `freedom` left |
 | `mate` | `type` (`coincident`, `concentric`, `parallel`, `distance`, `angle`, `fasten`), `a`, `b`, `distance` or `angle` for those types, `flip`, `name`. An end is `{"component": …, "face": selector}` (or `"edge"`, `"vertex"`), the selector in the part's own coordinates; for `fasten` it is the component alone |
@@ -320,6 +328,13 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `bom` | `level` (`parts`, the default: every part, through sub-assemblies; `top`: a sub-assembly is one line): `rows`, each with `item`, `part`, `quantity`, `material`, `volume_mm3`, `mass_kg`, `total_mass_kg`, the `components`, and for sheet metal `thickness`, `flat_size`, `bends`; the total `quantity` and `mass_kg`, or `without_mass` |
 | `mass` | in an assembly: each component's `volume_mm3`, `mass_kg` and `center_of_gravity`, and the `total` (with `center_of_gravity_of`: `mass` if every part has a material, else `volume`; `principal_moments_kg_mm2` or `principal_moments_mm5`); `without_material` |
 | `export` to a `.csv` | the bill of materials (every part) as a table: `item`, `part`, `quantity`, `material`, `mass_kg`, `total_mass_kg`, `thickness_`, `flat_width_`, `flat_height_` (with the document's unit), `bends`, `components` |
+
+**Visibility and the exploded view** change what is drawn, not the assembly. A hidden
+component is still mated, checked, counted, weighed and exported (a suppressed one is
+not). An exploded view is a list of steps stored in the assembly, each moving some of
+its components by a distance; a component in several steps moves by their sum. Whether
+the assembly is shown exploded is a view, like `flat_pattern`: it is not saved and not
+undone, and every other operation means the assembly as it is put together.
 
 **Interference** compares every two bodies of different components whose boxes overlap,
 by intersecting them: what they share is the interference. Bodies that only touch share

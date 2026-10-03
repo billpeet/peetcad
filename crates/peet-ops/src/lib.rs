@@ -46,6 +46,7 @@ mod analysis;
 mod args;
 mod assembly;
 mod diff;
+mod explode;
 mod export;
 mod fields;
 mod host;
@@ -61,6 +62,7 @@ mod value;
 
 pub use assembly::{CompSel, ComponentChange, InsertSource, Placing, Point3};
 pub use diff::{Translation, apply_model, diff};
+pub use explode::{ExplodeChange, ExplodeSel};
 pub use export::export_bytes;
 pub use fields::{
     AngledPlane, BaseFlange, Blend, CircularPattern, ConvertToSheet, CoordinateSystem,
@@ -132,6 +134,8 @@ struct Done {
     component: Option<peet_model::CompId>,
     /// A mate the operation was about, reported with its status.
     mate: Option<peet_model::MateId>,
+    /// A step of the exploded view the operation was about.
+    explode_step: Option<peet_model::ExplodeId>,
     /// A pull on a component to solve the assembly with, and its undo label.
     drag: Option<(peet_model::Drag, String)>,
     data: Map<String, Value>,
@@ -254,6 +258,7 @@ fn help() -> Map<String, Value> {
         .map(|o| ("component", o))
         .chain(mate::MATE_OPS.iter().map(|o| ("mate", o)))
         .chain(links::LINK_OPS.iter().map(|o| ("part", o)))
+        .chain(explode::EXPLODE_OPS.iter().map(|o| ("explode_step", o)))
     {
         // Words a feature has too (rename, delete): the component's and the mate's
         // forms beside it.
@@ -328,6 +333,7 @@ fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, V
         Query::Measure { a, b } => object(query::measure(doc, a, b.as_deref())?),
         Query::Components => assembly::components(doc)?,
         Query::Mates => mate::mates(doc)?,
+        Query::ExplodeSteps => explode::steps(doc)?,
     })
 }
 
@@ -440,6 +446,60 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 );
             } else {
                 done.mate = Some(id);
+            }
+            label
+        }
+        Op::ExplodeStep {
+            components,
+            by,
+            name,
+        } => {
+            let (id, label) = explode::add(doc, &mut model, components, by, name.as_deref())?;
+            done.explode_step = Some(id);
+            label
+        }
+        Op::EditExplodeStep { step, change } => {
+            let id = step.resolve(doc)?;
+            let label = explode::change(doc, &mut model, id, change)?;
+            if *change == ExplodeChange::Delete {
+                done.data.insert(
+                    "deleted".to_owned(),
+                    json!([label.trim_start_matches("Delete ")]),
+                );
+            } else {
+                done.explode_step = Some(id);
+            }
+            label
+        }
+        Op::Explode { on } => {
+            let steps = doc
+                .model
+                .assembly()
+                .map_or(0, |a| a.explode_steps().count());
+            if steps == 0 {
+                return Err(
+                    "The assembly has no explode steps to show: add one with explode_step."
+                        .to_owned(),
+                );
+            }
+            let on = on.unwrap_or(doc.explode() == 0.0);
+            doc.set_explode(if on { 1.0 } else { 0.0 });
+            done.data.insert("exploded".to_owned(), json!(on));
+            return Ok(done);
+        }
+        Op::ShowAll => {
+            let (shown, label) = explode::show_all(doc, &mut model)?;
+            done.data.insert("shown".to_owned(), json!(shown));
+            if shown.is_empty() {
+                return Ok(done);
+            }
+            label
+        }
+        Op::Isolate { components } => {
+            let (hidden, label) = explode::isolate(doc, &mut model, components)?;
+            done.data.insert("hidden".to_owned(), json!(hidden));
+            if model == doc.model {
+                return Ok(done);
             }
             label
         }
@@ -1044,6 +1104,9 @@ pub(crate) fn apply_with(
     }
     if let Some(id) = done.mate {
         out.insert("mate".to_owned(), mate::mate_out(doc, id));
+    }
+    if let Some(id) = done.explode_step {
+        out.insert("explode_step".to_owned(), explode::step_out(doc, id));
     }
     if done.changed && !done.replaced && doc.is_assembly() {
         // The components that are somewhere else now: what a mate, or a placement that

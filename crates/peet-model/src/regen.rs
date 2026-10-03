@@ -448,7 +448,7 @@ impl Engine {
                     path: vec![c.id],
                     body: body.clone(),
                     frame: placement,
-                    color: part.model.color,
+                    color: c.color.or(part.model.color),
                 });
             }
             // A sub-assembly's components, as one rigid thing.
@@ -460,7 +460,7 @@ impl Engine {
                     path,
                     body: inner.body.clone(),
                     frame: placement.compose(&inner.frame),
-                    color: inner.color,
+                    color: c.color.or(inner.color),
                 });
             }
             let name = &part.model.name;

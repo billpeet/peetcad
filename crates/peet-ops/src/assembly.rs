@@ -241,6 +241,8 @@ pub enum ComponentChange {
     Place(Placing),
     /// Make it an instance of another part, where it is.
     Replace(InsertSource),
+    /// A colour of its own, or (`None`) its part's again.
+    Color(Option<[u8; 3]>),
     Delete,
 }
 
@@ -253,6 +255,7 @@ impl ComponentChange {
             Self::Fix(_) => "fix",
             Self::Place(_) => "place",
             Self::Replace(_) => "replace",
+            Self::Color(_) => "set_color",
             Self::Delete => "delete",
         }
     }
@@ -295,6 +298,11 @@ pub(crate) const ASSEMBLY_OPS: &[(&str, &str, &str)] = &[
         "show",
         "component, on (default true)",
         "Show or hide a component.",
+    ),
+    (
+        "set_color",
+        "component, color (\"#rrggbb\" or [r, g, b]; null for its part's colour)",
+        "Give a component a colour of its own, in place of its part's.",
     ),
     (
         "delete",
@@ -392,6 +400,18 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
             let on = a.flag("on", true).map(ComponentChange::Suppress);
             change(a, on)
         }
+        "set_color" if a.has("component") => {
+            let color = match a.take_nullable("color") {
+                None => Err(
+                    "'set_color' needs a 'color' field (null for the part's colour).".to_owned(),
+                ),
+                Some(Value::Null) => Ok(None),
+                Some(v) => crate::library::color(&v)
+                    .map(Some)
+                    .map_err(|e| format!("color: {e}")),
+            };
+            change(a, color.map(ComponentChange::Color))
+        }
         "show" if a.has("component") => {
             let on = a.flag("on", true).map(ComponentChange::Show);
             change(a, on)
@@ -416,8 +436,17 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
             | Op::Drag { .. }
             | Op::Mate { .. }
             | Op::EditMate { .. }
+            | Op::ExplodeStep { .. }
+            | Op::EditExplodeStep { .. }
+            | Op::Explode { .. }
+            | Op::ShowAll
+            | Op::Isolate { .. }
             | Op::Query(
-                Query::Components | Query::Mates | Query::Interference { .. } | Query::Bom { .. }
+                Query::Components
+                    | Query::Mates
+                    | Query::ExplodeSteps
+                    | Query::Interference { .. }
+                    | Query::Bom { .. }
             )
     );
     let for_part = match op {
@@ -528,6 +557,9 @@ pub(crate) fn component_out(doc: &Document, id: CompId) -> Value {
     }
     if !c.visible {
         m.insert("hidden".to_owned(), json!(true));
+    }
+    if let Some(color) = c.color {
+        m.insert("color".to_owned(), crate::library::color_out(color));
     }
     m.insert("status".to_owned(), json!(status_word(status)));
     if let Some(message) = status.and_then(Status::message) {
@@ -729,6 +761,10 @@ pub(crate) fn change(
         ComponentChange::Show(on) => {
             assembly.component_mut(id).ok_or_else(gone)?.visible = *on;
             format!("{} {was}", if *on { "Show" } else { "Hide" })
+        }
+        ComponentChange::Color(color) => {
+            assembly.component_mut(id).ok_or_else(gone)?.color = *color;
+            format!("Colour {was}")
         }
         ComponentChange::Fix(on) => {
             assembly.component_mut(id).ok_or_else(gone)?.fixed = *on;

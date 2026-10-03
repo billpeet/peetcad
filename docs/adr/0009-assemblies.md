@@ -290,6 +290,28 @@ which no released version writes, without another version number.
   part has no material the mass is not given, the parts without one are named, and the
   centre and moments are those of the volume.
 
+## What stage 5 built
+
+- **Visibility.** A hidden component (`Component::visible`, there since stage 2) is
+  left out of what is drawn, picked and framed by zoom to fit, and of nothing else.
+  `show_all` and `isolate` change several at once, as one undo step each.
+- **Colour.** `Component::color` overrides the part's colour for one instance; a
+  sub-assembly's goes for everything in it. Set by `set_color` with `component`.
+- **Exploded view.** `Assembly` holds `ExplodeStep`s: a name, components of the
+  assembly, and an offset in the assembly's coordinates. They are model data (saved,
+  undone, translated to operations: `explode_step`, `edit_explode_step`). A component
+  in several steps moves by their sum; a deleted component leaves its steps, and an
+  empty step is dropped. Steps move only the assembly's own components: a sub-assembly
+  is one thing.
+- **Shown exploded is a view.** `Document::set_explode(amount)` (0 to 1) moves only
+  `Placed::shown`, the frame a body is drawn and picked at; `Placed::frame`, which
+  mates, interference, mass, bounds and exports use, never changes. So an exploded
+  view can't affect a mate, and nothing is rebuilt to show one: the application
+  animates `amount` over 0.4 s, moving instance transforms only. Dragging a component
+  is refused while the view is exploded.
+- Component and explode fields were added to model schema 6 (still unreleased), so an
+  assembly file written by an earlier build of this phase does not open.
+
 ## Consequences
 
 - An assembly file grows with the parts in it, and a part used by two assemblies is two

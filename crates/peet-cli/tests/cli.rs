@@ -684,6 +684,52 @@ fn what_the_assemblies_skill_says_about_step_is_true() {
 }
 
 #[test]
+fn what_the_assemblies_skill_says_about_showing_and_exploding_is_true() {
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "assemblies")
+        .map(|(_, text)| *text)
+        .unwrap();
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"explode_step\""))
+        .expect("the script that explodes an assembly");
+    // Asked while it is shown exploded: the components are where they were put.
+    let script = format!("{script}{{\"op\": \"components\"}}\n{{\"op\": \"bom\"}}\n");
+    let ran = peet_with(&["run", "-q"], &script);
+    assert_eq!(ran.code, OK, "{}", ran.out);
+    let n = ran.replies.len();
+    let (steps, components, bom) = (
+        &ran.replies[n - 3],
+        &ran.replies[n - 2],
+        &ran.replies[n - 1],
+    );
+    assert_eq!(steps["exploded"], true);
+    assert_eq!(steps["steps"].as_array().unwrap().len(), 2);
+    // "Bearing ends 110 above where it is."
+    assert_eq!(
+        steps["moved"],
+        json!([
+            {"component": "Top", "by": [0.0, 0.0, 60.0], "at": [0.0, 0.0, 100.0]},
+            {"component": "Bearing", "by": [0.0, 0.0, 110.0], "at": [60.0, 40.0, 190.0]},
+        ])
+    );
+    let listed = components["components"].as_array().unwrap();
+    assert_eq!(listed[2]["at"], json!([60.0, 40.0, 80.0]));
+    assert_eq!(listed[1]["color"], "#c82828");
+    assert!(listed[0].get("color").is_none());
+    // Isolated and shown again: nothing is hidden, and everything is counted.
+    assert!(listed.iter().all(|c| c.get("hidden").is_none()));
+    assert_eq!(bom["quantity"], 3);
+    let isolated = ran
+        .replies
+        .iter()
+        .find(|r| r["op"] == "isolate")
+        .expect("the isolate reply");
+    assert_eq!(isolated["hidden"], json!(["Base", "Top"]));
+}
+
+#[test]
 fn what_the_assemblies_skill_says_about_checking_is_true() {
     let skill = peet_cli::SKILLS
         .iter()

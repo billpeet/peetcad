@@ -6,10 +6,10 @@
 
 use egui::{RichText, Ui};
 use peet_math::{DQuat, DVec3};
-use peet_model::{CompId, MateEnd, MateGeom, MateId, MateKind, ScalarKind, Status};
+use peet_model::{CompId, ExplodeId, MateEnd, MateGeom, MateId, MateKind, ScalarKind, Status};
 use peet_ops::{
-    CompSel, ComponentChange, Input, InsertSource, MateChange, MateEndSel, MateType, Op, Placing,
-    Source,
+    CompSel, ComponentChange, ExplodeChange, Input, InsertSource, MateChange, MateEndSel, MateType,
+    Op, Placing, Point3, Source,
 };
 
 use crate::bodies::GeomRef;
@@ -22,6 +22,11 @@ use crate::features_ui::{ERROR, WARNING};
 
 /// Undo keys of the drags in a component's properties (one step per drag).
 const MOVE_KEY: u64 = 0x636f_6d70_6d6f_7665;
+/// The same for a component's colour and for an explode step's distance.
+const COLOR_KEY: u64 = 0x636f_6d70_636f_6c72;
+const EXPLODE_KEY: u64 = 0x6578_706c_6f64_6562;
+/// How long the assembly takes to come apart and go together again, in seconds.
+const EXPLODE_TIME: f64 = 0.4;
 
 /// Undo key of a drag of a component in the view (one step per drag).
 const DRAG_KEY: u64 = 0x636f_6d70_6472_6167;
@@ -50,7 +55,7 @@ pub(super) enum DragEvent {
 
 /// Where a ray first meets a shown body, in the document's coordinates.
 fn ray_hit(doc: &Document, body: usize, ray: &peet_math::Ray) -> Option<DVec3> {
-    let frame = doc.placed.get(body)?.frame;
+    let frame = doc.placed.get(body)?.shown;
     let (origin, dir) = (
         frame.to_local(ray.origin),
         frame.vector_to_local(ray.direction),
@@ -100,6 +105,12 @@ pub(super) fn drag_in_view(
     if response.drag_started_by(Primary) && plain {
         let geom = hovered?;
         let c = assembly.component(doc.placed.get(geom.body())?.component()?)?;
+        if doc.explode() > 0.0 {
+            return Some(DragEvent::Refused(
+                "The assembly is shown exploded, and its components are not where they are drawn. Turn Explode off to move them."
+                    .to_owned(),
+            ));
+        }
         if c.fixed {
             return Some(DragEvent::Refused(format!(
                 "{} is fixed, so it stays where it is. Untick Fixed in its properties to move it.",
@@ -148,6 +159,10 @@ enum TreeAction {
     Change(CompId, ComponentChange),
     SelectMate(MateId),
     ChangeMate(MateId, MateChange),
+    Isolate(CompId),
+    ShowAll,
+    SelectExplode(ExplodeId),
+    ChangeExplode(ExplodeId, ExplodeChange),
 }
 
 /// What to say about how a component can still move.
@@ -179,6 +194,10 @@ pub(super) fn works_in_assembly(cmd: CommandId) -> bool {
                     | "materials"
                     | "insert"
                     | "import_step"
+                    | "show_all"
+                    | "isolate"
+                    | "explode_step"
+                    | "explode"
                     | "update_links"
                     | "interference"
                     | "bom"
@@ -208,6 +227,10 @@ pub(super) fn needs_assembly(cmd: CommandId) -> bool {
             | CommandId::MateDistance
             | CommandId::MateAngle
             | CommandId::MateFasten
+            | CommandId::ShowAllComponents
+            | CommandId::IsolateComponent
+            | CommandId::AddExplodeStep
+            | CommandId::ExplodeView
     )
 }
 
@@ -216,6 +239,213 @@ impl PeetApp {
     pub(super) fn selected_component(&self) -> Option<CompId> {
         let id = self.selected_component?;
         self.doc.model.assembly()?.component(id).map(|c| c.id)
+    }
+
+    /// The selected step of the exploded view, if the document is an assembly that
+    /// still has it and nothing else was selected since.
+    pub(super) fn selected_explode(&self) -> Option<ExplodeId> {
+        let id = self.selected_explode?;
+        if self.selected_component.is_some() || self.selected_mate.is_some() {
+            return None;
+        }
+        self.doc.model.assembly()?.explode_step(id).map(|s| s.id)
+    }
+
+    /// Adds a step to the exploded view that moves the selected component, and shows
+    /// the assembly exploded so that it is seen.
+    pub(super) fn add_explode_step(&mut self) {
+        let Some(id) = self.selected_component() else {
+            return self.error("Select the component to move first.");
+        };
+        // A start, to be changed in the step's properties: up, by about half the size
+        // of the assembly.
+        let size = self.doc.visible_body_bounds().size().max_element();
+        let by = if size.is_finite() {
+            (size * 0.5).clamp(10.0, 1000.0).round()
+        } else {
+            50.0
+        };
+        let reply = self.perform(Op::ExplodeStep {
+            components: vec![CompSel::Id(id)],
+            by: Point3::Mm(DVec3::new(0.0, 0.0, by)),
+            name: None,
+        });
+        if !reply.ok {
+            return;
+        }
+        let step = &reply.json["explode_step"];
+        self.selected_explode = step["id"].as_u64().map(|i| ExplodeId(i as u32));
+        self.selected_component = None;
+        self.selected_mate = None;
+        self.selected_geom.clear();
+        self.explode_target = Some(1.0);
+        self.info(format!(
+            "Added {}. Set how far and which way in its properties; the component itself stays where its mates have it.",
+            step["name"].as_str().unwrap_or("the step")
+        ));
+    }
+
+    /// Shows the assembly exploded, or as it is put together again.
+    pub(super) fn toggle_explode(&mut self) {
+        let exploded = self.explode_target.unwrap_or(self.doc.explode()) > 0.5;
+        self.explode_target = Some(if exploded { 0.0 } else { 1.0 });
+    }
+
+    /// Moves the exploded view a frame's worth towards where it is going.
+    pub(super) fn animate_explode(&mut self, ctx: &egui::Context) {
+        let Some(target) = self.explode_target else {
+            return;
+        };
+        let now = self.doc.explode();
+        let step = if self.settings.animate_views {
+            f64::from(ctx.input(|i| i.stable_dt)).clamp(0.001, 0.1) / EXPLODE_TIME
+        } else {
+            1.0
+        };
+        let next = if (target - now).abs() <= step {
+            target
+        } else {
+            now + step * (target - now).signum()
+        };
+        self.doc.set_explode(next);
+        if next == target {
+            self.explode_target = None;
+        } else {
+            ctx.request_repaint();
+        }
+    }
+
+    pub(super) fn change_explode(&mut self, id: ExplodeId, change: ExplodeChange) {
+        let deleted = change == ExplodeChange::Delete;
+        let reply = self.perform(Op::EditExplodeStep {
+            step: id.into(),
+            change,
+        });
+        if reply.ok && deleted && self.selected_explode == Some(id) {
+            self.selected_explode = None;
+        }
+    }
+
+    /// The properties of a step of the exploded view: how far it moves its components,
+    /// and which they are.
+    pub(super) fn explode_properties(&mut self, ui: &mut Ui, id: ExplodeId) {
+        let Some(assembly) = self.doc.model.assembly() else {
+            return;
+        };
+        let Some(step) = assembly.explode_step(id).cloned() else {
+            return;
+        };
+        let units = self.doc.model.parameters.units;
+        let inside: Vec<(CompId, String)> = step
+            .components
+            .iter()
+            .map(|c| (*c, assembly.name_of(*c).to_owned()))
+            .collect();
+        let outside: Vec<(CompId, String)> = assembly
+            .components()
+            .filter(|c| !step.components.contains(&c.id))
+            .map(|c| (c.id, c.name.clone()))
+            .collect();
+        let mut by = step.offset.to_array().map(|v| units.from_mm(v));
+        let (mut moved, mut move_done) = (false, false);
+        let mut remove = None;
+        let mut add = None;
+        let mut delete = false;
+        ui.strong(&step.name);
+        ui.weak("A step of the exploded view. The components stay where their mates have them: they are only shown moved while Explode is on.");
+        egui::Grid::new("explode_props")
+            .num_columns(2)
+            .spacing([8.0, 6.0])
+            .show(ui, |ui| {
+                for (axis, value) in ["X", "Y", "Z"].iter().zip(&mut by) {
+                    ui.label(*axis)
+                        .on_hover_text("How far the components move, along the assembly's axes.");
+                    let r = ui.add(
+                        egui::DragValue::new(value)
+                            .speed(units.from_mm(1.0))
+                            .max_decimals(4)
+                            .suffix(format!(" {}", units.length.suffix())),
+                    );
+                    moved |= r.changed();
+                    move_done |= r.drag_stopped() || r.lost_focus();
+                    ui.end_row();
+                }
+                ui.label("Moves");
+                ui.vertical(|ui| {
+                    for (c, name) in &inside {
+                        ui.horizontal(|ui| {
+                            ui.label(name);
+                            if inside.len() > 1
+                                && ui
+                                    .small_button("×")
+                                    .on_hover_text("Take the component out of this step.")
+                                    .clicked()
+                            {
+                                remove = Some(*c);
+                            }
+                        });
+                    }
+                    if !outside.is_empty() {
+                        egui::ComboBox::from_id_salt("explode_add")
+                            .selected_text("Add a component…")
+                            .show_ui(ui, |ui| {
+                                for (c, name) in &outside {
+                                    if ui.selectable_label(false, name).clicked() {
+                                        add = Some(*c);
+                                    }
+                                }
+                            });
+                    }
+                });
+                ui.end_row();
+            });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
+            let exploded = self.explode_target.unwrap_or(self.doc.explode()) > 0.5;
+            if ui
+                .button(if exploded { "Collapse" } else { "Explode" })
+                .clicked()
+            {
+                self.toggle_explode();
+            }
+            delete = ui.button("Delete Step").clicked();
+        });
+
+        if moved {
+            let offset = DVec3::from_array(by.map(|v| units.to_mm(v)));
+            self.change_model(
+                &format!("Edit {}", step.name),
+                Some(EXPLODE_KEY ^ u64::from(id.0)),
+                |m| {
+                    if let Some(s) = m.assembly_mut().and_then(|a| a.explode_step_mut(id)) {
+                        s.offset = offset;
+                    }
+                },
+            );
+        }
+        if move_done {
+            self.doc.seal_history();
+        }
+        if remove.is_some() || add.is_some() {
+            let components: Vec<CompSel> = step
+                .components
+                .iter()
+                .copied()
+                .filter(|c| Some(*c) != remove)
+                .chain(add)
+                .map(CompSel::Id)
+                .collect();
+            self.change_explode(
+                id,
+                ExplodeChange::Edit {
+                    by: None,
+                    components: Some(components),
+                },
+            );
+        }
+        if delete {
+            self.change_explode(id, ExplodeChange::Delete);
+        }
     }
 
     /// The selected mate, if the document is an assembly that still has it.
@@ -813,6 +1043,8 @@ impl PeetApp {
         })
         .on_hover_text("How many ways the components can still move: six for each that is not fixed, less what the mates hold.");
         let mut actions = Vec::new();
+        let any_hidden = assembly.components().any(|c| !c.visible);
+        let selected_explode = self.selected_explode();
         for c in assembly.components() {
             let status = self.doc.evaluation().component_status(c.id);
             // As in other CAD systems: (f) fixed, (-) can still move.
@@ -880,6 +1112,10 @@ impl PeetApp {
                     },
                     change(ComponentChange::Suppress(!c.suppressed)),
                 );
+                pick(ui, "Isolate", TreeAction::Isolate(c.id));
+                if any_hidden {
+                    pick(ui, "Show All", TreeAction::ShowAll);
+                }
                 ui.separator();
                 pick(ui, "Delete", change(ComponentChange::Delete));
             });
@@ -937,8 +1173,44 @@ impl PeetApp {
                 pick(ui, "Delete", MateChange::Delete);
             });
         }
+        if assembly.explode_steps().len() > 0 {
+            ui.add_space(6.0);
+            ui.strong("Exploded view");
+        }
+        for s in assembly.explode_steps() {
+            let names: Vec<&str> = s.components.iter().map(|c| assembly.name_of(*c)).collect();
+            let r = ui.selectable_label(
+                selected_explode == Some(s.id),
+                format!("{} ({})", s.name, names.join(", ")),
+            );
+            if r.clicked() {
+                actions.push(TreeAction::SelectExplode(s.id));
+            }
+            r.context_menu(|ui| {
+                if ui.button("Delete").clicked() {
+                    actions.push(TreeAction::ChangeExplode(s.id, ExplodeChange::Delete));
+                    ui.close();
+                }
+            });
+        }
         for action in actions {
             match action {
+                TreeAction::Isolate(id) => {
+                    self.perform(Op::Isolate {
+                        components: vec![CompSel::Id(id)],
+                    });
+                }
+                TreeAction::ShowAll => {
+                    self.perform(Op::ShowAll);
+                }
+                TreeAction::SelectExplode(id) => {
+                    self.selected_explode = Some(id);
+                    self.selected_component = None;
+                    self.selected_mate = None;
+                    self.selected = None;
+                    self.selected_geom.clear();
+                }
+                TreeAction::ChangeExplode(id, change) => self.change_explode(id, change),
                 TreeAction::SelectMate(id) => {
                     self.selected_mate = Some(id);
                     self.selected_component = None;
@@ -1078,6 +1350,14 @@ impl PeetApp {
         };
         let mut origin = c.placement.origin.to_array().map(|v| units.from_mm(v));
         let mut fixed = c.fixed;
+        let mut visible = c.visible;
+        // A colour of its own, or its part's.
+        let part_color = assembly
+            .definition(c.definition)
+            .and_then(|d| d.model.color)
+            .unwrap_or([150, 160, 175]);
+        let mut own_color = c.color.is_some();
+        let mut rgb = c.color.unwrap_or(part_color);
         let mut moved = false;
         let mut move_done = false;
         let mut turn = None;
@@ -1150,6 +1430,21 @@ impl PeetApp {
                 );
                 ui.checkbox(&mut fixed, "");
                 ui.end_row();
+                ui.label("Shown").on_hover_text(
+                    "A hidden component is not drawn, but is still part of the assembly: counted, weighed and exported.",
+                );
+                ui.checkbox(&mut visible, "");
+                ui.end_row();
+                ui.label("Colour").on_hover_text(
+                    "A colour for this component alone, in place of its part's: to tell instances apart.",
+                );
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut own_color, "Own");
+                    if own_color {
+                        ui.color_edit_button_srgb(&mut rgb);
+                    }
+                });
+                ui.end_row();
                 if let Some(text) = &freedom {
                     ui.label("Freedom").on_hover_text(
                         "How many ways the component can still move, by itself or along with what it is mated to.",
@@ -1193,6 +1488,22 @@ impl PeetApp {
         }
         if fixed != c.fixed {
             self.change_component(id, ComponentChange::Fix(fixed));
+        }
+        if visible != c.visible {
+            self.change_component(id, ComponentChange::Show(visible));
+        }
+        let color = own_color.then_some(rgb);
+        if color != c.color {
+            // The steps of one drag in the colour picker are one undo step.
+            self.change_model(
+                &format!("Colour {}", c.name),
+                Some(COLOR_KEY ^ u64::from(id.0)),
+                |m| {
+                    if let Some(c) = m.assembly_mut().and_then(|a| a.component_mut(id)) {
+                        c.color = color;
+                    }
+                },
+            );
         }
         if open {
             self.open_component(id);
@@ -1599,6 +1910,120 @@ mod tests {
         app.watch_links_at(&ctx, start + second + SETTLE);
         assert_eq!(color(&app), Some([7, 7, 7]));
         std::fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn components_are_isolated_coloured_and_exploded() {
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        for cmd in [
+            CommandId::ShowAllComponents,
+            CommandId::IsolateComponent,
+            CommandId::AddExplodeStep,
+            CommandId::ExplodeView,
+        ] {
+            assert!(!app.command_state(cmd).enabled, "{cmd:?} in a part");
+        }
+        app.execute(&ctx, CommandId::NewAssembly);
+        ok(&mut app, &ctx, json!({"op": "insert", "sample": "bracket"}));
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "insert", "component": "Bracket-1", "at": [0, 0, 60]}),
+        );
+        let (first, second) = (CompId(1), CompId(2));
+        // Nothing selected, nothing hidden, no steps: all four are off.
+        for cmd in [
+            CommandId::ShowAllComponents,
+            CommandId::IsolateComponent,
+            CommandId::AddExplodeStep,
+            CommandId::ExplodeView,
+        ] {
+            assert!(!app.command_state(cmd).enabled, "{cmd:?}");
+        }
+
+        // Isolate the selected component, and bring the other back.
+        app.selected_component = Some(second);
+        app.execute(&ctx, CommandId::IsolateComponent);
+        let visible = |app: &PeetApp, id| {
+            let assembly = app.doc.model.assembly().unwrap();
+            assembly.component(id).unwrap().visible
+        };
+        assert!(!visible(&app, first) && visible(&app, second));
+        assert_eq!(app.doc.undo_label(), Some("Isolate Bracket-2"));
+        assert!(app.command_state(CommandId::ShowAllComponents).enabled);
+        draw(&mut app, &ctx);
+        app.execute(&ctx, CommandId::ShowAllComponents);
+        assert!(visible(&app, first));
+        assert!(!app.command_state(CommandId::ShowAllComponents).enabled);
+
+        // A colour of its own, as its properties set it: an operation.
+        let changed = app.change_model("Colour Bracket-2", Some(1), |m| {
+            m.assembly_mut()
+                .unwrap()
+                .component_mut(second)
+                .unwrap()
+                .color = Some([9, 8, 7]);
+        });
+        assert!(changed);
+        assert_eq!(app.doc.placed[1].color, Some([9, 8, 7]));
+        assert_ne!(app.doc.placed[0].color, Some([9, 8, 7]));
+
+        // An explode step for the selected component: added, selected, and shown.
+        app.execute(&ctx, CommandId::AddExplodeStep);
+        let step = app.selected_explode().expect("the new step is selected");
+        assert!(app.selected_component().is_none());
+        let offset = app.doc.model.assembly().unwrap().explode_offset(second);
+        assert!(offset.z >= 10.0 && offset.x == 0.0, "{offset}");
+        assert_eq!(app.doc.placed[1].frame.origin.z, 60.0);
+        // It comes apart over a few frames, and nothing but the view changes.
+        let model = app.doc.model.clone();
+        assert_eq!(
+            app.command_state(CommandId::ExplodeView).checked,
+            Some(true)
+        );
+        let mut frames = 0;
+        while app.explode_target.is_some() {
+            app.animate_explode(&ctx);
+            frames += 1;
+            assert!(frames < 1000);
+        }
+        assert!(frames > 1, "animated");
+        assert_eq!(app.doc.explode(), 1.0);
+        assert_eq!(app.doc.placed[1].shown.origin.z, 60.0 + offset.z);
+        assert_eq!(app.doc.placed[0].shown, app.doc.placed[0].frame);
+        assert_eq!(app.doc.model, model);
+        draw(&mut app, &ctx);
+
+        // Its distance, as its properties change it; and without animation, at once.
+        app.change_model("Edit Explode1", Some(2), |m| {
+            let a = m.assembly_mut().unwrap();
+            a.explode_step_mut(step).unwrap().offset = DVec3::new(25.0, 0.0, 0.0);
+        });
+        assert_eq!(app.doc.placed[1].shown.origin, DVec3::new(25.0, 0.0, 60.0));
+        app.settings.animate_views = false;
+        app.execute(&ctx, CommandId::ExplodeView);
+        assert_eq!(
+            app.command_state(CommandId::ExplodeView).checked,
+            Some(false)
+        );
+        app.animate_explode(&ctx);
+        assert_eq!(app.doc.explode(), 0.0);
+        assert_eq!(app.doc.placed[1].shown, app.doc.placed[1].frame);
+
+        // A script's `explode` shows it too, and the command sees it.
+        ok(&mut app, &ctx, json!({"op": "explode"}));
+        assert_eq!(
+            app.command_state(CommandId::ExplodeView).checked,
+            Some(true)
+        );
+
+        // Deleted from its properties: gone, and the command is off again.
+        app.change_explode(step, ExplodeChange::Delete);
+        assert!(app.selected_explode().is_none());
+        assert!(!app.command_state(CommandId::ExplodeView).enabled);
+        assert_eq!(app.doc.placed[1].shown, app.doc.placed[1].frame);
+        draw(&mut app, &ctx);
     }
 
     #[test]
