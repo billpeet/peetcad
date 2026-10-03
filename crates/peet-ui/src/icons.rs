@@ -112,6 +112,7 @@ pub enum Icon {
     CenterRectangle,
     Circle,
     Arc,
+    Spline,
     Slot,
     Polygon,
     Point,
@@ -209,6 +210,7 @@ impl Icon {
             C::SketchCenterRectangle => Self::CenterRectangle,
             C::SketchCircle => Self::Circle,
             C::SketchArc => Self::Arc,
+            C::SketchSpline => Self::Spline,
             C::SketchSlot => Self::Slot,
             C::SketchPolygon => Self::Polygon,
             C::SketchPoint => Self::Point,
@@ -318,6 +320,7 @@ impl Icon {
             | I::CenterRectangle
             | I::Circle
             | I::Arc
+            | I::Spline
             | I::Slot
             | I::Polygon
             | I::Point
@@ -991,6 +994,19 @@ impl<'a> Pen<'a> {
                 self.disc((3.0, 17.0), 1.8, fg);
                 self.disc((21.0, 17.0), 1.8, fg);
                 self.disc((12.0, 17.0), 1.5, fg);
+            }
+            Icon::Spline => {
+                // A wave through three fit points.
+                let pts: Vec<(f32, f32)> = (0..=24)
+                    .map(|i| {
+                        let t = i as f32 / 24.0;
+                        (3.0 + 18.0 * t, 12.0 - 6.5 * (2.0 * PI * t).sin())
+                    })
+                    .collect();
+                self.line(&pts, ac);
+                self.disc((3.0, 12.0), 1.8, fg);
+                self.disc((12.0, 12.0), 1.8, fg);
+                self.disc((21.0, 12.0), 1.8, fg);
             }
             Icon::Slot => {
                 self.arc((8.0, 12.0), 5.0, FRAC_PI_2, 1.5 * PI, ac);

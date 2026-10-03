@@ -1,13 +1,21 @@
 //! Fillets and chamfers on edges.
 //!
-//! **Method.** A blend is made with a *tool*: the sliver of space between the two faces
-//! of an edge and the blend surface. In the plane across the edge the sliver is a triangle
-//! with its corner on the edge, one side along each face and, opposite the corner, the
-//! fillet's arc or the chamfer's line. Swept along the edge it is the tool, which is
-//! subtracted from the body on a convex edge (it removes the sharp corner) and added to it
-//! on a concave one (it fills the corner in). The boolean operations do the rest: the
-//! tool's sides lie on the faces they came from and vanish there, and its curved or
-//! slanted face becomes the blend, tangent to both faces.
+//! There are two methods. Edges between flat faces and round edges about an axis are
+//! blended with a *tool* and the boolean operations, which keeps them exact: a fillet
+//! there is a cylinder or a torus, a chamfer a plane or a cone. Every other edge (a
+//! freeform or an elliptical one, a straight edge on a curved face, any edge of a
+//! freeform face) gets a *rolling-ball* blend, a freeform surface built straight into
+//! the solid ([`freeform`], which describes it). Edges that carry on from one another
+//! smoothly are blended the same way: with tools if every one of them can be.
+//!
+//! **Tools.** The tool is the sliver of space between the two faces of an edge and the
+//! blend surface. In the plane across the edge the sliver is a triangle with its corner
+//! on the edge, one side along each face and, opposite the corner, the fillet's arc or
+//! the chamfer's line. Swept along the edge it is the tool, which is subtracted from the
+//! body on a convex edge (it removes the sharp corner) and added to it on a concave one
+//! (it fills the corner in). The boolean operations do the rest: the tool's sides lie on
+//! the faces they came from and vanish there, and its curved or slanted face becomes the
+//! blend, tangent to both faces.
 //!
 //! - A *straight* edge between two flat faces sweeps the section along the edge
 //!   ([`crate::extrude`]): a fillet is a cylinder, a chamfer a plane.
@@ -21,14 +29,16 @@
 //! Faces that run along the edge at its end (the next face of a smooth chain) need
 //! nothing: the neighbouring edge's tool ends in the same section, and the two meet.
 //!
-//! **Corners.** Where blended edges meet at a corner, their tools overlap and the blends
-//! meet in a mitre (fillets of one radius cross in ellipses). Where three fillets meet at
-//! a square, convex corner, the corner is rounded with a ball first, which is what a
-//! milling cutter or a mould would leave, and the three fillets run up to it.
+//! **Corners.** Where edges blended with tools meet at a corner, their tools overlap and
+//! the blends meet in a mitre (fillets of one radius cross in ellipses). Where three
+//! fillets meet at a square, convex corner, the corner is rounded with a ball first,
+//! which is what a milling cutter or a mould would leave, and the three fillets run up
+//! to it.
 //!
-//! **Limits.** Every edge of one call takes the same size. Other edges (a line between a
-//! flat and a round face, an ellipse) and ends on curved faces are refused with
-//! [`KernelError::Unsupported`].
+//! **Limits.** Every edge of one call takes the same size. A rolling-ball blend can't
+//! meet another blend at a corner (there is no mitre between freeform surfaces yet), must
+//! cover a whole run of smoothly joined edges, and ends on flat faces; each of these is
+//! refused with a message that says what to pick instead.
 
 use std::f64::consts::{PI, TAU};
 
@@ -100,27 +110,54 @@ pub fn blend(solid: &Solid, edges: &[EdgeId], blend: Blend) -> Result<Blended, K
             "pick at least one edge".to_owned(),
         ));
     }
-    let mut jobs: Vec<Job> = Vec::with_capacity(edges.len());
+    let mut picked: Vec<(EdgeId, usize)> = Vec::with_capacity(edges.len());
     for (index, &edge) in edges.iter().enumerate() {
         if edge.index() >= solid.edges.len() {
             return Err(KernelError::InvalidInput(
                 "an edge to blend doesn't exist".to_owned(),
             ));
         }
-        if jobs.iter().any(|j| j.edge == edge) {
-            continue;
+        if !picked.iter().any(|(known, _)| *known == edge) {
+            picked.push((edge, index));
         }
-        jobs.push(Job::new(solid, edge, index, blend)?);
     }
+    // Edges that carry on from one another are blended the same way: with tools if
+    // every one of them can be, else by rolling a ball along the whole run.
+    let ids: Vec<EdgeId> = picked.iter().map(|(e, _)| *e).collect();
+    let mut jobs: Vec<Job> = Vec::new();
+    let mut rolled: Vec<(EdgeId, usize)> = Vec::new();
+    for group in freeform::chains(solid, &ids) {
+        let made: Vec<Result<Job, KernelError>> = group
+            .iter()
+            .map(|&k| Job::new(solid, picked[k].0, picked[k].1, blend))
+            .collect();
+        if made
+            .iter()
+            .any(|j| matches!(j, Err(KernelError::Unsupported(_))))
+        {
+            rolled.extend(group.iter().map(|&k| picked[k]));
+        } else {
+            for job in made {
+                jobs.push(job?);
+            }
+        }
+    }
+    jobs.sort_by_key(|j| j.index);
+    rolled.sort_by_key(|(_, index)| *index);
 
-    // Corners where three fillets meet squarely get a ball; the fillets stop short of it.
-    let mut body = Labelled {
-        solid: solid.clone(),
-        labels: solid
-            .face_ids()
-            .map(|f| vec![BlendFace::Original(f)])
-            .collect(),
+    let mut body = if rolled.is_empty() {
+        Labelled {
+            solid: solid.clone(),
+            labels: solid
+                .face_ids()
+                .map(|f| vec![BlendFace::Original(f)])
+                .collect(),
+        }
+    } else {
+        let others: Vec<EdgeId> = jobs.iter().map(|j| j.edge).collect();
+        freeform::blend(solid, &rolled, &others, blend)?
     };
+    // Corners where three fillets meet squarely get a ball; the fillets stop short of it.
     if let Blend::Fillet { radius } = blend {
         for corner in ball_corners(solid, &jobs) {
             let tool = corner_tool(&corner, radius, jobs[corner.jobs[0]].index)?;
@@ -674,6 +711,10 @@ fn corner_tool(corner: &BallCorner, radius: f64, label: usize) -> Result<Labelle
     };
     apply(&cube, &ball, BooleanOp::Subtract)
 }
+
+mod freeform;
+
+pub use freeform::{CURVE_FIT, SURFACE_FIT, TANGENT_FIT};
 
 #[cfg(test)]
 mod tests;

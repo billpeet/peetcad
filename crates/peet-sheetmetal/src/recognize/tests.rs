@@ -565,7 +565,7 @@ fn regions(curves: &[Curve]) -> Vec<Region> {
     let inputs: Vec<(EntityId, Curve)> = curves
         .iter()
         .enumerate()
-        .map(|(i, c)| (EntityId(i as u32), *c))
+        .map(|(i, c)| (EntityId(i as u32), c.clone()))
         .collect();
     regions_of_curves(&inputs).regions
 }

@@ -1,7 +1,7 @@
 //! Drawing in a sketch: the items of a `draw` list.
 //!
 //! In JSON each item is an object with a `type`: geometry (`point`, `line`, `polyline`,
-//! `circle`, `arc`, `rectangle`, `center_rectangle`, `slot`, `polygon`), a relation
+//! `circle`, `arc`, `spline`, `rectangle`, `center_rectangle`, `slot`, `polygon`), a relation
 //! (`coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `tangent`,
 //! `equal`, `concentric`, `midpoint`, `symmetric`, `fix`), a dimension (`distance`,
 //! `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle`) or
@@ -11,7 +11,8 @@
 //! Coordinates are sketch coordinates `[x, y]` in document units. Geometry can be given a
 //! label with `as`, and later items refer to entities by label, by id (as replies and the
 //! `feature` query give them) or by a part of one: `"a.start"`, `"a.end"`, `"c.center"`,
-//! `"r.bottom"`, `"r.top.end"`, `"origin"`.
+//! `"r.bottom"`, `"r.top.end"`, `"s.2"` (a spline's fit point by number, from 0),
+//! `"origin"`.
 
 use std::collections::HashMap;
 
@@ -135,7 +136,7 @@ const MEASURES: [(Measure, &str, &str); 7] = [
     (Measure::Angle, "angle", "two lines"),
 ];
 
-const GEOMETRY: [(&str, &str); 9] = [
+const GEOMETRY: [(&str, &str); 10] = [
     ("point", "at"),
     ("line", "from, to"),
     ("polyline", "points, closed: connected lines"),
@@ -143,6 +144,11 @@ const GEOMETRY: [(&str, &str); 9] = [
     (
         "arc",
         "center, start, end: counter-clockwise from start to end",
+    ),
+    (
+        "spline",
+        "points, closed: a smooth curve through the points; parts start, end and each point \
+         by number from 0",
     ),
     (
         "rectangle",
@@ -213,6 +219,13 @@ pub enum Draw {
         center: [f64; 2],
         start: [f64; 2],
         end: [f64; 2],
+    },
+    /// A smooth curve through the points, in order. A closed spline returns to its first
+    /// point, which is not repeated. Parts: `start`, `end` (open splines) and each point
+    /// by its number from 0.
+    Spline {
+        points: Vec<[f64; 2]>,
+        closed: bool,
     },
     /// Parts: `bottom`, `right`, `top`, `left`.
     Rectangle {
@@ -317,6 +330,7 @@ impl Draw {
             Self::Polyline { .. } => "polyline",
             Self::Circle { .. } => "circle",
             Self::Arc { .. } => "arc",
+            Self::Spline { .. } => "spline",
             Self::Rectangle { .. } => "rectangle",
             Self::CenterRectangle { .. } => "center_rectangle",
             Self::Slot { .. } => "slot",
@@ -386,6 +400,10 @@ impl DrawItem {
                     center: a.required("center", p2)?,
                     start: a.required("start", p2)?,
                     end: a.required("end", p2)?,
+                },
+                "spline" => Draw::Spline {
+                    points: a.required("points", |v| list(v)?.iter().map(p2).collect())?,
+                    closed: a.flag("closed", false)?,
                 },
                 "rectangle" => Draw::Rectangle {
                     from: a.required("from", p2)?,
@@ -564,11 +582,17 @@ fn resolve(
             "start" => sketch.endpoints(current).map(|e| e.0),
             "end" => sketch.endpoints(current).map(|e| e.1),
             "center" => sketch.center(current),
-            _ => None,
+            // A spline's fit point, by its number.
+            _ => part.parse::<usize>().ok().and_then(|i| {
+                sketch
+                    .spline_points(current)
+                    .and_then(|(points, _)| points.get(i).copied())
+            }),
         };
         current = next.ok_or_else(|| {
             format!(
-                "'{path}': entity {} has no '{part}' (parts are start, end and center)",
+                "'{path}': entity {} has no '{part}' (parts are start, end and center, and a \
+                 spline's points by number from 0)",
                 current.0
             )
         })?;
@@ -599,6 +623,10 @@ fn entity_out(sketch: &Sketch, id: EntityId) -> Value {
         Geometry::Arc { center, start, end } => {
             json!({ "id": id.0, "type": "arc", "center": center.0, "start": start.0, "end": end.0 })
         }
+        Geometry::Spline { ref points, closed } => json!({
+            "id": id.0, "type": "spline", "closed": closed,
+            "points": points.iter().map(|p| p.0).collect::<Vec<u32>>(),
+        }),
     }
 }
 
@@ -707,6 +735,13 @@ fn one(
         }
         Draw::Arc { center, start, end } => {
             Some(Named::Entity(sketch.add_arc(p(center), p(start), p(end))))
+        }
+        Draw::Spline { points, closed } => {
+            let through: Vec<_> = points.iter().map(p).collect();
+            let id = sketch
+                .add_spline(&through, *closed)
+                .map_err(|e| e.to_string())?;
+            Some(Named::Entity(id))
         }
         Draw::Polyline { points, closed } => {
             if points.len() < 2 || (*closed && points.len() < 3) {

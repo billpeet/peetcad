@@ -112,13 +112,13 @@ impl Slot {
                 "Click the faces to remove, opening the hollow, one after the other. Esc when done."
             }
             Self::DraftFace => {
-                "Click the faces to taper (flat ones, or round ones along the pull), one after the other (a picked face again to take it out). Esc when done."
+                "Click the faces to taper (flat, round along the pull, or freeform), one after the other (a picked face again to take it out). Esc when done."
             }
             Self::DraftNeutral => {
                 "Click a flat face or a plane for the neutral plane: the faces keep their size where they cross it."
             }
             Self::SweepPath => {
-                "Click the sketch of the path in the feature tree: lines and arcs joined end to end, starting on the profile's plane."
+                "Click the sketch of the path in the feature tree: lines and arcs joined end to end, or a spline, starting on the profile's plane."
             }
             Self::LoftProfile => {
                 "Click the sketches of the next profiles in the feature tree, in the order the loft passes through them. Esc when done."

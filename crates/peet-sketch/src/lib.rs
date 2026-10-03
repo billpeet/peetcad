@@ -5,6 +5,7 @@
 //!
 //! - [`sketch`]: the data model ([`Sketch`], entities, constraints, dimensions)
 //! - [`curve`]: resolved curve geometry, closest points and intersections
+//! - [`spline`]: splines through fit points, as exact B-spline curves
 //! - [`solver`]: the geometric constraint solver, DOF and redundancy analysis
 //! - [`expr`]: expressions and named parameters for dimension values
 //! - [`infer`]: automatic constraint inference while drawing
@@ -21,6 +22,7 @@ pub mod region;
 pub mod shapes;
 pub mod sketch;
 pub mod solver;
+pub mod spline;
 pub mod triangulate;
 
 pub use curve::{Curve, Intersection};
@@ -29,3 +31,4 @@ pub use sketch::{
     Sketch, SketchError,
 };
 pub use solver::{Analysis, Drag, SolveReport, Solver};
+pub use spline::{Spline, SplinePiece};

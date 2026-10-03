@@ -40,8 +40,10 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 /// - Model 6 (configurations stage 2): feature values and sketch dimensions can differ
 ///   between configurations, which the configurations hold in one more table. Schema 5
 ///   models are read as [`peet_model::ModelV5`] and converted.
+/// - Model 7: splines in sketches. Schema 6 models decode unchanged (a new variant at
+///   the end of the sketch geometry enum).
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 6;
+pub const MODEL_SCHEMA: u16 = 7;
 /// The last model schema without configurations.
 const MODEL_SCHEMA_BEFORE_CONFIGURATIONS: u16 = 4;
 pub const BREP_SCHEMA: u16 = 4;

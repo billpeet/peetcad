@@ -474,7 +474,11 @@ impl SketchEditor {
         };
         let settings = self.inference_settings(ui, view);
         let anchor = self.anchor(&item.sketch);
-        let inference = infer::infer(&item.sketch, cursor, anchor, &settings, &[]);
+        let mut inference = infer::infer(&item.sketch, cursor, anchor, &settings, &[]);
+        // A spline's own first point isn't in the sketch yet: snap to it by hand.
+        if self.tool == Tool::Spline && self.closes_spline(view, inference.pos) {
+            inference.pos = self.clicks[0].pos;
+        }
 
         // Track which way the cursor travels around an arc's centre.
         if self.tool == Tool::Arc && self.clicks.len() == 2 {
@@ -495,6 +499,20 @@ impl SketchEditor {
         if response.double_clicked() && self.tool == Tool::Line {
             self.cancel_tool();
             return;
+        }
+        if self.tool == Tool::Spline && !self.clicks.is_empty() {
+            // The point under a double-click was placed by its first click. Two quick
+            // clicks in different places are two points, not a double-click.
+            let on_last = self
+                .clicks
+                .last()
+                .is_some_and(|c| c.pos.distance(inference.pos) < MIN_SIZE_PX * view.px());
+            if (response.double_clicked() && on_last)
+                || response.clicked_by(PointerButton::Secondary)
+            {
+                self.finish_spline(item, false);
+                return;
+            }
         }
         if click {
             self.place_click(view, item, inference.clone());
@@ -523,6 +541,15 @@ impl SketchEditor {
         {
             return;
         }
+        if self.tool == Tool::Spline {
+            // A click back on the first point closes the spline.
+            if self.closes_spline(view, pos) {
+                self.finish_spline(item, true);
+            } else {
+                self.clicks.push(Click { pos, inference });
+            }
+            return;
+        }
         if self.tool == Tool::Arc && self.clicks.len() == 1 {
             self.arc_sweep = 0.0;
             self.arc_last_angle = Some((pos - self.clicks[0].pos).to_angle());
@@ -532,6 +559,43 @@ impl SketchEditor {
             let clicks = std::mem::take(&mut self.clicks);
             self.commit_shape(view, item, &clicks);
         }
+    }
+
+    /// Whether a spline click at `pos` is on the spline's first point, with enough
+    /// points placed for a closed spline.
+    fn closes_spline(&self, view: &SketchView, pos: DVec2) -> bool {
+        self.clicks.len() >= 3 && self.clicks[0].pos.distance(pos) <= SNAP_PX * view.px()
+    }
+
+    /// Ends the spline being drawn, through the points clicked so far. With too few
+    /// points there is nothing to keep, and the clicks are dropped.
+    pub(super) fn finish_spline(&mut self, item: &mut SketchItem, closed: bool) {
+        let clicks = std::mem::take(&mut self.clicks);
+        if clicks.len() < 2 {
+            return;
+        }
+        let before = item.sketch.clone();
+        let through: Vec<DVec2> = clicks.iter().map(|c| c.pos).collect();
+        let spline = match item.sketch.add_spline(&through, closed) {
+            Ok(id) => id,
+            Err(e) => {
+                self.error(format!("Spline: {e}."));
+                return;
+            }
+        };
+        item.sketch
+            .set_construction(spline, self.options.construction);
+        // Each click's inferred relations go to the fit point placed there.
+        let points: Vec<EntityId> = item
+            .sketch
+            .spline_points(spline)
+            .map(|(points, _)| points.to_vec())
+            .unwrap_or_default();
+        for (click, point) in clicks.iter().zip(points) {
+            self.apply_inferred(item, &click.inference.relations, point, None);
+        }
+        self.push_undo(before);
+        self.resolve(item);
     }
 
     fn commit_line(&mut self, item: &mut SketchItem, end: Click) {
@@ -732,6 +796,16 @@ impl SketchEditor {
                 center: *c,
                 radius: c.distance(cur),
             }],
+            (Tool::Spline, placed) if !placed.is_empty() => {
+                // Through the points so far and the cursor; closed when the cursor is
+                // back on the first point.
+                let closing = placed.len() >= 3 && cur == placed[0];
+                let mut through = placed.to_vec();
+                if !closing {
+                    through.push(cur);
+                }
+                vec![Curve::spline_through(&through, closing)]
+            }
             (Tool::Arc, [c]) => vec![line(*c, cur)],
             (Tool::Arc, [c, s]) => {
                 let end = *c + (cur - *c).normalize_or(DVec2::X) * c.distance(*s);

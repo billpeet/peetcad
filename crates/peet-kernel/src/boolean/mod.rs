@@ -37,9 +37,9 @@
 //! 2-manifold even where the geometry is not.
 
 mod assemble;
-mod classify;
+pub(crate) mod classify;
 mod clip;
-mod domain;
+pub(crate) mod domain;
 mod faces;
 mod freeform;
 mod roots;
@@ -112,6 +112,26 @@ pub fn boolean(a: &Solid, b: &Solid, op: BooleanOp) -> Result<Solid, KernelError
 /// [`boolean`], also reporting which input faces each result face came from. Persistent
 /// naming builds on this: a feature's faces keep their identity through later features.
 pub fn boolean_traced(a: &Solid, b: &Solid, op: BooleanOp) -> Result<Traced, KernelError> {
+    ssi::take_traced();
+    let result = combine(a, b, op);
+    let traced = ssi::take_traced();
+    match result {
+        // Curved faces that cross with no closed form are traced, which works where
+        // they cross cleanly. Where they don't, say so instead of what went wrong later.
+        Err(KernelError::InvalidResult(_) | KernelError::InvalidInput(_)) if traced => {
+            Err(KernelError::Unsupported(
+                "two curved faces cross in a way that can't be worked out: they touch \
+                 along a curve without passing through each other, or cross exactly at an \
+                 edge (for example a hole drilled across another hole of the same size, off \
+                 centre). Move or resize one of them a little so that they cross cleanly"
+                    .to_owned(),
+            ))
+        }
+        other => other,
+    }
+}
+
+fn combine(a: &Solid, b: &Solid, op: BooleanOp) -> Result<Traced, KernelError> {
     for (name, s) in [("first", a), ("second", b)] {
         let finite = s.vertices.iter().all(|v| v.point.is_finite())
             && s.edges
@@ -643,8 +663,7 @@ fn unsupported_crossing(a: &Surface, b: &Surface) -> String {
     use Surface::{Cone, Cylinder, Plane, Torus};
     match (a, b) {
         (Cylinder(_), Cylinder(_)) => "two cylindrical faces with non-parallel axes cross each \
-             other (for example a hole drilled across another hole); only cylinders with \
-             parallel axes can intersect for now"
+             other in a way that can't be worked out here"
             .to_owned(),
         (Plane(_), Cone(_)) | (Cone(_), Plane(_)) => "a flat face cuts a conical face along \
              its length (a parabola or a hyperbola); a plane can cut a cone square to its axis, \

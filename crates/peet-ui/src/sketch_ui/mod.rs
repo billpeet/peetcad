@@ -42,6 +42,8 @@ pub enum Tool {
     CenterRectangle,
     Circle,
     Arc,
+    /// A spline through as many points as are clicked.
+    Spline,
     Slot,
     Polygon,
     Point,
@@ -60,6 +62,7 @@ impl Tool {
             Self::CenterRectangle => "Center Rectangle",
             Self::Circle => "Circle",
             Self::Arc => "Arc",
+            Self::Spline => "Spline",
             Self::Slot => "Slot",
             Self::Polygon => "Polygon",
             Self::Point => "Point",
@@ -70,9 +73,11 @@ impl Tool {
         }
     }
 
-    /// Number of clicks that complete one shape (drawing tools only).
+    /// Number of clicks that complete one shape (drawing tools only). A spline takes
+    /// any number: it is finished by hand.
     fn clicks_needed(self) -> usize {
         match self {
+            Self::Spline => usize::MAX,
             Self::Point => 1,
             Self::Line | Self::Rectangle | Self::CenterRectangle | Self::Circle | Self::Polygon => {
                 2
@@ -281,6 +286,14 @@ impl SketchEditor {
             Tool::Arc if step == 1 => "Click the arc start point.",
             Tool::Arc => {
                 "Click the end point. Move the cursor around the centre to choose the direction."
+            }
+            Tool::Spline if step == 0 => "Click the first point of the spline.",
+            Tool::Spline if step == 1 => "Click the next point.",
+            Tool::Spline if step == 2 => {
+                "Click the next point. Double-click, Enter or right-click to finish; Esc to cancel."
+            }
+            Tool::Spline => {
+                "Click the next point, or the first point to close the spline. Double-click, Enter or right-click to finish; Esc to cancel."
             }
             Tool::Slot if step == 0 => "Click the first end centre.",
             Tool::Slot if step == 1 => "Click the second end centre.",
@@ -813,6 +826,9 @@ impl SketchEditor {
         if enter && self.chain.is_some() {
             self.cancel_tool();
         }
+        if enter && self.tool == Tool::Spline && !self.clicks.is_empty() {
+            self.finish_spline(item, false);
+        }
     }
 
     /// A short-lived message at the bottom of the viewport.
@@ -855,6 +871,7 @@ pub fn tool_for_command(cmd: CommandId) -> Option<Tool> {
         CommandId::SketchCenterRectangle => Tool::CenterRectangle,
         CommandId::SketchCircle => Tool::Circle,
         CommandId::SketchArc => Tool::Arc,
+        CommandId::SketchSpline => Tool::Spline,
         CommandId::SketchSlot => Tool::Slot,
         CommandId::SketchPolygon => Tool::Polygon,
         CommandId::SketchPoint => Tool::Point,
@@ -1061,6 +1078,11 @@ pub fn describe_entity(sketch: &Sketch, id: EntityId) -> String {
     if let Some(owner) = entity.owner
         && let Some(o) = sketch.entity(owner)
     {
+        if let Some((points, _)) = sketch.spline_points(owner)
+            && let Some(i) = points.iter().position(|p| *p == id)
+        {
+            return format!("Spline {} point {}", owner.0, i + 1);
+        }
         let role = match o.geometry {
             peet_sketch::Geometry::Line { start, .. }
             | peet_sketch::Geometry::Arc { start, .. }

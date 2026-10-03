@@ -46,13 +46,34 @@ one that looks down, y is reversed. For any other face, work it out from `plane`
 
 Extrude, cut and base flange use the sketch's **closed regions**.
 
-- `rectangle`, `center_rectangle`, `slot`, `polygon`, `circle` and a `polyline` with
-  `"closed": true` are closed and stay closed.
+- `rectangle`, `center_rectangle`, `slot`, `polygon`, `circle`, a `polyline` with
+  `"closed": true` and a `spline` with `"closed": true` are closed and stay closed.
 - Separate `line` items that happen to meet are not joined. Join their ends with
   `coincident`, or draw a `polyline`.
 - A region inside a region is a hole in it (a circle inside a rectangle).
 - `"construction": true` geometry helps relations and is ignored by regions: use it for
   centrelines and mirror axes.
+
+## Splines
+
+`spline` draws a smooth curve **through** its `points`, in order; with `"closed": true`
+it returns to the first point (don't repeat it).
+
+```jsonl
+{"op": "sketch", "on": "top", "name": "Blade", "draw": [{"type": "spline", "points": [[0, 0], [15, 12], [40, 14], [60, 0]], "as": "s"}, {"type": "line", "from": [60, 0], "to": [0, 0], "as": "l"}, {"type": "coincident", "of": ["s.end", "l.start"]}, {"type": "coincident", "of": ["s.start", "l.end"]}]}
+{"op": "extrude", "sketch": "Blade", "depth": 5}
+```
+
+- The points are the spline's only handles: `s.start`, `s.end`, and `s.0`, `s.1`, … by
+  number. They take `coincident`, `fix` and dimensions like a line's ends. To change the
+  shape, move a point or add one; there are no tangent handles, and a spline takes no
+  `tangent` relation.
+- Nothing can be put on the curve between its points. To join another curve to it, make
+  their end points `coincident`.
+- `trim`, `extend`, `offset` and `fillet` refuse splines; `mirror` copies them.
+- A profile with a spline extrudes, revolves (keep the spline clear of the axis) and
+  lofts (against lines and other splines, not arcs), and a spline can be a sweep's path.
+  Sheet metal features refuse it: flat patterns are lines and arcs.
 
 ## Relations and dimensions
 

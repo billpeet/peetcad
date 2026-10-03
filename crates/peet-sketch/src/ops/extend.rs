@@ -8,7 +8,8 @@ use crate::curve::Curve;
 use crate::sketch::{EntityId, Sketch, SketchError};
 
 /// Extends the end of a line or arc nearest `pick` until it meets the next curve, and adds
-/// a point-on-curve relation there.
+/// a point-on-curve relation there (none if that curve is a spline, which can't hold one).
+/// Splines themselves are not extended: add or move their fit points instead.
 ///
 /// Lines extend along their infinite line, arcs along their circle. Only the bounded
 /// extent of the other curves counts (construction geometry included). The endpoint moves
@@ -20,6 +21,11 @@ pub fn extend(sketch: &mut Sketch, curve: EntityId, pick: DVec2) -> Result<(), O
         return Err(SketchError::Locked(curve).into());
     }
     let c = sketch.curve(curve).ok_or(OpError::Missing(curve))?;
+    if matches!(c, Curve::Spline(_)) {
+        return Err(OpError::Unsupported(
+            "extending a spline. Drag its end point, or draw a new spline through more points",
+        ));
+    }
     if c.is_closed() {
         return Err(OpError::Unsupported("only lines and arcs can be extended"));
     }
@@ -47,7 +53,7 @@ pub fn extend(sketch: &mut Sketch, curve: EntityId, pick: DVec2) -> Result<(), O
                 continue;
             }
             let t = hit.t_a;
-            let beyond = match (c, at_end) {
+            let beyond = match (&c, at_end) {
                 (Curve::Arc { .. }, true) => t - 1.0,
                 (Curve::Arc { .. }, false) if t > 1.0 => period - t,
                 (Curve::Arc { .. }, false) => -1.0, // on the arc itself

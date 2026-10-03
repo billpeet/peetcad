@@ -191,9 +191,9 @@ fn area_of(loops: &FlatLoops) -> Area {
             .iter()
             .map(|l| {
                 l.iter()
-                    .map(|&(curve, reversed)| Edge2 {
-                        curve,
-                        reversed,
+                    .map(|(curve, reversed)| Edge2 {
+                        curve: curve.clone(),
+                        reversed: *reversed,
                         tag: NO_TAG,
                     })
                     .collect()

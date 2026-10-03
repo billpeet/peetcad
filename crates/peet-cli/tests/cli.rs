@@ -556,8 +556,9 @@ fn what_the_skills_say_about_lofts_freeform_faces_and_conversion_is_true() {
     assert_eq!(status(&ran.replies[3]), "failed");
     assert!(message(&ran.replies[3]).contains("same number"));
 
-    // A loft's sides are freeform; fillets and shells are refused there, and `normal`
-    // alone doesn't find them.
+    // A loft's sides are freeform. A fillet that would end on one, and a wall thicker
+    // than its tightest curve, are refused with the reason; a thin wall is made; and
+    // `normal` alone doesn't find freeform faces.
     let ran = peet_with(
         &["run", "-q", "--keep-going"],
         r#"{"op": "sketch", "on": "top", "name": "Base", "draw": [{"type": "rectangle", "from": [-20, -15], "to": [20, 15]}]}
@@ -566,8 +567,9 @@ fn what_the_skills_say_about_lofts_freeform_faces_and_conversion_is_true() {
 {"op": "loft", "profiles": ["Base", "Neck"]}
 {"op": "faces"}
 {"op": "fillet", "size": 2, "edges": [{"body": 0, "index": 0}]}
-{"op": "shell", "thickness": 1}
+{"op": "shell", "thickness": 30}
 {"op": "measure", "a": {"face": {"feature": "Loft1", "side": "side", "normal": [1, 0, 0]}}}
+{"op": "shell", "thickness": 1, "open": [{"normal": [0, 0, 1]}]}
 "#,
     );
     assert_eq!(status(&ran.replies[3]), "ok");
@@ -579,9 +581,11 @@ fn what_the_skills_say_about_lofts_freeform_faces_and_conversion_is_true() {
         .count();
     assert!(freeform > 0);
     assert_eq!(status(&ran.replies[5]), "failed");
+    assert!(message(&ran.replies[5]).contains("ends on a curved face"));
     assert_eq!(status(&ran.replies[6]), "failed");
     assert!(message(&ran.replies[6]).contains("freeform"));
     assert_eq!(ran.replies[7]["ok"], false);
+    assert_eq!(status(&ran.replies[8]), "ok");
 
     // A solid of two thicknesses is not converted, and says why.
     let ran = peet_with(

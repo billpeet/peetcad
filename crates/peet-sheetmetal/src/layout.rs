@@ -69,7 +69,7 @@ impl Area {
 }
 
 /// One edge of an area's loop.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Edge2 {
     pub curve: Curve,
     /// Traversed against the curve's own direction (arcs are always counter-clockwise).
@@ -113,7 +113,7 @@ impl Area {
                     l.edges
                         .iter()
                         .map(|e| Edge2 {
-                            curve: e.curve,
+                            curve: e.curve.clone(),
                             reversed: e.reversed,
                             tag: CurveTag::Sketch {
                                 owner,
@@ -162,7 +162,7 @@ pub(crate) fn loop_winding(edges: &[Edge2], p: DVec2) -> i32 {
             .iter()
             .map(|e| LoopEdge {
                 entity: peet_sketch::EntityId(0),
-                curve: e.curve,
+                curve: e.curve.clone(),
                 reversed: e.reversed,
             })
             .collect(),
@@ -174,6 +174,9 @@ pub(crate) fn loop_winding(edges: &[Edge2], p: DVec2) -> i32 {
 /// An edge moved by a 2D rigid motion or a reflection (arcs stay counter-clockwise).
 fn map_edge(e: &Edge2, f: &impl Fn(DVec2) -> DVec2) -> Edge2 {
     let curve = match e.curve {
+        // A rigid motion or a reflection maps control points to control points; the
+        // curve keeps its own direction, as a line does.
+        Curve::Spline(ref s) => Curve::Spline(s.mapped(f)),
         Curve::Line { a, b } => Curve::Line { a: f(a), b: f(b) },
         Curve::Circle { center, radius } => Curve::Circle {
             center: f(center),

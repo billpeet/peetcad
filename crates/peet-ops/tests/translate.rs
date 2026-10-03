@@ -406,6 +406,75 @@ fn sheet_metal_tools_are_made_by_operations() {
 }
 
 #[test]
+fn spline_edits_are_made_by_operations() {
+    let mut p = Pair::new();
+    p.change("New Sketch", |m| {
+        m.add_sketch(PlaneRef::Standard(StdPlane::Top), Plane::TOP);
+    });
+    let sketch = p.id("Sketch1");
+    let v = DVec2::new;
+    // The spline tool: a closed spline through four clicks.
+    let ops = p.change("Edit Sketch1", |m| {
+        let s = &mut m.feature_mut(sketch).unwrap().sketch_mut().unwrap().sketch;
+        s.add_spline(
+            &[v(10.0, 0.0), v(0.0, 8.0), v(-10.0, 0.0), v(0.0, -8.0)],
+            true,
+        )
+        .unwrap();
+    });
+    assert!(matches!(ops, [Op::SetSketch { .. }]), "{ops:?}");
+    let id = {
+        let s = &p
+            .direct
+            .model
+            .feature(sketch)
+            .unwrap()
+            .sketch()
+            .unwrap()
+            .sketch;
+        s.entities()
+            .find(|(_, e)| e.kind() == peet_sketch::EntityKind::Spline)
+            .map(|(id, _)| id)
+            .unwrap()
+    };
+    // Dragging a fit point, then deleting one and toggling construction.
+    let ops = p.change("Edit Sketch1", |m| {
+        let s = &mut m.feature_mut(sketch).unwrap().sketch_mut().unwrap().sketch;
+        let point = s.spline_points(id).unwrap().0[1];
+        s.set_point(point, v(2.0, 12.0));
+    });
+    assert!(matches!(ops, [Op::SetSketch { .. }]), "{ops:?}");
+    p.change("Edit Sketch1", |m| {
+        let s = &mut m.feature_mut(sketch).unwrap().sketch_mut().unwrap().sketch;
+        let point = s.spline_points(id).unwrap().0[3];
+        s.remove_entity(point).unwrap();
+    });
+    {
+        let s = &p
+            .through_ops
+            .model
+            .feature(sketch)
+            .unwrap()
+            .sketch()
+            .unwrap()
+            .sketch;
+        assert_eq!(s.spline_points(id).unwrap().0.len(), 3);
+    }
+    // An extrusion of it, added the way the Extrude tool does.
+    let ops = p.change("Add Extrude", |m| {
+        let e = m.add_extrude(sketch, Operation::Add);
+        let x = m.feature_mut(e).unwrap().extrude_mut().unwrap();
+        x.params.operation = Operation::NewBody;
+    });
+    assert!(matches!(ops, [Op::Add(new)] if new.len() == 1), "{ops:?}");
+    assert_eq!(p.through_ops.evaluation().bodies.len(), 1);
+    assert_eq!(
+        p.through_ops.evaluation().bodies[0].solid,
+        p.direct.evaluation().bodies[0].solid
+    );
+}
+
+#[test]
 fn a_drag_is_one_undo_step() {
     let mut doc = Document::default();
     let mut host = Headless::default();

@@ -1,6 +1,7 @@
 //! Profile and region detection: closed loops and nested regions for features to use.
 //!
-//! **Algorithm.** All non-construction lines, arcs and circles form a planar arrangement:
+//! **Algorithm.** All non-construction lines, arcs, circles and splines form a planar
+//! arrangement:
 //!
 //! 1. Every curve is split at its intersections with the others and wherever another
 //!    curve's endpoint touches it. Points within [`tolerance::LINEAR`] merge into one
@@ -18,7 +19,9 @@
 //!    another component that contains it.
 //!
 //! Areas are exact for arcs: the shoelace sum over chord endpoints plus the circular
-//! segment area of every arc.
+//! segment area of every arc. A spline's share is its own integral (see
+//! [`Curve::area_term`]). A spline is also cut where it crosses itself, and a closed
+//! spline always has a vertex at its seam.
 
 use std::collections::HashMap;
 use std::f64::consts::{PI, TAU};
@@ -75,6 +78,7 @@ impl Loop {
             let (a, b) = (e.curve.start(), e.curve.end());
             let chord = (a - p).angle_to(b - p);
             let w = match e.curve {
+                Curve::Spline(ref s) => s.angle_swept(p),
                 // Seen from inside its circle, a counter-clockwise arc always sweeps a
                 // positive angle: the chord's angle taken in 0..2π (a full turn when the
                 // arc is the whole circle). From outside, it sweeps what its chord does.
@@ -166,7 +170,7 @@ pub fn regions_of_curves(curves: &[(EntityId, Curve)]) -> Profile {
     let inputs: Vec<(EntityId, Curve)> = curves
         .iter()
         .filter(|(_, c)| c.length() > MERGE)
-        .copied()
+        .cloned()
         .collect();
     let mut graph = Arrangement::build(&inputs);
     let open_ends = graph.open_ends();
@@ -257,6 +261,11 @@ impl Arrangement {
                 }
             }
         }
+        for (i, (_, curve)) in inputs.iter().enumerate() {
+            for hit in curve.self_intersections() {
+                params[i].extend([hit.t_a, hit.t_b]);
+            }
+        }
         // Endpoints touching other curves (T-junctions the intersection test can miss,
         // and the ends of overlapping collinear/co-circular pieces).
         for i in 0..inputs.len() {
@@ -289,7 +298,7 @@ impl Arrangement {
                 graph.curve_ends.extend([a, b]);
             }
             for piece in curve.split(&ts) {
-                graph.add_piece(*entity, piece, &mut grid, &mut seen);
+                graph.add_piece(*entity, &piece, &mut grid, &mut seen);
             }
         }
         graph
@@ -298,18 +307,18 @@ impl Arrangement {
     fn add_piece(
         &mut self,
         entity: EntityId,
-        piece: Curve,
+        piece: &Curve,
         grid: &mut VertexGrid,
         seen: &mut HashMap<(usize, usize), Vec<usize>>,
     ) {
         let from = grid.vertex(&mut self.vertices, piece.start());
         let to = grid.vertex(&mut self.vertices, piece.end());
         if from == to {
-            // A closed arc: split it so the graph has no self loops. Lines this short are
-            // degenerate and dropped.
-            if matches!(piece, Curve::Arc { .. }) && piece.length() > 2.0 * MERGE {
-                self.add_piece(entity, piece.sub_curve(0.0, 0.5), grid, seen);
-                self.add_piece(entity, piece.sub_curve(0.5, 1.0), grid, seen);
+            // A closed arc, or a spline that ends where it starts: split it so the graph
+            // has no self loops. Lines this short are degenerate and dropped.
+            if !matches!(piece, Curve::Line { .. }) && piece.length() > 2.0 * MERGE {
+                self.add_piece(entity, &piece.sub_curve(0.0, 0.5), grid, seen);
+                self.add_piece(entity, &piece.sub_curve(0.5, 1.0), grid, seen);
             }
             return;
         }
@@ -325,7 +334,7 @@ impl Arrangement {
         same_pair.push(self.edges.len());
         self.edges.push(Edge {
             entity,
-            curve: piece,
+            curve: piece.clone(),
             from,
             to,
             alive: true,
@@ -392,14 +401,10 @@ impl Arrangement {
     /// Direction leaving the origin, and signed curvature (positive turning left).
     fn outgoing(&self, h: usize) -> (DVec2, f64) {
         let c = &self.edges[h / 2].curve;
-        let kappa = match *c {
-            Curve::Arc { radius, .. } => 1.0 / radius,
-            _ => 0.0,
-        };
         if h % 2 == 1 {
-            (-c.tangent_at(1.0), -kappa)
+            (-c.tangent_at(1.0), -c.curvature_at(1.0))
         } else {
-            (c.tangent_at(0.0), kappa)
+            (c.tangent_at(0.0), c.curvature_at(0.0))
         }
     }
 
@@ -495,7 +500,7 @@ impl Arrangement {
                     let e = &self.edges[h / 2];
                     LoopEdge {
                         entity: e.entity,
-                        curve: e.curve,
+                        curve: e.curve.clone(),
                         reversed: h % 2 == 1,
                     }
                 })
@@ -561,14 +566,10 @@ fn sort_around(list: &mut [(f64, f64, usize)]) {
     }
 }
 
-/// Contribution of a (possibly reversed) line or arc to its loop's signed area:
-/// `½ ∮ (x dy - y dx)`, exact for arcs.
+/// Contribution of a (possibly reversed) piece to its loop's signed area:
+/// `½ ∮ (x dy - y dx)`, exact for arcs and splines.
 fn half_edge_area(c: &Curve, reversed: bool) -> f64 {
-    let mut a = 0.5 * c.start().perp_dot(c.end());
-    if let Curve::Arc { radius, sweep, .. } = *c {
-        // Circular segment between the chord and a counter-clockwise arc.
-        a += 0.5 * radius * radius * (sweep - sweep.sin());
-    }
+    let a = c.area_term();
     if reversed { -a } else { a }
 }
 
@@ -915,6 +916,200 @@ mod tests {
         let plate = &p.regions[p.region_at(DVec2::new(1.0, 1.0)).unwrap()];
         assert_eq!(plate.holes.len(), 32);
         eprintln!("find_regions on 84 curves: {elapsed:?}");
+    }
+}
+
+#[cfg(test)]
+mod spline_tests {
+    use super::*;
+    use crate::triangulate::triangulate_region;
+
+    fn blob() -> [DVec2; 5] {
+        [
+            DVec2::new(10.0, 0.0),
+            DVec2::new(4.0, 9.0),
+            DVec2::new(-8.0, 5.0),
+            DVec2::new(-9.0, -6.0),
+            DVec2::new(3.0, -8.0),
+        ]
+    }
+
+    /// The area inside `curve` by a fine polygon.
+    fn polygon_area(curve: &Curve) -> f64 {
+        fine(curve)
+            .windows(2)
+            .map(|w| 0.5 * w[0].perp_dot(w[1]))
+            .sum()
+    }
+
+    fn fine(curve: &Curve) -> Vec<DVec2> {
+        let n = 100_000;
+        (0..=n)
+            .map(|i| curve.point_at(f64::from(i) / f64::from(n)))
+            .collect()
+    }
+
+    #[test]
+    fn closed_spline_alone() {
+        let mut s = Sketch::new();
+        let id = s.add_spline(&blob(), true).unwrap();
+        let p = find_regions(&s);
+        assert_eq!(p.regions.len(), 1);
+        assert!(p.open_ends.is_empty());
+        let r = &p.regions[0];
+        assert!(r.outer.edges.len() >= 2, "cut at its seam and once more");
+        assert!(r.outer.edges.iter().all(|e| e.entity == id));
+        let expected = polygon_area(&s.curve(id).unwrap());
+        assert!(
+            (r.area() - expected).abs() < 1e-4,
+            "{} vs {expected}",
+            r.area()
+        );
+        assert!(r.outer.signed_area > 0.0);
+        assert_eq!(p.region_at(DVec2::ZERO), Some(0));
+        assert_eq!(p.region_at(DVec2::new(20.0, 0.0)), None);
+        // Drawn the other way round it is still an outer loop, counter-clockwise.
+        let mut s = Sketch::new();
+        let mut back = blob();
+        back.reverse();
+        s.add_spline(&back, true).unwrap();
+        let q = find_regions(&s);
+        assert!((q.regions[0].outer.signed_area - expected).abs() < 1e-4);
+        assert!(q.regions[0].outer.edges.iter().all(|e| e.reversed));
+        // Shading covers the same area.
+        let mesh = triangulate_region(r, 1e-3);
+        assert!((mesh.area() - expected).abs() < 0.05);
+    }
+
+    #[test]
+    fn spline_joined_to_lines() {
+        // A wavy top on a rectangle: three lines and an open spline between their ends.
+        let mut s = Sketch::new();
+        s.add_line(DVec2::new(0.0, 10.0), DVec2::ZERO);
+        s.add_line(DVec2::ZERO, DVec2::new(30.0, 0.0));
+        s.add_line(DVec2::new(30.0, 0.0), DVec2::new(30.0, 10.0));
+        let top = s
+            .add_spline(
+                &[
+                    DVec2::new(30.0, 10.0),
+                    DVec2::new(20.0, 14.0),
+                    DVec2::new(10.0, 7.0),
+                    DVec2::new(0.0, 10.0),
+                ],
+                false,
+            )
+            .unwrap();
+        let p = find_regions(&s);
+        assert_eq!(p.regions.len(), 1);
+        assert!(p.open_ends.is_empty());
+        let r = &p.regions[0];
+        assert_eq!(r.outer.edges.len(), 4);
+        // Rectangle below y = 10, plus what the spline adds above and takes away below.
+        let curve = s.curve(top).unwrap();
+        // The area between the spline and the line y = 10, by trapezia.
+        let above: f64 = fine(&curve)
+            .windows(2)
+            .map(|w| 0.5 * (w[0].x - w[1].x) * (w[0].y + w[1].y - 20.0))
+            .sum();
+        assert!((r.area() - (300.0 + above)).abs() < 1e-5, "{}", r.area());
+
+        assert!(
+            p.region_at(DVec2::new(20.0, 12.0)).is_some(),
+            "under the hump"
+        );
+        assert!(p.region_at(DVec2::new(10.0, 9.0)).is_none(), "in the dip");
+        assert!(p.region_at(DVec2::new(15.0, 5.0)).is_some());
+        // Edges chain end to start.
+        for i in 0..4 {
+            let (_, end) = r.outer.edges[i].ends();
+            let (start, _) = r.outer.edges[(i + 1) % 4].ends();
+            assert!(end.distance(start) < 1e-9);
+        }
+    }
+
+    #[test]
+    fn line_across_a_closed_spline_splits_it() {
+        let mut s = Sketch::new();
+        let id = s.add_spline(&blob(), true).unwrap();
+        s.add_line(DVec2::new(-20.0, 0.5), DVec2::new(20.0, 0.5));
+        let p = find_regions(&s);
+        assert_eq!(p.regions.len(), 2);
+        let whole = polygon_area(&s.curve(id).unwrap());
+        let total: f64 = p.regions.iter().map(Region::area).sum();
+        assert!((total - whole).abs() < 1e-4);
+        assert_ne!(
+            p.region_at(DVec2::new(0.0, 3.0)),
+            p.region_at(DVec2::new(0.0, -3.0))
+        );
+        assert_eq!(p.open_ends.len(), 2, "the line's ends stick out");
+    }
+
+    #[test]
+    fn circle_inside_a_spline_is_a_hole_and_splines_cross() {
+        let mut s = Sketch::new();
+        let id = s.add_spline(&blob(), true).unwrap();
+        s.add_circle(DVec2::ZERO, 2.0);
+        let p = find_regions(&s);
+        assert_eq!(p.regions.len(), 2);
+        let outer = &p.regions[p.region_at(DVec2::new(5.0, 0.0)).unwrap()];
+        assert_eq!(outer.holes.len(), 1);
+        let whole = polygon_area(&s.curve(id).unwrap());
+        assert!((outer.area() - (whole - 4.0 * PI)).abs() < 1e-4);
+
+        // Two overlapping closed splines: the lens between them and what is left of each.
+        let mut s = Sketch::new();
+        let a = s.add_spline(&blob(), true).unwrap();
+        let shifted = blob().map(|q| q + DVec2::new(9.0, 1.0));
+        let b = s.add_spline(&shifted, true).unwrap();
+        let p = find_regions(&s);
+        assert_eq!(p.regions.len(), 3);
+        let lens = &p.regions[p.region_at(DVec2::new(5.0, 0.5)).unwrap()];
+        let total: f64 = p.regions.iter().map(Region::area).sum();
+        let (area_a, area_b) = (
+            polygon_area(&s.curve(a).unwrap()),
+            polygon_area(&s.curve(b).unwrap()),
+        );
+        assert!((total + lens.area() - (area_a + area_b)).abs() < 1e-4);
+    }
+
+    #[test]
+    fn a_spline_that_crosses_itself_makes_a_loop() {
+        let mut s = Sketch::new();
+        s.add_spline(
+            &[
+                DVec2::new(0.0, 0.0),
+                DVec2::new(10.0, 10.0),
+                DVec2::new(0.0, 12.0),
+                DVec2::new(10.0, 0.0),
+            ],
+            false,
+        )
+        .unwrap();
+        let p = find_regions(&s);
+        assert_eq!(p.regions.len(), 1, "the loop above the crossing");
+        assert!(p.regions[0].area() > 1.0);
+        assert_eq!(p.open_ends.len(), 2);
+        assert!(p.region_at(DVec2::new(5.0, 9.0)).is_some());
+    }
+
+    #[test]
+    fn an_open_spline_whose_ends_meet_is_a_region() {
+        let mut s = Sketch::new();
+        s.add_spline(
+            &[
+                DVec2::ZERO,
+                DVec2::new(8.0, 3.0),
+                DVec2::new(10.0, 10.0),
+                DVec2::new(3.0, 8.0),
+                DVec2::ZERO,
+            ],
+            false,
+        )
+        .unwrap();
+        let p = find_regions(&s);
+        assert_eq!(p.regions.len(), 1);
+        assert!(p.open_ends.is_empty());
+        assert!(p.region_at(DVec2::new(6.0, 6.0)).is_some());
     }
 }
 

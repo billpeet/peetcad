@@ -157,6 +157,7 @@ A `draw` list holds items with a `type`:
 | `polyline` | `points`, `closed` |
 | `circle` | `center`, `radius` |
 | `arc` | `center`, `start`, `end` (counter-clockwise) |
+| `spline` | `points`, `closed` (a smooth curve through the points; a closed one returns to the first, which is not repeated) |
 | `rectangle` | `from`, `to` (parts `bottom`, `right`, `top`, `left`) |
 | `center_rectangle` | `center`, `corner` |
 | `slot` | `from`, `to`, `radius` |
@@ -173,8 +174,18 @@ A `draw` list holds items with a `type`:
 
 Geometry takes `as` (a label) and `construction`. An entity is an id, a label from the
 same list, or a part of one: `"a.start"`, `"a.end"`, `"c.center"`, `"r.bottom"`,
-`"p.2"` (a shape's curve by number), `"origin"`. Labels last for one operation; the reply
-and the `feature` query give the ids.
+`"p.2"` (a shape's curve by number), `"s.2"` (a spline's fit point by number, from 0),
+`"origin"`. Labels last for one operation; the reply and the `feature` query give the ids.
+
+A spline passes through its points and has no other shape of its own: its points take
+`coincident`, `fix` and dimensions like a line's ends, and moving them moves the curve.
+There are no tangent handles yet, and a spline takes no `tangent` relation; nothing can
+be made `coincident` with the curve itself, only with its points. `trim`, `extend`,
+`offset` and `fillet` refuse splines; `mirror` copies them. A profile with a spline can
+be extruded, revolved (the spline must stay clear of the axis) and lofted (a spline side
+joins lines and other splines, not arcs), and a spline can be a sweep's path; sheet metal
+features refuse it.
+
 
 ### Features
 
@@ -200,7 +211,9 @@ with their defaults' types):
   or an axis selector. Left out, it is the sketch's first construction line, else
   `sketch_y`.
 - `sweep` takes `profile` and `path` (two sketches). Corners between straight pieces of
-  the path are mitred.
+  the path are mitred. A path with a spline in it is followed as a whole: it has no
+  corners, the profile's plane only has to cross its start (not squarely), and the sides
+  are freeform.
 - `loft` takes `profiles`: two or more sketches in order, each with the same number of
   edges (a circle adapts).
 - `convert_to_sheet` turns a solid of one wall thickness into a sheet metal body. It takes
@@ -209,8 +222,8 @@ with their defaults' types):
 - `hole` drills at every point of its sketch. `standard` (`{"size": "M6", "fit": "close"
   | "normal" | "loose" | "tapped"}`) sets every size; sizes given as well win.
 - `fillet` and `chamfer` take `edges` and `size`; `shell` takes `open` (faces to remove)
-  and `thickness`; `draft` takes `faces` (flat, or round along
-  the pull), `neutral` (a plane) and `angle`.
+  and `thickness`; `draft` takes `faces` (flat, round along
+  the pull, or freeform), `neutral` (a plane) and `angle`.
 
 | Operation | Fields |
 |---|---|

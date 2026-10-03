@@ -314,10 +314,10 @@ impl<'a> Ctx<'a> {
         for f in &body.faces {
             if let FaceTag::Wall {
                 piece, tag, curve, ..
-            } = *f
+            } = f
             {
-                walls.entry(piece).or_default().push(curve);
-                wall_list.push((piece, tag, curve));
+                walls.entry(*piece).or_default().push(curve.clone());
+                wall_list.push((*piece, *tag, curve.clone()));
             }
         }
         // The cut edges a user drew (reliefs are generated and left out).
@@ -350,14 +350,14 @@ impl<'a> Ctx<'a> {
                         }
                     }
                     BEdge {
-                        curve: *curve,
+                        curve: curve.clone(),
                         tags,
                         pieces,
                     }
                 })
                 .collect();
             if lp.outer {
-                outer.extend(edges.iter().map(|e| e.curve));
+                outer.extend(edges.iter().map(|e| e.curve.clone()));
                 let is_cut = |e: &BEdge| e.tags.iter().any(|t| cut_tags.contains(t));
                 for run in runs(&edges, is_cut) {
                     if let Some(f) = feature(run.iter().map(|&i| &edges[i]), false) {
@@ -845,7 +845,7 @@ fn feature<'e>(edges: impl Iterator<Item = &'e BEdge>, hole: bool) -> Option<Fea
     let mut pieces: Vec<usize> = Vec::new();
     let mut owner = None;
     for e in edges {
-        curves.push(e.curve);
+        curves.push(e.curve.clone());
         for &p in &e.pieces {
             if !pieces.contains(&p) {
                 pieces.push(p);

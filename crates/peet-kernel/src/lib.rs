@@ -11,6 +11,7 @@
 //! - [`revolve`]: solids from sketch regions turned about an axis
 //! - [`loft`]: solids through a series of profiles
 //! - [`nurbs`]: freeform curves and surfaces
+//! - [`profile`]: sketch splines as kernel curves, and the surfaces they sweep
 //! - [`primitive`]: blocks and balls
 //! - [`boolean`]: union / subtract / intersect, for add and cut features
 //! - [`blend`]: fillets and chamfers
@@ -30,9 +31,11 @@ pub mod geom;
 pub mod loft;
 pub mod nurbs;
 pub mod primitive;
+pub mod profile;
 pub mod query;
 pub mod reshape;
 pub mod revolve;
+pub mod sweep;
 pub mod tessellate;
 pub mod topo;
 pub mod transform;

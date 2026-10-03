@@ -334,9 +334,9 @@ pub fn mark_contains(mark: &FormMark, q: DVec2) -> bool {
     let edges: Vec<Edge2> = mark
         .outline
         .iter()
-        .map(|&(curve, reversed)| Edge2 {
-            curve,
-            reversed,
+        .map(|(curve, reversed)| Edge2 {
+            curve: curve.clone(),
+            reversed: *reversed,
             tag: CurveTag::Generated {
                 owner: 0,
                 part: 0,

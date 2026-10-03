@@ -43,8 +43,27 @@ draw the profile on one side of a construction centreline. `axis` can also be
 ## Sweep
 
 `sweep` takes two sketches: `profile` (closed regions) and `path` (connected lines and
-arcs in another sketch, starting on the profile's plane). A corner between two straight
-pieces of the path is mitred. `cut_sweep` removes the same shape.
+arcs in another sketch, starting on the profile's plane and square to it). A corner
+between two straight pieces of the path is mitred. `cut_sweep` removes the same shape.
+
+The path can be a **spline** (see the sketching skill), for a pipe or a handle that
+curves freely:
+
+```jsonl
+{"op": "sketch", "on": "right", "name": "Section", "draw": [{"type": "circle", "center": [0, 0], "radius": 4}, {"type": "circle", "center": [0, 0], "radius": 2.5}]}
+{"op": "sketch", "on": "top", "name": "Route", "draw": [{"type": "spline", "points": [[0, 0], [20, 5], [40, -5], [60, 0]]}]}
+{"op": "sweep", "profile": "Section", "path": "Route"}
+```
+
+- One end of the spline must lie **on the profile's plane**, heading away from it. It
+  need not leave squarely (a spline's end direction can't be set): the profile keeps
+  the attitude to the path it starts with, and is carried along without twisting.
+- A path with a spline has **no corners**: every piece must carry on the way the last
+  one ended, so draw the whole route as one spline. A closed spline is refused.
+- "The profile doesn't fit round a bend of the path" means the path bends more tightly
+  than the profile reaches towards the inside of the bend: move the spline's points
+  apart, or make the profile smaller.
+- The sides are freeform faces (below); it takes about a second to build.
 
 ## Loft
 
@@ -69,15 +88,26 @@ body. `cut_loft` removes the same shape.
 
 ## Freeform faces
 
-A loft's sides, and faces of an imported STEP body (`import_step`), can be **freeform**:
-`faces` reports them with `"surface": "freeform"`. They can be cut, added to, measured
+A loft's sides, the walls made from a sketch spline, a sweep along a spline and faces of
+an imported STEP body (`import_step`) can be **freeform**: `faces` reports them with
+`"surface": "freeform"`. They can be cut, added to, shelled, filleted, drafted, measured
 and exported like any face, with these limits:
 
-- `fillet`, `chamfer` and `shell` are refused on freeform faces and their edges, and
-  `draft` leaves them as they are. Round the profiles in the sketches instead.
+- `fillet` and `chamfer` roll along freeform edges, and along edges of curved faces (the
+  rim of a hole drilled across another). A run of edges must either close on itself or
+  end on **flat** faces, and the faces along it must meet smoothly: where fillets would
+  have to mitre into each other at a corner (the rectangular end of a rectangle-to-
+  circle loft) it fails to build and says so. Fillet such corners in the sketch.
+- `shell` and `draft` work on freeform faces. A wall thicker than the tightest curve of
+  a face fails ("would fold over itself"): use a thinner wall. A draft replaces a
+  freeform face with straight lines tilted from the pull, through the curve where the
+  face crosses the `neutral` plane, so the face must cross that plane along its whole
+  width.
+- These take from a few tenths of a second to about a second each.
 - A cut or an add that crosses a freeform face takes a few tenths of a second, and fails
   if the two surfaces only touch along a curve instead of crossing: move one so they
-  cross properly.
+  cross properly. The same goes for round faces that cross askew (a hole drilled across
+  a hole of another size): they work where they cross cleanly.
 - To select one, use `at`, `feature` and `side`, or `index`: `normal` alone finds flat
   faces only.
 - An imported body has no fields to edit. Build on it with new features.
@@ -101,8 +131,8 @@ with dimensions or `fix`, as in any sketch.
   already set by the operation's name, so leave it out.
 - `shell` hollows every body to `thickness`, removing the faces in `open` (none: a
   closed hollow).
-- `draft` tapers `faces` (flat ones, or round ones along the pull) about a `neutral`
-  plane by `angle`.
+- `draft` tapers `faces` (flat ones, round ones along the pull, or freeform ones) about
+  a `neutral` plane by `angle`.
 
 Each works on the bodies as they are at its place in the tree: a hole added after a
 shell goes through the wall, one added before it is shelled with the body.
