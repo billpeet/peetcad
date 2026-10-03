@@ -45,6 +45,8 @@
 mod args;
 mod export;
 mod fields;
+mod host;
+mod library;
 mod op;
 mod query;
 pub mod select;
@@ -57,7 +59,9 @@ pub use fields::{
     LinearPattern, MidPlane, Mirror, MiterFlange, OffsetPlane, PlanesAxis, Revolve, SheetCut,
     Shell, SketchPlane, SketchedBend, Sweep, VertexPoint,
 };
-pub use op::{Format, New, Op, Place, Query};
+pub use host::{AppCommand, Headless, Host, SketchTool, Toggle, View, Window};
+pub use library::{CheckRule, Gauge, GaugeBend};
+pub use op::{DatumSel, DxfPlacement, DxfTarget, Format, New, Op, Place, Query, Sample};
 pub use sketch::{Draw, DrawItem, Ent, Measure, Relation};
 pub use value::{
     AxisSel, Bend, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel, HoleStandard,
@@ -87,6 +91,9 @@ pub struct Reply {
     pub ok: bool,
     /// Whether it changed the part.
     pub changed: bool,
+    /// Whether the document was replaced by another (new, open): whatever was known
+    /// about the old one (a selection, an open sketch) no longer applies.
+    pub replaced: bool,
     /// The reply as JSON: `ok`, `op`, then `error`, or `created`, `failures` and data.
     pub json: Value,
 }
@@ -98,6 +105,8 @@ struct Done {
     commit: Option<(String, Model)>,
     /// Set by operations that change the document themselves (undo, redo).
     changed: bool,
+    /// The document was replaced by another.
+    replaced: bool,
     created: Vec<FeatureId>,
     /// A feature the operation was about, reported with its status.
     feature: Option<FeatureId>,
@@ -189,7 +198,7 @@ fn help() -> Map<String, Value> {
     let mut ops = Map::new();
     for (name, fields_text, what) in op::OTHER_OPS {
         ops.insert(
-            name.to_owned(),
+            (*name).to_owned(),
             json!({ "does": what, "fields": fields_text }),
         );
     }
@@ -212,6 +221,12 @@ fn help() -> Map<String, Value> {
             }
         }
     }
+    for (name, fields_text, what) in host::app_ops() {
+        ops.insert(
+            name.to_owned(),
+            json!({ "does": what, "fields": fields_text, "needs": "a running PeetCAD" }),
+        );
+    }
     let mut out = Map::new();
     out.insert("operations".to_owned(), Value::Object(ops));
     out.insert("draw".to_owned(), sketch::help());
@@ -233,8 +248,11 @@ fn help() -> Map<String, Value> {
     out
 }
 
-fn query(doc: &Document, q: &Query) -> Result<Map<String, Value>, String> {
+fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, Value>, String> {
     Ok(match q {
+        Query::Materials { material } => {
+            library::materials(host.materials(), material.as_deref(), doc)?
+        }
         Query::Help => help(),
         Query::Status => object(query::status(doc)),
         Query::Features => object(query::features(doc)),
@@ -244,19 +262,229 @@ fn query(doc: &Document, q: &Query) -> Result<Map<String, Value>, String> {
         Query::Faces { body } => object(query::faces(doc, *body)?),
         Query::Edges { body } => object(query::edges(doc, *body)?),
         Query::BendTable { body } => object(query::bend_table(doc, *body)?),
-        Query::Checks { body } => object(query::checks(doc, *body)?),
+        Query::Checks { body } => object(query::checks(doc, *body, host.check_rules())?),
         Query::Mass { body } => object(query::mass(doc, *body)?),
         Query::Measure { a, b } => object(query::measure(doc, a, b.as_deref())?),
     })
 }
 
-fn run(doc: &mut Document, op: &Op) -> Result<Done, String> {
+/// Refuses to replace a document with unsaved changes, unless told to discard them.
+fn guard_unsaved(doc: &Document, discard: bool, word: &str) -> Result<(), String> {
+    if doc.is_modified() && !discard {
+        return Err(format!(
+            "{} has unsaved changes: save it first, or give '{word}' \"discard\": true.",
+            doc.title()
+        ));
+    }
+    Ok(())
+}
+
+fn dxf_unit(unit: peet_sketch::expr::LengthUnit) -> peet_io::dxf_import::Unit {
+    use peet_io::dxf_import::Unit;
+    use peet_sketch::expr::LengthUnit;
+    match unit {
+        LengthUnit::Mm => Unit::Millimetres,
+        LengthUnit::Cm => Unit::Centimetres,
+        LengthUnit::M => Unit::Metres,
+        LengthUnit::Inch => Unit::Inches,
+        LengthUnit::Ft => Unit::Feet,
+    }
+}
+
+fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String> {
     let mut done = Done::default();
     let mut model = doc.model.clone();
     let label = match op {
         Op::Query(q) => {
-            done.data = query(doc, q)?;
+            done.data = query(host, doc, q)?;
             return Ok(done);
+        }
+        Op::App(command) => {
+            done.data = host.app(command)?;
+            return Ok(done);
+        }
+        Op::New { discard } => {
+            guard_unsaved(doc, *discard, "new")?;
+            *doc = Document::default();
+            done.replaced = true;
+            return Ok(done);
+        }
+        Op::Open { path, discard } => {
+            guard_unsaved(doc, *discard, "open")?;
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+            let opened = peet_io::document::open(&bytes)
+                .map_err(|e| format!("Couldn't open {}: {}", path.display(), e.message))?;
+            if !opened.warnings.is_empty() {
+                done.data
+                    .insert("warnings".to_owned(), json!(opened.warnings));
+            }
+            let name = path.file_name().map_or_else(
+                || path.to_string_lossy().into_owned(),
+                |n| n.to_string_lossy().into_owned(),
+            );
+            *doc = Document::from_opened(
+                opened,
+                Some(peet_document::FileLocation {
+                    name,
+                    path: Some(path.clone()),
+                }),
+            );
+            doc.finish_loading();
+            done.replaced = true;
+            return Ok(done);
+        }
+        Op::OpenSample { sample, discard } => {
+            guard_unsaved(doc, *discard, "open_sample")?;
+            let (model, _) = match sample {
+                Sample::Bracket => peet_model::samples::bracket(),
+                Sample::Enclosure => peet_model::samples::enclosure(),
+                Sample::Chassis => peet_model::samples::chassis(),
+                Sample::Housing => peet_model::samples::housing(),
+            };
+            *doc = Document::from_model(model, None);
+            done.replaced = true;
+            return Ok(done);
+        }
+        Op::FlatPattern { on } => {
+            if !doc.has_sheet_metal() {
+                return Err(
+                    "There is no sheet metal body to show flat: start one with base_flange."
+                        .to_owned(),
+                );
+            }
+            let flat = on.unwrap_or(!doc.is_flat());
+            doc.set_flat(flat);
+            done.data.insert("flat".to_owned(), json!(flat));
+            return Ok(done);
+        }
+        Op::SetGauge(gauge) => {
+            done.data = library::set_gauge(host.materials(), doc, gauge)?;
+            return Ok(done);
+        }
+        Op::DeleteGauge { material, gauge } => {
+            done.data = library::delete_gauge(host.materials(), material, gauge.as_deref())?;
+            return Ok(done);
+        }
+        Op::ImportMaterials { path } => {
+            done.data = library::import_materials(host.materials(), path)?;
+            return Ok(done);
+        }
+        Op::ExportMaterials { path } => {
+            done.data = library::export_materials(host.materials(), path)?;
+            return Ok(done);
+        }
+        Op::SetCheckRule {
+            rule,
+            thickness,
+            radius,
+            constant,
+        } => {
+            done.data =
+                library::set_check_rule(host.check_rules(), *rule, *thickness, *radius, *constant)?;
+            return Ok(done);
+        }
+        Op::ApplyMaterial {
+            material,
+            gauge,
+            thickness,
+            feature,
+        } => {
+            let (id, label, applied) = library::apply_material(
+                host.materials(),
+                doc,
+                &mut model,
+                material,
+                gauge.as_deref(),
+                *thickness,
+                feature.as_ref(),
+            )?;
+            done.feature = Some(id);
+            done.data = object(applied);
+            label
+        }
+        Op::ShowDatum { datum, on } => {
+            use peet_model::{Datum, StdPlane};
+            let datums: Vec<Datum> = match datum {
+                DatumSel::Origin => vec![Datum::Origin],
+                DatumSel::Front => vec![Datum::Plane(StdPlane::Front)],
+                DatumSel::Top => vec![Datum::Plane(StdPlane::Top)],
+                DatumSel::Right => vec![Datum::Plane(StdPlane::Right)],
+                DatumSel::Planes => StdPlane::ALL.into_iter().map(Datum::Plane).collect(),
+            };
+            for d in datums {
+                model.set_datum_visible(d, *on);
+            }
+            let word = if *on { "Show" } else { "Hide" };
+            match datum {
+                DatumSel::Planes => format!("{word} Planes"),
+                DatumSel::Origin => format!("{word} Origin"),
+                _ => format!("{word} {} Plane", datum.word()),
+            }
+        }
+        Op::ImportDxf {
+            path,
+            into,
+            unit,
+            placement,
+        } => {
+            use peet_io::dxf_import::{self, ImportOptions, Placement};
+            let bytes = std::fs::read(path)
+                .map_err(|e| format!("Couldn't read {}: {e}", path.display()))?;
+            let options = ImportOptions {
+                unit: unit.map(dxf_unit),
+                placement: match placement {
+                    DxfPlacement::Keep => Placement::Keep,
+                    DxfPlacement::Centred => Placement::Centred,
+                    DxfPlacement::LowerLeft => Placement::LowerLeftAtOrigin,
+                },
+                ..ImportOptions::flat_pattern()
+            };
+            let failed =
+                |e: dxf_import::ImportError| format!("Couldn't import {}: {e}", path.display());
+            let (id, report, label) = match into {
+                DxfTarget::Sketch(sketch) => {
+                    let id = sketch_id(doc, sketch)?;
+                    let Some(s) = model.feature_mut(id).and_then(|f| f.sketch_mut()) else {
+                        return Err("The sketch no longer exists.".to_owned());
+                    };
+                    let report =
+                        dxf_import::import_into(&mut s.sketch, &bytes, &options).map_err(failed)?;
+                    done.feature = Some(id);
+                    (id, report, format!("Import DXF into {}", model.name_of(id)))
+                }
+                DxfTarget::New { on, name } => {
+                    let (plane, at) = select::plane(doc, on)?;
+                    let imported = dxf_import::import(&bytes, &options).map_err(failed)?;
+                    let id = model.add_sketch(plane, at);
+                    if let Some(name) = name {
+                        rename(&mut model, id, name)?;
+                    }
+                    if let Some(s) = model.feature_mut(id).and_then(|f| f.sketch_mut()) {
+                        s.sketch = imported.sketch;
+                    }
+                    done.created.push(id);
+                    (id, imported.report, "Import DXF".to_owned())
+                }
+            };
+            done.sketch = Some(id);
+            done.data
+                .insert("curves".to_owned(), json!(report.entities_imported));
+            done.data
+                .insert("unit".to_owned(), json!(report.unit_used.label()));
+            if !report.skipped.is_empty() {
+                let skipped: Map<String, Value> = report
+                    .skipped
+                    .iter()
+                    .map(|(kind, n)| (kind.clone(), json!(n)))
+                    .collect();
+                done.data.insert("left_out".to_owned(), json!(skipped));
+            }
+            if !report.warnings.is_empty() {
+                done.data
+                    .insert("warnings".to_owned(), json!(report.warnings));
+            }
+            label
         }
         Op::Export {
             path,
@@ -473,20 +701,35 @@ fn run(doc: &mut Document, op: &Op) -> Result<Done, String> {
     Ok(done)
 }
 
+impl Reply {
+    /// The reply to an operation called `name` that could not be applied.
+    pub fn error(name: &str, error: String) -> Self {
+        failed(name, error)
+    }
+}
+
 fn failed(name: &str, error: String) -> Reply {
     Reply {
         ok: false,
         changed: false,
+        replaced: false,
         json: json!({ "ok": false, "op": name, "error": error }),
     }
 }
 
-/// Applies one operation to the document.
+/// Applies one operation to the document, with nothing but the document: the built-in
+/// material tables and check limits, and no application. See [`apply_in`].
 pub fn apply(doc: &mut Document, op: &Op, undo: Undo) -> Reply {
+    apply_in(&mut Headless::default(), doc, op, undo)
+}
+
+/// Applies one operation to the document, in `host`: the application, or a [`Headless`]
+/// kept for a whole script so that changes to the material tables last.
+pub fn apply_in(host: &mut dyn Host, doc: &mut Document, op: &Op, undo: Undo) -> Reply {
     // A part shown from a file's caches is rebuilt first: selectors need its bodies.
     doc.finish_loading();
     let name = op.word();
-    let mut done = match run(doc, op) {
+    let mut done = match run(host, doc, op) {
         Ok(d) => d,
         Err(e) => return failed(name, e),
     };
@@ -521,9 +764,13 @@ pub fn apply(doc: &mut Document, op: &Op, undo: Undo) -> Reply {
             out.insert("failures".to_owned(), json!(failures));
         }
     }
+    if done.replaced {
+        out.extend(object(query::status(doc)));
+    }
     Reply {
         ok: true,
         changed: done.changed,
+        replaced: done.replaced,
         json: Value::Object(out),
     }
 }
@@ -534,21 +781,29 @@ pub fn parse(doc: &Document, op: &Value) -> Result<Op, String> {
     op::from_json(op, doc).1
 }
 
-/// Applies one JSON operation to the document.
+/// Applies one JSON operation to the document, with nothing but the document. See
+/// [`apply_json_in`].
 pub fn apply_json(doc: &mut Document, op: &Value, undo: Undo) -> Reply {
+    apply_json_in(&mut Headless::default(), doc, op, undo)
+}
+
+/// Applies one JSON operation to the document, in `host`.
+pub fn apply_json_in(host: &mut dyn Host, doc: &mut Document, op: &Value, undo: Undo) -> Reply {
     doc.finish_loading();
     match op::from_json(op, doc) {
-        (_, Ok(op)) => apply(doc, &op, undo),
+        (_, Ok(op)) => apply_in(host, doc, &op, undo),
         (name, Err(e)) => failed(&name, e),
     }
 }
 
 /// Applies JSON operations in order, stopping at the first that can't be applied. Returns
-/// the replies so far (the last one is the failure, if there was one).
+/// the replies so far (the last one is the failure, if there was one). The operations
+/// share one [`Headless`] host, so a change to the material tables lasts for the run.
 pub fn apply_all(doc: &mut Document, ops: &[Value], undo: Undo) -> Vec<Reply> {
+    let mut host = Headless::default();
     let mut replies = Vec::with_capacity(ops.len());
     for op in ops {
-        let reply = apply_json(doc, op, undo);
+        let reply = apply_json_in(&mut host, doc, op, undo);
         let ok = reply.ok;
         replies.push(reply);
         if !ok {

@@ -79,10 +79,37 @@ lists, sketch coordinates. Replies use document units, except areas and volumes
 labels (`"as": "a"`, then `"a.end"`); labels are not stored in the sketch, so later
 operations use the ids that replies and the `feature` query give.
 
+**Every command has an operation.** `peet_ui::coverage` maps each `CommandId` to the
+operation that does what it does. The match is exhaustive, so a new command does not
+compile until it is covered, and a test checks that each operation named exists.
+
+**Operations run in a host.** Some things an operation needs are not the part's: the
+material tables and the limits of the manufacturing checks are the user's settings.
+`apply_in(host, …)` takes them from a `Host`: the application (its settings), or a
+`Headless` host that starts with the built-in ones and lasts for a script run. `apply`
+is `apply_in` with a fresh `Headless`.
+
+**Commands about the application are operations too** (`Op::App`): turn the view, toggle
+the grid, open a window, open a sketch for editing, pick a sketch tool, quit. Only the
+application can carry them out, through `PeetApp::apply_op`; a headless host refuses
+them, saying why. Commands whose windows show data (parameters, bend table, checks,
+materials, mass) are covered twice: an operation that returns the data, and `window` to
+open the window.
+
+**A sketch open for editing blocks changes from outside.** Its working copy is not in the
+part yet, so `PeetApp::apply_op` refuses operations that change the part until the sketch
+is finished. Queries and application commands are not refused.
+
+**Replacing the document is guarded.** `new`, `open` and `open_sample` are refused while
+the part has unsaved changes unless told to discard them, as the application asks first.
+
 ## Consequences
 
-- The application doesn't use the operations yet: its buttons still call the model
-  directly (stage 3). Until then the two can drift, and there is no macro recording.
+- The application's own buttons still call the model directly, not the operations
+  (stage 3). `PeetApp::apply_op` is the way in for operations, and is tested against the
+  application without a window; nothing calls it yet, because there is no transport
+  (stage 5). Until the buttons use the operations the two can drift, and there is no
+  macro recording.
 - There is no command line or live attach yet (stages 4 and 5): `apply` is callable from
   Rust and from tests only.
 - What depends on the part is still checked when an operation is applied, typed or not:
@@ -91,9 +118,15 @@ operations use the ids that replies and the `feature` query give.
 - The typed arguments are not `serde` types, so a JSON schema can't be derived from them.
   `help` is generated from the same tables and is the machine-readable reference; a
   schema for MCP tool definitions (stage 6) would be generated the same way.
-- Not covered yet: DXF import, the gauge tables and applying a material, custom limits
-  for the manufacturing checks, the flat/folded view toggle and other view state.
-- `save` and `export` write files through `peet-platform`, so they fail cleanly in the
+- A sketch tool picked with `tool` still needs clicks to draw: the operation that draws
+  is `draw`. There is no operation that selects things in the application, so commands
+  that act on a selection are covered by operations that take what was selected as
+  fields.
+- Changes a headless script makes to the material tables or the check limits are not
+  saved anywhere: the command line (stage 4) will have to decide whether to load and
+  store the application's settings.
+- Operations that read or write files (`open`, `save`, `export`, the imports) use the
+  file system, so they fail cleanly in the
   browser. A web host that wants them needs a variant that returns the bytes.
 - A face selector's `at` uses the body's tessellation to tell whether the point is on the
   face, so the first `at` on a body tessellates it (and only then).

@@ -26,6 +26,7 @@ use crate::solid_ui;
 use crate::tree::{TreeAction, TreeView, tree_ui};
 use crate::viewport::{Viewport, ViewportParams};
 
+pub mod scripting;
 mod solids;
 
 pub const APP_NAME: &str = "PeetCAD";
@@ -267,8 +268,14 @@ impl PeetApp {
 
     /// Replaces the document (new, opened, recovered).
     fn set_document(&mut self, doc: Document) {
-        self.close_sketch_discarding();
         self.doc = doc;
+        self.document_replaced();
+    }
+
+    /// Forgets what was known about the document that was open before: the open sketch,
+    /// the selection, what was being picked.
+    fn document_replaced(&mut self) {
+        self.close_sketch_discarding();
         self.selected = None;
         self.hovered = None;
         self.selected_geom.clear();

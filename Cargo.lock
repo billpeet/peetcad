@@ -2646,11 +2646,13 @@ dependencies = [
  "peet-kernel",
  "peet-math",
  "peet-model",
+ "peet-ops",
  "peet-platform",
  "peet-render",
  "peet-sheetmetal",
  "peet-sketch",
  "serde",
+ "serde_json",
 ]
 
 [[package]]

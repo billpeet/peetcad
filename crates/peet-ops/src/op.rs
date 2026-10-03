@@ -8,10 +8,59 @@ use peet_io::step::StepSchema;
 use peet_sketch::expr::LengthUnit;
 use serde_json::{Map, Value};
 
-use crate::args::{Args, integer, list, text};
+use crate::args::{Args, boolean, integer, list, number, text};
 use crate::fields::FeatureArgs;
+use crate::host::{AppCommand, word_enum};
+use crate::library::{CheckRule, Gauge};
 use crate::sketch::{self, DrawItem};
 use crate::value::{EdgeSel, FeatureSel, GeomSel, Input, PlaneSel};
+
+word_enum! {
+    /// A sample part that comes with PeetCAD.
+    Sample, "a sample" {
+        /// A 20-feature bracket.
+        Bracket = "bracket",
+        /// A sheet metal enclosure panel with four flanges.
+        Enclosure = "enclosure",
+        /// A sheet metal chassis tray.
+        Chassis = "chassis",
+        /// A revolved housing with a bolt circle.
+        Housing = "housing",
+    }
+}
+
+word_enum! {
+    /// The reference geometry every part has.
+    DatumSel, "built-in reference geometry" {
+        Origin = "origin",
+        Front = "front",
+        Top = "top",
+        Right = "right",
+        /// The three standard planes together.
+        Planes = "planes",
+    }
+}
+
+word_enum! {
+    /// Where an imported drawing is put in its sketch.
+    DxfPlacement, "a placement" {
+        /// Where the file has it.
+        Keep = "keep",
+        /// Its middle at the sketch's origin.
+        Centred = "centred",
+        /// Its lower left corner at the sketch's origin.
+        LowerLeft = "lower_left",
+    }
+}
+
+/// The sketch an imported drawing goes into.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DxfTarget {
+    /// A sketch the part already has.
+    Sketch(FeatureSel),
+    /// A new sketch on a plane or a flat face.
+    New { on: PlaneSel, name: Option<String> },
+}
 
 /// A feature to add: its kind and fields, and optionally its name.
 #[derive(Clone, Debug, PartialEq)]
@@ -66,6 +115,10 @@ pub enum Query {
     /// Manufacturing checks of a sheet metal body.
     Checks {
         body: Option<usize>,
+    },
+    /// The material and gauge tables: every material, or one.
+    Materials {
+        material: Option<String>,
     },
     /// Mass properties for a density of 1: volume, area, centre of gravity, principal
     /// moments of inertia. Of one body, or of all (each, and together).
@@ -157,6 +210,71 @@ pub enum Op {
     ImportStep {
         path: PathBuf,
     },
+    /// Bring the lines, arcs, circles and polylines of a DXF file into a sketch.
+    ImportDxf {
+        path: PathBuf,
+        into: DxfTarget,
+        /// The file's unit, if it doesn't say (or says wrong).
+        unit: Option<LengthUnit>,
+        placement: DxfPlacement,
+    },
+    /// Show or hide the origin or the standard planes.
+    ShowDatum {
+        datum: DatumSel,
+        on: bool,
+    },
+    /// Show sheet metal bodies as their flat patterns, or folded (`None`: the other way).
+    /// A view: it is not an undo step.
+    FlatPattern {
+        on: Option<bool>,
+    },
+    /// Set a base flange's thickness, bend radius and bend model from the material
+    /// tables: the gauge named, or the one nearest a thickness.
+    ApplyMaterial {
+        material: String,
+        gauge: Option<String>,
+        thickness: Option<f64>,
+        /// The first base flange if absent.
+        feature: Option<FeatureSel>,
+    },
+    /// Add a row to a material's gauge table, or change one.
+    SetGauge(Gauge),
+    /// Remove a gauge from a material's table, or (with no gauge) the whole table.
+    DeleteGauge {
+        material: String,
+        gauge: Option<String>,
+    },
+    /// Replace the material tables with those of a CSV file.
+    ImportMaterials {
+        path: PathBuf,
+    },
+    ExportMaterials {
+        path: PathBuf,
+    },
+    /// Change a limit of the manufacturing checks: multiples of the thickness and of the
+    /// bend radius, and a constant in mm. The parts left out keep their values.
+    SetCheckRule {
+        rule: CheckRule,
+        thickness: Option<f64>,
+        radius: Option<f64>,
+        constant: Option<f64>,
+    },
+    /// Start a new, empty part. Refused if the part has unsaved changes, unless told to
+    /// discard them.
+    New {
+        discard: bool,
+    },
+    /// Open a part from a `.peet` file.
+    Open {
+        path: PathBuf,
+        discard: bool,
+    },
+    OpenSample {
+        sample: Sample,
+        discard: bool,
+    },
+    /// Something for the application itself, not the part: it needs a running PeetCAD.
+    App(AppCommand),
     Undo,
     Redo,
     Query(Query),
@@ -203,6 +321,19 @@ impl Op {
             Self::DeleteParameter { .. } => "delete_parameter",
             Self::SetUnits { .. } => "set_units",
             Self::ImportStep { .. } => "import_step",
+            Self::ImportDxf { .. } => "import_dxf",
+            Self::ShowDatum { .. } => "show",
+            Self::FlatPattern { .. } => "flat_pattern",
+            Self::ApplyMaterial { .. } => "apply_material",
+            Self::SetGauge(_) => "set_gauge",
+            Self::DeleteGauge { .. } => "delete_gauge",
+            Self::ImportMaterials { .. } => "import_materials",
+            Self::ExportMaterials { .. } => "export_materials",
+            Self::SetCheckRule { .. } => "set_check_rule",
+            Self::New { .. } => "new",
+            Self::Open { .. } => "open",
+            Self::OpenSample { .. } => "open_sample",
+            Self::App(command) => command.word(),
             Self::Undo => "undo",
             Self::Redo => "redo",
             Self::Query(q) => match q {
@@ -216,6 +347,7 @@ impl Op {
                 Query::Edges { .. } => "edges",
                 Query::BendTable { .. } => "bend_table",
                 Query::Checks { .. } => "checks",
+                Query::Materials { .. } => "materials",
                 Query::Mass { .. } => "mass",
                 Query::Measure { .. } => "measure",
             },
@@ -240,6 +372,12 @@ fn units(v: &Value) -> Result<LengthUnit, String> {
 
 fn body(a: &mut Args) -> Result<Option<usize>, String> {
     a.parsed("body", |v| integer(v).map(|b| b as usize))
+}
+
+fn path(a: &mut Args, op: &str) -> Result<PathBuf, String> {
+    a.string("path")?
+        .map(PathBuf::from)
+        .ok_or_else(|| format!("'{op}' needs a 'path' field."))
 }
 
 fn feature(a: &mut Args, key: &str) -> Result<FeatureSel, String> {
@@ -297,7 +435,7 @@ fn new_features(op: &str, a: &mut Args) -> Result<Vec<New>, String> {
 
 /// The operations that aren't feature kinds, with their fields, for `help` and for the
 /// message about an unknown operation.
-pub(crate) const OTHER_OPS: [(&str, &str, &str); 29] = [
+pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "sketch",
         "on (plane), name, draw (list)",
@@ -410,6 +548,71 @@ pub(crate) const OTHER_OPS: [(&str, &str, &str); 29] = [
         "Add the solids of a STEP file as bodies, in one feature named after the file.",
     ),
     (
+        "show",
+        "datum (origin, front, top, right, planes), on (default true)",
+        "Show or hide the origin or the standard planes.",
+    ),
+    (
+        "flat_pattern",
+        "on (left out: the other way)",
+        "Show sheet metal bodies as their flat patterns, or folded.",
+    ),
+    (
+        "import_dxf",
+        "path, and sketch (an existing one) or on (a plane: a new sketch; default top) with name; unit (mm, cm, m, in, ft), placement (keep, centred, lower_left)",
+        "Bring the lines, arcs, circles and polylines of a DXF file into a sketch.",
+    ),
+    (
+        "materials",
+        "material",
+        "The material and gauge tables: thickness, bend radius and bend model by material and gauge.",
+    ),
+    (
+        "apply_material",
+        "material, gauge or thickness (the nearest gauge), feature (a base flange; default the first)",
+        "Set a sheet metal body's thickness, bend radius and bend model from the material tables.",
+    ),
+    (
+        "set_gauge",
+        "material, gauge, thickness, radius, bend ({k_factor} | {allowance} | {deduction}), notes",
+        "Add a row to a material's gauge table, or change one.",
+    ),
+    (
+        "delete_gauge",
+        "material, gauge (left out: the whole table)",
+        "Remove a gauge from a material's table.",
+    ),
+    (
+        "import_materials",
+        "path",
+        "Replace the material tables with those of a CSV file.",
+    ),
+    (
+        "export_materials",
+        "path",
+        "Write the material tables as CSV.",
+    ),
+    (
+        "set_check_rule",
+        "rule (min_flange, hole_to_bend, hole_to_edge, hole_to_hole, min_hole, collision), thickness, radius, constant",
+        "Change a limit of the manufacturing checks: multiples of the thickness and of the bend radius, plus a constant in mm.",
+    ),
+    (
+        "new",
+        "discard (default false)",
+        "Start a new, empty part. Refused if there are unsaved changes, unless discard is true.",
+    ),
+    (
+        "open",
+        "path, discard (default false)",
+        "Open a part from a .peet file.",
+    ),
+    (
+        "open_sample",
+        "sample (bracket, enclosure, chassis, housing), discard (default false)",
+        "Open one of the sample parts.",
+    ),
+    (
         "save",
         "path, caches (default true)",
         "Save the part (to the file it came from if no path is given).",
@@ -433,6 +636,74 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "edges" => Op::Query(Query::Edges { body: body(a)? }),
         "bend_table" => Op::Query(Query::BendTable { body: body(a)? }),
         "checks" => Op::Query(Query::Checks { body: body(a)? }),
+        "materials" => Op::Query(Query::Materials {
+            material: a.string("material")?,
+        }),
+        "new" => Op::New {
+            discard: a.flag("discard", false)?,
+        },
+        "open" => Op::Open {
+            path: path(a, "open")?,
+            discard: a.flag("discard", false)?,
+        },
+        "open_sample" => Op::OpenSample {
+            sample: a.required("sample", Sample::parse)?,
+            discard: a.flag("discard", false)?,
+        },
+        "flat_pattern" => Op::FlatPattern {
+            on: a.parsed("on", boolean)?,
+        },
+        "import_dxf" => {
+            let file = path(a, "import_dxf")?;
+            let into = match a.parsed("sketch", FeatureSel::parse)? {
+                Some(sketch) => {
+                    if a.has("on") || a.has("name") {
+                        return Err(
+                            "Give 'sketch' (an existing one), or 'on' and 'name' (a new one), not both."
+                                .to_owned(),
+                        );
+                    }
+                    DxfTarget::Sketch(sketch)
+                }
+                None => DxfTarget::New {
+                    on: a
+                        .parsed("on", PlaneSel::parse)?
+                        .unwrap_or(PlaneSel::Standard(peet_model::StdPlane::Top)),
+                    name: a.string("name")?,
+                },
+            };
+            Op::ImportDxf {
+                path: file,
+                into,
+                unit: a.parsed("unit", units)?,
+                placement: a
+                    .parsed("placement", DxfPlacement::parse)?
+                    .unwrap_or(DxfPlacement::Keep),
+            }
+        }
+        "apply_material" => Op::ApplyMaterial {
+            material: a.required("material", |v| text(v).map(str::to_owned))?,
+            gauge: a.string("gauge")?,
+            thickness: a.parsed("thickness", number)?,
+            feature: a.parsed("feature", FeatureSel::parse)?,
+        },
+        "set_gauge" => Op::SetGauge(Gauge::parse(a)?),
+        "delete_gauge" => Op::DeleteGauge {
+            material: a.required("material", |v| text(v).map(str::to_owned))?,
+            gauge: a.string("gauge")?,
+        },
+        "import_materials" => Op::ImportMaterials {
+            path: path(a, "import_materials")?,
+        },
+        "export_materials" => Op::ExportMaterials {
+            path: path(a, "export_materials")?,
+        },
+        "set_check_rule" => Op::SetCheckRule {
+            rule: a.required("rule", CheckRule::parse)?,
+            thickness: a.parsed("thickness", number)?,
+            radius: a.parsed("radius", number)?,
+            constant: a.parsed("constant", number)?,
+        },
         "mass" => Op::Query(Query::Mass { body: body(a)? }),
         "measure" => Op::Query(Query::Measure {
             a: Box::new(a.required("a", GeomSel::parse)?),
@@ -504,6 +775,10 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             feature: feature(a, "feature")?,
             on: a.flag("on", true)?,
         },
+        "show" if a.has("datum") => Op::ShowDatum {
+            datum: a.required("datum", DatumSel::parse)?,
+            on: a.flag("on", true)?,
+        },
         "show" => Op::Show {
             feature: feature(a, "feature")?,
             on: a.flag("on", true)?,
@@ -561,6 +836,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             length: a.required("length", units)?,
         },
         _ if FeatureArgs::adds(op) => Op::Add(new_features(op, a)?),
+        _ if let Some(command) = AppCommand::parse(op, a) => Op::App(command?),
         other => {
             let mut all: Vec<&str> = OTHER_OPS
                 .iter()
@@ -573,6 +849,15 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
                 )
                 .collect();
             all.push("help");
+            all.extend([
+                "view",
+                "zoom_to_fit",
+                "toggle",
+                "window",
+                "edit_sketch",
+                "exit_sketch",
+            ]);
+            all.extend(["tool", "quit"]);
             all.sort_unstable();
             all.dedup();
             return Err(format!(

@@ -119,7 +119,8 @@ impl FeatureSel {
         }
     }
 
-    pub(crate) fn resolve(&self, doc: &Document) -> Result<FeatureId, String> {
+    /// The feature this means in `doc`, or why there is none (or more than one).
+    pub fn resolve(&self, doc: &Document) -> Result<FeatureId, String> {
         match self {
             Self::Id(id) => doc
                 .model

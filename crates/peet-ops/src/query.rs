@@ -416,13 +416,16 @@ pub fn bend_table(doc: &Document, body: Option<usize>) -> Result<Value, String> 
     }))
 }
 
-pub fn checks(doc: &Document, body: Option<usize>) -> Result<Value, String> {
+pub fn checks(
+    doc: &Document,
+    body: Option<usize>,
+    rules: &peet_sheetmetal::CheckRules,
+) -> Result<Value, String> {
     let body = sheet(doc, body)?;
     let Some(sheet) = &body.sheet else {
         return Ok(json!({}));
     };
-    let rules = peet_sheetmetal::checks::CheckRules::default();
-    let findings: Vec<Value> = peet_sheetmetal::checks::check(sheet, &rules, |owner| {
+    let findings: Vec<Value> = peet_sheetmetal::checks::check(sheet, rules, |owner| {
         doc.model.name_of(FeatureId(owner)).to_owned()
     })
     .iter()
@@ -443,7 +446,11 @@ pub fn checks(doc: &Document, body: Option<usize>) -> Result<Value, String> {
         Value::Object(m)
     })
     .collect();
-    Ok(json!({ "passed": findings.is_empty(), "findings": findings }))
+    Ok(json!({
+        "passed": findings.is_empty(),
+        "findings": findings,
+        "rules": crate::library::rules_out(rules),
+    }))
 }
 
 /// The state of the document in a few lines.

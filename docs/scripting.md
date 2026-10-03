@@ -143,6 +143,7 @@ with their defaults' types):
 | `edit` | `feature`, then any of its fields |
 | `rename` | `feature`, `name` |
 | `suppress`, `show` | `feature`, `on` (default true) |
+| `show` | `datum` (`origin`, `front`, `top`, `right`, `planes`), `on`: the built-in reference geometry |
 | `delete` | `feature` or `features` |
 | `move` | `feature`, and `before`, `after` or `index` |
 | `rollback` | `to` (a feature, or `"end"`) |
@@ -167,7 +168,8 @@ with their defaults' types):
 | `bodies` | bounds, volume, counts; flat size and thickness for sheet metal |
 | `faces`, `edges` (`body`) | what made each face, normals, centres; edge ends and the faces they join |
 | `bend_table` (`body`) | flat size, area, and each bend |
-| `checks` (`body`) | manufacturing checks |
+| `checks` (`body`) | manufacturing checks, and the limits they were run with |
+| `materials` (`material`) | the material and gauge tables |
 | `mass` (`body`) | for a density of 1: volume, area, centre of gravity, principal moments; each body and the total |
 | `measure` (`a`, `b`) | the exact size of a face, edge or vertex, or with `b` the distance and angle between two. Each is `{"face": selector}`, `{"edge": selector}` or `{"vertex": selector}` |
 | `help` | this reference as data |
@@ -176,6 +178,53 @@ with their defaults' types):
 
 | Operation | Fields |
 |---|---|
+| `new` | `discard` |
+| `open` | `path`, `discard` |
+| `open_sample` | `sample` (`bracket`, `enclosure`, `chassis`, `housing`), `discard` |
 | `save` | `path` (optional once the part has a file), `caches` (default true) |
 | `import_step` | `path`: the file's solids become bodies, in one feature named after the file |
+| `import_dxf` | `path`, and `sketch` (an existing one) or `on` with `name` (a new one; default the top plane); `unit`, `placement` (`keep`, `centred`, `lower_left`) |
 | `export` | `path`, `format` (`stl`, `dxf`, `step`; taken from the path if absent), `body`, `schema` (`ap214`, `ap242`) |
+
+`new`, `open` and `open_sample` replace the document. They are refused while the part has
+unsaved changes, unless `discard` is true.
+
+### Sheet metal: materials, checks, flat pattern
+
+| Operation | Fields |
+|---|---|
+| `flat_pattern` | `on` (left out: the other way). A view, not an undo step; selectors and exports always mean the folded part |
+| `apply_material` | `material`, and `gauge` or `thickness` (the nearest gauge); `feature` (a base flange; default the first) |
+| `set_gauge` | `material`, `gauge`, `thickness`, `radius`, `bend` (`{"k_factor": …}`, `{"allowance": …}` or `{"deduction": …}`), `notes`: adds a row, or changes one |
+| `delete_gauge` | `material`, `gauge` (left out: the whole table) |
+| `import_materials`, `export_materials` | `path` (CSV) |
+| `set_check_rule` | `rule` (`min_flange`, `hole_to_bend`, `hole_to_edge`, `hole_to_hole`, `min_hole`, `collision`), `thickness`, `radius`, `constant`: the limit is that many thicknesses plus that many bend radii plus a constant in mm |
+
+The material tables and the check limits are the user's, not the part's. In the
+application they are its settings. Without it they start as the built-in ones and last
+for one script run.
+
+### The application
+
+These are about the application's window, not the part, so they need a running PeetCAD.
+Without one they are refused.
+
+| Operation | Fields |
+|---|---|
+| `view` | `to` (`isometric`, `front`, `back`, `left`, `right`, `top`, `bottom`) |
+| `zoom_to_fit` | |
+| `toggle` | `what` (`perspective`, `grid`, `view_cube`, `feature_tree`, `properties`, `performance_overlay`, `relations`, `construction`), `on` (left out: the other way) |
+| `window` | `open` (`command_palette`, `settings`, `keyboard_shortcuts`, `about`, `parameters`, `bend_table`, `checks`, `materials`, `mass`) |
+| `edit_sketch` | `sketch`: open it in the sketch editor |
+| `exit_sketch` | finish the open sketch, writing it to the part |
+| `tool` | `tool` (`select`, `line`, `rectangle`, `center_rectangle`, `circle`, `arc`, `slot`, `polygon`, `point`, `trim`, `extend`, `fillet`, `offset`, `mirror`, `dimension`) |
+| `quit` | |
+
+While a sketch is open for editing in the application, operations that change the part
+are refused until it is finished (`exit_sketch`); queries are not.
+
+## Every command has an operation
+
+`peet_ui::coverage` names the operation that covers each command of the application. It
+matches every command, so a new command does not compile until it has one, and a test
+checks that the operation named exists.
