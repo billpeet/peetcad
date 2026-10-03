@@ -40,6 +40,7 @@ peet run [SCRIPT...] [options]     # the operations of scripts (- or none: stand
 peet op JSON... [options]          # operations given as JSON
 peet OPERATION [field=value...]    # one operation, by name
 peet ops [OPERATION]               # the operations, or one with its fields
+peet skills [NAME]                 # how to use peet, for an agent
 peet new PART.peet                 # an empty part file
 peet dump PART.peet [OUT.ron]      # a part as readable text
 peet pack IN.ron PART.peet         # and back
@@ -73,6 +74,15 @@ peet pack IN.ron PART.peet         # and back
 - **Material tables and check limits** are the built-in ones (or `--materials`), and
   changes to them last for the run. The command line does not read or change the
   application's settings.
+
+### Skills for agents
+
+`peet skills` lists instructions written for an agent that is going to use `peet`, and
+`peet skills NAME` prints one. `core` is the one to start with: it gives the working loop
+and points to the others (`sketching`, `selectors`, `solids`, `sheet-metal`) for when a
+task reaches them. They are in `crates/peet-cli/skills/` and are built into the binary,
+so they describe the version being run. Every script in them is run by a test, and
+[AGENTS.md](../AGENTS.md) asks that a new feature is added to them.
 
 | Exit code | |
 |---|---|
@@ -158,7 +168,8 @@ A `draw` list holds items with a `type`:
 | `offset` | `of`, `distance` |
 | `mirror` | `of`, `axis` |
 | `construction` | `of`, `on` |
-| `delete` | `of` |
+| `delete` | `of` (entities) |
+| `remove` | `relations` (ids), `dimensions` (names) |
 
 Geometry takes `as` (a label) and `construction`. An entity is an id, a label from the
 same list, or a part of one: `"a.start"`, `"a.end"`, `"c.center"`, `"r.bottom"`,

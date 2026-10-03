@@ -507,3 +507,86 @@ fn what_the_skills_say_about_operations_is_true() {
     assert!(draw.out.contains("draw items") && draw.out.contains("polyline"));
     assert_eq!(peet(&["ops", "selectors"]).code, OK);
 }
+
+#[test]
+fn every_operation_that_adds_a_feature_is_named_in_a_skill() {
+    // AGENTS.md asks for this: a feature an agent isn't told about is not finished.
+    let ops = peet(&["ops"]);
+    let listed: Value = serde_json::from_str(&ops.out).unwrap();
+    let all: String = peet_cli::SKILLS.iter().map(|(_, text)| *text).collect();
+    let mut features = 0;
+    for (name, entry) in listed["operations"].as_object().unwrap() {
+        // The operations that add a feature list their fields one by one (or have
+        // several forms that do); the others describe theirs in a sentence.
+        if entry["fields"].is_object() || entry["forms"].is_object() {
+            features += 1;
+            assert!(
+                all.contains(&format!("`{name}`")),
+                "the operation '{name}' adds a feature, and no skill in crates/peet-cli/skills names it (see AGENTS.md)"
+            );
+        }
+    }
+    assert!(features >= 30, "{features}");
+}
+
+#[test]
+fn what_the_skills_say_about_lofts_freeform_faces_and_conversion_is_true() {
+    let status = |reply: &Value| reply["created"][0]["status"].clone();
+    let message = |reply: &Value| {
+        reply["created"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_owned()
+    };
+    // Profiles with different numbers of sides don't loft.
+    let ran = peet_with(
+        &["run", "-q"],
+        r#"{"op": "sketch", "on": "top", "name": "Base", "draw": [{"type": "rectangle", "from": [-20, -15], "to": [20, 15]}]}
+{"op": "plane", "from": "top", "distance": 30, "name": "Up"}
+{"op": "sketch", "on": "Up", "name": "Tri", "draw": [{"type": "polygon", "center": [0, 0], "vertex": [8, 0], "sides": 3}]}
+{"op": "loft", "profiles": ["Base", "Tri"]}
+"#,
+    );
+    assert_eq!(status(&ran.replies[3]), "failed");
+    assert!(message(&ran.replies[3]).contains("same number"));
+
+    // A loft's sides are freeform; fillets and shells are refused there, and `normal`
+    // alone doesn't find them.
+    let ran = peet_with(
+        &["run", "-q", "--keep-going"],
+        r#"{"op": "sketch", "on": "top", "name": "Base", "draw": [{"type": "rectangle", "from": [-20, -15], "to": [20, 15]}]}
+{"op": "plane", "from": "top", "distance": 30, "name": "Up"}
+{"op": "sketch", "on": "Up", "name": "Neck", "draw": [{"type": "circle", "center": [0, 0], "radius": 8}]}
+{"op": "loft", "profiles": ["Base", "Neck"]}
+{"op": "faces"}
+{"op": "fillet", "size": 2, "edges": [{"body": 0, "index": 0}]}
+{"op": "shell", "thickness": 1}
+{"op": "measure", "a": {"face": {"feature": "Loft1", "side": "side", "normal": [1, 0, 0]}}}
+"#,
+    );
+    assert_eq!(status(&ran.replies[3]), "ok");
+    let freeform = ran.replies[4]["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|f| f["surface"] == "freeform")
+        .count();
+    assert!(freeform > 0);
+    assert_eq!(status(&ran.replies[5]), "failed");
+    assert_eq!(status(&ran.replies[6]), "failed");
+    assert!(message(&ran.replies[6]).contains("freeform"));
+    assert_eq!(ran.replies[7]["ok"], false);
+
+    // A solid of two thicknesses is not converted, and says why.
+    let ran = peet_with(
+        &["run", "-q"],
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 2}
+{"op": "sketch", "on": {"normal": [0, 0, 1]}, "draw": [{"type": "rectangle", "from": [0, 0], "to": [20, 40]}]}
+{"op": "extrude", "sketch": "Sketch2", "depth": 5}
+{"op": "convert_to_sheet"}
+"#,
+    );
+    assert_eq!(status(&ran.replies[4]), "failed");
+    assert!(message(&ran.replies[4]).contains("one thickness"));
+}

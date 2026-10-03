@@ -1,6 +1,6 @@
 ---
 name: solids
-description: Solid features in peet - extrude and cut directions and end conditions, revolve, sweep, holes, fillets and chamfers, shell, draft, patterns and mirrors.
+description: Solid features in peet - extrude and cut directions and end conditions, revolve, sweep, loft, holes, fillets and chamfers, shell, draft, patterns and mirrors, freeform faces and imported STEP bodies.
 ---
 
 # Solid features
@@ -38,11 +38,49 @@ selectors`). `peet ops NAME` gives a feature's fields. Change one later with
 axis is the sketch's first **construction line**, else the sketch's vertical axis. So
 draw the profile on one side of a construction centreline. `axis` can also be
 `"sketch_x"`, `"sketch_y"`, `{"line": id}` or an axis selector. `angle` defaults to 360.
+`cut_revolve` removes the same shape.
 
 ## Sweep
 
 `sweep` takes two sketches: `profile` (closed regions) and `path` (connected lines and
-arcs in another sketch, starting on the profile's plane).
+arcs in another sketch, starting on the profile's plane). A corner between two straight
+pieces of the path is mitred. `cut_sweep` removes the same shape.
+
+## Loft
+
+`loft` joins the closed profiles of two or more sketches, in the order given, into one
+body. `cut_loft` removes the same shape.
+
+```jsonl
+{"op": "sketch", "on": "top", "name": "Base", "draw": [{"type": "rectangle", "from": [-20, -15], "to": [20, 15]}]}
+{"op": "plane", "from": "top", "distance": 30, "name": "Up"}
+{"op": "sketch", "on": "Up", "name": "Neck", "draw": [{"type": "circle", "center": [0, 0], "radius": 8}]}
+{"op": "loft", "profiles": ["Base", "Neck"]}
+{"op": "faces"}
+```
+
+- Each profile is one closed shape, in its own sketch, on its own plane: make the planes
+  with `plane` (`from` and `distance`).
+- Profiles need the **same number of sides**. A circle adapts to its neighbours, so a
+  rectangle lofts to a circle. A rectangle to a triangle fails to build: split an edge
+  of the profile with fewer sides so the counts match.
+- Two profiles give straight (ruled) sides; three or more give sides that pass smoothly
+  through every profile. There are no guide curves.
+
+## Freeform faces
+
+A loft's sides, and faces of an imported STEP body (`import_step`), can be **freeform**:
+`faces` reports them with `"surface": "freeform"`. They can be cut, added to, measured
+and exported like any face, with these limits:
+
+- `fillet`, `chamfer` and `shell` are refused on freeform faces and their edges, and
+  `draft` leaves them as they are. Round the profiles in the sketches instead.
+- A cut or an add that crosses a freeform face takes a few tenths of a second, and fails
+  if the two surfaces only touch along a curve instead of crossing: move one so they
+  cross properly.
+- To select one, use `at`, `feature` and `side`, or `index`: `normal` alone finds flat
+  faces only.
+- An imported body has no fields to edit. Build on it with new features.
 
 ## Holes
 
@@ -58,7 +96,8 @@ with `depth`.
   the edge fails to build: reduce it.
 - `shell` hollows every body to `thickness`, removing the faces in `open` (none: a
   closed hollow).
-- `draft` tapers flat `faces` about a `neutral` plane by `angle`.
+- `draft` tapers `faces` (flat ones, or round ones along the pull) about a `neutral`
+  plane by `angle`.
 
 Each works on the bodies as they are at its place in the tree: a hole added after a
 shell goes through the wall, one added before it is shelled with the body.

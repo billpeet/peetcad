@@ -178,6 +178,7 @@ peet set_parameter name=thickness value=2mm --file bracket.peet
 peet features --file bracket.peet                 # what is in it
 peet export path=flat.dxf --file bracket.peet
 peet ops                                          # every operation and its fields
+peet skills core                                  # how to use it, written for an agent
 ```
 
 The part is saved if it changed and every operation was applied. The exit code is 0, 1

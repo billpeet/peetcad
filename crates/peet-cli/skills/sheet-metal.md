@@ -1,6 +1,6 @@
 ---
 name: sheet-metal
-description: Sheet metal in peet - base flange, edge flanges, hems, cuts, forms, the flat pattern and its DXF, bend table, materials and gauges, manufacturing checks.
+description: Sheet metal in peet - base flange, edge flanges, hems, cuts, forms, converting a solid or an imported body to sheet metal, the flat pattern and its DXF, bend table, materials and gauges, manufacturing checks.
 ---
 
 # Sheet metal
@@ -28,6 +28,29 @@ features. It always has an exact **flat pattern**, which is what the DXF export 
   0.44}`, or an `allowance` or `deduction`) apply to the whole body. Defaults: 1.5 mm,
   1.5 mm, K 0.44. Or take them from the material tables: `peet materials`, then
   `{"op": "apply_material", "material": ..., "gauge": ...}`.
+
+## From a solid
+
+`convert_to_sheet` turns a solid that is already shaped like sheet metal (one wall
+thickness everywhere, flat walls, rounded bends) into a sheet metal body, so it gets a
+flat pattern and takes flanges. Use it on a shelled solid or on a body from
+`import_step`.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 2}
+{"op": "convert_to_sheet", "face": {"normal": [0, 0, 1]}, "bend": {"k_factor": 0.4}}
+{"op": "edge_flange", "length": 15, "edge": {"between": [[0, 0, 2], [60, 0, 2]]}}
+{"op": "bend_table"}
+```
+
+- `face` is the flat face that stays fixed in the flat pattern. Left out, it is the
+  largest flat face of the only body.
+- The thickness and the bend radii are read from the solid; `bend` (K-factor, allowance
+  or deduction) says how its bends unfold.
+- A solid that is not one thickness, or whose bends are sharp corners, fails to build
+  and says what it found: fix the solid, or model the part with `base_flange` and
+  flanges.
 
 ## Flanges and hems
 

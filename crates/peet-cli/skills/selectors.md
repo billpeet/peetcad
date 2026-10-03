@@ -52,7 +52,8 @@ given must match.
 - **A point on an edge is on two faces.** `{"at": [10, 0, 8]}` is ambiguous: add
   `"normal"` (`[0, 0, 1]` for the face that looks up), or use a point inside the face.
 - **`normal` alone** matches flat faces only, and every flat face that looks that way. On
-  a body with several, add `at` or `feature`.
+  a body with several, add `at` or `feature`. For a round or freeform face use `at`,
+  `feature` and `side`, or `index`.
 - **`side` matches every face of that kind**: an extrusion of a rectangle has four
   `side` faces. Add `at` or `normal`.
 - **A sketch needs a flat face.** A curved one is refused, saying so.

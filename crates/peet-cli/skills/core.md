@@ -74,7 +74,7 @@ Done when `status` shows `"failures": []` and `bodies` has the sizes that were a
   ids, which way the sketch axes point): `peet skills sketching`.
 - **Pointing at existing geometry** (a sketch on a face, the edge for a flange or a
   fillet, anything taking a plane, face, edge or vertex): `peet skills selectors`.
-- **Solid features** (extrude and cut directions, revolve, sweep, holes, fillets,
-  shell, patterns): `peet skills solids`.
-- **Sheet metal** (base flange, flanges, cuts, flat pattern, DXF, materials, checks):
-  `peet skills sheet-metal`.
+- **Solid features** (extrude and cut directions, revolve, sweep, loft, holes, fillets,
+  shell, patterns, freeform faces, bodies from a STEP file): `peet skills solids`.
+- **Sheet metal** (base flange, flanges, cuts, converting a solid to sheet metal, flat
+  pattern, DXF, materials, checks): `peet skills sheet-metal`.
