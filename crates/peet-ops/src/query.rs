@@ -194,6 +194,15 @@ pub fn sketch_summary(doc: &Document, id: FeatureId) -> Value {
 fn sketch_detail(doc: &Document, sketch: &Sketch) -> (Vec<Value>, Vec<Value>, Vec<Value>) {
     let units = &doc.model.parameters.units;
     let at = |id| point2_out(sketch.point(id), units);
+    // What can still move: an entity, or a point of it, that nothing holds yet.
+    let analysis = Solver::new().analyze(sketch);
+    let free = |id: peet_sketch::EntityId| {
+        let moves = |e| analysis.entity_status(e) == peet_sketch::solver::DofStatus::Under;
+        moves(id)
+            || sketch
+                .entity(id)
+                .is_some_and(|e| e.geometry.points().into_iter().any(moves))
+    };
     let mut entities = Vec::new();
     for (id, e) in sketch.entities() {
         let mut v = match e.geometry {
@@ -214,6 +223,9 @@ fn sketch_detail(doc: &Document, sketch: &Sketch) -> (Vec<Value>, Vec<Value>, Ve
         };
         if let Value::Object(m) = &mut v {
             m.insert("id".to_owned(), json!(id.0));
+            if free(id) {
+                m.insert("free".to_owned(), json!(true));
+            }
             if e.construction {
                 m.insert("construction".to_owned(), json!(true));
             }
@@ -328,7 +340,23 @@ pub fn bodies(doc: &Document) -> Value {
         .iter()
         .enumerate()
         .map(|(i, b)| {
-            let bounds = b.solid.bounds();
+            // A freeform face's own bounds are a box round its control points, which is
+            // a little too big: the body's triangles give the size it really has.
+            let freeform = b
+                .solid
+                .faces
+                .iter()
+                .any(|f| matches!(f.surface, Surface::Nurbs(_)));
+            let bounds = if freeform {
+                peet_math::Aabb::from_points(
+                    select::mesh(doc, i)
+                        .faces
+                        .iter()
+                        .flat_map(|f| f.positions.iter().copied()),
+                )
+            } else {
+                b.solid.bounds()
+            };
             let mut m = Map::new();
             m.insert("body".to_owned(), json!(i));
             m.insert("made_by".to_owned(), json!(doc.model.name_of(b.origin)));
@@ -374,6 +402,20 @@ pub fn faces(doc: &Document, body: Option<usize>) -> Result<Value, String> {
             m.insert("body".to_owned(), json!(bi));
             m.insert("index".to_owned(), json!(f.0));
             m.insert("what".to_owned(), json!(select::describe_face(doc, bi, f)));
+            // The same, as the `feature` and `side` of a selector.
+            let made_by: Vec<Value> = b
+                .face_name(f)
+                .origins()
+                .iter()
+                .filter(|o| !matches!(o.role, peet_model::FaceRole::Instance(_)))
+                .map(|o| {
+                    json!({
+                        "feature": doc.model.name_of(o.feature),
+                        "side": select::side_word(o.role),
+                    })
+                })
+                .collect();
+            m.insert("made_by".to_owned(), json!(made_by));
             match &b.solid.face(f).surface {
                 Surface::Plane(_) => {
                     m.insert("surface".to_owned(), json!("plane"));

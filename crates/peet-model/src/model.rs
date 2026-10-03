@@ -170,9 +170,13 @@ impl Model {
 
     /// Words for a face name, for messages: "the end face of Extrude1".
     pub fn describe_face(&self, name: &FaceName) -> String {
+        // A pattern, a mirror or a feature made at several places marks each copy's faces
+        // with which copy they are: that is said once, not as a part of the face.
+        let copy = |role: FaceRole| matches!(role, FaceRole::Instance(_));
         let parts: Vec<String> = name
             .origins()
             .iter()
+            .filter(|o| !copy(o.role))
             .map(|o| {
                 let role = match o.role {
                     FaceRole::NearCap => "start face",
@@ -196,7 +200,12 @@ impl Model {
                 format!("the {role} of {}", self.name_of(o.feature))
             })
             .collect();
-        parts.join(" joined with ")
+        let copied = name.origins().iter().find(|o| copy(o.role));
+        match (parts.is_empty(), copied) {
+            (true, Some(o)) => format!("a face of a copy made by {}", self.name_of(o.feature)),
+            (false, Some(_)) => format!("{} (one of several)", parts.join(" joined with ")),
+            (_, None) => parts.join(" joined with "),
+        }
     }
 
     // ---- Editing ----

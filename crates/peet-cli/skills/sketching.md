@@ -60,6 +60,16 @@ Extrude, cut and base flange use the sketch's **closed regions**.
   each wants (a `length` takes a line, a `distance` two points or a point and a line).
 - A dimension's `value` is a number or an expression (`"width / 2"`). It gets a name
   (`d1`, `d2`, or your `name`), which other dimensions and `set_dimension` use.
+- **What is still free:** when a sketch is `under_defined`, `peet feature feature=SKETCH`
+  marks each entity that can still move with `"free": true`. Dimension or relate those
+  (often it is the far end of a construction line).
+- A dimension is a size, not a coordinate: it has no sign. Geometry stays on the side
+  it was drawn, so a point drawn at x = −42 with a `horizontal_distance` of 42 to the
+  origin stays at −42.
+- A dimension is greater than 0. To put two things in line, use a relation:
+  `horizontal` or `vertical` of two points, or `coincident`. To centre a
+  `center_rectangle` on the origin: `{"type": "coincident", "of": ["r.center",
+  "origin"]}`.
 - Geometry is drawn where you put it and a sketch need not be fully defined: an
   `under_defined` sketch builds as drawn. Add dimensions to what must stay exact or
   follow a parameter.

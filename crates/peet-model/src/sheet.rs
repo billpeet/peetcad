@@ -124,7 +124,7 @@ fn sheet_body(
     let pieces = sheet.outline.iter().filter(|l| l.outer).count();
     let warning = (pieces > 1).then(|| {
         format!(
-            "The sheet is in {pieces} separate pieces: cuts or reliefs cut part of it off. Check the cuts, the flange offsets and the relief size."
+            "The sheet is in {pieces} separate pieces: cuts or reliefs cut part of it off. Check the cuts, the flanges' offsets from the ends of their edges, and the base flange's relief (its type and its ratio)."
         )
     });
     Ok((

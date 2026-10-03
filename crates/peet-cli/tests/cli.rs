@@ -596,3 +596,183 @@ fn what_the_skills_say_about_lofts_freeform_faces_and_conversion_is_true() {
     assert_eq!(status(&ran.replies[4]), "failed");
     assert!(message(&ran.replies[4]).contains("one thickness"));
 }
+
+#[test]
+fn what_the_demo_found_is_fixed() {
+    let status = |reply: &Value, i: usize| reply["created"][i]["status"].clone();
+    // A plain tray: four walls set back a little from the corners, with the default
+    // relief. The corners are notched and the sheet stays in one piece; the walls are
+    // named from one name.
+    let tray = r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [180, 120]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 1.5, "radius": 2}
+{"op": "edge_flange", "name": "Wall", "length": 30, "offset_start": 5, "offset_end": 5, "edges": [{"between": [[0, 0, 1.5], [180, 0, 1.5]]}, {"between": [[180, 0, 1.5], [180, 120, 1.5]]}, {"between": [[180, 120, 1.5], [0, 120, 1.5]]}, {"between": [[0, 120, 1.5], [0, 0, 1.5]]}]}
+"#;
+    let ran = peet_with(
+        &["run", "-q", "--strict"],
+        &format!("{tray}{{\"op\": \"bend_table\"}}\n"),
+    );
+    assert_eq!(ran.code, OK, "{}", ran.out);
+    for i in 0..4 {
+        assert_eq!(status(&ran.replies[2], i), "ok", "{}", ran.replies[2]);
+        assert_eq!(
+            ran.replies[2]["created"][i]["name"],
+            format!("Wall{}", i + 1)
+        );
+    }
+    assert_eq!(ran.replies[3]["pieces"], 1);
+
+    // A wall's `top` face looks into the tray; a hem on its edge folds inside, and on
+    // the outside face's edge, outside.
+    for (y, outside) in [(1.5, false), (0.0, true)] {
+        let script = format!(
+            "{tray}{{\"op\": \"hem\", \"length\": 8, \"edge\": {{\"between\": [[5, {y}, 30], [175, {y}, 30]]}}}}\n{{\"op\": \"bodies\"}}\n{{\"op\": \"measure\", \"a\": {{\"face\": {{\"feature\": \"Wall1\", \"side\": \"top\"}}}}}}\n"
+        );
+        let ran = peet_with(&["run", "-q", "--strict"], &script);
+        assert_eq!(ran.code, OK, "{}", ran.out);
+        let min_y = ran.replies[4]["bodies"][0]["min"][1].as_f64().unwrap();
+        assert_eq!(min_y < -1.0, outside, "hem on the y = {y} edge: {min_y}");
+    }
+
+    // A full revolve has only side faces: the error says which faces it has.
+    let ring = r#"{"op": "sketch", "on": "front", "draw": [{"type": "rectangle", "from": [11, 58], "to": [22, 63]}]}
+{"op": "revolve", "sketch": "Sketch1", "name": "Collar"}
+"#;
+    let ran = peet_with(
+        &["run", "-q", "--keep-going"],
+        &format!(
+            "{ring}{}\n{}\n{}\n{}\n",
+            r#"{"op": "measure", "a": {"face": {"feature": "Collar", "side": "end"}}}"#,
+            r#"{"op": "measure", "a": {"face": {"feature": "Collar", "normal": [0, 0, 1]}}}"#,
+            r#"{"op": "chamfer", "size": 1, "edges": [{"at": [22, 0, 63]}]}"#,
+            r#"{"op": "chamfer", "size": 1, "edges": [{"at": [0, 22, 63]}]}"#,
+        ),
+    );
+    let none = ran.replies[2]["error"].as_str().unwrap();
+    assert!(none.contains("The faces Collar made are"), "{none}");
+    assert!(
+        none.contains("side \"side\", normal [0.0,0.0,1.0]"),
+        "{none}"
+    );
+    assert_eq!(ran.replies[3]["ok"], true);
+    // A point on the seam is on two edges: the error says to move along the edge.
+    let seam = ran.replies[4]["error"].as_str().unwrap();
+    assert!(
+        seam.contains("2 edges match") && seam.contains("further along"),
+        "{seam}"
+    );
+    assert_eq!(status(&ran.replies[5], 0), "ok");
+
+    // A point on an edge between two faces: the error says to add the normal.
+    let ran = peet_with(
+        &["run", "-q", "--keep-going"],
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "center_rectangle", "center": [0, 0], "corner": [50, 40], "as": "r"}, {"type": "coincident", "of": ["r.center", "origin"]}, {"type": "vertical_distance", "of": ["r.center", "origin"], "value": 0}]}
+{"op": "sketch", "on": "top", "draw": [{"type": "center_rectangle", "center": [0, 0], "corner": [50, 40], "as": "r"}, {"type": "coincident", "of": ["r.center", "origin"]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 8}
+{"op": "plane", "from": {"at": [0, 40, 8]}}
+"#,
+    );
+    // A dimension of 0 is refused, and the message gives the alternative.
+    let zero = ran.replies[0]["error"].as_str().unwrap();
+    assert!(
+        zero.contains("can't be 0") && zero.contains("coincident"),
+        "{zero}"
+    );
+    assert_eq!(ran.replies[1]["ok"], true);
+    let edge = ran.replies[3]["error"].as_str().unwrap();
+    assert!(
+        edge.contains("2 faces match") && edge.contains("add \"normal\""),
+        "{edge}"
+    );
+
+    // `peet ops edge_flange` lists `edges`.
+    assert!(peet(&["ops", "edge_flange"]).out.contains("\"edges\""));
+    assert!(peet(&["ops", "hem"]).out.contains("\"edges\""));
+}
+
+#[test]
+fn what_the_second_demo_found_is_fixed() {
+    // Walls set back 5 from each end of their edges have bends that long, whatever
+    // order they are added in, and the sheet is one piece.
+    let ran = peet_with(
+        &["run", "-q", "--strict"],
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [180, 120]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 1.5, "radius": 2}
+{"op": "edge_flange", "name": "Wall", "length": 30, "offset_start": 5, "offset_end": 5, "edges": [{"between": [[0, 0, 1.5], [180, 0, 1.5]]}, {"between": [[180, 0, 1.5], [180, 120, 1.5]]}, {"between": [[180, 120, 1.5], [0, 120, 1.5]]}, {"between": [[0, 120, 1.5], [0, 0, 1.5]]}]}
+{"op": "bend_table"}
+{"op": "faces"}
+"#,
+    );
+    assert_eq!(ran.code, OK, "{}", ran.out);
+    let lengths: Vec<f64> = ran.replies[3]["bends"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b["length"].as_f64().unwrap())
+        .collect();
+    assert_eq!(lengths, [170.0, 110.0, 170.0, 110.0]);
+    assert_eq!(ran.replies[3]["pieces"], 1);
+    // `faces` says what made each face as selector values.
+    let faces = ran.replies[4]["faces"].as_array().unwrap();
+    let inside = faces
+        .iter()
+        .find(|f| f["made_by"] == json!([{"feature": "Wall3", "side": "top"}]))
+        .expect("the back wall's inside face");
+    assert_eq!(inside["normal"], json!([0.0, -1.0, 0.0]));
+    assert_eq!(inside["what"], "the top face of Wall3");
+
+    // A lofted body's size is its real size, and a face of a feature made at several
+    // places says so once.
+    let ran = peet_with(
+        &["run", "-q", "--strict"],
+        r#"{"op": "sketch", "on": "top", "name": "Base", "draw": [{"type": "rectangle", "from": [-20, -15], "to": [20, 15]}]}
+{"op": "plane", "from": "top", "distance": 30, "name": "Up"}
+{"op": "sketch", "on": "Up", "name": "Neck", "draw": [{"type": "circle", "center": [0, 0], "radius": 8}]}
+{"op": "loft", "profiles": ["Base", "Neck"]}
+{"op": "bodies"}
+"#,
+    );
+    assert_eq!(ran.code, OK, "{}", ran.out);
+    assert_eq!(
+        ran.replies[4]["bodies"][0]["size"],
+        json!([40.0, 30.0, 30.0])
+    );
+
+    let ran = peet_with(
+        &["run", "-q", "--strict"],
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-50, -40], "to": [50, 40]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 8}
+{"op": "sketch", "on": {"feature": "Extrude1", "side": "end"}, "name": "Centres", "draw": [{"type": "point", "at": [-40, 30], "as": "a"}, {"type": "point", "at": [40, 30]}, {"type": "horizontal_distance", "of": ["a", "origin"], "value": 40}]}
+{"op": "feature", "feature": "Centres"}
+{"op": "hole", "sketch": "Centres", "standard": {"size": "M5"}, "kind": "counterbore"}
+{"op": "feature", "feature": "Hole1"}
+{"op": "faces"}
+"#,
+    );
+    assert_eq!(ran.code, OK, "{}", ran.out);
+    // The dimensioned point stayed on the side it was drawn; the sketch says which
+    // points are still free.
+    let points = ran.replies[3]["entities"].as_array().unwrap();
+    assert_eq!(points[0]["at"], json!([-40.0, 30.0]));
+    assert_eq!(points[0]["free"], true, "its height is not fixed");
+    assert_eq!(points[1]["free"], true);
+    assert_eq!(ran.replies[3]["definition"], "under_defined");
+    // The sizes the skill quotes for an M5 hole.
+    let hole = &ran.replies[5]["fields"];
+    assert_eq!(hole["diameter"], 5.5);
+    assert_eq!(hole["counterbore_diameter"], 10.0);
+    assert_eq!(hole["counterbore_depth"], 5.4);
+    for face in ran.replies[6]["faces"].as_array().unwrap() {
+        let what = face["what"].as_str().unwrap();
+        assert!(!what.contains("copy of"), "{what}");
+    }
+    assert!(ran.replies[6]["faces"].as_array().unwrap().iter().any(|f| {
+        f["what"] == "the side face of Hole1 (one of several)"
+            && f["made_by"] == json!([{"feature": "Hole1", "side": "side"}])
+    }));
+
+    // A new part is called after its file from the start.
+    let dir = Folder::new("named");
+    let part = dir.path("bracket.peet");
+    let ran = peet(&["status", "--new", "-f", &part, "-q"]);
+    assert_eq!(ran.replies[0]["name"], "bracket.peet");
+}

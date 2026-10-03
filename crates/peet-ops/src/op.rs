@@ -509,11 +509,6 @@ fn new_features(op: &str, a: &mut Args) -> Result<Vec<New>, String> {
         if edges.is_empty() {
             return Err("'edges' is empty.".to_owned());
         }
-        if name.is_some() && edges.len() > 1 {
-            return Err(
-                "'name' can't be used with several edges: rename them afterwards.".to_owned(),
-            );
-        }
         Some(edges)
     } else {
         None
@@ -527,9 +522,12 @@ fn new_features(op: &str, a: &mut Args) -> Result<Vec<New>, String> {
             feature: args,
         }]);
     };
+    // Several features from one name are numbered: Wall1, Wall2, …
+    let several = edges.len() > 1;
     Ok(edges
         .into_iter()
-        .map(|edge| {
+        .enumerate()
+        .map(|(i, edge)| {
             let mut feature = args.clone();
             match &mut feature {
                 FeatureArgs::EdgeFlange(f) => f.edge = Some(Some(edge)),
@@ -537,7 +535,13 @@ fn new_features(op: &str, a: &mut Args) -> Result<Vec<New>, String> {
                 _ => {}
             }
             New {
-                name: name.clone(),
+                name: name.as_ref().map(|n| {
+                    if several {
+                        format!("{n}{}", i + 1)
+                    } else {
+                        n.clone()
+                    }
+                }),
                 feature,
             }
         })

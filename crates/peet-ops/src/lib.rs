@@ -221,6 +221,12 @@ fn help() -> Map<String, Value> {
         }
         let mut f = describe();
         f.insert("name".to_owned(), json!("text"));
+        if matches!(*word, "edge_flange" | "hem") {
+            f.insert(
+                "edges".to_owned(),
+                json!("list of edges, in place of 'edge': one feature per edge (a 'name' is numbered: Wall1, Wall2, …)"),
+            );
+        }
         match word.split_once('.') {
             // One operation with several forms, told apart by the fields given.
             Some((name, form)) => {

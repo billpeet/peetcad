@@ -422,6 +422,88 @@ fn interior_point(region: &Region) -> Option<DVec2> {
         .map(|[a, b, c]| (a + b + c) / 3.0)
 }
 
+/// Leaves out the scrap that reliefs cut loose: a fragment of a piece, no bigger than a
+/// bend relief, that no longer touches the rest of that piece.
+///
+/// Two flanges set back a little from the same corner each cut a relief next to it, and
+/// between them the reliefs cut the corner of the sheet off. In the shop that scrap falls
+/// away and the corner is notched; here it is left out, so the sheet stays in one piece.
+/// Anything larger that comes loose is kept, and reported as a separate piece.
+fn drop_scrap(layout: &Layout, kept: Vec<(Region, usize)>) -> Vec<(Region, usize)> {
+    let n = kept.len();
+    if n < 2 {
+        return kept;
+    }
+    // The ends of every edge of a region, in the direction the region runs round it.
+    let ends = |region: &Region| -> Vec<(u32, DVec2, DVec2)> {
+        std::iter::once(&region.outer)
+            .chain(&region.holes)
+            .flat_map(|l| &l.edges)
+            .map(|e| {
+                if e.reversed {
+                    (e.entity.0, e.curve.end(), e.curve.start())
+                } else {
+                    (e.entity.0, e.curve.start(), e.curve.end())
+                }
+            })
+            .collect()
+    };
+    let edges: Vec<Vec<(u32, DVec2, DVec2)>> = kept.iter().map(|(r, _)| ends(r)).collect();
+    // Regions of one piece that share an edge are one fragment of it.
+    let mut fragments = UnionFind::new(n);
+    for i in 0..n {
+        for j in i + 1..n {
+            if kept[i].1 != kept[j].1 {
+                continue;
+            }
+            let touch = edges[i].iter().any(|a| {
+                edges[j]
+                    .iter()
+                    .any(|b| a.0 == b.0 && close(a.1, b.2) && close(a.2, b.1))
+            });
+            if touch {
+                fragments.union(i, j);
+            }
+        }
+    }
+    let area = |region: &Region| -> f64 {
+        region
+            .outer
+            .edges
+            .iter()
+            .map(|e| area_term(&e.curve, e.reversed))
+            .sum::<f64>()
+            .abs()
+    };
+    let mut size: HashMap<usize, f64> = HashMap::new();
+    for (i, (region, _)) in kept.iter().enumerate() {
+        *size.entry(fragments.find(i)).or_default() += area(region);
+    }
+    // The largest fragment of each piece is the piece.
+    let mut largest: HashMap<usize, (usize, f64)> = HashMap::new();
+    for (i, (_, piece)) in kept.iter().enumerate() {
+        let fragment = fragments.find(i);
+        let a = size[&fragment];
+        let best = largest.entry(*piece).or_insert((fragment, a));
+        if a > best.1 {
+            *best = (fragment, a);
+        }
+    }
+    let s = &layout.settings;
+    let relief = s.radius + s.thickness * (1.0 + s.relief_ratio);
+    let scrap = 2.0 * relief * relief;
+    let keep: Vec<bool> = (0..n)
+        .map(|i| {
+            let fragment = fragments.find(i);
+            largest[&kept[i].1].0 == fragment || size[&fragment] > scrap
+        })
+        .collect();
+    kept.into_iter()
+        .zip(keep)
+        .filter_map(|(k, keep)| keep.then_some(k))
+        .collect()
+}
+
 /// `½ ∮ (x dy − y dx)` of a curve in traversal direction (exact for arcs).
 fn area_term(c: &Curve, reversed: bool) -> f64 {
     let a = match *c {
@@ -560,6 +642,7 @@ impl Flat {
         if kept.is_empty() {
             return Err(SheetError::Empty);
         }
+        let kept = drop_scrap(layout, kept);
 
         // Half-edges, closed curves split in two so every edge has two vertices.
         let mut halves: Vec<Half> = Vec::new();

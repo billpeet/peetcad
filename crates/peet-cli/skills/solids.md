@@ -88,12 +88,17 @@ and exported like any face, with these limits:
 (the sketch is on the face to drill into). `standard` sets every size from a screw size
 (`M2` to `M24`) and a fit (`close`, `normal`, `loose`, `tapped`); any size given as well
 wins. `kind`: `simple`, `counterbore`, `countersink`. `end`: `through_all` or `blind`
-with `depth`.
+with `depth`. The counterbore or countersink is at the face the sketch is on, and the
+hole goes into the body from there. `peet feature feature=Hole1` shows the sizes a
+standard gave (an M5 `normal` hole: 5.5 through, counterbore 10 wide and 5.4 deep).
+Several points in one sketch make several holes in one feature; fix their positions
+with dimensions or `fix`, as in any sketch.
 
 ## Fillet, chamfer, shell, draft
 
 - `fillet` and `chamfer` take `edges` and `size`. A size too large for the faces next to
-  the edge fails to build: reduce it.
+  the edge fails to build: reduce it. They are one kind of feature: `kind` says which,
+  already set by the operation's name, so leave it out.
 - `shell` hollows every body to `thickness`, removing the faces in `open` (none: a
   closed hollow).
 - `draft` tapers `faces` (flat ones, or round ones along the pull) about a `neutral`
