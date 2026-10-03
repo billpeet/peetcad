@@ -155,7 +155,18 @@ pub fn find_regions(sketch: &Sketch) -> Profile {
         .entities()
         .filter(|(_, e)| !e.construction && e.kind().is_curve())
         .filter_map(|(id, _)| Some((id, sketch.curve(id)?)))
+        .collect();
+    regions_of_curves(&inputs)
+}
+
+/// [`find_regions`] for loose curves: every minimal face of the arrangement of `curves`.
+/// Each loop edge reports the id it was given here as its `entity`, so callers can tag
+/// curves with ids of their own (sheet metal uses this to build flat patterns).
+pub fn regions_of_curves(curves: &[(EntityId, Curve)]) -> Profile {
+    let inputs: Vec<(EntityId, Curve)> = curves
+        .iter()
         .filter(|(_, c)| c.length() > MERGE)
+        .copied()
         .collect();
     let mut graph = Arrangement::build(&inputs);
     let open_ends = graph.open_ends();

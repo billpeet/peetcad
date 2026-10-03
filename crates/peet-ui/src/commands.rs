@@ -32,6 +32,7 @@ pub enum CommandId {
     SaveDocumentAs,
     SaveDocument,
     OpenSample,
+    OpenSampleEnclosure,
     RefPlane,
     RefAxis,
     RefPoint,
@@ -78,6 +79,12 @@ pub enum CommandId {
     Extrude,
     CutExtrude,
     ExportStl,
+    BaseFlange,
+    EdgeFlange,
+    SheetCut,
+    FlatPattern,
+    BendTable,
+    ExportDxf,
 }
 
 /// Static description of a command.
@@ -106,7 +113,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 69] = [
+    pub const ALL: [Self; 76] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -130,6 +137,7 @@ impl CommandId {
         Self::SaveDocumentAs,
         Self::SaveDocument,
         Self::OpenSample,
+        Self::OpenSampleEnclosure,
         Self::RefPlane,
         Self::RefAxis,
         Self::RefPoint,
@@ -176,6 +184,12 @@ impl CommandId {
         Self::Extrude,
         Self::CutExtrude,
         Self::ExportStl,
+        Self::BaseFlange,
+        Self::EdgeFlange,
+        Self::SheetCut,
+        Self::FlatPattern,
+        Self::BendTable,
+        Self::ExportDxf,
     ];
 
     pub fn info(self) -> CommandInfo {
@@ -289,6 +303,12 @@ impl CommandId {
                 "Open Sample Bracket",
                 "File",
                 "Open a 20-feature sample part to explore.",
+                None,
+            ),
+            Self::OpenSampleEnclosure => (
+                "Open Sample Enclosure Panel",
+                "File",
+                "Open a sheet metal enclosure panel with four flanges, reliefs and cutouts.",
                 None,
             ),
             Self::RefPlane => (
@@ -540,6 +560,42 @@ impl CommandId {
                 "Export STL…",
                 "File",
                 "Save the bodies as an STL mesh for 3D printing or other tools.",
+                None,
+            ),
+            Self::BaseFlange => (
+                "Base Flange",
+                "Sheet Metal",
+                "Start a sheet metal part from the selected (or open) sketch: a closed shape makes a plate, connected lines make a profile with a bend at each corner.",
+                None,
+            ),
+            Self::EdgeFlange => (
+                "Edge Flange",
+                "Sheet Metal",
+                "Add a flange with a bend on the selected edges of a sheet metal part (or pick an edge).",
+                None,
+            ),
+            Self::SheetCut => (
+                "Sheet Metal Cut",
+                "Sheet Metal",
+                "Cut the selected (or open) sketch square through the sheet. The sketch must be on a flat face of the sheet; the cut is made in the flat pattern, so it can cross bends.",
+                None,
+            ),
+            Self::FlatPattern => (
+                "Flat Pattern",
+                "Sheet Metal",
+                "Show sheet metal parts flat (unfolded) or folded.",
+                key(Key::U),
+            ),
+            Self::BendTable => (
+                "Bend Table…",
+                "Sheet Metal",
+                "The flat pattern report: flat size and every bend's direction, angle, radius, K-factor, allowance and deduction.",
+                None,
+            ),
+            Self::ExportDxf => (
+                "Export Flat Pattern DXF…",
+                "File",
+                "Save the flat pattern of the sheet metal part as a DXF for laser, plasma or punch cutting: outline, cutouts, bend lines and bend notes on separate layers.",
                 None,
             ),
         };

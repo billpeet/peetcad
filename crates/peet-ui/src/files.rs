@@ -21,6 +21,7 @@ pub enum AfterDiscard {
     New,
     Open,
     Sample,
+    SampleEnclosure,
     Quit,
 }
 

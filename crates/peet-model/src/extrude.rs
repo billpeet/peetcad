@@ -313,7 +313,7 @@ fn volume(solid: &Solid) -> f64 {
 }
 
 /// A stamp for the `index`-th body an operation produces.
-fn stamp(seed: u64, index: usize) -> u64 {
+pub(crate) fn stamp(seed: u64, index: usize) -> u64 {
     crate::hash::combine(seed, index as u64 + 1)
 }
 
@@ -335,6 +335,7 @@ pub fn apply_extrude(input: &ExtrudeInput<'_>) -> Result<Vec<Arc<Body>>, Feature
                 face_names: tool_names,
                 origin: input.feature,
                 stamp: stamp(input.stamp, 0),
+                sheet: None,
             }));
             Ok(out)
         }
@@ -353,6 +354,7 @@ pub fn apply_extrude(input: &ExtrudeInput<'_>) -> Result<Vec<Arc<Body>>, Feature
                     .first()
                     .map_or(input.feature, |&i| bodies[i].origin),
                 stamp: stamp(input.stamp, 0),
+                sheet: None,
             });
             let mut out = Vec::with_capacity(bodies.len() + 1);
             let mut merged = Some(merged);
@@ -396,6 +398,7 @@ pub fn apply_extrude(input: &ExtrudeInput<'_>) -> Result<Vec<Arc<Body>>, Feature
                     solid: traced.solid,
                     origin: body.origin,
                     stamp: stamp(input.stamp, i),
+                    sheet: None,
                 }));
             }
             if !removed {

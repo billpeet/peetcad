@@ -34,7 +34,7 @@ use crate::feature::{
     PointDef, PointRef, ScalarKind,
 };
 use crate::naming::{Body, find_edge, find_face, find_vertex};
-use crate::{Axis, Model, hash};
+use crate::{Axis, Model, hash, sheet};
 
 /// How well defined a sketch is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -308,10 +308,7 @@ impl Engine {
             },
             FeatureKind::Extrude(e) => {
                 let inputs = (|| {
-                    let sketch_state = ctx.state_of(e.sketch, "Its sketch")?;
-                    let Output::Sketch { plane, .. } = sketch_state.output else {
-                        return Err(format!("{} is not a sketch.", model.name_of(e.sketch)));
-                    };
+                    let (plane, sketch) = ctx.sketch_input(e.sketch)?;
                     let depth = if e.params.end.uses_depth() {
                         e.params
                             .depth
@@ -326,10 +323,7 @@ impl Engine {
                         }
                         _ => None,
                     };
-                    let sketch = model
-                        .sketch(e.sketch)
-                        .ok_or_else(|| "Its sketch was deleted.".to_owned())?;
-                    Ok((plane, depth, up_to, &sketch.sketch))
+                    Ok((plane, depth, up_to, sketch))
                 })();
                 match inputs {
                     Err(m) => fail(m, Output::None),
@@ -344,49 +338,89 @@ impl Engine {
                             depth,
                             &up_to,
                         ));
-                        let hit = self.cache.get(&id).filter(|c| c.key == key);
-                        let (state, bodies) = match hit {
-                            Some(c) => (reused(&c.state), c.bodies.clone()),
-                            None => {
-                                let result = apply_extrude(&ExtrudeInput {
-                                    feature: id,
-                                    bodies: &run.bodies,
-                                    plane: &plane,
-                                    sketch,
-                                    params: &e.params,
-                                    depth,
-                                    up_to,
-                                    stamp: key,
-                                });
-                                let (status, output, bodies) = match result {
-                                    Ok(b) => (Status::Ok, Output::Solid, Some(b)),
-                                    Err(e) => (Status::Failed(e.0), Output::None, None),
-                                };
-                                let state = FeatureState {
-                                    status,
-                                    output,
-                                    rebuilt: true,
-                                };
-                                self.cache.insert(
-                                    id,
-                                    Cached {
-                                        key,
-                                        state: state.clone(),
-                                        out_key: key,
-                                        bodies: bodies.clone(),
-                                    },
-                                );
-                                (state, bodies)
-                            }
-                        };
-                        if let Some(b) = bodies {
-                            run.bodies = b;
-                            run.body_key = key;
-                        }
-                        state
+                        self.solid_feature(id, key, run, |bodies| {
+                            let out = apply_extrude(&ExtrudeInput {
+                                feature: id,
+                                bodies,
+                                plane: &plane,
+                                sketch,
+                                params: &e.params,
+                                depth,
+                                up_to,
+                                stamp: key,
+                            })?;
+                            let warning = lost_sheet(model, bodies, &out, &feature.name);
+                            Ok((out, warning))
+                        })
                     }
                 }
             }
+            FeatureKind::BaseFlange(b) => {
+                let inputs = (|| {
+                    let (plane, sketch) = ctx.sketch_input(b.sketch)?;
+                    let settings = sheet::evaluate_settings(&b.settings, &model.parameters)?;
+                    let depth = b
+                        .depth
+                        .evaluate(ScalarKind::Length, &model.parameters)
+                        .map_err(|m| format!("Depth: {m}."))?;
+                    Ok((plane, sketch, settings, depth))
+                })();
+                match inputs {
+                    Err(m) => fail(m, Output::None),
+                    Ok((plane, sketch, settings, depth)) => {
+                        let sketch_key = run.out_keys.get(&b.sketch).copied().unwrap_or(0);
+                        let key =
+                            hash::of(&(3u8, id, &**b, sketch_key, run.body_key, &settings, depth));
+                        self.solid_feature(id, key, run, |bodies| {
+                            sheet::apply_base_flange(
+                                &sheet::BaseFlangeInput {
+                                    feature: id,
+                                    model,
+                                    plane,
+                                    sketch,
+                                    def: b,
+                                    settings,
+                                    depth,
+                                    stamp: key,
+                                },
+                                bodies,
+                            )
+                        })
+                    }
+                }
+            }
+            FeatureKind::EdgeFlange(e) => match sheet::edge_flange_spec(e, &model.parameters) {
+                Err(m) => fail(m, Output::None),
+                Ok(spec) => {
+                    let values = (spec.length, spec.angle, spec.offsets, spec.radius);
+                    let key = hash::of(&(4u8, id, &**e, run.body_key, values));
+                    self.solid_feature(id, key, run, |bodies| {
+                        sheet::apply_edge_flange(id, model, bodies, e, &spec, key)
+                    })
+                }
+            },
+            FeatureKind::SheetCut(c) => match ctx.sketch_input(c.sketch) {
+                Err(m) => fail(m, Output::None),
+                Ok((plane, sketch)) => {
+                    let face = match model.sketch(c.sketch).map(|s| &s.plane) {
+                        Some(PlaneRef::Face(f)) => Some(f.clone()),
+                        _ => None,
+                    };
+                    let sketch_key = run.out_keys.get(&c.sketch).copied().unwrap_or(0);
+                    let key = hash::of(&(5u8, id, sketch_key, run.body_key, &face));
+                    self.solid_feature(id, key, run, |bodies| {
+                        sheet::apply_sheet_cut(
+                            id,
+                            model,
+                            bodies,
+                            face.as_ref(),
+                            &plane,
+                            sketch,
+                            key,
+                        )
+                    })
+                }
+            },
             // Reference geometry is a few vector operations: always recomputed.
             FeatureKind::Plane(def) => reference(ctx.plane_def(def).map(Output::Plane)),
             FeatureKind::Axis(def) => reference(ctx.axis_def(def).map(Output::Axis)),
@@ -401,6 +435,70 @@ impl Engine {
         run.states.insert(id, state);
         write_back
     }
+}
+
+impl Engine {
+    /// Runs a solid feature with the given key, or reuses its remembered result. If it
+    /// succeeds, the bodies it produced are what the next features build on.
+    fn solid_feature(
+        &mut self,
+        id: FeatureId,
+        key: u64,
+        run: &mut Run,
+        compute: impl FnOnce(&[Arc<Body>]) -> Result<sheet::Applied, crate::FeatureError>,
+    ) -> FeatureState {
+        let hit = self.cache.get(&id).filter(|c| c.key == key);
+        let (state, bodies) = match hit {
+            Some(c) => (reused(&c.state), c.bodies.clone()),
+            None => {
+                let (status, output, bodies) = match compute(&run.bodies) {
+                    Ok((b, None)) => (Status::Ok, Output::Solid, Some(b)),
+                    Ok((b, Some(w))) => (Status::Warning(w), Output::Solid, Some(b)),
+                    Err(e) => (Status::Failed(e.0), Output::None, None),
+                };
+                let state = FeatureState {
+                    status,
+                    output,
+                    rebuilt: true,
+                };
+                self.cache.insert(
+                    id,
+                    Cached {
+                        key,
+                        state: state.clone(),
+                        out_key: key,
+                        bodies: bodies.clone(),
+                    },
+                );
+                (state, bodies)
+            }
+        };
+        if let Some(b) = bodies {
+            run.bodies = b;
+            run.body_key = key;
+        }
+        state
+    }
+}
+
+/// A warning if a solid feature turned a sheet metal body into a plain solid (which loses
+/// its flat pattern).
+fn lost_sheet(
+    model: &Model,
+    before: &[Arc<Body>],
+    after: &[Arc<Body>],
+    name: &str,
+) -> Option<String> {
+    let lost = before.iter().find(|b| {
+        b.sheet.is_some()
+            && after
+                .iter()
+                .any(|a| a.origin == b.origin && a.sheet.is_none())
+    })?;
+    Some(format!(
+        "{name} changed the sheet metal body of {} like a solid, so it no longer has a flat pattern. To keep it, sketch on its face and use a sheet metal cut.",
+        model.name_of(lost.origin)
+    ))
 }
 
 /// The state of a rebuild in progress.
@@ -476,13 +574,13 @@ fn solve_sketch(sketch: &Sketch, plane: Plane, model: &Model) -> (FeatureState, 
 }
 
 /// Resolves references against the features built so far.
-struct Ctx<'a> {
-    model: &'a Model,
-    bodies: &'a [Arc<Body>],
-    states: &'a HashMap<FeatureId, FeatureState>,
+struct Ctx<'m, 'r> {
+    model: &'m Model,
+    bodies: &'r [Arc<Body>],
+    states: &'r HashMap<FeatureId, FeatureState>,
 }
 
-impl Ctx<'_> {
+impl<'m> Ctx<'m, '_> {
     /// The state of a built feature, or why it can't be used. `what` starts the message
     /// ("Its sketch").
     fn state_of(&self, id: FeatureId, what: &str) -> Result<&FeatureState, String> {
@@ -505,6 +603,19 @@ impl Ctx<'_> {
                 Status::RolledBack => Err(format!("{what} ({name}) is rolled back.")),
             },
         }
+    }
+
+    /// A built sketch's plane and geometry, for a feature that uses it.
+    fn sketch_input(&self, id: FeatureId) -> Result<(Plane, &'m Sketch), String> {
+        let state = self.state_of(id, "Its sketch")?;
+        let Output::Sketch { plane, .. } = state.output else {
+            return Err(format!("{} is not a sketch.", self.model.name_of(id)));
+        };
+        let sketch = self
+            .model
+            .sketch(id)
+            .ok_or_else(|| "Its sketch was deleted.".to_owned())?;
+        Ok((plane, &sketch.sketch))
     }
 
     fn plane(&self, r: &PlaneRef) -> Result<Plane, String> {

@@ -14,6 +14,7 @@ peet-render.workspace = true
 peet-sketch.workspace = true
 peet-kernel.workspace = true
 peet-model.workspace = true
+peet-sheetmetal.workspace = true
 peet-io.workspace = true
 eframe = { workspace = true, features = ["wgpu", "persistence"] }
 egui.workspace = true

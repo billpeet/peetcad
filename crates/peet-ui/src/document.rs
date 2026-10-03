@@ -70,7 +70,9 @@ pub struct Document {
     history: History<Model>,
     /// The bodies of the last rebuild, ready to draw.
     pub bodies: Vec<Arc<BodyView>>,
-    /// Incremented on every rebuild, so the viewport knows to refresh.
+    /// Changes on every rebuild, so the viewport knows to refresh. Unique across all
+    /// documents of the process (see [`next_revision`]), so a newly opened document can
+    /// never be mistaken for the one it replaced.
     pub revision: u64,
     pub file: Option<FileLocation>,
     /// Hash of the model as last saved: the document is modified when they differ.
@@ -79,6 +81,8 @@ pub struct Document {
     /// Set when the shown bodies come from a file's cache and the model still has to be
     /// rebuilt.
     pending_rebuild: bool,
+    /// Sheet metal bodies are shown as flat patterns.
+    flat: bool,
 }
 
 impl Default for Document {
@@ -96,11 +100,12 @@ impl Document {
             engine: Engine::new(),
             history: History::default(),
             bodies: Vec::new(),
-            revision: 0,
+            revision: next_revision(),
             file,
             saved_hash: hash,
             current_hash: hash,
             pending_rebuild: false,
+            flat: false,
         };
         doc.rebuild();
         doc
@@ -121,11 +126,12 @@ impl Document {
             engine: Engine::new(),
             history: History::default(),
             bodies: Vec::new(),
-            revision: 0,
+            revision: next_revision(),
             file,
             saved_hash: hash,
             current_hash: hash,
             pending_rebuild: true,
+            flat: false,
         };
         match opened.bodies {
             Some(bodies) => {
@@ -136,7 +142,7 @@ impl Document {
                         Arc::new(BodyView::new(b, cached))
                     })
                     .collect();
-                doc.revision += 1;
+                doc.revision = next_revision();
             }
             None => doc.rebuild(),
         }
@@ -181,20 +187,59 @@ impl Document {
     /// Rebuilds the model and refreshes the bodies (tessellating only changed ones).
     pub fn rebuild(&mut self) {
         self.pending_rebuild = false;
-        let previous: HashMap<u64, Arc<BodyView>> =
-            self.bodies.drain(..).map(|b| (b.stamp, b)).collect();
-        let eval = self.engine.regenerate(&mut self.model);
-        self.bodies = eval
-            .bodies
-            .iter()
-            .map(|b| match previous.get(&b.stamp) {
-                Some(view) => view.clone(),
-                None => Arc::new(BodyView::new(b.clone(), None)),
-            })
-            .collect();
+        self.engine.regenerate(&mut self.model);
+        self.refresh_views();
         // Rebuilds write solved sketches back, which can change the hash.
         self.current_hash = peet_model::hash::of(&self.model);
-        self.revision += 1;
+    }
+
+    /// Makes the displayed bodies match the last rebuild and the view (folded or flat),
+    /// reusing the tessellation of every body that didn't change.
+    fn refresh_views(&mut self) {
+        let previous: HashMap<u64, Arc<BodyView>> =
+            self.bodies.drain(..).map(|b| (b.stamp, b)).collect();
+        let flat = self.flat;
+        self.bodies = self
+            .engine
+            .evaluation()
+            .bodies
+            .iter()
+            .map(|b| match previous.get(&BodyView::key(b, flat)) {
+                Some(view) => view.clone(),
+                None => Arc::new(BodyView::of(b.clone(), flat)),
+            })
+            .collect();
+        self.revision = next_revision();
+    }
+
+    /// Whether sheet metal bodies are shown flat.
+    pub fn is_flat(&self) -> bool {
+        self.flat
+    }
+
+    /// Shows sheet metal bodies flat (their flat patterns) or folded.
+    pub fn set_flat(&mut self, flat: bool) {
+        if self.flat != flat {
+            self.flat = flat;
+            if !self.pending_rebuild {
+                self.refresh_views();
+            }
+        }
+    }
+
+    /// Whether any body is sheet metal.
+    pub fn has_sheet_metal(&self) -> bool {
+        self.evaluation().bodies.iter().any(|b| b.sheet.is_some())
+    }
+
+    /// The sheet metal body to export or report on: the one `preferred` points to if it is
+    /// sheet metal, else the first one.
+    pub fn sheet_body(&self, preferred: Option<usize>) -> Option<&Arc<peet_model::Body>> {
+        let bodies = &self.evaluation().bodies;
+        preferred
+            .and_then(|i| bodies.get(i))
+            .filter(|b| b.sheet.is_some())
+            .or_else(|| bodies.iter().find(|b| b.sheet.is_some()))
     }
 
     pub fn evaluation(&self) -> &Evaluation {
@@ -204,6 +249,12 @@ impl Document {
     /// Applies a change as one undo step and rebuilds. Returns whether anything changed.
     pub fn change(&mut self, label: &str, f: impl FnOnce(&mut Model)) -> bool {
         self.change_inner(label, None, f)
+    }
+
+    /// Like [`Document::change`], but consecutive changes with the same `key` make one
+    /// undo step (a drag).
+    pub fn change_merging(&mut self, label: &str, key: u64, f: impl FnOnce(&mut Model)) -> bool {
+        self.change_inner(label, Some(key), f)
     }
 
     fn change_inner(&mut self, label: &str, key: Option<u64>, f: impl FnOnce(&mut Model)) -> bool {
@@ -218,6 +269,11 @@ impl Document {
         }
         self.rebuild();
         true
+    }
+
+    /// Ends a run of merged changes (a drag), so the next change is a new undo step.
+    pub fn seal_history(&mut self) {
+        self.history.seal();
     }
 
     pub fn can_undo(&self) -> bool {
@@ -345,7 +401,7 @@ impl Document {
 
     /// Converts a selection into references that survive a rebuild.
     pub fn persist(&self, g: GeomRef) -> Option<Persistent> {
-        let body = self.bodies.get(g.body())?;
+        let body = &self.bodies.get(g.body())?.source;
         Some(match g {
             GeomRef::Face { face, .. } => Persistent::Face(body.face_ref(face)),
             GeomRef::Edge { edge, .. } => Persistent::Edge(body.edge_ref(edge)?),
@@ -410,6 +466,13 @@ impl Document {
             .filter(|d| matches!(d, Datum::Plane(_)))
             .all(|d| self.model.datum_visible(*d))
     }
+}
+
+/// A revision number never used before in this process.
+fn next_revision() -> u64 {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NEXT: AtomicU64 = AtomicU64::new(1);
+    NEXT.fetch_add(1, Ordering::Relaxed)
 }
 
 /// Model-space bounds of a sketch's geometry (the origin point alone counts as empty).
@@ -521,6 +584,60 @@ mod tests {
             panic!()
         };
         assert!((doc.bodies[0].face_center(face).z - 25.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_new_document_has_a_new_revision() {
+        // The viewport re-uploads meshes when the revision changes: a replacement
+        // document must never repeat the revision of the one it replaces.
+        let a = Document::default();
+        let (model, _) = peet_model::samples::bracket();
+        let b = Document::from_model(model, None);
+        assert_ne!(a.revision, b.revision);
+        assert_ne!(Document::default().revision, Document::default().revision);
+    }
+
+    #[test]
+    fn flat_pattern_view_shares_topology_and_references() {
+        let (model, _) = peet_model::samples::enclosure();
+        let mut doc = Document::from_model(model, None);
+        assert!(doc.has_sheet_metal());
+        let folded = doc.bodies[0].clone();
+        let picks: Vec<GeomRef> = [0u32, 7, 23, 41]
+            .into_iter()
+            .map(|f| GeomRef::Face {
+                body: 0,
+                face: peet_kernel::FaceId(f),
+            })
+            .chain([3u32, 30].into_iter().map(|e| GeomRef::Edge {
+                body: 0,
+                edge: peet_kernel::EdgeId(e),
+            }))
+            .collect();
+        let refs: Vec<_> = picks.iter().map(|g| doc.persist(*g)).collect();
+
+        doc.set_flat(true);
+        let flat = doc.bodies[0].clone();
+        assert!(flat.flat && !folded.flat);
+        assert_ne!(flat.stamp, folded.stamp);
+        assert_eq!(flat.solid.faces.len(), folded.solid.faces.len());
+        let t = 1.5;
+        assert!(
+            (flat.solid.bounds().size().z - t).abs() < 1e-9,
+            "the flat pattern is flat"
+        );
+        // Picking the same element in the flat view gives the same reference.
+        let flat_refs: Vec<_> = picks.iter().map(|g| doc.persist(*g)).collect();
+        assert_eq!(refs, flat_refs);
+        // A change while flat keeps showing flat.
+        doc.change("Thicker", |m| {
+            m.parameters.set("thickness", "2mm").unwrap();
+        });
+        assert!(doc.bodies[0].flat);
+        assert!((doc.bodies[0].solid.bounds().size().z - 2.0).abs() < 1e-9);
+        doc.set_flat(false);
+        assert!(!doc.bodies[0].flat);
+        assert_eq!(doc.bodies[0].stamp, doc.evaluation().bodies[0].stamp);
     }
 
     #[test]

@@ -10,6 +10,8 @@ use peet_sketch::Sketch;
 use peet_sketch::expr::{Expr, Parameters};
 use serde::{Deserialize, Serialize};
 
+use peet_sheetmetal::{FlangePosition, ReliefType};
+
 use crate::extrude::Extrude;
 use crate::naming::{EdgeRef, FaceRef, VertexRef};
 
@@ -24,6 +26,8 @@ pub enum ScalarKind {
     Length,
     /// Degrees.
     Angle,
+    /// A plain number (a K-factor, a ratio).
+    Number,
 }
 
 /// A number the user entered: a plain value, or an expression over the parameter table
@@ -75,7 +79,7 @@ impl Scalar {
             Some(e) => e.clone(),
             None => match kind {
                 ScalarKind::Length => crate::units::length_value_text(self.value, params),
-                ScalarKind::Angle => format_number(self.value),
+                ScalarKind::Angle | ScalarKind::Number => format_number(self.value),
             },
         }
     }
@@ -266,6 +270,126 @@ pub struct ExtrudeFeature {
     pub params: Extrude,
 }
 
+/// How a sheet metal body works out the flat length of its bends, as entered.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum BendModelDef {
+    KFactor(Scalar),
+    /// Bend allowance in mm.
+    Allowance(Scalar),
+    /// Bend deduction in mm.
+    Deduction(Scalar),
+}
+
+/// A sheet metal body's settings, as entered (values may be expressions).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SheetSettingsDef {
+    pub thickness: Scalar,
+    /// Default inner bend radius.
+    pub radius: Scalar,
+    pub model: BendModelDef,
+    pub relief: ReliefType,
+    /// Relief width and how far it reaches past the bend, as a multiple of the thickness.
+    pub relief_ratio: Scalar,
+}
+
+impl Default for SheetSettingsDef {
+    fn default() -> Self {
+        let d = peet_sheetmetal::SheetSettings::default();
+        let k = match d.model {
+            peet_sheetmetal::BendModel::KFactor(k) => k,
+            _ => 0.44,
+        };
+        Self {
+            thickness: Scalar::new(d.thickness),
+            radius: Scalar::new(d.radius),
+            model: BendModelDef::KFactor(Scalar::new(k)),
+            relief: d.relief,
+            relief_ratio: Scalar::new(d.relief_ratio),
+        }
+    }
+}
+
+impl SheetSettingsDef {
+    /// Every value that can hold an expression.
+    pub fn scalars(&self) -> Vec<&Scalar> {
+        let model = match &self.model {
+            BendModelDef::KFactor(v) | BendModelDef::Allowance(v) | BendModelDef::Deduction(v) => v,
+        };
+        vec![&self.thickness, &self.radius, model, &self.relief_ratio]
+    }
+}
+
+/// The first feature of a sheet metal body: a plate from a closed sketch, or a profile of
+/// lines from an open one, with a bend at every corner.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BaseFlangeFeature {
+    pub sketch: FeatureId,
+    pub settings: SheetSettingsDef,
+    /// Put the thickness on the other side: against the sketch normal for a plate, to the
+    /// right of the lines for an open profile.
+    pub reverse: bool,
+    /// Open profiles: how far the profile is extruded.
+    pub depth: Scalar,
+    /// Open profiles: extrude to both sides of the sketch plane.
+    pub symmetric: bool,
+    /// Open profiles: extrude against the sketch normal.
+    pub flip_depth: bool,
+}
+
+impl BaseFlangeFeature {
+    pub fn new(sketch: FeatureId) -> Self {
+        Self {
+            sketch,
+            settings: SheetSettingsDef::default(),
+            reverse: false,
+            depth: Scalar::new(50.0),
+            symmetric: false,
+            flip_depth: false,
+        }
+    }
+}
+
+/// A flange added on an edge of a sheet metal body, with a bend.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct EdgeFlangeFeature {
+    /// The edge: where a flat face of the sheet meets its side. `None` until picked.
+    pub edge: Option<EdgeRef>,
+    /// Outside length: from the outer virtual sharp to the end of the flange.
+    pub length: Scalar,
+    /// Bend angle in degrees (90: square to the face).
+    pub angle: Scalar,
+    pub position: FlangePosition,
+    /// Set-back of the flange from the start and the end of the edge.
+    pub offset_start: Scalar,
+    pub offset_end: Scalar,
+    /// Bend to the other side of the sheet.
+    pub flip: bool,
+    /// Inner bend radius, if not the body's default.
+    pub radius: Option<Scalar>,
+}
+
+impl EdgeFlangeFeature {
+    pub fn new(edge: Option<EdgeRef>) -> Self {
+        Self {
+            edge,
+            length: Scalar::new(20.0),
+            angle: Scalar::new(90.0),
+            position: FlangePosition::MaterialInside,
+            offset_start: Scalar::new(0.0),
+            offset_end: Scalar::new(0.0),
+            flip: false,
+            radius: None,
+        }
+    }
+}
+
+/// A cut through a sheet metal body, square to the sheet, from a sketch on one of its flat
+/// faces. It is made in the flat pattern, so it can run across bends.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SheetCutFeature {
+    pub sketch: FeatureId,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum FeatureKind {
     Sketch(Box<SketchFeature>),
@@ -274,6 +398,9 @@ pub enum FeatureKind {
     Axis(AxisDef),
     Point(PointDef),
     CoordSystem(CoordSystemDef),
+    BaseFlange(Box<BaseFlangeFeature>),
+    EdgeFlange(Box<EdgeFlangeFeature>),
+    SheetCut(Box<SheetCutFeature>),
 }
 
 impl FeatureKind {
@@ -286,6 +413,9 @@ impl FeatureKind {
             Self::Axis(_) => "Reference axis",
             Self::Point(_) => "Reference point",
             Self::CoordSystem(_) => "Coordinate system",
+            Self::BaseFlange(_) => "Base flange",
+            Self::EdgeFlange(_) => "Edge flange",
+            Self::SheetCut(_) => "Sheet metal cut",
         }
     }
 
@@ -299,12 +429,26 @@ impl FeatureKind {
             Self::Axis(_) => "Axis",
             Self::Point(_) => "Point",
             Self::CoordSystem(_) => "Coordinate System",
+            Self::BaseFlange(_) => "Base-Flange",
+            Self::EdgeFlange(_) => "Edge-Flange",
+            Self::SheetCut(_) => "Sheet-Cut",
         }
     }
 
     /// Whether the feature changes the bodies (as opposed to sketches and reference geometry).
     pub fn is_solid(&self) -> bool {
-        matches!(self, Self::Extrude(_))
+        matches!(
+            self,
+            Self::Extrude(_) | Self::BaseFlange(_) | Self::EdgeFlange(_) | Self::SheetCut(_)
+        )
+    }
+
+    /// Whether the feature makes or changes a sheet metal body.
+    pub fn is_sheet_metal(&self) -> bool {
+        matches!(
+            self,
+            Self::BaseFlange(_) | Self::EdgeFlange(_) | Self::SheetCut(_)
+        )
     }
 
     /// The features this one refers to directly, without duplicates.
@@ -345,6 +489,13 @@ impl FeatureKind {
                 point_deps(&def.origin, &mut out);
                 plane_deps(&def.orientation, &mut out);
             }
+            Self::BaseFlange(b) => out.push(b.sketch),
+            Self::EdgeFlange(e) => {
+                if let Some(edge) = &e.edge {
+                    out.extend(edge.features());
+                }
+            }
+            Self::SheetCut(c) => out.push(c.sketch),
         }
         out.sort_unstable();
         out.dedup();
@@ -361,6 +512,17 @@ impl FeatureKind {
             Self::Plane(PlaneDef::Midplane { .. }) => Vec::new(),
             Self::Point(PointDef::Coordinates { x, y, z }) => vec![x, y, z],
             Self::Point(PointDef::Vertex(_)) => Vec::new(),
+            Self::BaseFlange(b) => {
+                let mut v = b.settings.scalars();
+                v.push(&b.depth);
+                v
+            }
+            Self::EdgeFlange(e) => {
+                let mut v = vec![&e.length, &e.angle, &e.offset_start, &e.offset_end];
+                v.extend(e.radius.as_ref());
+                v
+            }
+            Self::SheetCut(_) => Vec::new(),
         }
     }
 }

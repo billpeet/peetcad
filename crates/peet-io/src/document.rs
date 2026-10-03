@@ -21,9 +21,13 @@ use serde::{Deserialize, Serialize};
 use crate::peet::{PeetError, Reader, SectionKind, Writer};
 
 /// Schema versions of the sections this version writes and reads.
+///
+/// - Model 2 (Phase 4): sheet metal features, a unitless scalar kind. Version 1 models
+///   decode unchanged (the new variants are appended).
+/// - B-rep 2 (Phase 4): sheet metal face roles in face names.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 1;
-pub const BREP_SCHEMA: u16 = 1;
+pub const MODEL_SCHEMA: u16 = 2;
+pub const BREP_SCHEMA: u16 = 2;
 pub const MESH_SCHEMA: u16 = 1;
 
 /// The file extension, without the dot.

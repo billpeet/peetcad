@@ -186,17 +186,19 @@ Each phase ends with something usable and demonstrable. Estimates are rough and 
 ### Phase 4: Sheet Metal MVP ⭐
 *Goal: design a real sheet metal part and send its flat pattern to a laser cutter.*
 
-- [ ] Sheet metal part settings: thickness, default bend radius, K-factor, relief type
-- [ ] **Base flange / tab**: from a closed sketch (plate) or an open sketch (profile with automatic bends)
-- [ ] **Edge flange**: select an edge, set length, angle and offset (inner/outer/material-inside), and drag to set length
-- [ ] Bend reliefs: rectangular, obround, tear
-- [ ] **Cuts** through sheet metal, including across bends (cut normal to the sheet)
-- [ ] **Unfold / fold** toggle and live **flat pattern** view
-- [ ] Bend allowance models: K-factor, bend allowance and bend deduction, with values shown per bend
-- [ ] **DXF export** of the flat pattern: outer profile, cutouts, bend lines on a separate layer, bend annotations (direction, angle, radius)
-- [ ] Bend table / flat pattern report (bend order, angles, flat size)
+- [x] Sheet metal part settings: thickness, default bend radius, K-factor, relief type
+- [x] **Base flange / tab**: from a closed sketch (plate) or an open sketch (profile with automatic bends)
+- [x] **Edge flange**: select an edge, set length, angle and offset (inner/outer/material-inside), and drag to set length
+- [x] Bend reliefs: rectangular, obround, tear
+- [x] **Cuts** through sheet metal, including across bends (cut normal to the sheet)
+- [x] **Unfold / fold** toggle and live **flat pattern** view
+- [x] Bend allowance models: K-factor, bend allowance and bend deduction, with values shown per bend
+- [x] **DXF export** of the flat pattern: outer profile, cutouts, bend lines on a separate layer, bend annotations (direction, angle, radius)
+- [x] Bend table / flat pattern report (bend order, angles, flat size)
 
 **Exit criteria:** Model an enclosure panel with 4 flanges, reliefs and cutouts, export the DXF, and it is dimensionally correct against hand-calculated values.
+
+**Status:** Implemented in the new `peet-sheetmetal` crate, with features in `peet-model` (`sheet.rs`), DXF in `peet-io` and the UI in `peet-ui`. Sheet metal is native and flat first: a body carries a layout of flanges and bend strips in flat-pattern coordinates. One build produces the flat solid and a folded solid with *the same topology*, so unfolding is exact and free, and references and picking work in either view ([ADR 0004](docs/adr/0004-native-sheet-metal.md)). `crates/peet-io/tests/sheet_metal_exit.rs` models the enclosure panel (200 × 150 × 1.5 mm, R2, K 0.44; four 25 mm flanges set back 10 mm with rectangular reliefs; a window, four holes, a hole in a flange and a slot across a bend). It exports the DXF, reads it back and checks it against the hand calculation: blank 244.356636 × 194.356636 mm, every hole centre including the unfolded flange hole, bend-line positions and lengths, the slot's 20 mm flat length and the bend notes. 24 tests in `peet-sheetmetal` (including a property test over random flanges that checks validity and volume at K = 0.5) and 10 in `peet-model/tests/sheet_metal.rs` cover positions, up and down bends, reliefs, flanges on flanges, open profiles, cuts across bends, overlaps and references that survive edits. The panel rebuilds in about 4 ms in a release build. It was also checked by hand in the running app (**File → Open Sample Enclosure Panel**): folding, the flat pattern view with bend lines, the bend table, the panels and dragging a flange's length. That check found and fixed an older bug: bodies were not drawn after a part was opened or created, because a new document could repeat the old one's revision number. Known limits: corners are left open (bend zones that meet are reported as an overlap; closed corners are Phase 5); straight cut edges cross bends only parallel or square to the bend line, and round holes across bends are refused; open profiles take lines only (no arcs); an edge flange spans one edge (selecting several edges makes one flange each); Extrude or Cut-Extrude on a sheet body turns it into a plain solid, with a warning.
 
 ### Phase 5: Sheet Metal complete + Interop
 *Goal: sheet metal on par with mainstream tools for everyday work.*
@@ -312,6 +314,7 @@ Benchmarks (`criterion`) run in CI for the solver, kernel operations and regener
 | License | MIT |
 | Native file format | Compact binary container (`postcard` + `lz4`), with regenerable geometry and mesh caches for fast opening ([ADR 0003](docs/adr/0003-native-file-format.md)) |
 | Persistent naming | Faces are named by the feature and role that made them, carried through booleans; references add neighbours and a point to break ties ([ADR 0001](docs/adr/0001-persistent-naming.md)) |
+| Sheet metal | Native and flat first: a layout of flanges and bends in flat coordinates; the folded and flat solids share their topology, so unfolding is exact ([ADR 0004](docs/adr/0004-native-sheet-metal.md)) |
 | Regeneration and undo | Content-hashed keys per feature decide what to rebuild; undo stores model snapshots that share unchanged features ([ADR 0002](docs/adr/0002-incremental-regeneration.md)) |
 
 ## Open questions

@@ -1,6 +1,6 @@
 [package]
 name = "peet-io"
-description = "PeetCAD file formats: the native .peet format and STL export (DXF and STEP later)"
+description = "PeetCAD file formats: the native .peet format, STL export and DXF flat patterns (STEP later)"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,6 +11,8 @@ authors.workspace = true
 peet-math.workspace = true
 peet-kernel.workspace = true
 peet-model.workspace = true
+peet-sheetmetal.workspace = true
+peet-sketch.workspace = true
 serde.workspace = true
 postcard.workspace = true
 lz4_flex = { version = "0.14", default-features = false, features = ["std", "safe-encode", "safe-decode", "checked-decode"] }

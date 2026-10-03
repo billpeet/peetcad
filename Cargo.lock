@@ -2513,6 +2513,8 @@ dependencies = [
  "peet-kernel",
  "peet-math",
  "peet-model",
+ "peet-sheetmetal",
+ "peet-sketch",
  "postcard",
  "proptest",
  "ron",
@@ -2543,6 +2545,7 @@ version = "0.1.0"
 dependencies = [
  "peet-kernel",
  "peet-math",
+ "peet-sheetmetal",
  "peet-sketch",
  "postcard",
  "proptest",
@@ -2576,6 +2579,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "peet-sheetmetal"
+version = "0.1.0"
+dependencies = [
+ "peet-kernel",
+ "peet-math",
+ "peet-sketch",
+ "proptest",
+ "serde",
+]
+
+[[package]]
 name = "peet-sketch"
 version = "0.1.0"
 dependencies = [
@@ -2599,6 +2613,7 @@ dependencies = [
  "peet-model",
  "peet-platform",
  "peet-render",
+ "peet-sheetmetal",
  "peet-sketch",
  "serde",
 ]

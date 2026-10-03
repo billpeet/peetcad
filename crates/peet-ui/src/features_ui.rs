@@ -1,4 +1,4 @@
-//! Properties panels for features: extrusions and reference geometry.
+//! Properties panels for features: extrusions, sheet metal and reference geometry.
 //!
 //! Panels edit a copy of the feature's definition; the app compares it with the model
 //! afterwards and applies the difference as an undoable change. References to other
@@ -7,9 +7,11 @@
 
 use egui::{Color32, Ui};
 use peet_model::{
-    AxisDef, AxisRef, CoordSystemDef, EdgeRef, EndCondition, FaceRef, FeatureKind, Operation,
-    PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind, StdAxis, VertexRef,
+    AxisDef, AxisRef, BaseFlangeFeature, BendModelDef, CoordSystemDef, EdgeFlangeFeature, EdgeRef,
+    EndCondition, FaceRef, FeatureKind, Operation, PlaneDef, PlaneRef, PointDef, PointRef, Scalar,
+    ScalarKind, SheetSettingsDef, StdAxis, VertexRef,
 };
+use peet_sheetmetal::{FlangePosition, ReliefType};
 use peet_sketch::expr::Parameters;
 
 use crate::document::Document;
@@ -36,6 +38,8 @@ pub enum Slot {
     PointVertex,
     CsysOrigin,
     CsysOrientation,
+    /// The edge an edge flange goes on.
+    FlangeEdge,
 }
 
 impl Slot {
@@ -49,6 +53,9 @@ impl Slot {
             }
             Self::AxisFirst => "Click a straight edge, a round edge, a round face or a plane.",
             Self::PointVertex | Self::CsysOrigin => "Click a vertex.",
+            Self::FlangeEdge => {
+                "Click an edge along the top or bottom face of the sheet metal part (the flange bends towards that face)."
+            }
         }
     }
 }
@@ -124,6 +131,10 @@ pub fn apply_pick(kind: &mut FeatureKind, slot: Slot, picked: Picked) -> Result<
         (FeatureKind::CoordSystem(def), Slot::CsysOrientation) => {
             def.orientation = picked.plane()?;
         }
+        (FeatureKind::EdgeFlange(e), Slot::FlangeEdge) => match picked {
+            Picked::Edge(r) => e.edge = Some(r),
+            _ => return Err("Pick an edge of the sheet metal part, not a face.".into()),
+        },
         _ => return Err("That can't be used here.".into()),
     }
     Ok(())
@@ -181,6 +192,7 @@ pub fn scalar_field(
         let unit = match kind {
             ScalarKind::Length => params.units.length.suffix(),
             ScalarKind::Angle => "°",
+            ScalarKind::Number => "",
         };
         ui.weak(unit);
         if value.expression.is_some()
@@ -189,6 +201,7 @@ pub fn scalar_field(
             let shown = match kind {
                 ScalarKind::Length => params.units.format_length(v),
                 ScalarKind::Angle => params.units.format_angle(v),
+                ScalarKind::Number => peet_model::feature::format_number(v),
             };
             ui.weak(format!("= {shown}"));
         }
@@ -213,7 +226,15 @@ fn reference_row(
         if picking == Some(slot) {
             ui.colored_label(PICKING, "click it…");
         } else {
-            ui.label(text);
+            // Long descriptions would widen the whole panel: shorten, full text on hover.
+            const MAX: usize = 28;
+            if text.chars().count() > MAX {
+                let short: String = text.chars().take(MAX - 1).collect();
+                ui.label(format!("{}…", short.trim_end()))
+                    .on_hover_text(text);
+            } else {
+                ui.label(text);
+            }
         }
         if ui
             .small_button("Pick")
@@ -560,8 +581,255 @@ pub fn reference_panel(
                     &mut out,
                 );
             }
-            FeatureKind::Sketch(_) | FeatureKind::Extrude(_) => {}
+            FeatureKind::Sketch(_)
+            | FeatureKind::Extrude(_)
+            | FeatureKind::BaseFlange(_)
+            | FeatureKind::EdgeFlange(_)
+            | FeatureKind::SheetCut(_) => {}
         });
+    out
+}
+
+/// A sheet metal body's settings (thickness, radius, bend model, reliefs).
+fn sheet_settings_rows(
+    ui: &mut Ui,
+    s: &mut SheetSettingsDef,
+    params: &Parameters,
+    out: &mut PanelResult,
+) {
+    ui.label("Thickness");
+    out.committed |= scalar_field(
+        ui,
+        "sm_thickness",
+        &mut s.thickness,
+        ScalarKind::Length,
+        params,
+    );
+    ui.end_row();
+    ui.label("Bend radius");
+    out.committed |= scalar_field(ui, "sm_radius", &mut s.radius, ScalarKind::Length, params);
+    ui.end_row();
+
+    ui.label("Bend model");
+    let label = match s.model {
+        BendModelDef::KFactor(_) => "K-factor",
+        BendModelDef::Allowance(_) => "Bend allowance",
+        BendModelDef::Deduction(_) => "Bend deduction",
+    };
+    egui::ComboBox::from_id_salt("sm_model")
+        .selected_text(label)
+        .show_ui(ui, |ui| {
+            if ui
+                .selectable_label(label == "K-factor", "K-factor")
+                .clicked()
+                && !matches!(s.model, BendModelDef::KFactor(_))
+            {
+                s.model = BendModelDef::KFactor(Scalar::new(0.44));
+            }
+            if ui
+                .selectable_label(label == "Bend allowance", "Bend allowance")
+                .on_hover_text("A fixed flat length for every bend.")
+                .clicked()
+                && !matches!(s.model, BendModelDef::Allowance(_))
+            {
+                s.model = BendModelDef::Allowance(Scalar::new(2.0));
+            }
+            if ui
+                .selectable_label(label == "Bend deduction", "Bend deduction")
+                .on_hover_text("How much shorter than the outside lengths the flat is, per bend.")
+                .clicked()
+                && !matches!(s.model, BendModelDef::Deduction(_))
+            {
+                s.model = BendModelDef::Deduction(Scalar::new(2.0));
+            }
+        });
+    ui.end_row();
+    match &mut s.model {
+        BendModelDef::KFactor(k) => {
+            ui.label("K-factor").on_hover_text(
+                "Where the neutral axis lies, as a fraction of the thickness from the inside of the bend (0.3 to 0.5 is typical).",
+            );
+            out.committed |= scalar_field(ui, "sm_k", k, ScalarKind::Number, params);
+        }
+        BendModelDef::Allowance(v) => {
+            ui.label("Allowance");
+            out.committed |= scalar_field(ui, "sm_ba", v, ScalarKind::Length, params);
+        }
+        BendModelDef::Deduction(v) => {
+            ui.label("Deduction");
+            out.committed |= scalar_field(ui, "sm_bd", v, ScalarKind::Length, params);
+        }
+    }
+    ui.end_row();
+
+    ui.label("Relief");
+    egui::ComboBox::from_id_salt("sm_relief")
+        .selected_text(s.relief.label())
+        .show_ui(ui, |ui| {
+            for r in ReliefType::ALL {
+                ui.selectable_value(&mut s.relief, r, r.label());
+            }
+        })
+        .response
+        .on_hover_text("The cut made where a bend stops short of the end of an edge.");
+    ui.end_row();
+    if s.relief != ReliefType::Tear {
+        ui.label("Relief ratio").on_hover_text(
+            "Relief width, and how far it reaches past the bend, as a multiple of the thickness.",
+        );
+        out.committed |= scalar_field(
+            ui,
+            "sm_ratio",
+            &mut s.relief_ratio,
+            ScalarKind::Number,
+            params,
+        );
+        ui.end_row();
+    }
+}
+
+/// Base flange: the sheet settings, plus depth for open profiles.
+pub fn base_flange_panel(ui: &mut Ui, doc: &Document, b: &mut BaseFlangeFeature) -> PanelResult {
+    let mut out = PanelResult::default();
+    let params = &doc.model.parameters;
+    let open = doc.model.sketch(b.sketch).is_some_and(|s| {
+        peet_sketch::region::find_regions(&s.sketch)
+            .regions
+            .is_empty()
+    });
+    egui::Grid::new("base_flange_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Sketch");
+            ui.label(format!(
+                "{} ({})",
+                doc.model.name_of(b.sketch),
+                if open { "open profile" } else { "plate" }
+            ));
+            ui.end_row();
+            if open {
+                ui.label("Depth");
+                out.committed |=
+                    scalar_field(ui, "bf_depth", &mut b.depth, ScalarKind::Length, params);
+                ui.end_row();
+                ui.label("");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut b.symmetric, "Mid-plane");
+                    if !b.symmetric {
+                        ui.checkbox(&mut b.flip_depth, "Reverse");
+                    }
+                });
+                ui.end_row();
+            }
+            ui.label("Thickness side");
+            ui.checkbox(&mut b.reverse, "Flip").on_hover_text(if open {
+                "Put the thickness on the other side of the lines."
+            } else {
+                "Put the thickness on the other side of the sketch plane."
+            });
+            ui.end_row();
+            sheet_settings_rows(ui, &mut b.settings, params, &mut out);
+        });
+    ui.add_space(6.0);
+    ui.weak(if open {
+        "The lines are one face of the sheet; each corner gets a bend with the bend radius."
+    } else {
+        "A flat plate from the sketch's regions. Add flanges on its edges with Edge Flange."
+    });
+    out
+}
+
+/// Edge flange: its edge, length, angle, position, offsets and radius.
+pub fn edge_flange_panel(
+    ui: &mut Ui,
+    doc: &Document,
+    e: &mut EdgeFlangeFeature,
+    picking: Option<Slot>,
+    default_radius: Option<f64>,
+) -> PanelResult {
+    let mut out = PanelResult::default();
+    let params = &doc.model.parameters;
+    egui::Grid::new("edge_flange_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            let text = match &e.edge {
+                Some(r) => {
+                    let names: Vec<String> = r
+                        .faces
+                        .iter()
+                        .map(|f| doc.model.describe_face(f))
+                        .collect();
+                    names.join(" / ")
+                }
+                None => "None yet".to_owned(),
+            };
+            reference_row(ui, "Edge", text, Slot::FlangeEdge, picking, &mut out);
+            ui.label("Length").on_hover_text(
+                "Outside length: from the outer virtual sharp (where the outer faces would meet without the bend) to the end of the flange. Drag the arrow in the view to change it.",
+            );
+            out.committed |= scalar_field(ui, "ef_length", &mut e.length, ScalarKind::Length, params);
+            ui.end_row();
+            ui.label("Angle");
+            out.committed |= scalar_field(ui, "ef_angle", &mut e.angle, ScalarKind::Angle, params);
+            ui.end_row();
+            ui.label("Position");
+            egui::ComboBox::from_id_salt("ef_position")
+                .selected_text(e.position.label())
+                .show_ui(ui, |ui| {
+                    for p in FlangePosition::ALL {
+                        let tip = match p {
+                            FlangePosition::MaterialInside => {
+                                "The flange's outside is flush with the edge: the part keeps its outside size."
+                            }
+                            FlangePosition::MaterialOutside => {
+                                "The flange's inside is flush with the edge."
+                            }
+                            FlangePosition::BendOutside => {
+                                "The bend starts at the edge: the face keeps its full size."
+                            }
+                        };
+                        ui.selectable_value(&mut e.position, p, p.label())
+                            .on_hover_text(tip);
+                    }
+                });
+            ui.end_row();
+            ui.label("Offset start");
+            out.committed |=
+                scalar_field(ui, "ef_off0", &mut e.offset_start, ScalarKind::Length, params);
+            ui.end_row();
+            ui.label("Offset end");
+            out.committed |=
+                scalar_field(ui, "ef_off1", &mut e.offset_end, ScalarKind::Length, params);
+            ui.end_row();
+            ui.label("Direction");
+            ui.checkbox(&mut e.flip, "Flip")
+                .on_hover_text("Bend to the other side of the sheet.");
+            ui.end_row();
+            ui.label("Bend radius");
+            ui.horizontal(|ui| {
+                let mut custom = e.radius.is_some();
+                if ui.checkbox(&mut custom, "Custom").changed() {
+                    e.radius = custom.then(|| Scalar::new(default_radius.unwrap_or(1.0)));
+                }
+                if e.radius.is_none()
+                    && let Some(r) = default_radius
+                {
+                    ui.weak(format!("body default, {}", params.units.format_length(r)));
+                }
+            });
+            ui.end_row();
+            if let Some(r) = &mut e.radius {
+                ui.label("");
+                out.committed |= scalar_field(ui, "ef_radius", r, ScalarKind::Length, params);
+                ui.end_row();
+            }
+        });
+    ui.add_space(6.0);
+    ui.weak(
+        "Set the offsets to stop the flange short of the corners; reliefs are cut where it does.",
+    );
     out
 }
 

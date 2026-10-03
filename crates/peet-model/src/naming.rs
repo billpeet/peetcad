@@ -42,6 +42,7 @@ use std::sync::Arc;
 
 use peet_kernel::{EdgeId, FaceId, Solid, VertexId};
 use peet_math::DVec3;
+use peet_sheetmetal::SheetBody;
 use peet_sketch::EntityId;
 use serde::{Deserialize, Serialize};
 
@@ -55,8 +56,21 @@ pub enum FaceRole {
     NearCap,
     /// The cap at the far end of an extrusion (a pocket's floor).
     FarCap,
-    /// A wall swept by this curve of the feature's sketch.
+    /// A wall swept by this curve of the feature's sketch (also a base flange's or a sheet
+    /// metal cut's wall from that sketch curve).
     Side(EntityId),
+    /// The top side of a sheet metal flange: `part` tells the flanges of one feature
+    /// apart (the profile line for an open-profile base flange, else 0).
+    SheetTop(u32),
+    /// The bottom side of a sheet metal flange.
+    SheetBottom(u32),
+    /// The top side of a bend (the inside when it bends up).
+    BendTop(u32),
+    /// The bottom side of a bend.
+    BendBottom(u32),
+    /// A wall through the sheet that the feature made: a flange's end or sides, a relief
+    /// (numbered within `part`, see `peet_sheetmetal::layout::wall`).
+    Wall(u32, u8),
 }
 
 /// One feature's contribution to a face.
@@ -154,6 +168,10 @@ pub struct Body {
     /// Identifies this exact geometry: two bodies with the same stamp are identical, so
     /// display meshes can be cached by it.
     pub stamp: u64,
+    /// For sheet metal bodies: the sheet definition, the flat pattern and what each face
+    /// is. Not saved in the B-rep cache (rebuilt from the model).
+    #[serde(skip)]
+    pub sheet: Option<Arc<SheetBody>>,
 }
 
 impl Body {

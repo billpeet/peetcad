@@ -3,8 +3,10 @@
 A lightweight parametric 3D CAD application written in Rust, with sheet metal first.
 It runs as a native Windows app and in the browser (WebAssembly), from one codebase.
 
-> **Status:** early development (Phase 3: a parametric, history-based modeller with
-> sketches, extrude and cut, reference geometry, undo and a native file format).
+> **Status:** early development (Phase 4: sheet metal, with base and edge flanges,
+> reliefs, cuts across bends, a live flat pattern and DXF export, on top of a
+> parametric, history-based modeller with sketches, extrude and cut, reference
+> geometry, undo and a native file format).
 > See [ROADMAP.md](ROADMAP.md) for the plan.
 
 ## Running
@@ -82,6 +84,24 @@ Click a face or edge in the viewport to select it (hovering highlights it first)
 a model face, select a flat face and press `S`. **File → Export STL** saves the bodies as a
 mesh.
 
+### Sheet metal
+
+Select a sketch and click **Base Flange** (toolbar or **Features → Sheet Metal**). A
+closed shape makes a flat plate; a chain of connected lines makes a profile with a bend at
+each corner. Its properties set the thickness, bend radius, bend model (K-factor, bend
+allowance or bend deduction) and relief type.
+
+| Action | How |
+|---|---|
+| Add a flange | Select one or more edges along the top or bottom face, then **Edge Flange** (or click it first and pick an edge). Set the length (measured on the outside), angle, position (material inside or outside, bend outside), offsets from the ends of the edge, and a custom radius. Drag the orange arrow on the selected flange to change its length |
+| Cut through the sheet | Sketch on a flat face of the sheet, then **Cut**. The cut is made in the flat pattern, so straight edges can run across bends |
+| Flat pattern | `U` toggles between folded and flat; bend lines are dashed |
+| Bend table | **Bends**: flat size, and every bend's direction, angle, radius, K-factor, allowance and deduction (copy it as text for a spreadsheet) |
+| DXF for the laser | **File → Export Flat Pattern DXF**: outline, cutouts, bend lines and bend notes on separate layers, in mm |
+
+**File → Open Sample Enclosure Panel** opens a panel with four flanges, reliefs and
+cutouts. Try changing the `thickness` and `flange` parameters (**Tools → Parameters**).
+
 ### The feature tree
 
 The tree is the part's history. Features refer to faces by what made them (not by number),
@@ -128,8 +148,9 @@ crates/
   peet-render/    wgpu viewport renderer: camera, grid, meshes, edges, overlays
   peet-sketch/    2D sketches: entities, constraints, solver, expressions, editing operations
   peet-kernel/    B-rep kernel: planes and cylinders, extrude, booleans, validation, tessellation
-  peet-model/     the parametric core: feature tree, persistent naming, rebuilds, undo
-  peet-io/        file formats: native .peet, STL export
+  peet-sheetmetal/ sheet metal: flat layouts of flanges and bends, folding, flat patterns, bend math
+  peet-model/     the parametric core: feature tree, persistent naming, rebuilds, sheet metal features, undo
+  peet-io/        file formats: native .peet, STL export, DXF flat patterns
   peet-ui/        egui application shell: panels, commands, viewport interaction
   peetcad/        the application binary (native main and web entry point)
 ```

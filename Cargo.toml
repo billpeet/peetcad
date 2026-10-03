@@ -18,6 +18,7 @@ peet-math = { path = "crates/peet-math" }
 peet-model = { path = "crates/peet-model" }
 peet-platform = { path = "crates/peet-platform" }
 peet-render = { path = "crates/peet-render" }
+peet-sheetmetal = { path = "crates/peet-sheetmetal" }
 peet-sketch = { path = "crates/peet-sketch" }
 peet-ui = { path = "crates/peet-ui" }
 

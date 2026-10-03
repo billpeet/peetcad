@@ -173,6 +173,31 @@ impl Viewport {
         }
     }
 
+    /// Where a model point appears on screen (in points), if it is in front of the camera.
+    pub fn project(&self, p: DVec3, scene: &Aabb) -> Option<egui::Pos2> {
+        let rect = self.last_rect;
+        let clip = self.camera.view_projection(self.aspect(), scene) * p.extend(1.0);
+        if clip.w <= 0.0 {
+            return None;
+        }
+        let ndc = clip.truncate() / clip.w;
+        Some(pos2(
+            rect.left() + (ndc.x as f32 + 1.0) * 0.5 * rect.width(),
+            rect.top() + (1.0 - ndc.y as f32) * 0.5 * rect.height(),
+        ))
+    }
+
+    /// The ray through a screen position (in points).
+    pub fn ray_at(&self, p: egui::Pos2) -> peet_math::Ray {
+        self.camera.ray(ndc(self.last_rect, p), self.aspect())
+    }
+
+    /// Model units per screen point at the camera's target distance.
+    pub fn world_per_point(&self) -> f64 {
+        self.camera
+            .world_per_pixel(f64::from(self.last_rect.height().max(1.0)))
+    }
+
     pub fn show(&mut self, ui: &mut Ui, params: &ViewportParams<'_>) -> ViewportEvents {
         let rect = ui.available_rect_before_wrap();
         self.last_rect = rect;
@@ -696,6 +721,35 @@ impl Viewport {
         for body in &params.document.bodies {
             for [a, b] in body.silhouettes.lines(view) {
                 self.overlay.line(a, b, edge_color);
+            }
+        }
+        // Bend lines on both sides of flat patterns, dashed.
+        let bend_color = if params.dark {
+            [120, 220, 140, 255]
+        } else {
+            [20, 140, 60, 255]
+        };
+        for body in params.document.bodies.iter().filter(|b| b.flat) {
+            let Some(sheet) = &body.source.sheet else {
+                continue;
+            };
+            let frame = sheet.layout.pieces[0].frame;
+            let t = sheet.layout.settings.thickness;
+            let lift = wpp * 0.5;
+            for line in &sheet.bend_lines {
+                for s in &line.segments {
+                    for z in [t + lift, -lift] {
+                        let a = frame.to_world(s[0].extend(z));
+                        let b = frame.to_world(s[1].extend(z));
+                        let dash = (wpp * 8.0).max(1e-6);
+                        let n = ((a.distance(b) / dash).ceil() as usize).clamp(1, 2000);
+                        for i in (0..n).step_by(2) {
+                            let t0 = i as f64 / n as f64;
+                            let t1 = ((i + 1) as f64 / n as f64).min(1.0);
+                            self.overlay.line(a.lerp(b, t0), a.lerp(b, t1), bend_color);
+                        }
+                    }
+                }
             }
         }
         let hover = params

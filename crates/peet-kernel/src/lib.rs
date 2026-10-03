@@ -8,6 +8,7 @@
 //! - [`extrude`]: solids from sketch regions
 //! - [`boolean`]: union / subtract / intersect, for add and cut features
 //! - [`tessellate`]: display meshes, edge polylines and silhouettes
+//! - [`transform`]: rigid placement of geometry and solids
 //!
 //! Every operation returns a valid solid or a [`KernelError`]; it must never panic or
 //! produce corrupt topology.
@@ -18,6 +19,7 @@ pub mod extrude;
 pub mod geom;
 pub mod tessellate;
 pub mod topo;
+pub mod transform;
 pub mod validate;
 
 pub use error::KernelError;

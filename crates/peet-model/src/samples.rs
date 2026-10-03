@@ -1,5 +1,5 @@
 //! Sample parts, built through the same API as the UI uses. They serve the exit-criterion
-//! test, the rebuild benchmark and "open a sample" in the app.
+//! tests, the rebuild benchmark and "open a sample" in the app.
 
 use peet_kernel::Surface;
 use peet_math::{DVec2, DVec3, Plane};
@@ -98,6 +98,75 @@ pub fn bracket() -> (Model, Engine) {
     (b.model, b.engine)
 }
 
+/// A sheet metal enclosure panel (the Phase 4 exit criterion part): a 200 × 150 plate,
+/// 1.5 mm thick (the `thickness` parameter), with a 25 mm flange on each edge set back
+/// 10 mm from the corners (with reliefs), an 80 × 40 window, four Ø5 mounting holes, a
+/// slot running across the right-hand bend and a Ø8 hole in the front flange.
+pub fn enclosure() -> (Model, Engine) {
+    let mut b = Builder {
+        model: Model::new(),
+        engine: Engine::new(),
+    };
+    b.model.name = "Enclosure Panel".to_owned();
+    let _ = b.model.parameters.set("thickness", "1.5mm");
+    let _ = b.model.parameters.set("flange", "25mm");
+    let base = b.sketch(PlaneRef::Standard(StdPlane::Top), |s| {
+        let shape = shapes::rectangle(s, DVec2::ZERO, DVec2::new(200.0, 150.0));
+        let (bottom, right) = (shape.curves[0], shape.curves[1]);
+        let corner = s.endpoints(bottom).expect("a line").0;
+        let _ = s.add_constraint(ConstraintKind::Coincident(corner, Sketch::ORIGIN));
+        let _ = s.add_dimension(ConstraintKind::Length(bottom), 200.0);
+        let _ = s.add_dimension(ConstraintKind::Length(right), 150.0);
+    });
+    let flange = b.model.add_base_flange(base);
+    if let Some(f) = b.model.feature_mut(flange)
+        && let FeatureKind::BaseFlange(def) = &mut f.kind
+    {
+        def.settings.thickness = Scalar {
+            value: 1.5,
+            expression: Some("thickness".to_owned()),
+        };
+        def.settings.radius = Scalar::new(2.0);
+    }
+    let t = 1.5;
+    let corners = [
+        DVec3::new(0.0, 0.0, t),
+        DVec3::new(200.0, 0.0, t),
+        DVec3::new(200.0, 150.0, t),
+        DVec3::new(0.0, 150.0, t),
+    ];
+    for i in 0..4 {
+        let edge = b.edge(corners[i], corners[(i + 1) % 4]);
+        let id = b.model.add_edge_flange(Some(edge));
+        if let Some(f) = b.model.feature_mut(id)
+            && let FeatureKind::EdgeFlange(e) = &mut f.kind
+        {
+            e.length = Scalar {
+                value: 25.0,
+                expression: Some("flange".to_owned()),
+            };
+            e.offset_start = Scalar::new(10.0);
+            e.offset_end = Scalar::new(10.0);
+        }
+    }
+    let top = b.face(DVec3::Z, DVec3::new(50.0, 50.0, t));
+    let cutouts = b.sketch(top, |s| {
+        shapes::rectangle(s, DVec2::new(60.0, 55.0), DVec2::new(140.0, 95.0));
+        for (x, y) in [(20.0, 20.0), (180.0, 20.0), (20.0, 130.0), (180.0, 130.0)] {
+            s.add_circle(DVec2::new(x, y), 2.5);
+        }
+        shapes::rectangle(s, DVec2::new(190.0, 70.0), DVec2::new(210.0, 80.0));
+    });
+    b.model.add_sheet_cut(cutouts);
+    let front = b.face(-DVec3::Y, DVec3::new(100.0, 0.0, 15.0));
+    let hole = b.sketch(front, |s| {
+        s.add_circle(DVec2::new(100.0, 15.0), 4.0);
+    });
+    b.model.add_sheet_cut(hole);
+    b.engine.regenerate(&mut b.model);
+    (b.model, b.engine)
+}
+
 /// The bracket's exact volume for a base plate `width` wide.
 pub fn bracket_volume(width: f64) -> f64 {
     let pi = std::f64::consts::PI;
@@ -137,6 +206,27 @@ impl Builder {
             edit(&mut e.params);
         }
         id
+    }
+
+    /// A reference to the edge between two points, in the model as built so far.
+    fn edge(&mut self, a: DVec3, b: DVec3) -> crate::EdgeRef {
+        let eval = self.engine.regenerate(&mut self.model);
+        for body in &eval.bodies {
+            for e in body.solid.edge_ids() {
+                let edge = body.solid.edge(e);
+                let (s, t) = (
+                    body.solid.vertex(edge.start).point,
+                    body.solid.vertex(edge.end).point,
+                );
+                let same = |p: DVec3, q: DVec3| p.distance(q) < 1e-9;
+                if ((same(s, a) && same(t, b)) || (same(s, b) && same(t, a)))
+                    && let Some(r) = body.edge_ref(e)
+                {
+                    return r;
+                }
+            }
+        }
+        panic!("the sample has no edge from {a} to {b}");
     }
 
     /// A reference to the planar face with outward normal `n` through `at`, in the model

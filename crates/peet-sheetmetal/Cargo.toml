@@ -1,6 +1,6 @@
 [package]
-name = "peet-model"
-description = "PeetCAD's parametric core: the feature tree, persistent naming, incremental regeneration, sheet metal features and undo"
+name = "peet-sheetmetal"
+description = "PeetCAD sheet metal: flat layouts of flanges and bends, folding, flat patterns and bend math"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -11,17 +11,10 @@ authors.workspace = true
 peet-math.workspace = true
 peet-sketch.workspace = true
 peet-kernel.workspace = true
-peet-sheetmetal.workspace = true
-web-time.workspace = true
-postcard.workspace = true
-serde = { workspace = true, features = ["rc"] }
+serde.workspace = true
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }
 
 [lints]
 workspace = true
-
-[[bench]]
-name = "regen"
-harness = false

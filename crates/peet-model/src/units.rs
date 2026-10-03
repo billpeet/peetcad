@@ -8,6 +8,7 @@ fn quantity_kind(kind: ScalarKind) -> QuantityKind {
     match kind {
         ScalarKind::Length => QuantityKind::Length,
         ScalarKind::Angle => QuantityKind::Angle,
+        ScalarKind::Number => QuantityKind::Number,
     }
 }
 

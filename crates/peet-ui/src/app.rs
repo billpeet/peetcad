@@ -3,9 +3,10 @@
 use eframe::egui_wgpu::RenderState;
 use egui::{Align, Layout, Ui};
 use peet_kernel::Surface;
+use peet_math::DVec3;
 use peet_model::{
-    AxisDef, CoordSystemDef, Datum, FeatureId, FeatureKind, PlaneDef, PlaneRef, PointDef, PointRef,
-    Scalar, StdPlane,
+    AxisDef, CoordSystemDef, Datum, EdgeRef, FeatureId, FeatureKind, PlaneDef, PlaneRef, PointDef,
+    PointRef, Scalar, ScalarKind, StdPlane,
 };
 use peet_platform::Instant;
 use peet_render::{Projection, StandardView};
@@ -32,6 +33,19 @@ struct OpenWindows {
     about: bool,
     plane_picker: bool,
     parameters: bool,
+    bend_table: bool,
+}
+
+/// A drag of an edge flange's length handle in progress.
+#[derive(Clone, Copy, Debug)]
+struct FlangeDrag {
+    id: FeatureId,
+    /// The flange's far end and direction when the drag started.
+    origin: DVec3,
+    dir: DVec3,
+    /// Its length then (mm), and where along its line the pointer was.
+    length: f64,
+    start: f64,
 }
 
 pub struct PeetApp {
@@ -68,6 +82,7 @@ pub struct PeetApp {
     quit_requested: bool,
     /// The window title last set, so it is only sent when it changes.
     title: String,
+    flange_drag: Option<FlangeDrag>,
 }
 
 impl PeetApp {
@@ -137,6 +152,7 @@ impl PeetApp {
             files: FileState::default(),
             quit_requested: false,
             title: String::new(),
+            flange_drag: None,
         }
     }
 
@@ -215,7 +231,7 @@ impl PeetApp {
     fn selected_face(&self) -> Option<(PlaneRef, peet_math::Plane)> {
         match self.selected_geom[..] {
             [GeomRef::Face { body, face }] => {
-                let b = self.doc.bodies.get(body)?;
+                let b = &self.doc.bodies.get(body)?.source;
                 let plane = peet_model::face_sketch_plane(&b.solid, face)?;
                 Some((PlaneRef::Face(b.face_ref(face)), plane))
             }
@@ -255,7 +271,7 @@ impl PeetApp {
     fn picked(&self, geom: Option<GeomRef>, plane: Option<ItemId>) -> Option<Picked> {
         match geom {
             Some(GeomRef::Face { body, face }) => {
-                let b = self.doc.bodies.get(body)?;
+                let b = &self.doc.bodies.get(body)?.source;
                 let surface = b.solid.face(face).surface;
                 Some(Picked::Face {
                     face: b.face_ref(face),
@@ -263,11 +279,11 @@ impl PeetApp {
                     round: matches!(surface, Surface::Cylinder(_)),
                 })
             }
-            Some(GeomRef::Edge { body, edge }) => {
-                Some(Picked::Edge(self.doc.bodies.get(body)?.edge_ref(edge)?))
-            }
+            Some(GeomRef::Edge { body, edge }) => Some(Picked::Edge(
+                self.doc.bodies.get(body)?.source.edge_ref(edge)?,
+            )),
             Some(GeomRef::Vertex { body, vertex }) => Some(Picked::Vertex(
-                self.doc.bodies.get(body)?.vertex_ref(vertex),
+                self.doc.bodies.get(body)?.source.vertex_ref(vertex),
             )),
             None => Some(Picked::Plane(self.doc.plane_ref_of_item(plane?)?)),
         }
@@ -310,6 +326,8 @@ impl PeetApp {
     /// Opens a sketch for editing and turns the view to look straight at it.
     fn open_sketch(&mut self, id: FeatureId) {
         self.close_sketch();
+        // Sketches are drawn on the folded part.
+        self.doc.set_flat(false);
         let Some(f) = self.doc.model.sketch(id) else {
             return;
         };
@@ -391,6 +409,142 @@ impl PeetApp {
         });
         self.selected = id.map(ItemId::Feature);
         self.selected_geom.clear();
+    }
+
+    /// Whether a sketch lies on a face of a sheet metal body.
+    fn sketch_on_sheet(&self, sketch: FeatureId) -> bool {
+        let bodies = &self.doc.evaluation().bodies;
+        match self.doc.model.sketch(sketch).map(|s| &s.plane) {
+            Some(PlaneRef::Face(f)) => peet_model::naming::find_face(bodies, f)
+                .is_some_and(|found| bodies[found.body].sheet.is_some()),
+            _ => false,
+        }
+    }
+
+    /// Starts a sheet metal part from the open or selected sketch.
+    fn start_base_flange(&mut self) {
+        let Some(sketch) = self.extrude_source() else {
+            return;
+        };
+        self.close_sketch();
+        // A new sheet metal body starts with the settings of the last one.
+        let previous = self.doc.model.features().rev().find_map(|f| match &f.kind {
+            FeatureKind::BaseFlange(b) => Some(b.settings.clone()),
+            _ => None,
+        });
+        let mut id = None;
+        self.change("Add Base Flange", |m| {
+            let b = m.add_base_flange(sketch);
+            if let (Some(settings), Some(f)) = (previous, m.feature_mut(b))
+                && let FeatureKind::BaseFlange(def) = &mut f.kind
+            {
+                def.settings = settings;
+            }
+            id = Some(b);
+        });
+        self.selected = id.map(ItemId::Feature);
+        self.selected_geom.clear();
+    }
+
+    /// Adds an edge flange on each selected sheet metal edge, or one waiting for a pick.
+    fn start_edge_flange(&mut self) {
+        let edges: Vec<EdgeRef> = self
+            .selected_geom
+            .iter()
+            .filter_map(|g| match *g {
+                GeomRef::Edge { body, edge } => {
+                    let b = &self.doc.bodies.get(body)?.source;
+                    b.sheet.as_ref()?;
+                    b.edge_ref(edge)
+                }
+                _ => None,
+            })
+            .collect();
+        let pick = edges.is_empty();
+        let label = if edges.len() > 1 {
+            "Add Edge Flanges"
+        } else {
+            "Add Edge Flange"
+        };
+        let mut ids = Vec::new();
+        self.change(label, |m| {
+            if edges.is_empty() {
+                ids.push(m.add_edge_flange(None));
+            }
+            for e in edges {
+                ids.push(m.add_edge_flange(Some(e)));
+            }
+        });
+        let last = ids.last().copied();
+        self.selected = last.map(ItemId::Feature);
+        self.selected_geom.clear();
+        if pick && let Some(id) = last {
+            self.picking = Some((id, Slot::FlangeEdge));
+            self.status_message = None;
+        }
+    }
+
+    /// Cuts the open or selected sketch through the sheet it is drawn on.
+    fn start_sheet_cut(&mut self) {
+        let Some(sketch) = self.extrude_source() else {
+            return;
+        };
+        self.close_sketch();
+        let mut id = None;
+        self.change("Add Sheet Metal Cut", |m| {
+            id = Some(m.add_sheet_cut(sketch))
+        });
+        self.selected = id.map(ItemId::Feature);
+        self.selected_geom.clear();
+    }
+
+    fn toggle_flat(&mut self) {
+        let flat = !self.doc.is_flat();
+        self.doc.set_flat(flat);
+        self.hovered_geom = None;
+        if flat {
+            self.info("Showing the flat pattern (U to fold it again). Bend lines are dashed.");
+        } else {
+            self.status_message = None;
+        }
+    }
+
+    fn export_dxf(&mut self) {
+        let preferred = self.selected_geom.first().map(|g| g.body());
+        let Some(body) = self.doc.sheet_body(preferred).cloned() else {
+            self.error("There is no sheet metal part to export: start one with Base Flange.");
+            return;
+        };
+        let Some(sheet) = &body.sheet else {
+            return;
+        };
+        let text = peet_io::dxf::flat_pattern(sheet);
+        let title = self.doc.title();
+        let stem = title.strip_suffix(".peet").unwrap_or(&title).to_owned();
+        let several = self
+            .doc
+            .evaluation()
+            .bodies
+            .iter()
+            .filter(|b| b.sheet.is_some())
+            .count()
+            > 1;
+        let name = if several {
+            format!("{stem}-{}.dxf", self.doc.model.name_of(body.origin))
+        } else {
+            format!("{stem}.dxf")
+        };
+        let size = sheet.report().flat_size;
+        let units = self.doc.model.parameters.units;
+        match peet_platform::save_file(&name, ("DXF drawing", &["dxf"]), text.as_bytes()) {
+            Ok(peet_platform::SaveOutcome::Saved(to)) => self.info(format!(
+                "Exported the flat pattern ({} × {}) to {to}",
+                units.format_length(size.x),
+                units.format_length(size.y)
+            )),
+            Ok(peet_platform::SaveOutcome::Cancelled) => {}
+            Err(e) => self.error(e),
+        }
     }
 
     /// Adds reference geometry built from the selection.
@@ -478,6 +632,12 @@ impl PeetApp {
                 self.set_document(Document::from_model(model, None));
                 self.files.discard_autosave();
                 self.info("Opened the sample bracket. Try changing Sketch1's width (d1), or drag the rollback bar.");
+            }
+            AfterDiscard::SampleEnclosure => {
+                let (model, _) = peet_model::samples::enclosure();
+                self.set_document(Document::from_model(model, None));
+                self.files.discard_autosave();
+                self.info("Opened the sample enclosure panel. Press U for its flat pattern, or change the thickness and flange parameters (Tools > Parameters).");
             }
             AfterDiscard::Quit => {
                 self.files.discard_autosave();
@@ -590,6 +750,16 @@ impl PeetApp {
             CommandId::NewSketch => enabled(!in_sketch),
             CommandId::Extrude | CommandId::CutExtrude => enabled(self.extrude_source().is_some()),
             CommandId::ExportStl => enabled(!self.doc.bodies.is_empty()),
+            CommandId::BaseFlange => enabled(self.extrude_source().is_some()),
+            CommandId::EdgeFlange => enabled(!in_sketch && self.doc.has_sheet_metal()),
+            CommandId::SheetCut => {
+                enabled(self.extrude_source().is_some() && self.doc.has_sheet_metal())
+            }
+            CommandId::FlatPattern => CommandState {
+                enabled: !in_sketch && self.doc.has_sheet_metal(),
+                checked: Some(self.doc.is_flat()),
+            },
+            CommandId::BendTable | CommandId::ExportDxf => enabled(self.doc.has_sheet_metal()),
             CommandId::EditSketch => enabled(!in_sketch && self.selected_sketch().is_some()),
             CommandId::ExitSketch => enabled(in_sketch),
             CommandId::Parameters => enabled(true),
@@ -610,6 +780,7 @@ impl PeetApp {
             CommandId::NewDocument
             | CommandId::OpenDocument
             | CommandId::OpenSample
+            | CommandId::OpenSampleEnclosure
             | CommandId::SaveDocument
             | CommandId::SaveDocumentAs => enabled(true),
             CommandId::ViewIsometric
@@ -659,8 +830,24 @@ impl PeetApp {
             CommandId::Undo => self.undo_redo(false),
             CommandId::Redo => self.undo_redo(true),
             CommandId::Extrude => self.start_extrude(peet_model::Operation::Add),
-            CommandId::CutExtrude => self.start_extrude(peet_model::Operation::Cut),
+            CommandId::CutExtrude => {
+                // A cut sketched on sheet metal is a sheet metal cut: it keeps the flat pattern.
+                if self
+                    .extrude_source()
+                    .is_some_and(|s| self.sketch_on_sheet(s))
+                {
+                    self.start_sheet_cut();
+                } else {
+                    self.start_extrude(peet_model::Operation::Cut);
+                }
+            }
             CommandId::ExportStl => self.export_stl(),
+            CommandId::BaseFlange => self.start_base_flange(),
+            CommandId::EdgeFlange => self.start_edge_flange(),
+            CommandId::SheetCut => self.start_sheet_cut(),
+            CommandId::FlatPattern => self.toggle_flat(),
+            CommandId::BendTable => self.windows.bend_table = true,
+            CommandId::ExportDxf => self.export_dxf(),
             CommandId::NewSketch => match self.selected_plane() {
                 Some((plane, placement)) => self.new_sketch(plane, placement),
                 None => self.windows.plane_picker = true,
@@ -696,6 +883,7 @@ impl PeetApp {
             CommandId::NewDocument => self.guard_unsaved(AfterDiscard::New),
             CommandId::OpenDocument => self.guard_unsaved(AfterDiscard::Open),
             CommandId::OpenSample => self.guard_unsaved(AfterDiscard::Sample),
+            CommandId::OpenSampleEnclosure => self.guard_unsaved(AfterDiscard::SampleEnclosure),
             CommandId::SaveDocument => self.save(false),
             CommandId::SaveDocumentAs => self.save(true),
             CommandId::CommandPalette => self.palette.toggle(),
@@ -922,11 +1110,13 @@ impl PeetApp {
                 item(ui, CommandId::NewDocument);
                 item(ui, CommandId::OpenDocument);
                 item(ui, CommandId::OpenSample);
+                item(ui, CommandId::OpenSampleEnclosure);
                 ui.separator();
                 item(ui, CommandId::SaveDocument);
                 item(ui, CommandId::SaveDocumentAs);
                 ui.separator();
                 item(ui, CommandId::ExportStl);
+                item(ui, CommandId::ExportDxf);
                 ui.separator();
                 item(ui, CommandId::Settings);
                 if CommandId::Quit.available() {
@@ -974,6 +1164,12 @@ impl PeetApp {
                 item(ui, CommandId::Extrude);
                 item(ui, CommandId::CutExtrude);
                 ui.separator();
+                ui.menu_button("Sheet Metal", |ui| {
+                    for cmd in SHEET_METAL {
+                        item(ui, cmd);
+                    }
+                });
+                ui.separator();
                 ui.menu_button("Reference Geometry", |ui| {
                     for cmd in REFERENCES {
                         item(ui, cmd);
@@ -1003,6 +1199,8 @@ impl PeetApp {
                 item(ui, CommandId::ToggleGrid);
                 item(ui, CommandId::ToggleReferencePlanes);
                 item(ui, CommandId::ToggleViewCube);
+                ui.separator();
+                item(ui, CommandId::FlatPattern);
             });
             ui.menu_button("Window", |ui| {
                 item(ui, CommandId::ToggleFeatureTree);
@@ -1061,6 +1259,13 @@ impl PeetApp {
                 }
             });
             ui.separator();
+            ui.weak("Sheet Metal");
+            tool(ui, pending, CommandId::BaseFlange, "Base Flange");
+            tool(ui, pending, CommandId::EdgeFlange, "Edge Flange");
+            tool(ui, pending, CommandId::FlatPattern, "Flat");
+            tool(ui, pending, CommandId::BendTable, "Bends");
+            tool(ui, pending, CommandId::ExportDxf, "DXF");
+            ui.separator();
             tool(ui, pending, CommandId::ExportStl, "Export STL");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let palette = CommandId::CommandPalette;
@@ -1090,6 +1295,7 @@ impl PeetApp {
             tool(ui, pending, CommandId::ExitSketch, "✔ Exit Sketch");
             tool(ui, pending, CommandId::Extrude, "Extrude");
             tool(ui, pending, CommandId::CutExtrude, "Cut");
+            tool(ui, pending, CommandId::BaseFlange, "Base Flange");
             ui.separator();
             for (cmd, label) in [
                 (CommandId::SketchSelect, "Select"),
@@ -1398,6 +1604,30 @@ impl PeetApp {
                 }
                 out
             }
+            FeatureKind::BaseFlange(b) => {
+                let r = features_ui::base_flange_panel(ui, &self.doc, b);
+                ui.add_space(8.0);
+                if ui.button("Edit Sketch").clicked() {
+                    self.selected = Some(ItemId::Feature(b.sketch));
+                    pending.push(CommandId::EditSketch);
+                }
+                r
+            }
+            FeatureKind::EdgeFlange(e) => {
+                let radius = self.flange_default_radius(id);
+                features_ui::edge_flange_panel(ui, &self.doc, e, picking, radius)
+            }
+            FeatureKind::SheetCut(c) => {
+                ui.label(format!("Sketch: {}", self.doc.model.name_of(c.sketch)));
+                ui.add_space(4.0);
+                ui.weak("Cuts the sketch's regions square through the sheet. The cut is made in the flat pattern from the face the sketch is on, so straight edges can cross bends.");
+                ui.add_space(8.0);
+                if ui.button("Edit Sketch").clicked() {
+                    self.selected = Some(ItemId::Feature(c.sketch));
+                    pending.push(CommandId::EditSketch);
+                }
+                features_ui::PanelResult::default()
+            }
             other => features_ui::reference_panel(ui, &self.doc, other, picking),
         };
         if kind != feature.kind {
@@ -1498,7 +1728,153 @@ impl PeetApp {
         }
     }
 
+    /// The default bend radius of the sheet metal body an edge flange is on.
+    fn flange_default_radius(&self, id: FeatureId) -> Option<f64> {
+        let bodies = &self.doc.evaluation().bodies;
+        let on = bodies.iter().find(|b| {
+            b.sheet
+                .as_ref()
+                .is_some_and(|s| s.layout.pieces.iter().any(|p| p.origin.owner == id.0))
+        });
+        on.or_else(|| bodies.iter().find(|b| b.sheet.is_some()))
+            .and_then(|b| b.sheet.as_ref())
+            .map(|s| s.layout.settings.radius)
+    }
+
     // ---- Windows ----
+
+    /// The flat pattern report of every sheet metal body. Returns a command to run (the
+    /// window's export button).
+    fn bend_table_window(&mut self, ctx: &egui::Context) -> Option<CommandId> {
+        let mut open = self.windows.bend_table;
+        let mut command = None;
+        let units = self.doc.model.parameters.units;
+        egui::Window::new("Bend Table")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(620.0)
+            .show(ctx, |ui| {
+                let bodies: Vec<_> = self
+                    .doc
+                    .evaluation()
+                    .bodies
+                    .iter()
+                    .filter(|b| b.sheet.is_some())
+                    .cloned()
+                    .collect();
+                if bodies.is_empty() {
+                    ui.weak("There is no sheet metal part. Start one with Base Flange.");
+                    return;
+                }
+                for (bi, body) in bodies.iter().enumerate() {
+                    let Some(sheet) = &body.sheet else { continue };
+                    let report = sheet.report();
+                    let name = |o: peet_sheetmetal::Origin| {
+                        self.doc.model.name_of(FeatureId(o.owner)).to_owned()
+                    };
+                    if bodies.len() > 1 {
+                        ui.strong(format!("Body from {}", self.doc.model.name_of(body.origin)));
+                    }
+                    egui::Grid::new(("flat_summary", bi))
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            ui.label("Flat size");
+                            ui.monospace(format!(
+                                "{} × {}",
+                                units.format_length(report.flat_size.x),
+                                units.format_length(report.flat_size.y)
+                            ));
+                            ui.end_row();
+                            ui.label("Thickness");
+                            ui.monospace(units.format_length(report.thickness));
+                            ui.end_row();
+                            ui.label("Bend model");
+                            ui.label(match report.model {
+                                peet_sheetmetal::BendModel::KFactor(k) => {
+                                    format!("K-factor {}", peet_model::feature::format_number(k))
+                                }
+                                peet_sheetmetal::BendModel::Allowance(v) => {
+                                    format!("Bend allowance {}", units.format_length(v))
+                                }
+                                peet_sheetmetal::BendModel::Deduction(v) => {
+                                    format!("Bend deduction {}", units.format_length(v))
+                                }
+                            });
+                            ui.end_row();
+                            ui.label("Cutouts");
+                            ui.label(report.cutouts.to_string());
+                            ui.end_row();
+                        });
+                    if report.pieces > 1 {
+                        ui.colored_label(
+                            features_ui::WARNING,
+                            format!("The blank is in {} separate pieces.", report.pieces),
+                        );
+                    }
+                    ui.add_space(6.0);
+                    if report.bends.is_empty() {
+                        ui.weak("No bends: the part is a flat plate.");
+                    } else {
+                        egui::Grid::new(("bend_rows", bi))
+                            .striped(true)
+                            .num_columns(9)
+                            .spacing([12.0, 4.0])
+                            .show(ui, |ui| {
+                                for h in [
+                                    "#", "Feature", "Direction", "Angle", "Inner R", "K", "BA",
+                                    "BD", "Length",
+                                ] {
+                                    ui.strong(h);
+                                }
+                                ui.end_row();
+                                for (i, row) in report.bends.iter().enumerate() {
+                                    ui.label((i + 1).to_string());
+                                    ui.label(name(row.origin));
+                                    ui.label(if row.up { "Up" } else { "Down" });
+                                    ui.monospace(units.format_angle(row.angle));
+                                    ui.monospace(units.format_length(row.radius));
+                                    ui.monospace(format!("{:.3}", row.k_factor));
+                                    ui.monospace(units.format_length(row.allowance));
+                                    ui.monospace(units.format_length(row.deduction));
+                                    ui.monospace(units.format_length(row.length));
+                                    ui.end_row();
+                                }
+                            });
+                        ui.add_space(2.0);
+                        ui.weak("Bends are listed in the order they were made. Up means towards the side the flat pattern is seen from (the DXF's view).");
+                    }
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ui
+                            .button("Copy as Text")
+                            .on_hover_text("Tab-separated, for pasting into a spreadsheet.")
+                            .clicked()
+                        {
+                            ui.ctx().copy_text(report.to_text(name));
+                        }
+                        if ui.button("Export DXF…").clicked() {
+                            self.selected_geom = vec![GeomRef::Face {
+                                body: self
+                                    .doc
+                                    .evaluation()
+                                    .bodies
+                                    .iter()
+                                    .position(|b| std::sync::Arc::ptr_eq(b, body))
+                                    .unwrap_or(0),
+                                face: peet_kernel::FaceId(0),
+                            }];
+                            command = Some(CommandId::ExportDxf);
+                        }
+                    });
+                    if bi + 1 < bodies.len() {
+                        ui.separator();
+                    }
+                }
+            });
+        self.windows.bend_table = open;
+        command
+    }
 
     fn plane_picker_window(&mut self, ctx: &egui::Context) {
         let mut open = self.windows.plane_picker;
@@ -1877,6 +2253,15 @@ const SKETCH_TOOLS: [CommandId; 13] = [
 
 const SKETCH_EDITS: [CommandId; 2] = [CommandId::SketchOffset, CommandId::SketchMirror];
 
+const SHEET_METAL: [CommandId; 6] = [
+    CommandId::BaseFlange,
+    CommandId::EdgeFlange,
+    CommandId::SheetCut,
+    CommandId::FlatPattern,
+    CommandId::BendTable,
+    CommandId::ExportDxf,
+];
+
 const REFERENCES: [CommandId; 4] = [
     CommandId::RefPlane,
     CommandId::RefAxis,
@@ -1897,6 +2282,118 @@ const RELATIONS: [CommandId; 11] = [
     CommandId::RelSymmetric,
     CommandId::RelFix,
 ];
+
+/// The length handle of the selected edge flange: an arrow at its far end that drags the
+/// flange longer or shorter, as one undo step.
+fn flange_handle(
+    ui: &mut Ui,
+    viewport: &Viewport,
+    doc: &mut Document,
+    selected: Option<ItemId>,
+    drag: &mut Option<FlangeDrag>,
+) {
+    let Some(ItemId::Feature(id)) = selected else {
+        *drag = None;
+        return;
+    };
+    let Some(FeatureKind::EdgeFlange(def)) = doc.feature(id).map(|f| &f.kind) else {
+        return;
+    };
+    let length = def
+        .length
+        .evaluate(ScalarKind::Length, &doc.model.parameters)
+        .ok();
+    let Some((tip, dir)) = peet_model::sheet::edge_flange_handle(&doc.evaluation().bodies, id)
+    else {
+        return;
+    };
+    let scene = doc.visible_body_bounds();
+    let wpp = viewport.world_per_point();
+    let (Some(a), Some(b)) = (
+        viewport.project(tip, &scene),
+        viewport.project(tip + dir * wpp * 50.0, &scene),
+    ) else {
+        return;
+    };
+    if a.distance(b) < 8.0 {
+        return; // looking straight along the flange: nothing to grab
+    }
+    let response = ui
+        .interact(
+            egui::Rect::from_two_pos(a, b).expand(8.0),
+            ui.id().with(("flange_handle", id.0)),
+            egui::Sense::drag(),
+        )
+        .on_hover_cursor(egui::CursorIcon::Grab)
+        .on_hover_text("Drag to change the flange length");
+    let hot = response.hovered() || response.dragged();
+    let color = if hot {
+        PICKING
+    } else {
+        egui::Color32::from_rgb(230, 120, 30)
+    };
+    let painter = ui.painter();
+    let stroke = egui::Stroke::new(if hot { 3.0 } else { 2.0 }, color);
+    painter.line_segment([a, b], stroke);
+    let back = (a - b).normalized() * 10.0;
+    let side = egui::vec2(-back.y, back.x) * 0.5;
+    painter.line_segment([b, b + back + side], stroke);
+    painter.line_segment([b, b + back - side], stroke);
+    painter.circle_filled(a, 3.5, color);
+    if hot && let Some(l) = length {
+        painter.text(
+            b + (b - a).normalized() * 6.0 + egui::vec2(4.0, 0.0),
+            egui::Align2::LEFT_CENTER,
+            doc.model.parameters.units.format_length(l),
+            egui::FontId::proportional(13.0),
+            color,
+        );
+    }
+
+    let along = |p: egui::Pos2, origin: DVec3, dir: DVec3| -> Option<f64> {
+        // The point of the flange's line closest to the pointer ray.
+        let ray = viewport.ray_at(p);
+        let w0 = origin - ray.origin;
+        let b = dir.dot(ray.direction);
+        let denom = 1.0 - b * b;
+        (denom > 1e-6).then(|| (b * ray.direction.dot(w0) - dir.dot(w0)) / denom)
+    };
+    if response.drag_started()
+        && let (Some(p), Some(l)) = (response.interact_pointer_pos(), length)
+        && let Some(s) = along(p, tip, dir)
+    {
+        *drag = Some(FlangeDrag {
+            id,
+            origin: tip,
+            dir,
+            length: l,
+            start: s,
+        });
+    }
+    if response.dragged()
+        && let Some(d) = *drag
+        && d.id == id
+        && let Some(p) = response.interact_pointer_pos()
+        && let Some(s) = along(p, d.origin, d.dir)
+    {
+        // Half-millimetre steps.
+        let new = (((d.length + s - d.start) * 2.0).round() / 2.0).max(0.5);
+        if length.is_none_or(|l| (l - new).abs() > 1e-9) {
+            let label = format!("Drag {} Length", doc.model.name_of(id));
+            doc.change_merging(&label, 0x666c_616e_6765 ^ u64::from(id.0), |m| {
+                if let Some(f) = m.feature_mut(id)
+                    && let FeatureKind::EdgeFlange(e) = &mut f.kind
+                {
+                    e.length = Scalar::new(new);
+                }
+            });
+        }
+    }
+    if response.drag_stopped() {
+        *drag = None;
+        doc.seal_history();
+    }
+}
 
 /// A menu entry for a command, with its shortcut. Returns true if clicked.
 fn menu_button(ui: &mut Ui, cmd: CommandId, state: CommandState) -> bool {
@@ -2008,6 +2505,14 @@ impl eframe::App for PeetApp {
                 },
             );
             self.hovered_geom = viewport.hovered_geom;
+            let handles = self.sketch.is_none() && self.picking.is_none() && !self.doc.is_flat();
+            flange_handle(
+                ui,
+                viewport,
+                &mut self.doc,
+                self.selected.filter(|_| handles),
+                &mut self.flange_drag,
+            );
             if let (Some(editor), Some(work)) = (&mut self.sketch, &mut self.sketch_work) {
                 if let Some(response) = &events.response {
                     editor.show(ui, response, &viewport.camera, work, &self.doc.model.parameters, dark);
@@ -2065,6 +2570,9 @@ impl eframe::App for PeetApp {
         self.about_window(&ctx);
         self.plane_picker_window(&ctx);
         self.parameters_window(&ctx);
+        if let Some(cmd) = self.bend_table_window(&ctx) {
+            pending.push(cmd);
+        }
         self.confirm_window(&ctx);
         self.recovery_window(&ctx);
         let states = CommandId::ALL.map(|c| (c, self.command_state(c)));

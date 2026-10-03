@@ -142,6 +142,14 @@ impl Model {
                     FaceRole::NearCap => "start face",
                     FaceRole::FarCap => "end face",
                     FaceRole::Side(_) => "side face",
+                    FaceRole::SheetTop(_) => "top face",
+                    FaceRole::SheetBottom(_) => "bottom face",
+                    FaceRole::BendTop(_) => "bend's top face",
+                    FaceRole::BendBottom(_) => "bend's bottom face",
+                    FaceRole::Wall(_, i) => match i {
+                        peet_sheetmetal::layout::wall::TIP => "end face",
+                        _ => "edge face",
+                    },
                 };
                 format!("the {role} of {}", self.name_of(o.feature))
             })
@@ -209,6 +217,38 @@ impl Model {
             s.visible = false;
         }
         id
+    }
+
+    /// Adds a base flange (a new sheet metal body) from `sketch`, which is then hidden.
+    pub fn add_base_flange(&mut self, sketch: FeatureId) -> FeatureId {
+        let id = self.add(FeatureKind::BaseFlange(Box::new(
+            crate::feature::BaseFlangeFeature::new(sketch),
+        )));
+        self.hide(sketch);
+        id
+    }
+
+    /// Adds an edge flange on `edge` (or waiting for an edge to be picked).
+    pub fn add_edge_flange(&mut self, edge: Option<crate::naming::EdgeRef>) -> FeatureId {
+        self.add(FeatureKind::EdgeFlange(Box::new(
+            crate::feature::EdgeFlangeFeature::new(edge),
+        )))
+    }
+
+    /// Adds a sheet metal cut from `sketch` (drawn on a face of the sheet), which is then
+    /// hidden.
+    pub fn add_sheet_cut(&mut self, sketch: FeatureId) -> FeatureId {
+        let id = self.add(FeatureKind::SheetCut(Box::new(
+            crate::feature::SheetCutFeature { sketch },
+        )));
+        self.hide(sketch);
+        id
+    }
+
+    fn hide(&mut self, id: FeatureId) {
+        if let Some(f) = self.feature_mut(id) {
+            f.visible = false;
+        }
     }
 
     /// Removes a feature. Features that refer to it stay, and fail to rebuild with a

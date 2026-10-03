@@ -29,7 +29,14 @@ impl GeomRef {
 
 #[derive(Debug)]
 pub struct BodyView {
+    /// What is drawn: the model's body, or for a sheet metal body in the flat pattern
+    /// view, its flat pattern (same topology, so face and edge ids are the same).
     pub body: Arc<peet_model::Body>,
+    /// The model's body. References (to faces, edges, vertices) are made from this one,
+    /// so they are the same whichever view they were picked in.
+    pub source: Arc<peet_model::Body>,
+    /// Showing the flat pattern.
+    pub flat: bool,
     /// Kernel tessellation (kept for highlighting faces and edges).
     pub tess: SolidMesh,
     /// GPU-ready mesh: per-vertex face ids and per-segment edge ids for picking.
@@ -54,7 +61,40 @@ pub fn tolerance(solid: &peet_kernel::Solid) -> f64 {
     (size * 5e-4).clamp(0.005, 0.1)
 }
 
+/// Distinguishes a flat pattern's display stamp from its body's.
+const FLAT_STAMP: u64 = 0x9e37_79b9_7f4a_7c15;
+
 impl BodyView {
+    /// The view of a model body: its flat pattern if `flat` is set and it is sheet metal,
+    /// else the body itself.
+    pub fn of(source: Arc<peet_model::Body>, flat: bool) -> Self {
+        match (&source.sheet, flat) {
+            (Some(sheet), true) => {
+                let shown = Arc::new(peet_model::Body {
+                    solid: sheet.flat.clone(),
+                    face_names: source.face_names.clone(),
+                    origin: source.origin,
+                    stamp: source.stamp ^ FLAT_STAMP,
+                    sheet: source.sheet.clone(),
+                });
+                let mut v = Self::new(shown, None);
+                v.source = source;
+                v.flat = true;
+                v
+            }
+            _ => Self::new(source, None),
+        }
+    }
+
+    /// The stamp the view is cached by: the model body's, marked when flat.
+    pub fn key(source: &peet_model::Body, flat: bool) -> u64 {
+        if flat && source.sheet.is_some() {
+            source.stamp ^ FLAT_STAMP
+        } else {
+            source.stamp
+        }
+    }
+
     /// Tessellates `body`, or uses `cached` (a mesh of this exact body from a file).
     pub fn new(body: Arc<peet_model::Body>, cached: Option<SolidMesh>) -> Self {
         let (tess, error) = match cached {
@@ -67,6 +107,8 @@ impl BodyView {
         let mesh = to_mesh_data(&tess);
         Self {
             silhouettes: Silhouettes::new(&body.solid),
+            source: body.clone(),
+            flat: false,
             body,
             tess,
             mesh,
