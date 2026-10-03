@@ -69,8 +69,13 @@ pub enum FaceRole {
     /// The bottom side of a bend.
     BendBottom(u32),
     /// A wall through the sheet that the feature made: a flange's end or sides, a relief
-    /// (numbered within `part`, see `peet_sheetmetal::layout::wall`).
+    /// (numbered within `part`, see `peet_sheetmetal::layout::wall`), a face of a form
+    /// (see `peet_sheetmetal::form::face`).
     Wall(u32, u8),
+    /// Added to the names of the faces a pattern or a mirror makes: which copy they are
+    /// part of (the copied feature's place in the list, times 2^16, plus the copy's
+    /// number). Faces of different copies then have different names.
+    Instance(u32),
 }
 
 /// One feature's contribution to a face.

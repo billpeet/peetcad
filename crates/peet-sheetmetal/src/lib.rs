@@ -9,24 +9,41 @@
 //! - [`settings`]: thickness, radius, K-factor / bend allowance / bend deduction, reliefs
 //! - [`layout`]: pieces, bends and cuts; base flanges (plates and open profiles), edge
 //!   flanges
+//! - [`flange`]: edge flanges, hems and sketched flange profiles
+//! - [`corner`]: corners where two flanges meet: reliefs, gaps and how the flanges end
+//! - [`form`]: dimples, embosses and louvers
+//! - [`split`]: sketched bends and jogs, which bend a flange along a line
 //! - [`build`]: the flat and folded solids, the flat pattern outline and bend lines
 //! - [`report`]: the bend table and flat size
+//! - [`checks`]: manufacturing checks (short flanges, holes near bends and edges, collisions)
+//! - [`gauge`]: gauge and material tables, shareable as CSV
 //!
 //! The crate is headless and has no knowledge of features: owners are plain numbers that
 //! the model maps to its feature ids.
 
 pub mod build;
+pub mod checks;
+pub mod corner;
+pub mod flange;
+pub mod form;
+pub mod gauge;
 pub mod layout;
 pub mod report;
 pub mod settings;
+pub mod split;
 
 #[cfg(test)]
 mod tests;
 
 pub use build::{BendLine, FaceTag, FlatLoop, SheetBody, SheetError, build};
+pub use checks::{CheckKind, CheckRules, Finding, Rule, Severity, check, error_finding};
+pub use corner::{Corner, CornerKind, CornerRelief, CornerSpec};
+pub use flange::{Attachment, EdgeFlangeSpec, HemKind, HemSpec, Segment};
+pub use form::{Form, FormKind, FormMark, FormShape};
+pub use gauge::{CsvError, GaugeEntry, GaugeTable, MaterialLibrary};
 pub use layout::{
-    Area, Bend, ChainLine, CurveTag, Cut, Edge2, EdgeFlangeSpec, EdgeSite, Layout, Origin, Piece,
-    PieceKind,
+    Area, Bend, ChainLine, CurveTag, Cut, Edge2, EdgeSite, Layout, Origin, Piece, PieceKind,
 };
 pub use report::{BendRow, Report};
 pub use settings::{BendModel, BendValues, FlangePosition, ReliefType, SheetSettings};
+pub use split::{BendLinePosition, JogDimension, JogSpec, SketchedBendSpec, Split};

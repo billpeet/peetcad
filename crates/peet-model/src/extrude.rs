@@ -172,6 +172,8 @@ pub struct ExtrudeInput<'a> {
     pub up_to: Option<Plane>,
     /// Seed for the stamps of the bodies this feature creates or changes.
     pub stamp: u64,
+    /// Mirror the sketch's regions (y to −y) before extruding: for mirrored copies.
+    pub mirror: bool,
 }
 
 /// The extrusion's offsets along the plane normal: where it starts (the near cap) and
@@ -257,6 +259,7 @@ fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError
     let regions: Vec<Region> = indices
         .iter()
         .map(|&i| profile.regions[i].clone())
+        .map(|r| if input.mirror { mirrored(&r) } else { r })
         .collect();
     let (near, far) = range(input)?;
     let (from, to) = (near.min(far), near.max(far));
@@ -288,6 +291,67 @@ fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError
         })
         .collect();
     Ok((solid, names))
+}
+
+/// A region mirrored in the sketch's x axis (y to −y), its loops still running the
+/// same way round (outer counter-clockwise).
+fn mirrored(region: &Region) -> Region {
+    use peet_sketch::Curve;
+    use peet_sketch::region::{Loop, LoopEdge};
+    let m = |p: DVec2| DVec2::new(p.x, -p.y);
+    let edge = |e: &LoopEdge| -> LoopEdge {
+        let curve = match e.curve {
+            Curve::Line { a, b } => Curve::Line { a: m(a), b: m(b) },
+            Curve::Circle { center, radius } => Curve::Circle {
+                center: m(center),
+                radius,
+            },
+            Curve::Arc {
+                center,
+                radius,
+                start_angle,
+                sweep,
+            } => Curve::Arc {
+                // Mirrored, the arc runs clockwise: start it at the mirrored end instead.
+                center: m(center),
+                radius,
+                start_angle: -(start_angle + sweep),
+                sweep,
+            },
+        };
+        // A mirrored arc is traversed the other way round its new (counter-clockwise)
+        // direction; lines and circles keep their direction.
+        let reversed = match e.curve {
+            Curve::Arc { .. } => !e.reversed,
+            _ => e.reversed,
+        };
+        LoopEdge {
+            entity: e.entity,
+            curve,
+            reversed,
+        }
+    };
+    // Mirroring turns every loop round: walk it backwards to turn it back.
+    let fix = |l: &Loop| -> Loop {
+        let edges = l
+            .edges
+            .iter()
+            .rev()
+            .map(|e| {
+                let mut e = edge(e);
+                e.reversed = !e.reversed;
+                e
+            })
+            .collect();
+        Loop {
+            edges,
+            signed_area: l.signed_area,
+        }
+    };
+    Region {
+        outer: fix(&region.outer),
+        holes: region.holes.iter().map(fix).collect(),
+    }
 }
 
 /// The names of a boolean's result faces: each face takes the names of the input faces it

@@ -229,12 +229,7 @@ fn nest_marker(ui: &mut Ui, nest: Nest) {
 
 /// The sketch a feature is built from, if any.
 fn profile_sketch(kind: &FeatureKind) -> Option<FeatureId> {
-    match kind {
-        FeatureKind::Extrude(e) => Some(e.sketch),
-        FeatureKind::BaseFlange(b) => Some(b.sketch),
-        FeatureKind::SheetCut(c) => Some(c.sketch),
-        _ => None,
-    }
+    kind.sketch()
 }
 
 /// Everything a feature row needs besides the feature.

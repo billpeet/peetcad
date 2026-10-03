@@ -1,6 +1,6 @@
 [package]
 name = "peet-io"
-description = "PeetCAD file formats: the native .peet format, STL export and DXF flat patterns (STEP later)"
+description = "PeetCAD file formats: the native .peet format, STL and STEP export, DXF flat patterns and DXF import"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true

@@ -336,6 +336,19 @@ impl SketchEditor {
         self.prune_selection(&item.sketch);
     }
 
+    /// Changes the sketch from outside the editor's tools (an import), as one undo step.
+    pub fn edit_externally<T>(
+        &mut self,
+        item: &mut SketchItem,
+        f: impl FnOnce(&mut Sketch) -> T,
+    ) -> T {
+        let before = item.sketch.clone();
+        let out = f(&mut item.sketch);
+        self.push_undo(before);
+        self.resolve(item);
+        out
+    }
+
     /// Records `before` as an undo step.
     fn push_undo(&mut self, before: Sketch) {
         self.undo.push(before);

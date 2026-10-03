@@ -4,8 +4,9 @@
 //!   truth, and what is saved.
 //! - [`feature`]: what features there are (sketches, extrusions, sheet metal, reference
 //!   geometry) and how they refer to each other.
-//! - [`sheet`]: sheet metal features (base flange, edge flange, sheet metal cut) on top of
-//!   `peet-sheetmetal`.
+//! - [`sheet`]: sheet metal features (base flange, edge flange, sheet metal cut, hem,
+//!   sketched bend, jog, mitre flange, corner, forms) on top of `peet-sheetmetal`.
+//! - `pattern`: linear and circular patterns and mirrors of features.
 //! - [`naming`]: persistent names for faces, edges and vertices, so references survive
 //!   upstream edits.
 //! - [`DependencyGraph`]: which feature uses which.
@@ -20,6 +21,7 @@ pub mod hash;
 mod history;
 mod model;
 pub mod naming;
+mod pattern;
 mod placement;
 mod regen;
 pub mod samples;
@@ -30,9 +32,11 @@ pub use extrude::{
     EndCondition, Extrude, ExtrudeInput, Operation, RegionSelection, apply_extrude, default_regions,
 };
 pub use feature::{
-    Axis, AxisDef, AxisRef, BaseFlangeFeature, BendModelDef, CoordSystemDef, EdgeFlangeFeature,
-    ExtrudeFeature, Feature, FeatureId, FeatureKind, PlaneDef, PlaneRef, PointDef, PointRef,
-    Scalar, ScalarKind, SheetCutFeature, SheetSettingsDef, SketchFeature, StdAxis, StdPlane,
+    Axis, AxisDef, AxisRef, BaseFlangeFeature, BendModelDef, CoordSystemDef, CornerFeature,
+    EdgeFlangeFeature, ExtrudeFeature, Feature, FeatureId, FeatureKind, FormFeature, HemFeature,
+    JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, PatternDef, PatternFeature,
+    PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind, SheetCutFeature, SheetSettingsDef,
+    SketchFeature, SketchedBendFeature, StdAxis, StdPlane,
 };
 pub use history::History;
 pub use model::{Datum, DependencyGraph, Model};

@@ -75,6 +75,21 @@ pub enum Icon {
     BendTable,
     ExportDxf,
     ExportStl,
+    Hem,
+    SketchedBend,
+    Jog,
+    MiterFlange,
+    Corner,
+    Dimple,
+    Emboss,
+    Louver,
+    LinearPattern,
+    CircularPattern,
+    MirrorFeature,
+    Checks,
+    Gauge,
+    ExportStep,
+    ImportDxf,
     Search,
     Check,
     Select,
@@ -144,6 +159,21 @@ impl Icon {
             C::BendTable => Self::BendTable,
             C::ExportDxf => Self::ExportDxf,
             C::ExportStl => Self::ExportStl,
+            C::Hem => Self::Hem,
+            C::SketchedBend => Self::SketchedBend,
+            C::Jog => Self::Jog,
+            C::MiterFlange => Self::MiterFlange,
+            C::CornerTreatment => Self::Corner,
+            C::Dimple => Self::Dimple,
+            C::Emboss => Self::Emboss,
+            C::Louver => Self::Louver,
+            C::LinearPattern => Self::LinearPattern,
+            C::CircularPattern => Self::CircularPattern,
+            C::MirrorFeature => Self::MirrorFeature,
+            C::SheetChecks => Self::Checks,
+            C::GaugeTables => Self::Gauge,
+            C::ExportStep => Self::ExportStep,
+            C::ImportDxf => Self::ImportDxf,
             C::CommandPalette => Self::Search,
             C::SketchSelect => Self::Select,
             C::SketchLine => Self::Line,
@@ -165,7 +195,7 @@ impl Icon {
             C::NewDocument => Self::NewDocument,
             C::OpenDocument => Self::Open,
             C::SaveDocumentAs => Self::SaveAs,
-            C::OpenSample | C::OpenSampleEnclosure => Self::Sample,
+            C::OpenSample | C::OpenSampleEnclosure | C::OpenSampleChassis => Self::Sample,
             C::Settings => Self::Settings,
             C::Quit => Self::Quit,
             C::DeleteSelection => Self::Delete,
@@ -194,15 +224,32 @@ impl Icon {
             FeatureKind::BaseFlange(_) => Self::BaseFlange,
             FeatureKind::EdgeFlange(_) => Self::EdgeFlange,
             FeatureKind::SheetCut(_) => Self::SheetCut,
+            FeatureKind::Hem(_) => Self::Hem,
+            FeatureKind::SketchedBend(_) => Self::SketchedBend,
+            FeatureKind::Jog(_) => Self::Jog,
+            FeatureKind::MiterFlange(_) => Self::MiterFlange,
+            FeatureKind::Corner(_) => Self::Corner,
+            FeatureKind::Form(f) => match f.kind {
+                peet_sheetmetal::FormKind::Dimple => Self::Dimple,
+                peet_sheetmetal::FormKind::Emboss => Self::Emboss,
+                peet_sheetmetal::FormKind::Louver => Self::Louver,
+            },
+            FeatureKind::Pattern(p) => match p.def {
+                peet_model::PatternDef::Linear { .. } => Self::LinearPattern,
+                peet_model::PatternDef::Circular { .. } => Self::CircularPattern,
+            },
+            FeatureKind::Mirror(_) => Self::MirrorFeature,
         }
     }
 
     pub fn category(self) -> Category {
         use Icon as I;
         match self {
-            I::Save | I::Undo | I::Redo | I::Search | I::Parameters | I::BendTable => {
+            I::Save | I::Undo | I::Redo | I::Search | I::Parameters | I::BendTable | I::Gauge => {
                 Category::Neutral
             }
+            I::Checks => Category::Confirm,
+            I::LinearPattern | I::CircularPattern | I::MirrorFeature => Category::Solid,
             I::ViewIso
             | I::ViewFront
             | I::ViewTop
@@ -236,8 +283,19 @@ impl Icon {
             I::Reference | I::RefPlane | I::RefAxis | I::RefPoint | I::CoordSystem => {
                 Category::Reference
             }
-            I::BaseFlange | I::EdgeFlange | I::SheetCut | I::FlatPattern => Category::SheetMetal,
-            I::ExportDxf | I::ExportStl => Category::Export,
+            I::BaseFlange
+            | I::EdgeFlange
+            | I::SheetCut
+            | I::FlatPattern
+            | I::Hem
+            | I::SketchedBend
+            | I::Jog
+            | I::MiterFlange
+            | I::Corner
+            | I::Dimple
+            | I::Emboss
+            | I::Louver => Category::SheetMetal,
+            I::ExportDxf | I::ExportStl | I::ExportStep | I::ImportDxf => Category::Export,
             I::Check => Category::Confirm,
             I::Delete => Category::Cut,
             I::NewDocument
@@ -595,6 +653,102 @@ impl<'a> Pen<'a> {
             Icon::ExportStl => {
                 self.document();
                 self.face(&[(8.0, 18.0), (12.0, 10.0), (16.0, 18.0)], ac);
+            }
+            Icon::Hem => {
+                // The sheet, folded back over itself.
+                self.line(&[(3.0, 16.0), (17.0, 16.0)], fg);
+                self.arc((17.0, 13.0), 3.0, -FRAC_PI_2, FRAC_PI_2, ac);
+                self.line(&[(17.0, 10.0), (8.0, 10.0)], ac);
+            }
+            Icon::SketchedBend => {
+                self.closed(&[(2.0, 19.0), (8.0, 13.0), (14.0, 13.0), (8.0, 19.0)], fg);
+                self.face(&[(8.0, 19.0), (14.0, 13.0), (20.0, 5.0), (14.0, 11.0)], ac);
+                self.dashed(&[(8.0, 19.0), (14.0, 13.0)], fg);
+            }
+            Icon::Jog => {
+                self.line(&[(2.0, 17.0), (9.0, 17.0)], fg);
+                self.line(&[(9.0, 17.0), (15.0, 8.0)], ac);
+                self.line(&[(15.0, 8.0), (22.0, 8.0)], fg);
+            }
+            Icon::MiterFlange => {
+                self.closed(&[(3.0, 19.0), (9.0, 13.0), (21.0, 13.0), (15.0, 19.0)], fg);
+                self.face(&[(15.0, 19.0), (21.0, 13.0), (21.0, 5.0), (15.0, 11.0)], ac);
+                self.face(&[(9.0, 13.0), (21.0, 13.0), (21.0, 5.0), (9.0, 5.0)], ac);
+                self.line(&[(21.0, 13.0), (21.0, 5.0)], fg);
+            }
+            Icon::Corner => {
+                self.line(&[(4.0, 20.0), (4.0, 6.0), (10.0, 6.0)], fg);
+                self.line(&[(12.0, 4.0), (12.0, 12.0), (20.0, 12.0)], fg);
+                self.face(&[(4.0, 6.0), (10.0, 6.0), (10.0, 12.0), (4.0, 12.0)], ac);
+                self.dashed(&[(10.0, 6.0), (12.0, 4.0)], ac);
+            }
+            Icon::Dimple => {
+                self.line(&[(2.0, 17.0), (7.0, 17.0)], fg);
+                self.line(&[(17.0, 17.0), (22.0, 17.0)], fg);
+                self.arc((12.0, 17.0), 5.0, PI, 2.0 * PI, ac);
+                self.circle((12.0, 8.0), 1.2, ac);
+            }
+            Icon::Emboss => {
+                self.line(&[(2.0, 17.0), (7.0, 17.0), (7.0, 10.0)], fg);
+                self.line(&[(7.0, 10.0), (17.0, 10.0)], ac);
+                self.line(&[(17.0, 10.0), (17.0, 17.0), (22.0, 17.0)], fg);
+            }
+            Icon::Louver => {
+                self.closed(&[(3.0, 5.0), (21.0, 5.0), (21.0, 19.0), (3.0, 19.0)], fg);
+                for y in [9.0, 12.5, 16.0] {
+                    self.line(&[(6.0, y), (18.0, y)], ac);
+                }
+            }
+            Icon::LinearPattern => {
+                self.face(&[(3.0, 9.0), (8.0, 9.0), (8.0, 15.0), (3.0, 15.0)], ac);
+                self.closed(&[(10.0, 9.0), (15.0, 9.0), (15.0, 15.0), (10.0, 15.0)], fg);
+                self.closed(&[(17.0, 9.0), (22.0, 9.0), (22.0, 15.0), (17.0, 15.0)], fg);
+                self.arrow((4.0, 20.0), (21.0, 20.0), fg);
+            }
+            Icon::CircularPattern => {
+                self.disc((12.0, 4.5), 2.5, ac);
+                for (x, y) in [(19.0, 9.5), (16.5, 18.0), (7.5, 18.0), (5.0, 9.5)] {
+                    self.circle((x, y), 2.5, fg);
+                }
+                self.disc((12.0, 12.5), 1.2, fg);
+            }
+            Icon::MirrorFeature => {
+                self.dashed(&[(12.0, 2.0), (12.0, 22.0)], fg);
+                self.face(&[(4.0, 7.0), (9.0, 7.0), (9.0, 17.0), (4.0, 14.0)], ac);
+                self.closed(&[(20.0, 7.0), (15.0, 7.0), (15.0, 17.0), (20.0, 14.0)], fg);
+            }
+            Icon::Checks => {
+                self.closed(&[(4.0, 3.0), (20.0, 3.0), (20.0, 21.0), (4.0, 21.0)], fg);
+                self.line(&[(7.0, 9.0), (9.0, 11.0), (12.0, 7.0)], ac);
+                self.line(&[(7.0, 16.0), (9.0, 18.0), (12.0, 14.0)], ac);
+                self.line(&[(14.0, 9.5), (18.0, 9.5)], fg);
+                self.line(&[(14.0, 16.5), (18.0, 16.5)], fg);
+            }
+            Icon::Gauge => {
+                for (y, w) in [(6.0, 1.0), (11.0, 2.0), (17.0, 3.0)] {
+                    self.solid(
+                        &[(4.0, y), (20.0, y), (20.0, y + w), (4.0, y + w)],
+                        if w > 1.5 { ac } else { fg },
+                    );
+                }
+            }
+            Icon::ExportStep => {
+                self.document();
+                self.face(
+                    &[
+                        (8.0, 15.0),
+                        (12.0, 11.0),
+                        (16.0, 13.0),
+                        (16.0, 17.0),
+                        (12.0, 19.0),
+                        (8.0, 18.0),
+                    ],
+                    ac,
+                );
+            }
+            Icon::ImportDxf => {
+                self.document();
+                self.arrow((12.0, 9.0), (12.0, 18.0), ac);
             }
             Icon::Search => {
                 self.circle((10.0, 10.0), 6.0, fg);

@@ -42,6 +42,7 @@ use peet_sketch::Curve;
 use peet_sketch::region::{Region, regions_of_curves};
 use peet_sketch::triangulate::triangulate_region;
 
+use crate::form::{FormMark, face as form_face};
 use crate::layout::{Bend, CurveTag, Edge2, EdgeSite, Layout, Origin, PieceKind, loop_winding};
 
 /// Points closer than this are the same point of the flat pattern.
@@ -124,12 +125,18 @@ pub enum FaceTag {
         curve: Curve,
         reversed: bool,
     },
+    /// A face of a form (a dimple, an emboss, a louver) on a flange. `tag` names it:
+    /// the form's owner and part, and the face's number in [`crate::form::face`].
+    Form { piece: usize, tag: CurveTag },
 }
 
 impl FaceTag {
     pub fn piece(&self) -> usize {
         match *self {
-            Self::Top { piece } | Self::Bottom { piece } | Self::Wall { piece, .. } => piece,
+            Self::Top { piece }
+            | Self::Bottom { piece }
+            | Self::Wall { piece, .. }
+            | Self::Form { piece, .. } => piece,
         }
     }
 }
@@ -162,6 +169,8 @@ pub struct SheetBody {
     pub faces: Vec<FaceTag>,
     pub outline: Vec<FlatLoop>,
     pub bend_lines: Vec<BendLine>,
+    /// The forms pressed into the sheet, for marking on the flat pattern.
+    pub forms: Vec<FormMark>,
 }
 
 impl SheetBody {
@@ -223,7 +232,7 @@ impl SheetBody {
         let (piece, top) = match *self.faces.get(face.index())? {
             FaceTag::Top { piece } => (piece, true),
             FaceTag::Bottom { piece } => (piece, false),
-            FaceTag::Wall { .. } => return None,
+            FaceTag::Wall { .. } | FaceTag::Form { .. } => return None,
         };
         let p = &self.layout.pieces[piece];
         p.is_flange().then_some((piece, p.frame, top))
@@ -246,8 +255,11 @@ impl SheetBody {
 
 /// Builds the folded solid and the rest of the sheet body.
 pub fn build(layout: Layout) -> Result<(Solid, SheetBody), SheetError> {
-    let flat = Flat::new(&layout)?;
-    let (local, faces, info) = flat.thicken(&layout)?;
+    // The geometry comes from the layout with its corners worked out; the body keeps the
+    // layout as defined, so later features can add to it and change its corners.
+    let resolved = layout.resolved();
+    let flat = Flat::new(&resolved)?;
+    let (local, faces, info) = flat.thicken(&resolved)?;
     if let Err(problems) = validate::validate(&local) {
         return Err(SheetError::Invalid(format!(
             "flat: {}",
@@ -258,7 +270,7 @@ pub fn build(layout: Layout) -> Result<(Solid, SheetBody), SheetError> {
                 .join("; ")
         )));
     }
-    let folded = fold(&layout, &flat, &local, &info)?;
+    let folded = fold(&resolved, &flat, &local, &info)?;
     if let Err(problems) = validate::validate(&folded) {
         return Err(SheetError::Invalid(format!(
             "folded: {}",
@@ -270,8 +282,28 @@ pub fn build(layout: Layout) -> Result<(Solid, SheetBody), SheetError> {
         )));
     }
     let flat_solid = transform::solid(&local, &layout.pieces[0].frame);
-    let outline = flat.outline();
-    let bend_lines = flat.bend_lines(&layout);
+    let outline = flat.outline(&resolved);
+    let bend_lines = flat.bend_lines(&resolved);
+    let forms = resolved
+        .forms
+        .iter()
+        .map(|f| {
+            let area = f.area();
+            FormMark {
+                owner: f.owner,
+                part: f.part,
+                kind: f.kind,
+                up: f.up,
+                height: f.height,
+                outline: area.edges().map(|e| (e.curve, e.reversed)).collect(),
+                center: f.center(),
+                lance: f.open_side.and_then(|o| match &f.shape {
+                    crate::form::FormShape::Polygon(p) => Some([p[o], p[(o + 1) % p.len()]]),
+                    crate::form::FormShape::Circle { .. } => None,
+                }),
+            }
+        })
+        .collect();
     Ok((
         folded,
         SheetBody {
@@ -280,6 +312,7 @@ pub fn build(layout: Layout) -> Result<(Solid, SheetBody), SheetError> {
             faces,
             outline,
             bend_lines,
+            forms,
         },
     ))
 }
@@ -450,7 +483,7 @@ fn is_fold(layout: &Layout, pa: usize, pb: usize, a: DVec2, b: DVec2) -> bool {
         };
         let line = if other == bend.parent {
             bend.origin
-        } else if other == bend.child {
+        } else if Some(other) == bend.child {
             bend.origin + bend.across * bend.width()
         } else {
             return false;
@@ -479,6 +512,10 @@ impl Flat {
         for c in &layout.cuts {
             c.area.edges().for_each(&mut add);
         }
+        let form_areas: Vec<_> = layout.forms.iter().map(|f| f.area()).collect();
+        for a in &form_areas {
+            a.edges().for_each(&mut add);
+        }
         let profile = regions_of_curves(&inputs);
 
         // Material faces and their pieces.
@@ -495,7 +532,16 @@ impl Flat {
                 if layout
                     .cuts
                     .iter()
-                    .any(|c| pi < c.pieces && c.area.contains(p))
+                    .any(|c| c.applies_to(pi) && c.area.contains(p))
+                {
+                    continue;
+                }
+                // A form's outline is a hole that its own faces fill.
+                if layout
+                    .forms
+                    .iter()
+                    .zip(&form_areas)
+                    .any(|(f, a)| f.piece == pi && a.contains(p))
                 {
                     continue;
                 }
@@ -768,12 +814,15 @@ impl Flat {
         })
     }
 
-    /// The boundary loops of the glued flat pattern.
-    fn outline(&self) -> Vec<FlatLoop> {
+    /// The boundary loops of the glued flat pattern (the holes forms fill are not cut).
+    fn outline(&self, layout: &Layout) -> Vec<FlatLoop> {
         let mut out = Vec::new();
         let mut seen = vec![false; self.edges.len()];
         for e0 in 0..self.edges.len() {
             if seen[e0] || self.edges[e0].twin.is_some() {
+                continue;
+            }
+            if form_of(layout, self.edges[e0].tag).is_some() {
                 continue;
             }
             let mut lp = Vec::new();
@@ -943,12 +992,20 @@ fn join_pieces(mut edges: Vec<(Curve, bool)>) -> Vec<(Curve, bool)> {
 
 /// What each element of the thickened solid came from, for folding.
 struct Info {
-    /// Per vertex: its group and whether it is on the top side.
-    vertices: Vec<(usize, bool)>,
+    /// Per vertex: where it came from.
+    vertices: Vec<VertexSource>,
     /// Per edge: what made it.
     edges: Vec<EdgeSource>,
     /// Per face: its tag's piece and kind.
     faces: Vec<FaceSource>,
+}
+
+#[derive(Clone, Copy)]
+enum VertexSource {
+    /// A vertex group of the flat pattern, on the top or the bottom side.
+    Group { group: usize, top: bool },
+    /// A point of a form, in flat coordinates, on a flange.
+    Form { piece: usize, at: DVec3 },
 }
 
 #[derive(Clone, Copy)]
@@ -957,12 +1014,24 @@ enum EdgeSource {
     Cap { edge: usize, top: bool },
     /// The vertical edge at a vertex group (where walls meet).
     Vertical,
+    /// An edge of a form, on a flange.
+    Form { piece: usize, line: bool },
 }
 
 #[derive(Clone, Copy)]
 enum FaceSource {
     Cap { face: usize, top: bool },
     Wall { edge: usize },
+    Form { piece: usize },
+}
+
+/// The form an edge of the flat pattern outlines, and which side of it.
+fn form_of(layout: &Layout, tag: CurveTag) -> Option<(usize, usize)> {
+    layout
+        .forms
+        .iter()
+        .enumerate()
+        .find_map(|(i, f)| f.side_of(tag).map(|s| (i, s)))
 }
 
 impl Flat {
@@ -996,9 +1065,15 @@ impl Flat {
                 verts.entry(g).or_insert_with(|| {
                     let p = self.groups[g];
                     let b = solid.add_vertex(p.extend(0.0));
-                    info.vertices.push((g, false));
+                    info.vertices.push(VertexSource::Group {
+                        group: g,
+                        top: false,
+                    });
                     let tv = solid.add_vertex(p.extend(t));
-                    info.vertices.push((g, true));
+                    info.vertices.push(VertexSource::Group {
+                        group: g,
+                        top: true,
+                    });
                     (b, tv)
                 });
             }
@@ -1056,9 +1131,24 @@ impl Flat {
             .map(|c| c.expect("every edge has caps"))
             .collect();
 
+        // The sides of forms that the form's own faces close (all but a louver's lance).
+        let formed: Vec<bool> = self
+            .edges
+            .iter()
+            .map(|e| {
+                form_of(layout, e.tag)
+                    .is_some_and(|(f, side)| layout.forms[f].open_side != Some(side))
+            })
+            .collect();
+
         // Vertical edges where walls meet.
         let mut vertical: HashMap<usize, EdgeId> = HashMap::new();
-        for e in self.edges.iter().filter(|e| e.twin.is_none()) {
+        for (_, e) in self
+            .edges
+            .iter()
+            .enumerate()
+            .filter(|(i, e)| e.twin.is_none() && !formed[*i])
+        {
             for g in [e.start, e.end] {
                 vertical.entry(g).or_insert_with(|| {
                     let (b, tp) = verts[&g];
@@ -1110,7 +1200,7 @@ impl Flat {
 
         // Walls.
         for (i, e) in self.edges.iter().enumerate() {
-            if e.twin.is_some() {
+            if e.twin.is_some() || formed[i] {
                 continue;
             }
             let shell = shell_of[&suf.find(e.face)];
@@ -1153,6 +1243,28 @@ impl Flat {
                     (vertical[&e.start], true),
                 ],
             );
+        }
+        let mut ctx = FormCtx {
+            solid: &mut solid,
+            tags: &mut tags,
+            info: &mut info,
+            caps: &caps,
+            verts: &verts,
+            vertical: &vertical,
+        };
+        for f in 0..layout.forms.len() {
+            let shell = self
+                .edges
+                .iter()
+                .find(|e| form_of(layout, e.tag).is_some_and(|(i, _)| i == f))
+                .map(|e| shell_of[&suf.find(e.face)]);
+            let Some(shell) = shell else {
+                return Err(SheetError::Message(format!(
+                    "A {} was cut away with the material it was on.",
+                    layout.forms[f].kind.label().to_lowercase()
+                )));
+            };
+            self.form(layout, f, shell, &mut ctx)?;
         }
         Ok((solid, tags, info))
     }
@@ -1210,9 +1322,14 @@ fn fold(layout: &Layout, flat: &Flat, local: &Solid, info: &Info) -> Result<Soli
     }
 
     let mut out = local.clone();
-    for (v, &(g, top)) in info.vertices.iter().enumerate() {
-        let p = flat.groups[g].extend(if top { t } else { 0.0 });
-        out.vertices[v].point = piece_map(layout, group_piece[&g]).point(p);
+    for (v, src) in info.vertices.iter().enumerate() {
+        out.vertices[v].point = match *src {
+            VertexSource::Group { group, top } => {
+                let p = flat.groups[group].extend(if top { t } else { 0.0 });
+                piece_map(layout, group_piece[&group]).point(p)
+            }
+            VertexSource::Form { piece, at } => layout.pieces[piece].frame.to_world(at),
+        };
     }
     let point = |out: &Solid, v: VertexId| out.vertices[v.index()].point;
 
@@ -1221,6 +1338,12 @@ fn fold(layout: &Layout, flat: &Flat, local: &Solid, info: &Info) -> Result<Soli
         let (vs, ve) = (point(&out, edge.start), point(&out, edge.end));
         let (curve, t0, t1) = match *src {
             EdgeSource::Vertical => line_between(vs, ve)?,
+            EdgeSource::Form { line: true, .. } => line_between(vs, ve)?,
+            EdgeSource::Form { piece, line: false } => (
+                transform::curve(&edge.curve, &layout.pieces[piece].frame),
+                edge.t0,
+                edge.t1,
+            ),
             EdgeSource::Cap { edge: fe, top } => {
                 let p = piece_of_edge(fe);
                 let fedge = &flat.edges[fe];
@@ -1263,6 +1386,10 @@ fn fold(layout: &Layout, flat: &Flat, local: &Solid, info: &Info) -> Result<Soli
     for (fi, src) in info.faces.iter().enumerate() {
         let face = &local.faces[fi];
         let (surface, reversed) = match *src {
+            FaceSource::Form { piece } => (
+                transform::surface(&face.surface, &layout.pieces[piece].frame),
+                face.reversed,
+            ),
             FaceSource::Cap { face: mf, top } => {
                 let p = flat.faces[mf].piece;
                 match piece_map(layout, p) {
@@ -1379,4 +1506,387 @@ fn bend_cylinder(parent: Frame, bend: &Bend, z: f64) -> Surface {
         frame,
         radius: bend.radius_at(z),
     })
+}
+
+// ---- Forms ----
+
+/// What the thickened solid has so far, for adding forms to it.
+struct FormCtx<'a> {
+    solid: &'a mut Solid,
+    tags: &'a mut Vec<FaceTag>,
+    info: &'a mut Info,
+    /// Bottom and top copies of each flat edge.
+    caps: &'a [(EdgeId, EdgeId)],
+    /// Bottom and top vertices of each vertex group.
+    verts: &'a HashMap<usize, (VertexId, VertexId)>,
+    /// The vertical edge at a vertex group.
+    vertical: &'a HashMap<usize, EdgeId>,
+}
+
+/// An edge used by a loop: the edge, and whether the loop runs against its direction.
+type Use = (EdgeId, bool);
+
+/// The right-hand normal of a curve traversed in loop order, at `p`.
+fn right_normal(curve: &Curve, reversed: bool, p: DVec2) -> DVec2 {
+    let tangent = match *curve {
+        Curve::Line { a, b } => (b - a).normalize_or_zero(),
+        Curve::Arc { center, .. } | Curve::Circle { center, .. } => {
+            let r = (p - center).normalize_or_zero();
+            DVec2::new(-r.y, r.x) // counter-clockwise
+        }
+    };
+    let tangent = if reversed { -tangent } else { tangent };
+    DVec2::new(tangent.y, -tangent.x)
+}
+
+impl Flat {
+    /// Builds form `f`'s faces into the hole its outline left in the flange.
+    ///
+    /// The faces are made for a form standing out of the top side, at *canonical*
+    /// heights: 0 at the face it leaves, `t` at the other face, `h` and `h + t` at the
+    /// plateau. A form on the bottom side is the mirror image: heights are flipped and
+    /// every loop is turned round.
+    fn form(
+        &self,
+        layout: &Layout,
+        f: usize,
+        shell: ShellId,
+        cx: &mut FormCtx<'_>,
+    ) -> Result<(), SheetError> {
+        let form = &layout.forms[f];
+        let t = layout.settings.thickness;
+        let h = form.height;
+        let up = form.up;
+        let piece = form.piece;
+        let z = |c: f64| if up { c } else { t - c };
+        let what = form.kind.label().to_lowercase();
+
+        // The hole's loop, in order (the flange's material on the left).
+        let first = (0..self.edges.len())
+            .find(|&e| form_of(layout, self.edges[e].tag).is_some_and(|(i, _)| i == f))
+            .expect("the caller found an edge");
+        let face = &self.faces[self.edges[first].face];
+        let lp = face
+            .loops
+            .iter()
+            .find(|l| l.contains(&first))
+            .expect("every edge is on a loop");
+        if !lp
+            .iter()
+            .all(|&e| form_of(layout, self.edges[e].tag).is_some_and(|(i, _)| i == f))
+        {
+            return Err(SheetError::Message(format!(
+                "The {what} touches the edge of the sheet, a cut or another form. Move it clear."
+            )));
+        }
+        let n = lp.len();
+        let edge = |k: usize| &self.edges[lp[k % n]];
+        let side = |k: usize| form_of(layout, edge(k).tag).map_or(0, |(_, s)| s);
+        let open = (0..n).find(|&k| form.open_side == Some(side(k)));
+        let start = |k: usize| edge(k).ends().0;
+
+        // The inside of the wall: each side moved a thickness into the form (a louver's
+        // open side stays), meeting at the corners.
+        let shift = |k: usize| if open == Some(k % n) { 0.0 } else { t };
+        let mut w = Vec::with_capacity(n);
+        for k in 0..n {
+            let (prev, next) = (edge(k + n - 1), edge(k));
+            let v = start(k);
+            let n2 = right_normal(&next.curve, next.reversed, v);
+            let n1 = right_normal(&prev.curve, prev.reversed, v);
+            let point = match (prev.curve, next.curve) {
+                (Curve::Line { .. }, Curve::Line { .. }) if n1.perp_dot(n2).abs() > 1e-9 => {
+                    // Where the two moved lines cross.
+                    let (p1, d1) = (v + n1 * shift(k + n - 1), DVec2::new(-n1.y, n1.x));
+                    let (p2, d2) = (v + n2 * shift(k), DVec2::new(-n2.y, n2.x));
+                    let s = (p2 - p1).perp_dot(d2) / d1.perp_dot(d2);
+                    p1 + d1 * s
+                }
+                _ => v + n2 * shift(k),
+            };
+            w.push(point);
+        }
+        // The inside curve of side k, from w[k] to w[k + 1], and whether it runs against
+        // its own direction.
+        let inner = |k: usize| -> (Curve, bool) {
+            let e = edge(k);
+            match e.curve {
+                Curve::Arc {
+                    center,
+                    start_angle,
+                    sweep,
+                    ..
+                } => (
+                    Curve::Arc {
+                        center,
+                        radius: w[k].distance(center),
+                        start_angle,
+                        sweep,
+                    },
+                    e.reversed,
+                ),
+                _ => (
+                    Curve::Line {
+                        a: w[k],
+                        b: w[(k + 1) % n],
+                    },
+                    false,
+                ),
+            }
+        };
+
+        // Vertices.
+        let group = |k: usize| edge(k).start;
+        let cap_vertex = |k: usize, level: f64| {
+            let (b, tp) = cx.verts[&group(k % n)];
+            if (level == 0.0) == up { b } else { tp }
+        };
+        let vertex = |cx: &mut FormCtx<'_>, p: DVec2, c: f64| {
+            let at = p.extend(z(c));
+            cx.info.vertices.push(VertexSource::Form { piece, at });
+            cx.solid.add_vertex(at)
+        };
+        let vht: Vec<VertexId> = (0..n).map(|k| vertex(cx, start(k), h + t)).collect();
+        let w0: Vec<VertexId> = (0..n).map(|k| vertex(cx, w[k], 0.0)).collect();
+        let wh: Vec<VertexId> = (0..n).map(|k| vertex(cx, w[k], h)).collect();
+
+        // Edges. `curve_edge` makes a copy of a flat curve at height c, used from `a` to
+        // `b`.
+        let curve_edge = |cx: &mut FormCtx<'_>,
+                          curve: Curve,
+                          reversed: bool,
+                          c: f64,
+                          a: VertexId,
+                          b: VertexId|
+         -> Use {
+            match curve {
+                Curve::Arc {
+                    center,
+                    radius,
+                    start_angle,
+                    sweep,
+                } => {
+                    let (cs, ce) = if reversed { (b, a) } else { (a, b) };
+                    cx.info.edges.push(EdgeSource::Form { piece, line: false });
+                    let id = cx.solid.add_edge(
+                        Curve3::Circle(Circle3 {
+                            frame: Frame {
+                                origin: center.extend(z(c)),
+                                rotation: peet_math::DQuat::IDENTITY,
+                            },
+                            radius,
+                        }),
+                        cs,
+                        ce,
+                        start_angle,
+                        start_angle + sweep,
+                    );
+                    (id, reversed)
+                }
+                _ => {
+                    cx.info.edges.push(EdgeSource::Form { piece, line: true });
+                    (cx.solid.add_line_edge(a, b), false)
+                }
+            }
+        };
+        let line_edge = |cx: &mut FormCtx<'_>, a: VertexId, b: VertexId| -> EdgeId {
+            cx.info.edges.push(EdgeSource::Form { piece, line: true });
+            cx.solid.add_line_edge(a, b)
+        };
+        // The flat's own copies of the outline at heights 0 and t.
+        let cap_use = |k: usize, level: f64| -> Use {
+            let (b, tp) = cx.caps[lp[k % n]];
+            let id = if (level == 0.0) == up { b } else { tp };
+            (id, edge(k).reversed)
+        };
+        let c0: Vec<Use> = (0..n).map(|k| cap_use(k, 0.0)).collect();
+        let ct: Vec<Use> = (0..n).map(|k| cap_use(k, t)).collect();
+        let cht: Vec<Use> = (0..n)
+            .map(|k| {
+                let e = edge(k);
+                curve_edge(cx, e.curve, e.reversed, h + t, vht[k], vht[(k + 1) % n])
+            })
+            .collect();
+        let mut cw0: Vec<Option<Use>> = vec![None; n];
+        for (k, slot) in cw0.iter_mut().enumerate() {
+            if open != Some(k) {
+                let (c, r) = inner(k);
+                *slot = Some(curve_edge(cx, c, r, 0.0, w0[k], w0[(k + 1) % n]));
+            }
+        }
+        let cwh: Vec<Use> = (0..n)
+            .map(|k| {
+                let (c, r) = inner(k);
+                curve_edge(cx, c, r, h, wh[k], wh[(k + 1) % n])
+            })
+            .collect();
+        // Verticals: up the outside of the wall at the outline's corners, up the inside
+        // at the inside's corners.
+        let vt: Vec<EdgeId> = (0..n)
+            .map(|k| line_edge(cx, cap_vertex(k, t), vht[k]))
+            .collect();
+        let vw: Vec<EdgeId> = (0..n).map(|k| line_edge(cx, w0[k], wh[k])).collect();
+        // A louver's mouth: the foot's two ends at the open side.
+        let legs = open.map(|o| {
+            (
+                line_edge(cx, cap_vertex(o, 0.0), w0[o]),
+                line_edge(cx, w0[(o + 1) % n], cap_vertex(o + 1, 0.0)),
+            )
+        });
+
+        // Faces.
+        let flip = |l: &[Use]| -> Vec<Use> { l.iter().rev().map(|&(e, r)| (e, !r)).collect() };
+        let add_face = |cx: &mut FormCtx<'_>,
+                        surface: Surface,
+                        reversed: bool,
+                        loops: Vec<Vec<Use>>,
+                        index: u8| {
+            let face = cx.solid.add_face(shell, surface, reversed);
+            for l in loops {
+                // The mirror image turns every loop round.
+                let l = if up { l } else { flip(&l) };
+                cx.solid.add_loop(face, &l);
+            }
+            cx.tags.push(FaceTag::Form {
+                piece,
+                tag: CurveTag::Generated {
+                    owner: form.owner,
+                    part: form.part,
+                    index,
+                },
+            });
+            cx.info.faces.push(FaceSource::Form { piece });
+        };
+        let level_plane = |c: f64, outward_up: bool| {
+            // The canonical outward direction, mirrored for a form on the bottom side.
+            let n = if outward_up == up {
+                DVec3::Z
+            } else {
+                -DVec3::Z
+            };
+            Surface::Plane(
+                Plane::from_origin_normal_x(DVec3::new(0.0, 0.0, z(c)), n, DVec3::X)
+                    .expect("a valid plane"),
+            )
+        };
+        // A wall along a curve, facing its left (`left`) or its right.
+        let wall =
+            |curve: &Curve, reversed: bool, left: bool| -> Result<(Surface, bool), SheetError> {
+                let mid = curve.point_at(0.5);
+                let right = right_normal(curve, reversed, mid);
+                let normal = if left { -right } else { right };
+                Ok(match *curve {
+                    Curve::Line { a, b } => {
+                        let d = (b - a).extend(0.0);
+                        let plane =
+                            Plane::from_origin_normal_x(a.extend(0.0), normal.extend(0.0), d)
+                                .ok_or_else(|| {
+                                    SheetError::Invalid("a form wall has no length".to_owned())
+                                })?;
+                        (Surface::Plane(plane), false)
+                    }
+                    Curve::Arc { center, radius, .. } | Curve::Circle { center, radius } => (
+                        Surface::Cylinder(Cylinder {
+                            frame: Frame {
+                                origin: center.extend(0.0),
+                                rotation: peet_math::DQuat::IDENTITY,
+                            },
+                            radius,
+                        }),
+                        normal.dot(mid - center) < 0.0,
+                    ),
+                })
+            };
+
+        // The foot: where the wall leaves the sheet, between the outline and the inside.
+        let foot = match (open, legs) {
+            (Some(o), Some((leg_a, leg_b))) => {
+                let mut l = Vec::new();
+                for k in o + 1..o + n {
+                    l.push(c0[k % n]);
+                }
+                l.push((leg_a, false));
+                for k in (o + 1..o + n).rev() {
+                    let (e, r) = cw0[k % n].expect("formed sides have an inside edge");
+                    l.push((e, !r));
+                }
+                l.push((leg_b, false));
+                vec![l]
+            }
+            _ => {
+                let inside: Vec<Use> = cw0.iter().map(|u| u.expect("formed")).collect();
+                vec![c0.clone(), flip(&inside)]
+            }
+        };
+        add_face(cx, level_plane(0.0, false), false, foot, form_face::FOOT);
+        for k in 0..n {
+            if open == Some(k) {
+                continue;
+            }
+            let e = edge(k);
+            let k1 = (k + 1) % n;
+            // Outside of the wall, facing away from the form.
+            let (surface, rev) = wall(&e.curve, e.reversed, true)?;
+            let (ct_e, ct_r) = ct[k];
+            add_face(
+                cx,
+                surface,
+                rev,
+                vec![vec![(ct_e, !ct_r), (vt[k], false), cht[k], (vt[k1], true)]],
+                form_face::OUTER + k as u8,
+            );
+            // Inside of the wall, facing into the form.
+            let (c, r) = inner(k);
+            let (surface, rev) = wall(&c, r, false)?;
+            let (cwh_e, cwh_r) = cwh[k];
+            add_face(
+                cx,
+                surface,
+                rev,
+                vec![vec![
+                    cw0[k].expect("formed"),
+                    (vw[k1], false),
+                    (cwh_e, !cwh_r),
+                    (vw[k], true),
+                ]],
+                form_face::INNER + k as u8,
+            );
+        }
+        add_face(
+            cx,
+            level_plane(h + t, true),
+            false,
+            vec![flip(&cht)],
+            form_face::TOP,
+        );
+        add_face(
+            cx,
+            level_plane(h, false),
+            false,
+            vec![cwh.clone()],
+            form_face::UNDER,
+        );
+        if let (Some(o), Some((leg_a, leg_b))) = (open, legs) {
+            let o1 = (o + 1) % n;
+            let e = edge(o);
+            let (surface, rev) = wall(&e.curve, e.reversed, true)?;
+            let (cwh_e, cwh_r) = cwh[o];
+            // The existing verticals run bottom to top: canonical up is that way only for
+            // a form on the top side.
+            let mouth = vec![
+                (cx.vertical[&group(o)], !up),
+                (vt[o], false),
+                cht[o],
+                (vt[o1], true),
+                (cx.vertical[&group(o1)], up),
+                (leg_b, true),
+                (vw[o1], false),
+                (cwh_e, !cwh_r),
+                (vw[o], true),
+                (leg_a, true),
+            ];
+            add_face(cx, surface, rev, vec![mouth], form_face::MOUTH);
+        }
+        Ok(())
+    }
 }

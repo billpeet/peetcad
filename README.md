@@ -3,10 +3,11 @@
 A lightweight parametric 3D CAD application written in Rust, with sheet metal first.
 It runs as a native Windows app and in the browser (WebAssembly), from one codebase.
 
-> **Status:** early development (Phase 4: sheet metal, with base and edge flanges,
-> reliefs, cuts across bends, a live flat pattern and DXF export, on top of a
-> parametric, history-based modeller with sketches, extrude and cut, reference
-> geometry, undo and a native file format).
+> **Status:** early development (Phase 5: sheet metal for everyday work, with base, edge
+> and mitre flanges, hems, sketched bends and jogs, corners, dimples, embosses and
+> louvers, patterns and mirrors, manufacturing checks, gauge tables, a live flat pattern,
+> DXF export and import and STEP export, on top of a parametric, history-based modeller
+> with sketches, extrude and cut, reference geometry, undo and a native file format).
 > See [ROADMAP.md](ROADMAP.md) for the plan.
 
 ## Running
@@ -95,12 +96,24 @@ allowance or bend deduction) and relief type.
 |---|---|
 | Add a flange | Select one or more edges along the top or bottom face, then **Edge Flange** (or click it first and pick an edge). Set the length (measured on the outside), angle, position (material inside or outside, bend outside), offsets from the ends of the edge, and a custom radius. Drag the orange arrow on the selected flange to change its length |
 | Cut through the sheet | Sketch on a flat face of the sheet, then **Cut**. The cut is made in the flat pattern, so straight edges can run across bends |
+| Hem an edge | Select edges, then **Hem**: closed, open (with a gap), teardrop or rolled |
+| Flange round several edges | Sketch a profile (connected lines) square to one of the edges, starting at its top or bottom corner: the face at the end of the edge is a handy place. Select the edges, then **Miter Flange**. Where the edges meet, walls butt and lips in one plane are mitred, with a gap |
+| Bend along a line | Sketch lines across a flat face, then **Sketched Bend** (one bend per line) or **Jog** (a step: two bends that offset the far side) |
+| Corners | Flanges on neighbouring edges meet in a butt corner with a relief and a 0.1 mm gap. **Corner** changes that for the selected flanges' faces, or for every corner: butt, overlap or open, the gap, and the relief |
+| Dimples, embosses, louvers | Sketch circles (dimples) or closed polygons (embosses, louvers) on a flat face, then **Dimple**, **Emboss** or **Louver**. They are pressed, not cut: the flat pattern marks them on their own layer (a louver's open side is cut) |
+| Patterns and mirrors | Select an extrusion, a cut, a sheet metal cut or a form in the tree, then **Linear Pattern** (a row or a grid), **Circular Pattern** or **Mirror**. Directions can be the standard axes, a reference axis or a picked edge |
+| Check for manufacture | **Check**: flanges too short to bend, holes too close to a bend or an edge, holes too small, and parts that collide when folded. The limits are editable (multiples of thickness and radius) |
+| Materials and gauges | **Materials**: tables of thickness, bend radius and K-factor by material and gauge. **Apply** a row to the part; edit the tables, or share them as CSV |
 | Flat pattern | `U` toggles between folded and flat; bend lines are dashed |
 | Bend table | **Bends**: flat size, and every bend's direction, angle, radius, K-factor, allowance and deduction (copy it as text for a spreadsheet) |
-| DXF for the laser | **File → Export Flat Pattern DXF**: outline, cutouts, bend lines and bend notes on separate layers, in mm |
+| DXF for the laser | **File → Export Flat Pattern DXF**: outline, cutouts, bend lines, bend notes and form marks on separate layers, in mm |
+| STEP for other CAD | **File → Export STEP**: the folded part as exact geometry (AP214) |
+| Start from a drawing | **File → Import DXF**: lines, arcs, circles and polylines come into the open sketch, or into a new one. A closed outline is ready for **Base Flange** |
 
 **File → Open Sample Enclosure Panel** opens a panel with four flanges, reliefs and
 cutouts. Try changing the `thickness` and `flange` parameters (**Tools → Parameters**).
+**Open Sample Chassis** opens a tray with a mitre-flanged rim, a hem, patterned holes and
+louvers and mirrored dimples.
 
 ### The feature tree
 

@@ -47,6 +47,8 @@ struct OpenWindows {
     about: bool,
     parameters: bool,
     bend_table: bool,
+    sheet_checks: bool,
+    gauges: bool,
 }
 
 /// A drag of an edge flange's length handle in progress.
@@ -99,6 +101,12 @@ pub struct PeetApp {
     title: String,
     flange_drag: Option<FlangeDrag>,
     ribbon_tab: RibbonTab,
+    /// The gauge window: the table shown, and what went wrong with the last import.
+    gauge_table: usize,
+    gauge_message: Option<String>,
+    /// File dialogs waiting for an answer.
+    gauge_import: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
+    dxf_import: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
 }
 
 impl PeetApp {
@@ -171,6 +179,10 @@ impl PeetApp {
             title: String::new(),
             flange_drag: None,
             ribbon_tab: RibbonTab::default(),
+            gauge_table: 0,
+            gauge_message: None,
+            gauge_import: None,
+            dxf_import: None,
         }
     }
 
@@ -746,6 +758,12 @@ impl PeetApp {
                 self.files.discard_autosave();
                 self.info("Opened the sample enclosure panel. Press U for its flat pattern, or change the thickness and flange parameters (Tools > Parameters).");
             }
+            AfterDiscard::SampleChassis => {
+                let (model, _) = peet_model::samples::chassis();
+                self.set_document(Document::from_model(model, None));
+                self.files.discard_autosave();
+                self.info("Opened the sample chassis. Press U for its flat pattern; Sheet Metal > Check runs the manufacturing checks.");
+            }
             AfterDiscard::Quit => {
                 self.files.discard_autosave();
                 self.doc.mark_saved(None);
@@ -866,7 +884,25 @@ impl PeetApp {
                 enabled: !in_sketch && self.doc.has_sheet_metal(),
                 checked: Some(self.doc.is_flat()),
             },
-            CommandId::BendTable | CommandId::ExportDxf => enabled(self.doc.has_sheet_metal()),
+            CommandId::BendTable | CommandId::ExportDxf | CommandId::SheetChecks => {
+                enabled(self.doc.has_sheet_metal())
+            }
+            CommandId::Hem | CommandId::CornerTreatment => {
+                enabled(!in_sketch && self.doc.has_sheet_metal())
+            }
+            CommandId::SketchedBend
+            | CommandId::Jog
+            | CommandId::MiterFlange
+            | CommandId::Dimple
+            | CommandId::Emboss
+            | CommandId::Louver => {
+                enabled(self.extrude_source().is_some() && self.doc.has_sheet_metal())
+            }
+            CommandId::LinearPattern | CommandId::CircularPattern | CommandId::MirrorFeature => {
+                enabled(!in_sketch && self.copy_source().is_some())
+            }
+            CommandId::GaugeTables | CommandId::ImportDxf => enabled(true),
+            CommandId::ExportStep => enabled(!self.doc.bodies.is_empty()),
             CommandId::EditSketch => enabled(!in_sketch && self.selected_sketch().is_some()),
             CommandId::ExitSketch => enabled(in_sketch),
             CommandId::Parameters => enabled(true),
@@ -888,6 +924,7 @@ impl PeetApp {
             | CommandId::OpenDocument
             | CommandId::OpenSample
             | CommandId::OpenSampleEnclosure
+            | CommandId::OpenSampleChassis
             | CommandId::SaveDocument
             | CommandId::SaveDocumentAs => enabled(true),
             CommandId::ViewIsometric
@@ -955,6 +992,31 @@ impl PeetApp {
             CommandId::FlatPattern => self.toggle_flat(),
             CommandId::BendTable => self.windows.bend_table = true,
             CommandId::ExportDxf => self.export_dxf(),
+            CommandId::Hem => self.start_hem(),
+            CommandId::SketchedBend => {
+                self.start_from_sheet_sketch("Sketched Bend", |m, s| m.add_sketched_bend(s));
+            }
+            CommandId::Jog => self.start_from_sheet_sketch("Jog", |m, s| m.add_jog(s)),
+            CommandId::MiterFlange => self.start_miter_flange(),
+            CommandId::CornerTreatment => self.start_corner(),
+            CommandId::Dimple => self.start_from_sheet_sketch("Dimple", |m, s| {
+                m.add_form(s, peet_sheetmetal::FormKind::Dimple)
+            }),
+            CommandId::Emboss => self.start_from_sheet_sketch("Emboss", |m, s| {
+                m.add_form(s, peet_sheetmetal::FormKind::Emboss)
+            }),
+            CommandId::Louver => self.start_from_sheet_sketch("Louver", |m, s| {
+                m.add_form(s, peet_sheetmetal::FormKind::Louver)
+            }),
+            CommandId::LinearPattern => self.start_copy(CopyKind::Linear),
+            CommandId::CircularPattern => self.start_copy(CopyKind::Circular),
+            CommandId::MirrorFeature => self.start_copy(CopyKind::Mirror),
+            CommandId::SheetChecks => self.windows.sheet_checks = true,
+            CommandId::GaugeTables => self.windows.gauges = true,
+            CommandId::ExportStep => self.export_step(),
+            CommandId::ImportDxf => {
+                self.dxf_import = Some(peet_platform::open_file(("DXF drawing", &["dxf"])));
+            }
             CommandId::NewSketch => match self.selected_plane() {
                 Some((plane, placement)) => self.new_sketch(plane, placement),
                 None => {
@@ -998,6 +1060,7 @@ impl PeetApp {
             CommandId::OpenDocument => self.guard_unsaved(AfterDiscard::Open),
             CommandId::OpenSample => self.guard_unsaved(AfterDiscard::Sample),
             CommandId::OpenSampleEnclosure => self.guard_unsaved(AfterDiscard::SampleEnclosure),
+            CommandId::OpenSampleChassis => self.guard_unsaved(AfterDiscard::SampleChassis),
             CommandId::SaveDocument => self.save(false),
             CommandId::SaveDocumentAs => self.save(true),
             CommandId::CommandPalette => self.palette.toggle(),
@@ -1332,9 +1395,20 @@ impl PeetApp {
                                         "Enclosure Panel",
                                         Small,
                                     );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::OpenSampleChassis,
+                                        "Chassis",
+                                        Small,
+                                    );
                                 });
                             });
+                            ribbon::group(ui, "Import", |ui| {
+                                tool(ui, pending, CommandId::ImportDxf, "DXF", Large);
+                            });
                             ribbon::group(ui, "Export", |ui| {
+                                tool(ui, pending, CommandId::ExportStep, "STEP", Large);
                                 tool(ui, pending, CommandId::ExportStl, "STL", Large);
                                 tool(ui, pending, CommandId::ExportDxf, "DXF", Large);
                             });
@@ -1363,6 +1437,25 @@ impl PeetApp {
                                     |ui| menu(ui, pending, &REFERENCES),
                                 );
                             });
+                            ribbon::group(ui, "Copy", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::LinearPattern,
+                                        "Linear Pattern",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::CircularPattern,
+                                        "Circular Pattern",
+                                        Small,
+                                    );
+                                    tool(ui, pending, CommandId::MirrorFeature, "Mirror", Small);
+                                });
+                            });
                             ribbon::group(ui, "History", |ui| {
                                 ribbon::stack(ui, |ui| {
                                     tool(ui, pending, CommandId::DeleteSelection, "Delete", Small);
@@ -1389,6 +1482,28 @@ impl PeetApp {
                                 tool(ui, pending, CommandId::BaseFlange, "Base Flange", Large);
                                 ribbon::stack(ui, |ui| {
                                     tool(ui, pending, CommandId::SheetCut, "Sheet Cut", Small);
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::SketchedBend,
+                                        "Sketched Bend",
+                                        Small,
+                                    );
+                                    tool(ui, pending, CommandId::Jog, "Jog", Small);
+                                });
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::MiterFlange,
+                                        "Miter Flange",
+                                        Small,
+                                    );
+                                    tool(ui, pending, CommandId::Dimple, "Dimple", Small);
+                                    tool(ui, pending, CommandId::Louver, "Louver", Small);
+                                });
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::ImportDxf, "Import DXF", Small);
                                 });
                             });
                             ribbon::group(ui, "Draw", |ui| {
@@ -1456,14 +1571,66 @@ impl PeetApp {
                             ribbon::group(ui, "Flanges", |ui| {
                                 tool(ui, pending, CommandId::BaseFlange, "Base Flange", Large);
                                 tool(ui, pending, CommandId::EdgeFlange, "Edge Flange", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::MiterFlange,
+                                        "Miter Flange",
+                                        Small,
+                                    );
+                                    tool(ui, pending, CommandId::Hem, "Hem", Small);
+                                    tool(ui, pending, CommandId::CornerTreatment, "Corner", Small);
+                                });
+                            });
+                            ribbon::group(ui, "Bends", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::SketchedBend,
+                                        "Sketched Bend",
+                                        Small,
+                                    );
+                                    tool(ui, pending, CommandId::Jog, "Jog", Small);
+                                });
+                            });
+                            ribbon::group(ui, "Cut and Form", |ui| {
                                 tool(ui, pending, CommandId::SheetCut, "Sheet Cut", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::Dimple, "Dimple", Small);
+                                    tool(ui, pending, CommandId::Emboss, "Emboss", Small);
+                                    tool(ui, pending, CommandId::Louver, "Louver", Small);
+                                });
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::LinearPattern,
+                                        "Linear Pattern",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::CircularPattern,
+                                        "Circular Pattern",
+                                        Small,
+                                    );
+                                    tool(ui, pending, CommandId::MirrorFeature, "Mirror", Small);
+                                });
                             });
                             ribbon::group(ui, "Flat Pattern", |ui| {
                                 tool(ui, pending, CommandId::FlatPattern, "Flatten", Large);
-                                tool(ui, pending, CommandId::BendTable, "Bend Table", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::BendTable, "Bend Table", Small);
+                                    tool(ui, pending, CommandId::SheetChecks, "Check", Small);
+                                    tool(ui, pending, CommandId::GaugeTables, "Materials", Small);
+                                });
                             });
                             ribbon::group(ui, "Export", |ui| {
                                 tool(ui, pending, CommandId::ExportDxf, "DXF", Large);
+                                tool(ui, pending, CommandId::ExportStep, "STEP", Large);
                             });
                         }
                         RibbonTab::View => {
@@ -1846,6 +2013,32 @@ impl PeetApp {
                 }
                 features_ui::PanelResult::default()
             }
+            FeatureKind::Hem(h) => features_ui::hem_panel(ui, &self.doc, h, picking),
+            FeatureKind::SketchedBend(b) => {
+                let radius = self.flange_default_radius(id);
+                let r = features_ui::sketched_bend_panel(ui, &self.doc, b, radius);
+                self.edit_sketch_button(ui, b.sketch, pending);
+                r
+            }
+            FeatureKind::Jog(j) => {
+                let radius = self.flange_default_radius(id);
+                let r = features_ui::jog_panel(ui, &self.doc, j, radius);
+                self.edit_sketch_button(ui, j.sketch, pending);
+                r
+            }
+            FeatureKind::MiterFlange(m) => {
+                let r = features_ui::miter_flange_panel(ui, &self.doc, m, picking);
+                self.edit_sketch_button(ui, m.sketch, pending);
+                r
+            }
+            FeatureKind::Corner(c) => features_ui::corner_panel(ui, &self.doc, c, picking),
+            FeatureKind::Form(f) => {
+                let r = features_ui::form_panel(ui, &self.doc, f);
+                self.edit_sketch_button(ui, f.sketch, pending);
+                r
+            }
+            FeatureKind::Pattern(p) => features_ui::pattern_panel(ui, &self.doc, id, p, picking),
+            FeatureKind::Mirror(m) => features_ui::mirror_panel(ui, &self.doc, id, m, picking),
             other => features_ui::reference_panel(ui, &self.doc, other, picking),
         };
         if kind != feature.kind {
@@ -1885,6 +2078,15 @@ impl PeetApp {
         if !users.is_empty() {
             ui.add_space(4.0);
             ui.weak(format!("Used by {}", users.join(", ")));
+        }
+    }
+
+    /// A button that opens a feature's sketch.
+    fn edit_sketch_button(&mut self, ui: &mut Ui, sketch: FeatureId, pending: &mut Vec<CommandId>) {
+        ui.add_space(8.0);
+        if ui.button("Edit Sketch").clicked() {
+            self.selected = Some(ItemId::Feature(sketch));
+            pending.push(CommandId::EditSketch);
         }
     }
 
@@ -2672,6 +2874,7 @@ impl eframe::App for PeetApp {
         let ctx = ui.ctx().clone();
         self.apply_theme(&ctx);
         self.poll_files(&ctx);
+        self.poll_imports(&ctx);
         // A part opened with cached bodies was shown last frame; now build it for real.
         if self.doc.finish_loading() {
             ctx.request_repaint();
@@ -2820,6 +3023,8 @@ impl eframe::App for PeetApp {
         self.shortcuts_window(&ctx);
         self.about_window(&ctx);
         self.parameters_window(&ctx);
+        self.sheet_checks_window(&ctx);
+        self.gauge_window(&ctx);
         if let Some(cmd) = self.bend_table_window(&ctx) {
             pending.push(cmd);
         }
@@ -2849,4 +3054,695 @@ impl eframe::App for PeetApp {
         // Called periodically and on shutdown: make sure unsaved work is on disk.
         self.files.autosave(&self.doc, true);
     }
+}
+
+// ---- Phase 5 commands ----
+
+/// What a pattern or mirror command makes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CopyKind {
+    Linear,
+    Circular,
+    Mirror,
+}
+
+impl PeetApp {
+    /// The selected edges that are on sheet metal bodies.
+    fn selected_sheet_edges(&self) -> Vec<EdgeRef> {
+        self.selected_geom
+            .iter()
+            .filter_map(|g| match *g {
+                GeomRef::Edge { body, edge } => {
+                    let b = &self.doc.bodies.get(body)?.source;
+                    b.sheet.as_ref()?;
+                    b.edge_ref(edge)
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Adds a hem on each selected sheet metal edge, or one waiting for a pick.
+    fn start_hem(&mut self) {
+        let edges = self.selected_sheet_edges();
+        let pick = edges.is_empty();
+        let mut ids = Vec::new();
+        self.change(
+            if edges.len() > 1 {
+                "Add Hems"
+            } else {
+                "Add Hem"
+            },
+            |m| {
+                if edges.is_empty() {
+                    ids.push(m.add_hem(None));
+                }
+                for e in edges {
+                    ids.push(m.add_hem(Some(e)));
+                }
+            },
+        );
+        let last = ids.last().copied();
+        self.selected = last.map(ItemId::Feature);
+        self.selected_geom.clear();
+        if pick && let Some(id) = last {
+            self.picking = Some((id, Slot::HemEdge));
+            self.status_message = None;
+        }
+    }
+
+    /// Adds a feature made from the open or selected sketch, which must be on a flat
+    /// face of a sheet metal part.
+    fn start_from_sheet_sketch(
+        &mut self,
+        label: &str,
+        add: impl FnOnce(&mut peet_model::Model, FeatureId) -> FeatureId,
+    ) {
+        let Some(sketch) = self.extrude_source() else {
+            return;
+        };
+        self.close_sketch();
+        if !self.sketch_on_sheet(sketch) {
+            self.error(format!(
+                "{label}: draw the sketch on a flat face of the sheet metal part first (select the face, then New Sketch)."
+            ));
+            return;
+        }
+        let mut id = None;
+        self.change(&format!("Add {label}"), |m| id = Some(add(m, sketch)));
+        self.selected = id.map(ItemId::Feature);
+        self.selected_geom.clear();
+    }
+
+    /// Adds a mitre flange from the open or selected sketch along the selected edges.
+    fn start_miter_flange(&mut self) {
+        let Some(sketch) = self.extrude_source() else {
+            return;
+        };
+        let edges = self.selected_sheet_edges();
+        self.close_sketch();
+        let pick = edges.is_empty();
+        let mut id = None;
+        self.change("Add Miter Flange", |m| {
+            id = Some(m.add_miter_flange(sketch, edges));
+        });
+        self.selected = id.map(ItemId::Feature);
+        self.selected_geom.clear();
+        if pick && let Some(id) = id {
+            self.picking = Some((id, Slot::MiterEdge));
+            self.info("Click the edges for the flange to run along, one after the other (Add in the properties for each).");
+        }
+    }
+
+    /// Adds a corner treatment for the corners at the selected faces (or every corner).
+    fn start_corner(&mut self) {
+        let faces: Vec<peet_model::FaceRef> = self
+            .selected_geom
+            .iter()
+            .filter_map(|g| match *g {
+                GeomRef::Face { body, face } => {
+                    let b = &self.doc.bodies.get(body)?.source;
+                    b.sheet.as_ref()?;
+                    Some(b.face_ref(face))
+                }
+                _ => None,
+            })
+            .collect();
+        // Start from the part's relief size.
+        let relief = self
+            .doc
+            .sheet_body(None)
+            .and_then(|b| b.sheet.as_ref())
+            .map(|s| s.layout.default_corner());
+        let mut id = None;
+        self.change("Add Corner", |m| {
+            let c = m.add_corner(faces);
+            if let (Some(spec), Some(f)) = (relief, m.feature_mut(c))
+                && let FeatureKind::Corner(def) = &mut f.kind
+            {
+                def.relief = spec.relief;
+                def.relief_size = peet_model::Scalar::new(spec.relief_size);
+                def.gap = peet_model::Scalar::new(spec.gap);
+            }
+            id = Some(c);
+        });
+        self.selected = id.map(ItemId::Feature);
+        self.selected_geom.clear();
+    }
+
+    /// The selected feature, if a pattern or a mirror can copy it.
+    fn copy_source(&self) -> Option<FeatureId> {
+        let id = self.selected_feature()?;
+        self.doc
+            .feature(id)
+            .is_some_and(|f| f.kind.can_be_copied())
+            .then_some(id)
+    }
+
+    /// Adds a pattern or a mirror of the selected feature.
+    fn start_copy(&mut self, kind: CopyKind) {
+        let Some(seed) = self.copy_source() else {
+            self.error("Select the feature to copy in the tree first: an extrusion, a cut, a sheet metal cut or a form.");
+            return;
+        };
+        use peet_model::{AxisRef, LinearDirection, PatternDef, Scalar, StdAxis, StdPlane};
+        // A direction along the face the seed is sketched on, if it is on one.
+        let sketch_plane = self
+            .doc
+            .feature(seed)
+            .and_then(|f| f.kind.sketch())
+            .and_then(|s| self.doc.sketch_placement(s))
+            .map(|(plane, _)| plane);
+        let in_plane = |axis: StdAxis| {
+            sketch_plane.is_none_or(|p| p.normal().dot(axis.axis().dir).abs() < 0.5)
+        };
+        let along = StdAxis::ALL
+            .into_iter()
+            .find(|a| in_plane(*a))
+            .unwrap_or(StdAxis::X);
+        let normal = sketch_plane.map_or(StdAxis::Z, |p| {
+            StdAxis::ALL
+                .into_iter()
+                .max_by(|a, b| {
+                    let d = |x: &StdAxis| p.normal().dot(x.axis().dir).abs();
+                    d(a).total_cmp(&d(b))
+                })
+                .unwrap_or(StdAxis::Z)
+        });
+        let mut id = None;
+        let label = match kind {
+            CopyKind::Linear => "Add Linear Pattern",
+            CopyKind::Circular => "Add Circular Pattern",
+            CopyKind::Mirror => "Add Mirror",
+        };
+        self.change(label, |m| {
+            id = Some(match kind {
+                CopyKind::Linear => m.add_pattern(
+                    vec![seed],
+                    PatternDef::Linear {
+                        first: LinearDirection {
+                            direction: AxisRef::Standard(along),
+                            spacing: Scalar::new(20.0),
+                            count: 2,
+                            flip: false,
+                        },
+                        second: None,
+                    },
+                ),
+                CopyKind::Circular => m.add_pattern(
+                    vec![seed],
+                    PatternDef::Circular {
+                        axis: AxisRef::Standard(normal),
+                        count: 4,
+                        angle: Scalar::new(360.0),
+                        flip: false,
+                    },
+                ),
+                CopyKind::Mirror => {
+                    // A standard plane square to the sketch, to start with.
+                    let plane = StdPlane::ALL
+                        .into_iter()
+                        .find(|p| {
+                            sketch_plane
+                                .is_none_or(|s| s.normal().dot(p.plane().normal()).abs() < 0.5)
+                        })
+                        .unwrap_or(StdPlane::Right);
+                    m.add_mirror(vec![seed], PlaneRef::Standard(plane))
+                }
+            });
+        });
+        self.selected = id.map(ItemId::Feature);
+        self.selected_geom.clear();
+    }
+
+    fn export_step(&mut self) {
+        let bodies = self.doc.evaluation().bodies.clone();
+        if bodies.is_empty() {
+            self.error("There are no bodies to export.");
+            return;
+        }
+        let title = self.doc.title();
+        let stem = title.strip_suffix(".peet").unwrap_or(&title).to_owned();
+        let names: Vec<String> = bodies
+            .iter()
+            .map(|b| self.doc.model.name_of(b.origin).to_owned())
+            .collect();
+        let solids: Vec<(&str, &peet_kernel::Solid)> = names
+            .iter()
+            .zip(&bodies)
+            .map(|(n, b)| (n.as_str(), &b.solid))
+            .collect();
+        let options = peet_io::step::StepOptions {
+            schema: peet_io::step::StepSchema::Ap214,
+            product_name: stem.clone(),
+            author: String::new(),
+            organization: String::new(),
+            timestamp: peet_platform::timestamp_iso(),
+        };
+        let text = peet_io::step::write(&solids, &options);
+        match peet_platform::save_file(
+            &format!("{stem}.step"),
+            ("STEP file", &["step", "stp"]),
+            text.as_bytes(),
+        ) {
+            Ok(peet_platform::SaveOutcome::Saved(to)) => self.info(format!(
+                "Exported {} as STEP (AP214) to {to}",
+                if bodies.len() == 1 {
+                    "the body".to_owned()
+                } else {
+                    format!("{} bodies", bodies.len())
+                }
+            )),
+            Ok(peet_platform::SaveOutcome::Cancelled) => {}
+            Err(e) => self.error(e),
+        }
+    }
+
+    /// Puts an opened DXF into the open sketch, or into a new one.
+    fn finish_dxf_import(&mut self, file: &peet_platform::OpenedFile) {
+        let options = peet_io::dxf_import::ImportOptions::flat_pattern();
+        if let (Some(editor), Some(work)) = (&mut self.sketch, &mut self.sketch_work) {
+            let result = editor.edit_externally(work, |s| {
+                peet_io::dxf_import::import_into(s, &file.bytes, &options)
+            });
+            match result {
+                Ok(report) => self.info(import_summary(&file.name, &report)),
+                Err(e) => self.error(format!("Couldn't import {}: {e}", file.name)),
+            }
+            return;
+        }
+        let imported = match peet_io::dxf_import::import(&file.bytes, &options) {
+            Ok(i) => i,
+            Err(e) => {
+                self.error(format!("Couldn't import {}: {e}", file.name));
+                return;
+            }
+        };
+        let (plane, placement) = self.selected_plane().unwrap_or((
+            PlaneRef::Standard(peet_model::StdPlane::Top),
+            peet_model::StdPlane::Top.plane(),
+        ));
+        let mut id = None;
+        let sketch = imported.sketch;
+        self.change("Import DXF", |m| {
+            let s = m.add_sketch(plane, placement);
+            if let Some(f) = m.feature_mut(s).and_then(|f| f.sketch_mut()) {
+                f.sketch = sketch;
+            }
+            id = Some(s);
+        });
+        self.selected = id.map(ItemId::Feature);
+        self.selected_geom.clear();
+        self.info(import_summary(&file.name, &imported.report));
+        let bounds = self.doc.visible_bounds();
+        let animate = self.settings.animate_views;
+        if let Some(vp) = &mut self.viewport {
+            vp.zoom_to_fit(&bounds, animate);
+        }
+    }
+
+    /// The manufacturing checks of every sheet metal body.
+    fn sheet_checks_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.windows.sheet_checks;
+        let units = self.doc.model.parameters.units;
+        let mut rules = self.settings.check_rules;
+        egui::Window::new("Check for Manufacture")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(560.0)
+            .show(ctx, |ui| {
+                let bodies: Vec<_> = self
+                    .doc
+                    .evaluation()
+                    .bodies
+                    .iter()
+                    .filter(|b| b.sheet.is_some())
+                    .cloned()
+                    .collect();
+                if bodies.is_empty() {
+                    ui.weak("There is no sheet metal part. Start one with Base Flange.");
+                }
+                // Features that failed to build are the first thing to fix.
+                let failed: Vec<(String, String)> = self
+                    .doc
+                    .model
+                    .features()
+                    .filter(|f| f.kind.is_sheet_metal())
+                    .filter_map(|f| match self.doc.evaluation().status(f.id) {
+                        Some(peet_model::Status::Failed(m)) => Some((f.name.clone(), m.clone())),
+                        _ => None,
+                    })
+                    .collect();
+                for (name, message) in &failed {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(features_ui::ERROR, "⚠");
+                        ui.label(format!("{name} doesn't build: {message}"));
+                    });
+                }
+                for (bi, body) in bodies.iter().enumerate() {
+                    let Some(sheet) = &body.sheet else { continue };
+                    if bodies.len() > 1 {
+                        ui.strong(format!("Body from {}", self.doc.model.name_of(body.origin)));
+                    }
+                    let findings = peet_sheetmetal::check(sheet, &rules, |o| {
+                        self.doc.model.name_of(FeatureId(o)).to_owned()
+                    });
+                    if findings.is_empty() && failed.is_empty() {
+                        ui.horizontal(|ui| {
+                            ui.colored_label(egui::Color32::from_rgb(60, 170, 80), "✔");
+                            ui.label("Nothing found: the part passes every check.");
+                        });
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt(("findings", bi))
+                        .max_height(260.0)
+                        .show(ui, |ui| {
+                            for f in &findings {
+                                ui.horizontal_wrapped(|ui| {
+                                    let (mark, color) = match f.severity {
+                                        peet_sheetmetal::Severity::Error => {
+                                            ("⚠", features_ui::ERROR)
+                                        }
+                                        peet_sheetmetal::Severity::Warning => {
+                                            ("⚠", features_ui::WARNING)
+                                        }
+                                        peet_sheetmetal::Severity::Info => {
+                                            ("ℹ", ui.visuals().weak_text_color())
+                                        }
+                                    };
+                                    ui.colored_label(color, mark);
+                                    ui.strong(f.kind.label());
+                                    ui.label(&f.message);
+                                });
+                            }
+                        });
+                    if bi + 1 < bodies.len() {
+                        ui.separator();
+                    }
+                }
+                ui.add_space(6.0);
+                ui.collapsing("Rules", |ui| {
+                    ui.weak("Each limit is a multiple of the thickness (t), plus a multiple of the bend radius (R), plus a fixed length. Set all three to zero to turn a check off.");
+                    egui::Grid::new("check_rules")
+                        .num_columns(5)
+                        .spacing([10.0, 4.0])
+                        .show(ui, |ui| {
+                            for h in ["Check", "× t", "× R", &format!("+ {}", units.length.suffix()), ""] {
+                                ui.strong(h);
+                            }
+                            ui.end_row();
+                            let row = |ui: &mut Ui, label: &str, tip: &str, r: &mut peet_sheetmetal::Rule| {
+                                ui.label(label).on_hover_text(tip);
+                                ui.add(egui::DragValue::new(&mut r.thickness).speed(0.05).range(0.0..=50.0));
+                                ui.add(egui::DragValue::new(&mut r.radius).speed(0.05).range(0.0..=50.0));
+                                ui.add(egui::DragValue::new(&mut r.constant).speed(0.05).range(0.0..=1000.0));
+                                ui.weak(r.formula());
+                                ui.end_row();
+                            };
+                            row(ui, "Shortest flange", "The flat length a flange needs next to a bend for the press brake to grip it.", &mut rules.min_flange);
+                            row(ui, "Hole to bend", "The least distance from a hole or a cut to a bend region.", &mut rules.hole_to_bend);
+                            row(ui, "Hole to edge", "The least distance from a hole to the edge of the blank.", &mut rules.hole_to_edge);
+                            row(ui, "Hole to hole", "The least distance between two holes.", &mut rules.hole_to_hole);
+                            row(ui, "Smallest hole", "The smallest hole that can be cut cleanly.", &mut rules.min_hole);
+                            row(ui, "Collision depth", "How far two folded parts may run into each other before it is reported.", &mut rules.collision);
+                        });
+                    if ui.button("Defaults").clicked() {
+                        rules = peet_sheetmetal::CheckRules::default();
+                    }
+                });
+            });
+        self.settings.check_rules = rules;
+        self.windows.sheet_checks = open;
+    }
+
+    /// The base flange whose settings the gauge window applies to: the selected one, the
+    /// one of the selected body, or the first.
+    fn gauge_target(&self) -> Option<FeatureId> {
+        let is_base = |id: FeatureId| {
+            matches!(
+                self.doc.feature(id).map(|f| &f.kind),
+                Some(FeatureKind::BaseFlange(_))
+            )
+        };
+        self.selected_feature()
+            .filter(|id| is_base(*id))
+            .or_else(|| {
+                let body = self.selected_geom.first().map(|g| g.body())?;
+                let origin = self.doc.bodies.get(body)?.source.origin;
+                is_base(origin).then_some(origin)
+            })
+            .or_else(|| {
+                self.doc
+                    .model
+                    .features()
+                    .find(|f| matches!(f.kind, FeatureKind::BaseFlange(_)))
+                    .map(|f| f.id)
+            })
+    }
+
+    /// Material and gauge tables: apply an entry to the part, edit, import and export.
+    fn gauge_window(&mut self, ctx: &egui::Context) {
+        let mut open = self.windows.gauges;
+        let units = self.doc.model.parameters.units;
+        let mut library = self.settings.materials.clone();
+        let target = self.gauge_target();
+        let mut apply: Option<peet_sheetmetal::GaugeEntry> = None;
+        let mut import = false;
+        let mut export = false;
+        let mut message = self.gauge_message.clone();
+        let mut tab = self.gauge_table.min(library.tables.len().saturating_sub(1));
+        egui::Window::new("Materials and Gauges")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(640.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Material");
+                    egui::ComboBox::from_id_salt("gauge_material")
+                        .selected_text(
+                            library
+                                .tables
+                                .get(tab)
+                                .map_or("None", |t| t.name.as_str())
+                                .to_owned(),
+                        )
+                        .show_ui(ui, |ui| {
+                            for (i, t) in library.tables.iter().enumerate() {
+                                ui.selectable_value(&mut tab, i, &t.name);
+                            }
+                        });
+                    if ui.button("New material").clicked() {
+                        library.tables.push(peet_sheetmetal::GaugeTable {
+                            name: format!("Material {}", library.tables.len() + 1),
+                            material: format!("Material {}", library.tables.len() + 1),
+                            entries: Vec::new(),
+                        });
+                        tab = library.tables.len() - 1;
+                    }
+                    if !library.tables.is_empty() && ui.button("Delete material").clicked() {
+                        library.tables.remove(tab);
+                        tab = tab.saturating_sub(1);
+                    }
+                });
+                ui.add_space(4.0);
+                let target_name = target.map(|t| self.doc.model.name_of(t).to_owned());
+                if let Some(table) = library.tables.get_mut(tab) {
+                    ui.horizontal(|ui| {
+                        ui.label("Name");
+                        if ui.text_edit_singleline(&mut table.name).changed() {
+                            table.material = table.name.clone();
+                        }
+                    });
+                    let mut remove = None;
+                    egui::ScrollArea::vertical().max_height(300.0).show(ui, |ui| {
+                        egui::Grid::new("gauge_rows")
+                            .striped(true)
+                            .num_columns(7)
+                            .spacing([10.0, 4.0])
+                            .show(ui, |ui| {
+                                for h in ["Gauge", "Thickness", "Bend radius", "K-factor", "Notes", "", ""] {
+                                    ui.strong(h);
+                                }
+                                ui.end_row();
+                                for (i, e) in table.entries.iter_mut().enumerate() {
+                                    ui.add(egui::TextEdit::singleline(&mut e.gauge).desired_width(70.0));
+                                    let scale = units.length.mm_per_unit();
+                                    let mut thickness = e.thickness / scale;
+                                    if ui.add(egui::DragValue::new(&mut thickness).speed(0.01).range(0.001..=1000.0).suffix(format!(" {}", units.length.suffix()))).changed() {
+                                        e.thickness = thickness * scale;
+                                    }
+                                    let mut radius = e.radius / scale;
+                                    if ui.add(egui::DragValue::new(&mut radius).speed(0.01).range(0.0..=1000.0).suffix(format!(" {}", units.length.suffix()))).changed() {
+                                        e.radius = radius * scale;
+                                    }
+                                    match &mut e.model {
+                                        peet_sheetmetal::BendModel::KFactor(k) => {
+                                            ui.add(egui::DragValue::new(k).speed(0.005).range(0.0..=1.0));
+                                        }
+                                        peet_sheetmetal::BendModel::Allowance(v) => {
+                                            ui.label(format!("BA {}", units.format_length(*v)));
+                                        }
+                                        peet_sheetmetal::BendModel::Deduction(v) => {
+                                            ui.label(format!("BD {}", units.format_length(*v)));
+                                        }
+                                    }
+                                    ui.add(egui::TextEdit::singleline(&mut e.notes).desired_width(120.0));
+                                    let tip = match &target_name {
+                                        Some(n) => format!("Set the thickness, bend radius and bend model of {n} from this row."),
+                                        None => "There is no sheet metal part yet: start one with Base Flange.".to_owned(),
+                                    };
+                                    if ui.add_enabled(target.is_some(), egui::Button::new("Apply").small()).on_hover_text(tip).clicked() {
+                                        apply = Some(e.clone());
+                                    }
+                                    if ui.small_button("✖").on_hover_text("Delete this row.").clicked() {
+                                        remove = Some(i);
+                                    }
+                                    ui.end_row();
+                                }
+                            });
+                    });
+                    if let Some(i) = remove {
+                        table.entries.remove(i);
+                    }
+                    if ui.button("Add gauge").clicked() {
+                        let last = table.entries.last().cloned();
+                        table.entries.push(last.unwrap_or(peet_sheetmetal::GaugeEntry {
+                            gauge: "1.5 mm".to_owned(),
+                            thickness: 1.5,
+                            radius: 1.5,
+                            model: peet_sheetmetal::BendModel::KFactor(0.44),
+                            notes: String::new(),
+                        }));
+                    }
+                }
+                ui.separator();
+                ui.horizontal(|ui| {
+                    if ui.button("Import CSV…").on_hover_text("Replace the tables with those in a CSV file (from a colleague or a spreadsheet).").clicked() {
+                        import = true;
+                    }
+                    if ui.button("Export CSV…").on_hover_text("Save every table as one CSV file, to share or to edit in a spreadsheet.").clicked() {
+                        export = true;
+                    }
+                    if ui.button("Restore built-in tables").clicked() {
+                        library = peet_sheetmetal::MaterialLibrary::builtin();
+                        tab = 0;
+                        message = None;
+                    }
+                });
+                if let Some(m) = &message {
+                    ui.add_space(4.0);
+                    ui.colored_label(features_ui::ERROR, m);
+                }
+                ui.add_space(4.0);
+                ui.weak("The built-in values are starting points: check radius and K-factor against a test bend in your shop. Applying a row copies its values into the part; the part doesn't change when the table does.");
+            });
+        self.gauge_table = tab;
+        self.gauge_message = message;
+        self.settings.materials = library;
+        self.windows.gauges = open;
+        if let (Some(entry), Some(target)) = (apply, target) {
+            let name = self.doc.model.name_of(target).to_owned();
+            let label = entry.gauge.clone();
+            self.change(&format!("Apply {label} to {name}"), |m| {
+                if let Some(f) = m.feature_mut(target)
+                    && let FeatureKind::BaseFlange(b) = &mut f.kind
+                {
+                    use peet_model::{BendModelDef, Scalar};
+                    b.settings.thickness = Scalar::new(entry.thickness);
+                    b.settings.radius = Scalar::new(entry.radius);
+                    b.settings.model = match entry.model {
+                        peet_sheetmetal::BendModel::KFactor(k) => {
+                            BendModelDef::KFactor(Scalar::new(k))
+                        }
+                        peet_sheetmetal::BendModel::Allowance(v) => {
+                            BendModelDef::Allowance(Scalar::new(v))
+                        }
+                        peet_sheetmetal::BendModel::Deduction(v) => {
+                            BendModelDef::Deduction(Scalar::new(v))
+                        }
+                    };
+                }
+            });
+            self.info(format!("Applied {label} to {name}."));
+        }
+        if export {
+            let csv = self.settings.materials.to_csv();
+            match peet_platform::save_file("gauges.csv", ("CSV table", &["csv"]), csv.as_bytes()) {
+                Ok(peet_platform::SaveOutcome::Saved(to)) => {
+                    self.info(format!("Saved the gauge tables to {to}"));
+                }
+                Ok(peet_platform::SaveOutcome::Cancelled) => {}
+                Err(e) => self.error(e),
+            }
+        }
+        if import {
+            self.gauge_import = Some(peet_platform::open_file(("CSV table", &["csv"])));
+        }
+    }
+
+    /// Takes the results of the import dialogs when they arrive.
+    fn poll_imports(&mut self, ctx: &egui::Context) {
+        if let Some(p) = &self.dxf_import
+            && let Some(result) = p.take()
+        {
+            self.dxf_import = None;
+            match result {
+                Ok(Some(file)) => self.finish_dxf_import(&file),
+                Ok(None) => {}
+                Err(e) => self.error(e),
+            }
+        }
+        if let Some(p) = &self.gauge_import
+            && let Some(result) = p.take()
+        {
+            self.gauge_import = None;
+            match result {
+                Ok(Some(file)) => {
+                    let text = String::from_utf8_lossy(&file.bytes);
+                    match peet_sheetmetal::MaterialLibrary::from_csv(&text) {
+                        Ok(lib) => {
+                            let n: usize = lib.tables.iter().map(|t| t.entries.len()).sum();
+                            self.settings.materials = lib;
+                            self.gauge_table = 0;
+                            self.gauge_message = None;
+                            self.info(format!("Imported {n} gauges from {}", file.name));
+                        }
+                        Err(errors) => {
+                            let mut text: Vec<String> =
+                                errors.iter().take(6).map(ToString::to_string).collect();
+                            if errors.len() > 6 {
+                                text.push(format!("…and {} more.", errors.len() - 6));
+                            }
+                            self.gauge_message =
+                                Some(format!("{} wasn't imported. {}", file.name, text.join(" ")));
+                        }
+                    }
+                }
+                Ok(None) => {}
+                Err(e) => self.error(e),
+            }
+        }
+        if self.dxf_import.is_some() || self.gauge_import.is_some() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+}
+
+/// What a DXF import brought in, for the status bar.
+fn import_summary(name: &str, report: &peet_io::dxf_import::ImportReport) -> String {
+    let mut text = format!(
+        "Imported {} curves from {name} ({})",
+        report.entities_imported,
+        report.unit_used.label()
+    );
+    let skipped: usize = report.skipped.iter().map(|(_, n)| n).sum();
+    if skipped > 0 {
+        let kinds: Vec<String> = report
+            .skipped
+            .iter()
+            .map(|(k, n)| format!("{n} {k}"))
+            .collect();
+        text.push_str(&format!("; left out {}", kinds.join(", ")));
+    }
+    text
 }

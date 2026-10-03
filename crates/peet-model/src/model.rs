@@ -150,6 +150,7 @@ impl Model {
                         peet_sheetmetal::layout::wall::TIP => "end face",
                         _ => "edge face",
                     },
+                    FaceRole::Instance(_) => "copy",
                 };
                 format!("the {role} of {}", self.name_of(o.feature))
             })
@@ -243,6 +244,78 @@ impl Model {
         )));
         self.hide(sketch);
         id
+    }
+
+    /// Adds a hem on `edge` (or waiting for an edge to be picked).
+    pub fn add_hem(&mut self, edge: Option<crate::naming::EdgeRef>) -> FeatureId {
+        self.add(FeatureKind::Hem(Box::new(crate::feature::HemFeature::new(
+            edge,
+        ))))
+    }
+
+    /// Adds a sketched bend along the lines of `sketch`, which is then hidden.
+    pub fn add_sketched_bend(&mut self, sketch: FeatureId) -> FeatureId {
+        let id = self.add(FeatureKind::SketchedBend(Box::new(
+            crate::feature::SketchedBendFeature::new(sketch),
+        )));
+        self.hide(sketch);
+        id
+    }
+
+    /// Adds a jog along the line of `sketch`, which is then hidden.
+    pub fn add_jog(&mut self, sketch: FeatureId) -> FeatureId {
+        let id = self.add(FeatureKind::Jog(Box::new(crate::feature::JogFeature::new(
+            sketch,
+        ))));
+        self.hide(sketch);
+        id
+    }
+
+    /// Adds a mitre flange with the profile in `sketch` along `edges`.
+    pub fn add_miter_flange(
+        &mut self,
+        sketch: FeatureId,
+        edges: Vec<crate::naming::EdgeRef>,
+    ) -> FeatureId {
+        let id = self.add(FeatureKind::MiterFlange(Box::new(
+            crate::feature::MiterFlangeFeature::new(sketch, edges),
+        )));
+        self.hide(sketch);
+        id
+    }
+
+    /// Adds a corner treatment for the corners at `faces` (every corner if empty).
+    pub fn add_corner(&mut self, faces: Vec<crate::naming::FaceRef>) -> FeatureId {
+        self.add(FeatureKind::Corner(Box::new(
+            crate::feature::CornerFeature::new(faces),
+        )))
+    }
+
+    /// Adds forms of `kind` from the shapes in `sketch`, which is then hidden.
+    pub fn add_form(&mut self, sketch: FeatureId, kind: peet_sheetmetal::FormKind) -> FeatureId {
+        let id = self.add(FeatureKind::Form(Box::new(
+            crate::feature::FormFeature::new(sketch, kind),
+        )));
+        self.hide(sketch);
+        id
+    }
+
+    /// Adds a pattern of `seeds`.
+    pub fn add_pattern(
+        &mut self,
+        seeds: Vec<FeatureId>,
+        def: crate::feature::PatternDef,
+    ) -> FeatureId {
+        self.add(FeatureKind::Pattern(Box::new(
+            crate::feature::PatternFeature { seeds, def },
+        )))
+    }
+
+    /// Adds mirror images of `seeds` across `plane`.
+    pub fn add_mirror(&mut self, seeds: Vec<FeatureId>, plane: PlaneRef) -> FeatureId {
+        self.add(FeatureKind::Mirror(Box::new(
+            crate::feature::MirrorFeature { seeds, plane },
+        )))
     }
 
     fn hide(&mut self, id: FeatureId) {

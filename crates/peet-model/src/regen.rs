@@ -30,11 +30,11 @@ use web_time::Instant;
 
 use crate::extrude::{EndCondition, ExtrudeInput, apply_extrude};
 use crate::feature::{
-    AxisDef, AxisRef, CoordSystemDef, Feature, FeatureId, FeatureKind, PlaneDef, PlaneRef,
-    PointDef, PointRef, ScalarKind,
+    AxisDef, AxisRef, CoordSystemDef, Feature, FeatureId, FeatureKind, PatternDef, PlaneDef,
+    PlaneRef, PointDef, PointRef, ScalarKind,
 };
 use crate::naming::{Body, find_edge, find_face, find_vertex};
-use crate::{Axis, Model, hash, sheet};
+use crate::{Axis, Model, hash, pattern, sheet};
 
 /// How well defined a sketch is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -348,6 +348,7 @@ impl Engine {
                                 depth,
                                 up_to,
                                 stamp: key,
+                                mirror: false,
                             })?;
                             let warning = lost_sheet(model, bodies, &out, &feature.name);
                             Ok((out, warning))
@@ -421,6 +422,208 @@ impl Engine {
                     })
                 }
             },
+            FeatureKind::Hem(h) => match sheet::hem_spec(h, &model.parameters) {
+                Err(m) => fail(m, Output::None),
+                Ok(spec) => {
+                    let values = (spec.length, spec.gap, spec.radius, spec.angle, spec.offsets);
+                    let key = hash::of(&(6u8, id, &**h, run.body_key, values));
+                    self.solid_feature(id, key, run, |bodies| {
+                        sheet::apply_hem(id, model, bodies, h, &spec, key)
+                    })
+                }
+            },
+            FeatureKind::SketchedBend(b) => {
+                let inputs = (|| {
+                    let (plane, sketch) = ctx.sketch_input(b.sketch)?;
+                    let angle = ctx.scalar(&b.angle, ScalarKind::Angle, "Angle")?;
+                    let radius = b
+                        .radius
+                        .as_ref()
+                        .map(|r| ctx.scalar(r, ScalarKind::Length, "Bend radius"))
+                        .transpose()?;
+                    Ok((plane, sketch, angle, radius))
+                })();
+                match inputs {
+                    Err(m) => fail(m, Output::None),
+                    Ok((plane, sketch, angle, radius)) => {
+                        let face = sheet::sketch_face_ref(model, b.sketch);
+                        let sketch_key = run.out_keys.get(&b.sketch).copied().unwrap_or(0);
+                        let key = hash::of(&(
+                            7u8,
+                            id,
+                            &**b,
+                            sketch_key,
+                            run.body_key,
+                            &face,
+                            angle,
+                            radius,
+                        ));
+                        self.solid_feature(id, key, run, |bodies| {
+                            sheet::apply_sketched_bend(
+                                id,
+                                model,
+                                bodies,
+                                face.as_ref(),
+                                &plane,
+                                sketch,
+                                b,
+                                angle,
+                                radius,
+                                key,
+                            )
+                        })
+                    }
+                }
+            }
+            FeatureKind::Jog(j) => {
+                let inputs = (|| {
+                    let (plane, sketch) = ctx.sketch_input(j.sketch)?;
+                    let offset = ctx.scalar(&j.offset, ScalarKind::Length, "Offset")?;
+                    let angle = ctx.scalar(&j.angle, ScalarKind::Angle, "Angle")?;
+                    let radius = j
+                        .radius
+                        .as_ref()
+                        .map(|r| ctx.scalar(r, ScalarKind::Length, "Bend radius"))
+                        .transpose()?;
+                    Ok((plane, sketch, (offset, angle, radius)))
+                })();
+                match inputs {
+                    Err(m) => fail(m, Output::None),
+                    Ok((plane, sketch, values)) => {
+                        let face = sheet::sketch_face_ref(model, j.sketch);
+                        let sketch_key = run.out_keys.get(&j.sketch).copied().unwrap_or(0);
+                        let key =
+                            hash::of(&(8u8, id, &**j, sketch_key, run.body_key, &face, values));
+                        self.solid_feature(id, key, run, |bodies| {
+                            sheet::apply_jog(
+                                id,
+                                model,
+                                bodies,
+                                face.as_ref(),
+                                &plane,
+                                sketch,
+                                j,
+                                values,
+                                key,
+                            )
+                        })
+                    }
+                }
+            }
+            FeatureKind::MiterFlange(m) => {
+                let inputs = (|| {
+                    let (plane, sketch) = ctx.sketch_input(m.sketch)?;
+                    let gap = ctx.scalar(&m.gap, ScalarKind::Length, "Gap")?;
+                    let offsets = [
+                        ctx.scalar(&m.offset_start, ScalarKind::Length, "Start offset")?,
+                        ctx.scalar(&m.offset_end, ScalarKind::Length, "End offset")?,
+                    ];
+                    Ok((plane, sketch, gap, offsets))
+                })();
+                match inputs {
+                    Err(e) => fail(e, Output::None),
+                    Ok((plane, sketch, gap, offsets)) => {
+                        let sketch_key = run.out_keys.get(&m.sketch).copied().unwrap_or(0);
+                        let key =
+                            hash::of(&(9u8, id, &**m, sketch_key, run.body_key, gap, offsets));
+                        self.solid_feature(id, key, run, |bodies| {
+                            sheet::apply_miter_flange(
+                                id, model, bodies, m, &plane, sketch, gap, offsets, key,
+                            )
+                        })
+                    }
+                }
+            }
+            FeatureKind::Corner(c) => match sheet::corner_spec(c, &model.parameters) {
+                Err(m) => fail(m, Output::None),
+                Ok(spec) => {
+                    let key = hash::of(&(10u8, id, &**c, run.body_key, spec.gap, spec.relief_size));
+                    self.solid_feature(id, key, run, |bodies| {
+                        sheet::apply_corner(model, bodies, c, spec, key)
+                    })
+                }
+            },
+            FeatureKind::Form(f) => {
+                let inputs = (|| {
+                    let (plane, sketch) = ctx.sketch_input(f.sketch)?;
+                    let height = ctx.scalar(&f.height, ScalarKind::Length, "Height")?;
+                    Ok((plane, sketch, height))
+                })();
+                match inputs {
+                    Err(m) => fail(m, Output::None),
+                    Ok((plane, sketch, height)) => {
+                        let face = sheet::sketch_face_ref(model, f.sketch);
+                        let sketch_key = run.out_keys.get(&f.sketch).copied().unwrap_or(0);
+                        let key =
+                            hash::of(&(11u8, id, &**f, sketch_key, run.body_key, &face, height));
+                        self.solid_feature(id, key, run, |bodies| {
+                            sheet::apply_form(
+                                id,
+                                model,
+                                bodies,
+                                face.as_ref(),
+                                &plane,
+                                sketch,
+                                f,
+                                height,
+                                key,
+                            )
+                        })
+                    }
+                }
+            }
+            FeatureKind::Pattern(p) => {
+                let inputs = (|| {
+                    let motions = ctx.pattern_motions(&p.def)?;
+                    let seeds = ctx.seeds(&p.seeds)?;
+                    Ok((motions, seeds))
+                })();
+                match inputs {
+                    Err(m) => fail(m, Output::None),
+                    Ok((motions, seeds)) => {
+                        let key = hash::of(&(
+                            12u8,
+                            id,
+                            &**p,
+                            run.body_key,
+                            seed_key(model, &p.seeds, &run.out_keys),
+                            format!("{motions:?}"),
+                        ));
+                        self.solid_feature(id, key, run, |bodies| {
+                            pattern::apply_copies(id, model, bodies, &seeds, &motions, key)
+                        })
+                    }
+                }
+            }
+            FeatureKind::Mirror(m) => {
+                let inputs = (|| {
+                    let plane = ctx
+                        .plane(&m.plane)
+                        .map_err(|e| format!("Mirror plane: {e}"))?;
+                    let seeds = ctx.seeds(&m.seeds)?;
+                    Ok((plane, seeds))
+                })();
+                match inputs {
+                    Err(e) => fail(e, Output::None),
+                    Ok((plane, seeds)) => {
+                        let motions = [pattern::Motion::Mirror {
+                            point: plane.origin(),
+                            normal: plane.normal(),
+                        }];
+                        let key = hash::of(&(
+                            13u8,
+                            id,
+                            &**m,
+                            run.body_key,
+                            seed_key(model, &m.seeds, &run.out_keys),
+                            &plane,
+                        ));
+                        self.solid_feature(id, key, run, |bodies| {
+                            pattern::apply_copies(id, model, bodies, &seeds, &motions, key)
+                        })
+                    }
+                }
+            }
             // Reference geometry is a few vector operations: always recomputed.
             FeatureKind::Plane(def) => reference(ctx.plane_def(def).map(Output::Plane)),
             FeatureKind::Axis(def) => reference(ctx.axis_def(def).map(Output::Axis)),
@@ -656,6 +859,7 @@ impl<'m> Ctx<'m, '_> {
                 }),
                 _ => Err(format!("{} is not an axis.", self.model.name_of(*id))),
             },
+            AxisRef::Edge(e) => self.axis_def(&AxisDef::Edge(e.clone())),
         }
     }
 
@@ -805,5 +1009,154 @@ impl<'m> Ctx<'m, '_> {
             origin: self.point(&def.origin)?,
             rotation: self.plane(&def.orientation)?.frame.rotation,
         })
+    }
+}
+
+/// Identifies the copied features' inputs: their definitions and their sketches.
+fn seed_key(model: &Model, seeds: &[FeatureId], out_keys: &HashMap<FeatureId, u64>) -> u64 {
+    let mut key = 0;
+    for &s in seeds {
+        let def = model.feature(s).map_or(0, |f| hash::of(&f.kind));
+        let sketch = model
+            .feature(s)
+            .and_then(|f| f.kind.sketch())
+            .and_then(|sk| out_keys.get(&sk).copied())
+            .unwrap_or(0);
+        key = hash::combine(key, hash::combine(def, sketch));
+    }
+    key
+}
+
+impl<'m> Ctx<'m, '_> {
+    /// The copied features, resolved.
+    fn seeds(&self, ids: &[FeatureId]) -> Result<Vec<(String, pattern::Seed<'m>)>, String> {
+        if ids.is_empty() {
+            return Err("Pick the features to copy.".to_owned());
+        }
+        let mut out = Vec::new();
+        for &id in ids {
+            self.state_of(id, "A copied feature")?;
+            let feature = self.model.feature(id).expect("state_of checked it exists");
+            let name = feature.name.clone();
+            let seed = match &feature.kind {
+                FeatureKind::Extrude(e) => {
+                    let (plane, sketch) = self.sketch_input(e.sketch)?;
+                    let depth = if e.params.end.uses_depth() {
+                        self.scalar(&e.params.depth, ScalarKind::Length, "Depth")?
+                    } else {
+                        0.0
+                    };
+                    let up_to = match &e.params.end {
+                        EndCondition::UpTo(r) => Some(self.plane(r)?),
+                        _ => None,
+                    };
+                    pattern::Seed::Extrude {
+                        plane,
+                        sketch,
+                        params: &e.params,
+                        depth,
+                        up_to,
+                    }
+                }
+                FeatureKind::SheetCut(c) => {
+                    let (plane, sketch) = self.sketch_input(c.sketch)?;
+                    pattern::Seed::SheetCut {
+                        plane,
+                        sketch,
+                        face: sheet::sketch_face_ref(self.model, c.sketch),
+                    }
+                }
+                FeatureKind::Form(f) => {
+                    let (plane, sketch) = self.sketch_input(f.sketch)?;
+                    pattern::Seed::Form {
+                        plane,
+                        sketch,
+                        face: sheet::sketch_face_ref(self.model, f.sketch),
+                        def: f,
+                        height: self.scalar(&f.height, ScalarKind::Length, "Height")?,
+                    }
+                }
+                other => {
+                    return Err(format!(
+                        "{name} is a {}, which can't be copied: patterns and mirrors copy extrusions, cuts, sheet metal cuts and forms.",
+                        other.type_name().to_lowercase()
+                    ));
+                }
+            };
+            out.push((name, seed));
+        }
+        Ok(out)
+    }
+
+    /// Where a pattern's copies go (the original excluded).
+    fn pattern_motions(&self, def: &PatternDef) -> Result<Vec<pattern::Motion>, String> {
+        let count = |n: u32, what: &str| {
+            if (2..=10_000).contains(&n) {
+                Ok(n)
+            } else {
+                Err(format!(
+                    "The {what} count must be between 2 and 10000 (it is {n})."
+                ))
+            }
+        };
+        match def {
+            PatternDef::Linear { first, second } => {
+                let step = |d: &crate::feature::LinearDirection, what: &str| {
+                    let axis = self
+                        .axis(&d.direction)
+                        .map_err(|m| format!("{what}: {m}"))?;
+                    let spacing = self.scalar(&d.spacing, ScalarKind::Length, "Spacing")?;
+                    let sign = if d.flip { -1.0 } else { 1.0 };
+                    Ok::<_, String>((axis.dir * spacing * sign, count(d.count, what)?))
+                };
+                let (s1, n1) = step(first, "direction")?;
+                let (s2, n2) = match second {
+                    Some(d) => step(d, "second direction")?,
+                    None => (DVec3::ZERO, 1),
+                };
+                let mut out = Vec::new();
+                for j in 0..n2 {
+                    for i in 0..n1 {
+                        if i == 0 && j == 0 {
+                            continue;
+                        }
+                        out.push(pattern::Motion::translation(
+                            s1 * f64::from(i) + s2 * f64::from(j),
+                        ));
+                    }
+                }
+                Ok(out)
+            }
+            PatternDef::Circular {
+                axis,
+                count: n,
+                angle,
+                flip,
+            } => {
+                let a = self.axis(axis).map_err(|m| format!("Axis: {m}"))?;
+                let n = count(*n, "copy")?;
+                let total = self.scalar(angle, ScalarKind::Angle, "Angle")?;
+                if total.abs() < 1e-9 {
+                    return Err("The angle must not be zero.".to_owned());
+                }
+                // All the way round: evenly spaced; otherwise the last copy at the angle.
+                let full = (total.abs() - 360.0).abs() < 1e-9;
+                let step = if full {
+                    total / f64::from(n)
+                } else {
+                    total / f64::from(n - 1)
+                };
+                let sign = if *flip { -1.0 } else { 1.0 };
+                Ok((1..n)
+                    .map(|k| {
+                        pattern::Motion::rotation(
+                            a.origin,
+                            a.dir,
+                            (sign * step * f64::from(k)).to_radians(),
+                        )
+                    })
+                    .collect())
+            }
+        }
     }
 }

@@ -22,6 +22,7 @@ pub enum AfterDiscard {
     Open,
     Sample,
     SampleEnclosure,
+    SampleChassis,
     Quit,
 }
 

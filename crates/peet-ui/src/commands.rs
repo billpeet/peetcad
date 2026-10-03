@@ -33,6 +33,7 @@ pub enum CommandId {
     SaveDocument,
     OpenSample,
     OpenSampleEnclosure,
+    OpenSampleChassis,
     RefPlane,
     RefAxis,
     RefPoint,
@@ -85,6 +86,21 @@ pub enum CommandId {
     FlatPattern,
     BendTable,
     ExportDxf,
+    Hem,
+    SketchedBend,
+    Jog,
+    MiterFlange,
+    CornerTreatment,
+    Dimple,
+    Emboss,
+    Louver,
+    LinearPattern,
+    CircularPattern,
+    MirrorFeature,
+    SheetChecks,
+    GaugeTables,
+    ExportStep,
+    ImportDxf,
 }
 
 /// Static description of a command.
@@ -113,7 +129,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 76] = [
+    pub const ALL: [Self; 92] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -138,6 +154,7 @@ impl CommandId {
         Self::SaveDocument,
         Self::OpenSample,
         Self::OpenSampleEnclosure,
+        Self::OpenSampleChassis,
         Self::RefPlane,
         Self::RefAxis,
         Self::RefPoint,
@@ -190,6 +207,21 @@ impl CommandId {
         Self::FlatPattern,
         Self::BendTable,
         Self::ExportDxf,
+        Self::Hem,
+        Self::SketchedBend,
+        Self::Jog,
+        Self::MiterFlange,
+        Self::CornerTreatment,
+        Self::Dimple,
+        Self::Emboss,
+        Self::Louver,
+        Self::LinearPattern,
+        Self::CircularPattern,
+        Self::MirrorFeature,
+        Self::SheetChecks,
+        Self::GaugeTables,
+        Self::ExportStep,
+        Self::ImportDxf,
     ];
 
     pub fn info(self) -> CommandInfo {
@@ -309,6 +341,12 @@ impl CommandId {
                 "Open Sample Enclosure Panel",
                 "File",
                 "Open a sheet metal enclosure panel with four flanges, reliefs and cutouts.",
+                None,
+            ),
+            Self::OpenSampleChassis => (
+                "Open Sample Chassis",
+                "File",
+                "Open a sheet metal chassis tray: a mitre flange rim, a hem, patterned holes and louvers, and mirrored dimples.",
                 None,
             ),
             Self::RefPlane => (
@@ -596,6 +634,96 @@ impl CommandId {
                 "Export Flat Pattern DXF…",
                 "File",
                 "Save the flat pattern of the sheet metal part as a DXF for laser, plasma or punch cutting: outline, cutouts, bend lines and bend notes on separate layers.",
+                None,
+            ),
+            Self::Hem => (
+                "Hem",
+                "Sheet Metal",
+                "Fold the selected edges of a sheet metal part back over the sheet (or pick an edge): closed, open, teardrop or rolled.",
+                None,
+            ),
+            Self::SketchedBend => (
+                "Sketched Bend",
+                "Sheet Metal",
+                "Bend a flat face along the lines of the selected (or open) sketch, drawn across that face.",
+                None,
+            ),
+            Self::Jog => (
+                "Jog",
+                "Sheet Metal",
+                "Step a flat face along the line of the selected (or open) sketch: two bends that offset the far side.",
+                None,
+            ),
+            Self::MiterFlange => (
+                "Miter Flange",
+                "Sheet Metal",
+                "Run the profile in the selected (or open) sketch along the selected edges of a face. Draw the profile square to one of the edges, starting at it; where the edges meet, the flanges are mitred.",
+                None,
+            ),
+            Self::CornerTreatment => (
+                "Corner",
+                "Sheet Metal",
+                "Set how flanges meet at corners: butt, overlap or open, the gap between them and the relief. Applies to the corners at the selected faces, or to every corner of the part.",
+                None,
+            ),
+            Self::Dimple => (
+                "Dimple",
+                "Sheet Metal",
+                "Press a round dimple at each circle of the selected (or open) sketch, drawn on a flat face of the sheet.",
+                None,
+            ),
+            Self::Emboss => (
+                "Emboss",
+                "Sheet Metal",
+                "Press a raised plateau for each closed polygon of the selected (or open) sketch, drawn on a flat face of the sheet.",
+                None,
+            ),
+            Self::Louver => (
+                "Louver",
+                "Sheet Metal",
+                "Lance and form a louver for each closed polygon (usually a rectangle) of the selected (or open) sketch: one side is cut open.",
+                None,
+            ),
+            Self::LinearPattern => (
+                "Linear Pattern",
+                "Features",
+                "Copy the selected feature (an extrusion, a cut, a sheet metal cut or a form) in a row or a grid.",
+                None,
+            ),
+            Self::CircularPattern => (
+                "Circular Pattern",
+                "Features",
+                "Copy the selected feature (an extrusion, a cut, a sheet metal cut or a form) around an axis.",
+                None,
+            ),
+            Self::MirrorFeature => (
+                "Mirror",
+                "Features",
+                "Make a mirror image of the selected feature (an extrusion, a cut, a sheet metal cut or a form) across a plane.",
+                None,
+            ),
+            Self::SheetChecks => (
+                "Check for Manufacture…",
+                "Sheet Metal",
+                "Check the sheet metal part against shop rules: flanges too short to bend, holes too close to a bend or an edge, holes too small, parts that collide when folded.",
+                None,
+            ),
+            Self::GaugeTables => (
+                "Materials and Gauges…",
+                "Sheet Metal",
+                "Tables of sheet stock: thickness, bend radius and K-factor by material and gauge. Apply one to the part, edit the tables, or share them as a CSV file.",
+                None,
+            ),
+            Self::ExportStep => (
+                "Export STEP…",
+                "File",
+                "Save the bodies as a STEP file (exact geometry) for other CAD systems and for fabricators.",
+                None,
+            ),
+            Self::ImportDxf => (
+                "Import DXF…",
+                "File",
+                "Bring the lines, arcs and circles of a DXF drawing into the open sketch, or into a new sketch on the top plane (or the selected plane or face).",
                 None,
             ),
         };

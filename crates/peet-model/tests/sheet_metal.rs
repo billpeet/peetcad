@@ -315,7 +315,7 @@ fn faces_are_named_by_role() {
                 let expect = if *piece == 0 { base } else { f };
                 assert_eq!(owner, expect);
             }
-            FaceTag::Wall { .. } => {}
+            FaceTag::Wall { .. } | FaceTag::Form { .. } => {}
         }
     }
     // A sketch on the flange's outer face follows the flange when the plate changes.

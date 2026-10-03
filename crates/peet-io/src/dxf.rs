@@ -11,8 +11,12 @@
 //! | `CUTOUTS`    | holes and inner cutouts (round holes as circles)           |
 //! | `BEND`       | bend lines (the middle of each bend region), dashed        |
 //! | `BEND_NOTES` | one note per bend: direction, angle and inner radius       |
+//! | `FORMS`      | outlines and centre marks of dimples, embosses and louvers |
+//! | `FORM_NOTES` | one note per form: kind, direction and height              |
 //!
-//! "UP" means the flange bends towards the viewer (the top side of the sheet).
+//! "UP" means the flange bends (or the form stands) towards the viewer (the top side of
+//! the sheet). Forms are pressed, not cut, so their outlines are kept off the cutting
+//! layers; the lance of a louver is cut, and is on `CUTOUTS`.
 
 use std::collections::HashSet;
 use std::fmt::Write as _;
@@ -26,6 +30,8 @@ pub mod layer {
     pub const CUTOUTS: &str = "CUTOUTS";
     pub const BEND: &str = "BEND";
     pub const BEND_NOTES: &str = "BEND_NOTES";
+    pub const FORMS: &str = "FORMS";
+    pub const FORM_NOTES: &str = "FORM_NOTES";
 }
 
 /// A 2D drawing entity.
@@ -174,6 +180,80 @@ pub fn flat_pattern_entities(sheet: &SheetBody) -> Vec<Entity> {
             ),
         });
     }
+
+    for form in &sheet.forms {
+        // A louver's lance is cut; the other sides are only marked.
+        let lance = form.lance;
+        let is_lance = |a: DVec2, b: DVec2| {
+            lance.is_some_and(|l| {
+                (l[0].distance(a) < 1e-9 && l[1].distance(b) < 1e-9)
+                    || (l[0].distance(b) < 1e-9 && l[1].distance(a) < 1e-9)
+            })
+        };
+        let mut size = 0.0_f64;
+        for (curve, _) in &form.outline {
+            match *curve {
+                Curve::Line { a, b } => {
+                    size = size.max(a.distance(form.center));
+                    out.push(Entity::Line {
+                        layer: if is_lance(a, b) {
+                            layer::CUTOUTS
+                        } else {
+                            layer::FORMS
+                        },
+                        a,
+                        b,
+                        dashed: false,
+                    });
+                }
+                Curve::Circle { center, radius } => {
+                    size = size.max(radius);
+                    out.push(Entity::Circle {
+                        layer: layer::FORMS,
+                        center,
+                        radius,
+                    });
+                }
+                Curve::Arc {
+                    center,
+                    radius,
+                    start_angle,
+                    sweep,
+                } => {
+                    size = size.max(radius);
+                    out.push(Entity::Arc {
+                        layer: layer::FORMS,
+                        center,
+                        radius,
+                        start: start_angle.to_degrees().rem_euclid(360.0),
+                        end: (start_angle + sweep).to_degrees().rem_euclid(360.0),
+                    });
+                }
+            }
+        }
+        // A centre mark for the punch, and a note.
+        let arm = (size / 4.0).clamp(0.5, 5.0);
+        for d in [DVec2::X, DVec2::Y] {
+            out.push(Entity::Line {
+                layer: layer::FORMS,
+                a: form.center - d * arm,
+                b: form.center + d * arm,
+                dashed: false,
+            });
+        }
+        out.push(Entity::Text {
+            layer: layer::FORM_NOTES,
+            at: form.center + DVec2::new(0.0, arm + height),
+            height,
+            rotation: 0.0,
+            text: format!(
+                "{} {} {}",
+                form.kind.label().to_uppercase(),
+                if form.up { "UP" } else { "DOWN" },
+                number(form.height, 3)
+            ),
+        });
+    }
     out
 }
 
@@ -287,12 +367,14 @@ pub fn write(entities: &[Entity]) -> String {
     pair(0, "ENDTAB");
     pair(0, "TABLE");
     pair(2, "LAYER");
-    pair(70, "4");
+    pair(70, "6");
     for (name, color, linetype) in [
         (layer::OUTLINE, "7", "CONTINUOUS"),
         (layer::CUTOUTS, "4", "CONTINUOUS"),
         (layer::BEND, "3", "DASHED"),
         (layer::BEND_NOTES, "2", "CONTINUOUS"),
+        (layer::FORMS, "6", "CONTINUOUS"),
+        (layer::FORM_NOTES, "2", "CONTINUOUS"),
     ] {
         pair(0, "LAYER");
         pair(2, name);

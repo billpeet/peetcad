@@ -85,6 +85,36 @@ pub fn data_dir() -> Option<std::path::PathBuf> {
 }
 
 /// Time elapsed since `start`, in milliseconds, as a float (convenient for display).
+/// The current time as `2026-01-31T14:05:09` (UTC), for file headers.
+pub fn timestamp_iso() -> String {
+    let secs = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs());
+    iso_from_unix(secs)
+}
+
+/// A count of seconds since 1970 as a calendar date and time (UTC).
+fn iso_from_unix(secs: u64) -> String {
+    let (days, rest) = (secs / 86_400, secs % 86_400);
+    // Civil date from a day count (Howard Hinnant's algorithm), in the era starting
+    // 0000-03-01.
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let doe = z % 146_097;
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let day = doy - (153 * mp + 2) / 5 + 1;
+    let month = if mp < 10 { mp + 3 } else { mp - 9 };
+    let year = yoe + era * 400 + u64::from(month <= 2);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}",
+        rest / 3_600,
+        rest % 3_600 / 60,
+        rest % 60
+    )
+}
+
 pub fn elapsed_ms(start: Instant) -> f64 {
     start.elapsed().as_secs_f64() * 1000.0
 }

@@ -20,13 +20,14 @@
 //! built ([`crate::build`]), so a flange only has to say "this strip of my parent is mine
 //! now" rather than edit its parent's outline.
 
-use std::f64::consts::PI;
-
 use peet_math::{DQuat, DVec2, DVec3, Frame, Plane, tolerance};
 use peet_sketch::Curve;
 use peet_sketch::region::{Loop, LoopEdge, Region};
 
-use crate::settings::{BendModel, BendValues, FlangePosition, ReliefType, SheetSettings};
+use crate::corner::Corner;
+use crate::flange::Attachment;
+use crate::form::Form;
+use crate::settings::{BendModel, BendValues, SheetSettings};
 
 /// Who made a piece: an owner (the feature) and a key within it, for naming its faces.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -42,13 +43,28 @@ pub enum CurveTag {
     Sketch { owner: u32, entity: u32 },
     /// An edge the owner made (a flange's tip and sides, a relief), numbered within it.
     Generated { owner: u32, part: u32, index: u8 },
+    /// A copy of a sketch curve made by a pattern or a mirror (the owner): which copy,
+    /// and the curve's entity in the copied feature's sketch.
+    Copy { owner: u32, copy: u32, entity: u32 },
 }
 
 impl CurveTag {
     pub fn owner(self) -> u32 {
         match self {
-            Self::Sketch { owner, .. } | Self::Generated { owner, .. } => owner,
+            Self::Sketch { owner, .. }
+            | Self::Generated { owner, .. }
+            | Self::Copy { owner, .. } => owner,
         }
+    }
+}
+
+impl Area {
+    /// The area with every curve's tag changed by `f`.
+    pub fn retagged(mut self, f: impl Fn(CurveTag) -> CurveTag) -> Self {
+        for e in self.loops.iter_mut().flatten() {
+            e.tag = f(e.tag);
+        }
+        self
     }
 }
 
@@ -192,9 +208,10 @@ fn map_edge(e: &Edge2, f: &impl Fn(DVec2) -> DVec2) -> Edge2 {
 /// A bend: a strip of the flat pattern that wraps around a cylinder when folded.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Bend {
-    /// The flange the bend starts from, and the one it carries.
+    /// The flange the bend starts from, and the one it carries (none at the end of a
+    /// rolled hem, which ends in the bend).
     pub parent: usize,
-    pub child: usize,
+    pub child: Option<usize>,
     /// The start of the bend's parent-side line, in flat coordinates.
     pub origin: DVec2,
     /// Unit direction along the bend line.
@@ -334,8 +351,15 @@ impl Piece {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Cut {
     pub area: Area,
-    /// The cut applies to the pieces that existed when it was made: `pieces[..pieces]`.
-    pub pieces: usize,
+    /// The pieces the cut applies to: those that existed when it was made, plus the pieces
+    /// later split off them (by a sketched bend), which keep their holes.
+    pub pieces: Vec<usize>,
+}
+
+impl Cut {
+    pub fn applies_to(&self, piece: usize) -> bool {
+        self.pieces.contains(&piece)
+    }
 }
 
 /// An open profile's line, in sketch coordinates, in chain order.
@@ -356,22 +380,6 @@ pub struct EdgeSite {
     /// Whether the edge was picked on the top side of the sheet (the flange then bends
     /// towards that side).
     pub top: bool,
-}
-
-/// An edge flange's values, evaluated.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct EdgeFlangeSpec {
-    /// Outside length: from the outer virtual sharp to the flange's end.
-    pub length: f64,
-    /// Bend angle in degrees.
-    pub angle: f64,
-    pub position: FlangePosition,
-    /// How far each end of the flange is set back from the ends of the edge.
-    pub offsets: [f64; 2],
-    /// Bend to the other side.
-    pub flip: bool,
-    /// Inner radius, if not the body's default.
-    pub radius: Option<f64>,
 }
 
 /// Wall numbers within an edge flange (part 0), for naming its faces.
@@ -406,11 +414,25 @@ pub struct Layout {
     pub settings: SheetSettings,
     pub pieces: Vec<Piece>,
     pub cuts: Vec<Cut>,
+    /// The flanges and hems added on edges, in order: where they sit, for finding the
+    /// corners where two of them meet.
+    pub attachments: Vec<Attachment>,
+    /// Where two of those flanges meet, and how the corner is treated.
+    pub corners: Vec<Corner>,
+    /// Dimples, embosses and louvers pressed into flanges.
+    pub forms: Vec<Form>,
 }
 
 /// A rectangle in a 2D frame `(o, u, v)`: `o + x·u + y·v` for `x` in `x0..x1`, `y` in
 /// `y0..y1`. Edges in order: `y = y0`, `x = x1`, `y = y1`, `x = x0`.
-fn rect(o: DVec2, u: DVec2, v: DVec2, x: [f64; 2], y: [f64; 2], tags: [CurveTag; 4]) -> Area {
+pub(crate) fn rect(
+    o: DVec2,
+    u: DVec2,
+    v: DVec2,
+    x: [f64; 2],
+    y: [f64; 2],
+    tags: [CurveTag; 4],
+) -> Area {
     let p = |a: f64, b: f64| o + u * a + v * b;
     Area::polygon(
         &[p(x[0], y[0]), p(x[1], y[0]), p(x[1], y[1]), p(x[0], y[1])],
@@ -418,7 +440,7 @@ fn rect(o: DVec2, u: DVec2, v: DVec2, x: [f64; 2], y: [f64; 2], tags: [CurveTag;
     )
 }
 
-const MIN_LENGTH: f64 = 100.0 * tolerance::LINEAR;
+pub(crate) const MIN_LENGTH: f64 = 100.0 * tolerance::LINEAR;
 
 impl Layout {
     /// A flat plate: the regions of a closed sketch on `plane`, thickened along the plane
@@ -448,6 +470,9 @@ impl Layout {
                 frame,
             }],
             cuts: Vec::new(),
+            attachments: Vec::new(),
+            corners: Vec::new(),
+            forms: Vec::new(),
         })
     }
 
@@ -574,7 +599,7 @@ impl Layout {
             let flange = pieces.len() - 1;
             let bend = Bend {
                 parent: flange,
-                child: flange + 2,
+                child: Some(flange + 2),
                 origin: DVec2::new(x, y[0]),
                 along: DVec2::Y,
                 across: DVec2::X,
@@ -603,179 +628,17 @@ impl Layout {
             settings,
             pieces,
             cuts: Vec::new(),
+            attachments: Vec::new(),
+            corners: Vec::new(),
+            forms: Vec::new(),
         })
-    }
-
-    /// Adds an edge flange on a straight boundary edge of a flange.
-    pub fn add_edge_flange(
-        &mut self,
-        owner: u32,
-        site: &EdgeSite,
-        spec: &EdgeFlangeSpec,
-    ) -> Result<(), String> {
-        let parent = self
-            .pieces
-            .get(site.piece)
-            .ok_or("The edge is not on this body.")?;
-        if !parent.is_flange() {
-            return Err("Edge flanges go on flat faces, not on bends.".to_owned());
-        }
-        let t = self.settings.thickness;
-        let radius = spec.radius.unwrap_or(self.settings.radius);
-        if !(radius.is_finite() && radius >= 0.0) {
-            return Err("The bend radius can't be negative.".to_owned());
-        }
-        if !spec.length.is_finite() {
-            return Err("The length is not a number.".to_owned());
-        }
-        let values = BendValues::new(self.settings.model, spec.angle.to_radians(), radius, t)?;
-        let ossb = values.outside_setback();
-        let straight = spec.length - ossb;
-        if straight <= MIN_LENGTH {
-            return Err(format!(
-                "The flange is too short for its bend: make it longer than {ossb:.3} mm (measured on the outside)."
-            ));
-        }
-        let trim = match spec.position {
-            FlangePosition::MaterialInside => ossb,
-            FlangePosition::MaterialOutside => values.inside_setback(),
-            FlangePosition::BendOutside => 0.0,
-        };
-        let len = site.a.distance(site.b);
-        let [o0, o1] = spec.offsets;
-        if !(o0.is_finite() && o1.is_finite()) || o0 < 0.0 || o1 < 0.0 {
-            return Err("The offsets from the ends of the edge can't be negative.".to_owned());
-        }
-        let span = [o0, len - o1];
-        if span[1] - span[0] <= MIN_LENGTH {
-            return Err(format!(
-                "The offsets ({o0:.3} + {o1:.3} mm) leave nothing of the {len:.3} mm edge."
-            ));
-        }
-        let d = (site.b - site.a) / len;
-        let out = DVec2::new(d.y, -d.x); // right of the edge: away from the material
-        let inward = -out;
-        let up = site.top != spec.flip;
-        let tag = |index: u8| CurveTag::Generated {
-            owner,
-            part: 0,
-            index,
-        };
-        let ba = values.allowance;
-        let origin = site.a + d * span[0] + inward * trim;
-        let bend_index = self.pieces.len();
-        let bend = Bend {
-            parent: site.piece,
-            child: bend_index + 1,
-            origin,
-            along: d,
-            across: out,
-            length: span[1] - span[0],
-            values,
-            up,
-        };
-        let parent_frame = parent.frame;
-        let child_frame = parent_frame.compose(&bend.fold_frame());
-        let w = span[1] - span[0];
-        let bend_outline = rect(
-            origin,
-            d,
-            out,
-            [0.0, w],
-            [0.0, ba],
-            [
-                tag(wall::BEND_PARENT),
-                tag(wall::BEND_END),
-                tag(wall::BEND_CHILD),
-                tag(wall::BEND_START),
-            ],
-        );
-        let child_outline = rect(
-            origin,
-            d,
-            out,
-            [0.0, w],
-            [ba, ba + straight],
-            [
-                tag(wall::FLANGE_FOLD),
-                tag(wall::FLANGE_END),
-                tag(wall::TIP),
-                tag(wall::FLANGE_START),
-            ],
-        );
-        // Reliefs where the bend stops short of an end of the edge.
-        let mut reliefs = Vec::new();
-        if self.settings.relief != ReliefType::Tear {
-            let rw = self.settings.relief_ratio * t;
-            let depth = trim + self.settings.relief_ratio * t;
-            if o0 > MIN_LENGTH {
-                reliefs.push(relief(
-                    self.settings.relief,
-                    site.a,
-                    d,
-                    inward,
-                    [(o0 - rw).max(0.0), o0],
-                    depth,
-                    |i| tag(wall::RELIEF_START + i),
-                ));
-            }
-            if o1 > MIN_LENGTH {
-                reliefs.push(relief(
-                    self.settings.relief,
-                    site.a,
-                    d,
-                    inward,
-                    [span[1], (span[1] + rw).min(len)],
-                    depth,
-                    |i| tag(wall::RELIEF_END + i),
-                ));
-            }
-        }
-        if trim > MIN_LENGTH {
-            let trim_area = rect(
-                site.a,
-                d,
-                inward,
-                [span[0], span[1]],
-                [0.0, trim],
-                [
-                    tag(wall::TRIM),
-                    tag(wall::TRIM + 1),
-                    tag(wall::TRIM + 2),
-                    tag(wall::TRIM + 3),
-                ],
-            );
-            self.pieces[site.piece].trims.push(trim_area);
-        }
-        let before = self.pieces.len();
-        for area in reliefs.into_iter().flatten() {
-            self.cuts.push(Cut {
-                area,
-                pieces: before,
-            });
-        }
-        self.pieces.push(Piece {
-            origin: Origin { owner, part: 0 },
-            kind: PieceKind::Bend(bend),
-            outline: bend_outline,
-            trims: Vec::new(),
-            frame: parent_frame,
-        });
-        self.pieces.push(Piece {
-            origin: Origin { owner, part: 0 },
-            kind: PieceKind::Flange,
-            outline: child_outline,
-            trims: Vec::new(),
-            frame: child_frame,
-        });
-        Ok(())
     }
 
     /// Cuts `area` (in flat coordinates) out of every piece that exists now.
     pub fn add_cut(&mut self, area: Area) {
         self.cuts.push(Cut {
             area,
-            pieces: self.pieces.len(),
+            pieces: (0..self.pieces.len()).collect(),
         });
     }
 
@@ -793,72 +656,6 @@ impl Layout {
     }
 }
 
-/// A relief slot next to the end of a bend: along the edge over `u`, reaching `depth`
-/// into the material. `None` if it has no width.
-fn relief(
-    kind: ReliefType,
-    a: DVec2,
-    d: DVec2,
-    inward: DVec2,
-    u: [f64; 2],
-    depth: f64,
-    tag: impl Fn(u8) -> CurveTag,
-) -> Option<Area> {
-    let width = u[1] - u[0];
-    if width <= MIN_LENGTH || depth <= MIN_LENGTH {
-        return None;
-    }
-    let p = |x: f64, y: f64| a + d * x + inward * y;
-    match kind {
-        ReliefType::Rectangular | ReliefType::Tear => Some(rect(
-            a,
-            d,
-            inward,
-            u,
-            [0.0, depth],
-            [tag(0), tag(1), tag(2), tag(3)],
-        )),
-        ReliefType::Obround => {
-            let r = width / 2.0;
-            if depth <= r + MIN_LENGTH {
-                // Too shallow for a round end: a rectangle.
-                return relief(ReliefType::Rectangular, a, d, inward, u, depth, tag);
-            }
-            let yc = depth - r;
-            let center = p(u[0] + r, yc);
-            // (d, inward) is counter-clockwise, so the arc from the right side to the left
-            // side through the far end runs counter-clockwise.
-            let arc = Curve::arc_from_points(center, p(u[1], yc), p(u[0], yc));
-            let arc = match arc {
-                Curve::Arc {
-                    center,
-                    radius,
-                    start_angle,
-                    ..
-                } => Curve::Arc {
-                    center,
-                    radius,
-                    start_angle,
-                    sweep: PI,
-                },
-                other => other,
-            };
-            Some(Area {
-                loops: vec![vec![
-                    Edge2::line(p(u[0], 0.0), p(u[1], 0.0), tag(0)),
-                    Edge2::line(p(u[1], 0.0), p(u[1], yc), tag(1)),
-                    Edge2 {
-                        curve: arc,
-                        reversed: false,
-                        tag: tag(2),
-                    },
-                    Edge2::line(p(u[0], yc), p(u[0], 0.0), tag(3)),
-                ]],
-            })
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -867,7 +664,7 @@ mod tests {
     fn bend(up: bool) -> Bend {
         Bend {
             parent: 0,
-            child: 2,
+            child: Some(2),
             origin: DVec2::new(10.0, 0.0),
             along: DVec2::Y,
             across: DVec2::X,

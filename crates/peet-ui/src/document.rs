@@ -641,6 +641,38 @@ mod tests {
     }
 
     #[test]
+    fn chassis_sample_shows_folded_and_flat() {
+        // The Phase 5 sample: mitre flange, hem, patterns, louvers and dimples all
+        // tessellate for display, folded and flat, and every face can be referred to.
+        let (model, _) = peet_model::samples::chassis();
+        let mut doc = Document::from_model(model, None);
+        assert!(doc.has_sheet_metal());
+        assert_eq!(doc.evaluation().failures().count(), 0);
+        let folded = doc.bodies[0].clone();
+        assert!(!folded.tess.faces.is_empty());
+        let faces = folded.solid.faces.len() as u32;
+        for f in (0..faces).step_by(7) {
+            let g = GeomRef::Face {
+                body: 0,
+                face: peet_kernel::FaceId(f),
+            };
+            let kept = doc.persist(g).expect("every face has a name");
+            assert_eq!(doc.restore(&kept), Some(g), "face {f}");
+        }
+        doc.set_flat(true);
+        let flat = doc.bodies[0].clone();
+        assert_eq!(flat.solid.faces.len(), folded.solid.faces.len());
+        assert_eq!(flat.tess.faces.len(), folded.tess.faces.len());
+        // Flat, except for the forms: the louvers stand 3 above the 1.5 sheet.
+        assert!((flat.solid.bounds().size().z - 4.5).abs() < 1e-9);
+        // An edit rebuilds it all.
+        doc.change("Thicker", |m| {
+            m.parameters.set("thickness", "2mm").unwrap();
+        });
+        assert_eq!(doc.evaluation().failures().count(), 0);
+    }
+
+    #[test]
     fn opening_a_file_shows_cached_bodies_then_rebuilds() {
         let (model, _) = peet_model::samples::bracket();
         let doc = Document::from_model(model, None);

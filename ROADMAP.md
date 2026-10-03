@@ -203,19 +203,25 @@ Each phase ends with something usable and demonstrable. Estimates are rough and 
 ### Phase 5: Sheet Metal complete + Interop
 *Goal: sheet metal on par with mainstream tools for everyday work.*
 
-- [ ] Miter flange (flanges along a chain of edges)
-- [ ] Hem (closed, open, teardrop, rolled)
-- [ ] Jog, sketched bend (bend along a sketch line)
-- [ ] Closed and open corners, corner reliefs, corner gap control
-- [ ] Flange on a partial edge, flange profiles from a sketch
-- [ ] Gauge / material tables (thickness, radius and K-factor by material, user editable, shareable)
-- [ ] Mirror and pattern (linear, circular) of features
-- [ ] Simple forming features: louvers, embosses, dimples (represented in the flat pattern)
-- [ ] **STEP export (AP214/AP242)** of the folded solid
-- [ ] DXF import (for sketches and base flanges from existing profiles)
-- [ ] Manufacturing checks: minimum flange length, hole too close to a bend, overlapping flat pattern
+- [x] Miter flange (flanges along a chain of edges)
+- [x] Hem (closed, open, teardrop, rolled)
+- [x] Jog, sketched bend (bend along a sketch line)
+- [x] Closed and open corners, corner reliefs, corner gap control
+- [x] Flange on a partial edge, flange profiles from a sketch
+- [x] Gauge / material tables (thickness, radius and K-factor by material, user editable, shareable)
+- [x] Mirror and pattern (linear, circular) of features
+- [x] Simple forming features: louvers, embosses, dimples (represented in the flat pattern)
+- [x] **STEP export (AP214/AP242)** of the folded solid
+- [x] DXF import (for sketches and base flanges from existing profiles)
+- [x] Manufacturing checks: minimum flange length, hole too close to a bend, overlapping flat pattern
 
 **Exit criteria:** A user can reproduce a typical industrial sheet metal bracket or chassis, and a fabricator accepts the DXF and STEP without rework.
+
+**Status:** Implemented on the flat-first layout of Phase 4, which carried all of it ([ADR 0005](docs/adr/0005-sheet-metal-phase-5.md)). In `peet-sheetmetal`: a flange is a *profile* (a chain of bends and flats), which gives edge flanges, every kind of hem and mitre flanges with a sketched profile; sketched bends and jogs split a flange in place without moving anything in the flat pattern; corners between flanges are recorded and resolved at build time (butt, overlap or open, a gap, a rectangular or tear relief), with lips in one plane mitred exactly; dimples, embosses and louvers are square-walled forms present in both the flat and the folded solid; manufacturing checks and gauge tables. In `peet-model`: the features, plus linear and circular patterns and mirrors of extrusions, cuts, sheet metal cuts and forms, each copy's faces named apart. In `peet-io`: STEP export as an exact B-rep, DXF import into sketches, forms on the flat pattern DXF. In `peet-ui`: commands, ribbon tools and property panels for all of it, a checks window and a materials window.
+
+`crates/peet-io/tests/chassis_exit.rs` builds the exit part, a chassis tray (`samples::chassis`, **File → Open Sample Chassis**): a 240 × 160 × 1.5 base with a mitre-flanged rim on three sides (40 mm walls, 12 mm lips, mitred), a closed hem on the front edge, four holes and ten louvers from patterns, two dimples from a mirror and a window in the back wall. Its DXF is checked against the hand calculation (blank 333.571680 × 215.876415 mm; hole centres; the window's position through two bends; every bend line; the lances; the notes), it passes the manufacturing checks, it reads back as one closed blank with five holes, and it survives save and reopen. Its STEP file (AP214 and AP242, folded and flat) is checked face by face in `step_export.rs`: every edge used twice, every loop the right way round, areas and volume equal to the kernel's. The chassis rebuilds in about 4 ms. The workspace has 61 tests in `peet-sheetmetal`, 9 in `peet-model/tests/phase5.rs`, 5 in the exit test and 7 for STEP, besides those of earlier phases; all pass, clippy is clean and the web build compiles.
+
+Still to do: the STEP files have not been opened in another CAD system (none was available to the tests: they are checked by a Part 21 reader written for the purpose), and a fabricator has not seen the DXF, so the second half of the exit criterion is unconfirmed. The new commands, ribbon tools, panels and windows have been compile-checked and their features tested through the model, but none has been exercised by hand in the running app. Known limits: "flange on a partial edge" is the edge flange's offsets from Phase 4 (with reliefs), not a new feature; a mitre flange's edges must be on one face; corners are exact for square corners with square bends, and other angles may be refused; corner reliefs are rectangular or tear (a round relief would cross the bends); lips turned outwards round a corner overlap in the flat pattern and are refused; forms have square walls and sharp corners (rounded ones need the Phase 6 surfaces); patterns and mirrors copy extrusions, cuts, sheet metal cuts and forms, not flanges, and a sheet metal copy must stay on its original's face; a jog keeps the flat length, so the far side moves in; hems don't make corners with their neighbours (the sheet tears at their ends unless they are set back); DXF import skips splines and ellipses; the gauge tables' stainless and galvanised thicknesses should be checked against a supplier's chart.
 
 ### Phase 6: General solid modelling
 *Goal: broaden beyond sheet metal.*
@@ -316,6 +322,7 @@ Benchmarks (`criterion`) run in CI for the solver, kernel operations and regener
 | Persistent naming | Faces are named by the feature and role that made them, carried through booleans; references add neighbours and a point to break ties ([ADR 0001](docs/adr/0001-persistent-naming.md)) |
 | Sheet metal | Native and flat first: a layout of flanges and bends in flat coordinates; the folded and flat solids share their topology, so unfolding is exact ([ADR 0004](docs/adr/0004-native-sheet-metal.md)) |
 | Regeneration and undo | Content-hashed keys per feature decide what to rebuild; undo stores model snapshots that share unchanged features ([ADR 0002](docs/adr/0002-incremental-regeneration.md)) |
+| Sheet metal features | Flanges are profiles of bends and flats; sketched bends split a flange in place; corners are declared and resolved at build time; forms are square-walled and present in both solids; patterns copy features, not geometry ([ADR 0005](docs/adr/0005-sheet-metal-phase-5.md)) |
 
 ## Open questions
 

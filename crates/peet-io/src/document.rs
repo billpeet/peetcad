@@ -25,9 +25,13 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 /// - Model 2 (Phase 4): sheet metal features, a unitless scalar kind. Version 1 models
 ///   decode unchanged (the new variants are appended).
 /// - B-rep 2 (Phase 4): sheet metal face roles in face names.
+/// - Model 3 (Phase 5): hems, sketched bends, jogs, mitre flanges, corners, forms,
+///   patterns and mirrors; axes along edges; the copy role in face names. Version 1 and 2
+///   models decode unchanged (every addition is a new variant at the end of its enum).
+/// - B-rep 3 (Phase 5): the copy role in face names.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 2;
-pub const BREP_SCHEMA: u16 = 2;
+pub const MODEL_SCHEMA: u16 = 3;
+pub const BREP_SCHEMA: u16 = 3;
 pub const MESH_SCHEMA: u16 = 1;
 
 /// The file extension, without the dot.

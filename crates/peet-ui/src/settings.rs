@@ -203,6 +203,10 @@ pub struct Settings {
     pub show_properties: bool,
     /// Save parts with their display caches: larger files that open instantly.
     pub save_caches: bool,
+    /// The sheet stock tables (material, gauge, thickness, radius, K-factor).
+    pub materials: peet_sheetmetal::MaterialLibrary,
+    /// The limits the manufacturing checks use.
+    pub check_rules: peet_sheetmetal::CheckRules,
 }
 
 impl Default for Settings {
@@ -220,6 +224,8 @@ impl Default for Settings {
             show_feature_tree: true,
             show_properties: true,
             save_caches: true,
+            materials: peet_sheetmetal::MaterialLibrary::builtin(),
+            check_rules: peet_sheetmetal::CheckRules::default(),
         }
     }
 }

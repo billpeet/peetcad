@@ -14,6 +14,8 @@
 //! - *Bend deduction* `BD = 2·OSSB − BA`: how much shorter the flat pattern is than the
 //!   sum of the outside flange lengths.
 
+use std::f64::consts::{PI, TAU};
+
 use serde::{Deserialize, Serialize};
 
 /// How the flat length of a bend is worked out.
@@ -155,12 +157,38 @@ pub struct BendValues {
 impl BendValues {
     /// Works out the allowance of a bend from the bend model.
     pub fn new(model: BendModel, angle: f64, radius: f64, thickness: f64) -> Result<Self, String> {
-        if !(angle.is_finite() && angle > 1e-6 && angle < std::f64::consts::PI - 1e-6) {
+        if !(angle.is_finite() && angle > 1e-6 && angle < PI - 1e-6) {
             return Err(format!(
                 "A bend angle must be between 0° and 180° (this one is {:.3}°).",
                 angle.to_degrees()
             ));
         }
+        Self::make(model, angle, radius, thickness)
+    }
+
+    /// A bend that may turn through 180° or more (a hem or a roll): up to just short of a
+    /// full turn. Bend deduction has no meaning past 180°, so the deduction model can't be
+    /// used for those.
+    pub fn hem(model: BendModel, angle: f64, radius: f64, thickness: f64) -> Result<Self, String> {
+        if !(angle.is_finite() && angle > 1e-6 && angle < TAU - 1e-3) {
+            return Err(format!(
+                "A hem or roll must turn through less than 360° (this one is {:.3}°).",
+                angle.to_degrees()
+            ));
+        }
+        if angle >= PI - 1e-6 && matches!(model, BendModel::Deduction(_)) {
+            return Err(
+                "A bend deduction can't give the flat length of a bend of 180° or more. Use a K-factor or a bend allowance for this body."
+                    .to_owned(),
+            );
+        }
+        if !(radius.is_finite() && radius > 0.0) {
+            return Err("The bend radius of a hem must be greater than zero.".to_owned());
+        }
+        Self::make(model, angle, radius, thickness)
+    }
+
+    fn make(model: BendModel, angle: f64, radius: f64, thickness: f64) -> Result<Self, String> {
         let ossb = (radius + thickness) * (angle / 2.0).tan();
         let allowance = match model {
             BendModel::KFactor(k) => angle * (radius + k * thickness),
@@ -180,17 +208,39 @@ impl BendValues {
         })
     }
 
-    /// Outside setback: tangent line to the outer virtual sharp.
+    /// Whether the bend turns through 180° or more (a hem or a roll), where there are no
+    /// virtual sharps.
+    pub fn is_hem(&self) -> bool {
+        self.angle >= PI - 1e-6
+    }
+
+    /// Outside setback: tangent line to the outer virtual sharp. Not a number for hems.
     pub fn outside_setback(&self) -> f64 {
+        if self.is_hem() {
+            return f64::NAN;
+        }
         (self.radius + self.thickness) * (self.angle / 2.0).tan()
     }
 
-    /// Inside setback: tangent line to the inner virtual sharp.
+    /// Inside setback: tangent line to the inner virtual sharp. Not a number for hems.
     pub fn inside_setback(&self) -> f64 {
+        if self.is_hem() {
+            return f64::NAN;
+        }
         self.radius * (self.angle / 2.0).tan()
     }
 
-    /// Bend deduction.
+    /// How far the outside of the bend reaches past its tangent line, square to it.
+    pub fn outside_reach(&self) -> f64 {
+        let r = self.radius + self.thickness;
+        if self.angle >= std::f64::consts::FRAC_PI_2 {
+            r
+        } else {
+            r * self.angle.sin()
+        }
+    }
+
+    /// Bend deduction. Not a number for hems.
     pub fn deduction(&self) -> f64 {
         2.0 * self.outside_setback() - self.allowance
     }

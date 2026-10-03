@@ -10,7 +10,10 @@ use peet_sketch::Sketch;
 use peet_sketch::expr::{Expr, Parameters};
 use serde::{Deserialize, Serialize};
 
-use peet_sheetmetal::{FlangePosition, ReliefType};
+use peet_sheetmetal::corner::{CornerKind, CornerRelief};
+use peet_sheetmetal::{
+    BendLinePosition, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
+};
 
 use crate::extrude::Extrude;
 use crate::naming::{EdgeRef, FaceRef, VertexRef};
@@ -196,6 +199,8 @@ pub enum AxisRef {
     Standard(StdAxis),
     /// A reference axis feature (or a coordinate system: its Z axis).
     Feature(FeatureId),
+    /// Along a straight edge (or through the centre of a round one).
+    Edge(EdgeRef),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -390,6 +395,220 @@ pub struct SheetCutFeature {
     pub sketch: FeatureId,
 }
 
+/// A hem on an edge of a sheet metal body: the edge folded back over the sheet.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct HemFeature {
+    /// The edge: where a flat face of the sheet meets its side. `None` until picked.
+    pub edge: Option<EdgeRef>,
+    pub kind: HemKind,
+    /// Closed and open hems: from the outside of the fold to the end. Teardrop: the
+    /// flat end's length.
+    pub length: Scalar,
+    /// Open hems: the gap between the sheet and the hem.
+    pub gap: Scalar,
+    /// Teardrop and rolled hems: the inner radius.
+    pub radius: Scalar,
+    /// Teardrop and rolled hems: the angle turned through, in degrees.
+    pub angle: Scalar,
+    /// The fold's outside is flush with the original edge (else the fold starts there).
+    pub inside: bool,
+    pub offset_start: Scalar,
+    pub offset_end: Scalar,
+    /// Fold to the other side of the sheet.
+    pub flip: bool,
+}
+
+impl HemFeature {
+    pub fn new(edge: Option<EdgeRef>) -> Self {
+        Self {
+            edge,
+            kind: HemKind::Closed,
+            length: Scalar::new(10.0),
+            gap: Scalar::new(1.0),
+            radius: Scalar::new(1.0),
+            angle: Scalar::new(270.0),
+            inside: true,
+            offset_start: Scalar::new(0.0),
+            offset_end: Scalar::new(0.0),
+            flip: false,
+        }
+    }
+}
+
+/// Bends a flat face of a sheet metal body along the lines of a sketch drawn on it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SketchedBendFeature {
+    pub sketch: FeatureId,
+    /// Bend angle in degrees.
+    pub angle: Scalar,
+    /// Inner radius, if not the body's default.
+    pub radius: Option<Scalar>,
+    pub position: BendLinePosition,
+    /// Bend away from the face the sketch is on (else towards it).
+    pub flip: bool,
+    /// On the part's first face: keep the other side fixed.
+    pub flip_fixed: bool,
+}
+
+impl SketchedBendFeature {
+    pub fn new(sketch: FeatureId) -> Self {
+        Self {
+            sketch,
+            angle: Scalar::new(90.0),
+            radius: None,
+            position: BendLinePosition::Centerline,
+            flip: false,
+            flip_fixed: false,
+        }
+    }
+}
+
+/// A step in a flat face: two bends along a sketched line, offsetting the far side.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct JogFeature {
+    pub sketch: FeatureId,
+    pub offset: Scalar,
+    pub dimension: JogDimension,
+    /// Angle of both bends, in degrees.
+    pub angle: Scalar,
+    pub radius: Option<Scalar>,
+    pub position: BendLinePosition,
+    /// Step away from the face the sketch is on (else towards it).
+    pub flip: bool,
+    pub flip_fixed: bool,
+}
+
+impl JogFeature {
+    pub fn new(sketch: FeatureId) -> Self {
+        Self {
+            sketch,
+            offset: Scalar::new(10.0),
+            dimension: JogDimension::Overall,
+            angle: Scalar::new(90.0),
+            radius: None,
+            position: BendLinePosition::BendOutside,
+            flip: false,
+            flip_fixed: false,
+        }
+    }
+}
+
+/// A flange with a sketched profile, run along a chain of edges of one face.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MiterFlangeFeature {
+    /// The profile: connected lines drawn square to one of the edges, starting at it.
+    pub sketch: FeatureId,
+    pub edges: Vec<EdgeRef>,
+    /// The gap left where the flanges of neighbouring edges meet.
+    pub gap: Scalar,
+    pub offset_start: Scalar,
+    pub offset_end: Scalar,
+}
+
+impl MiterFlangeFeature {
+    pub fn new(sketch: FeatureId, edges: Vec<EdgeRef>) -> Self {
+        Self {
+            sketch,
+            edges,
+            gap: Scalar::new(0.1),
+            offset_start: Scalar::new(0.0),
+            offset_end: Scalar::new(0.0),
+        }
+    }
+}
+
+/// How the corners where flanges meet are treated.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CornerFeature {
+    /// Faces of the flanges at the corners (their ends or their sides). None: every
+    /// corner of the body.
+    pub faces: Vec<FaceRef>,
+    pub kind: CornerKind,
+    pub gap: Scalar,
+    pub relief: CornerRelief,
+    /// How far a rectangular relief reaches past the bends.
+    pub relief_size: Scalar,
+}
+
+impl CornerFeature {
+    pub fn new(faces: Vec<FaceRef>) -> Self {
+        Self {
+            faces,
+            kind: CornerKind::Butt,
+            gap: Scalar::new(0.1),
+            relief: CornerRelief::Rectangular,
+            relief_size: Scalar::new(1.0),
+        }
+    }
+}
+
+/// Dimples, embosses or louvers from the shapes of a sketch on a flat face.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FormFeature {
+    pub sketch: FeatureId,
+    pub kind: FormKind,
+    /// How far the plateau stands out of the sheet.
+    pub height: Scalar,
+    /// Press into the face the sketch is on (else stand out of it).
+    pub flip: bool,
+    /// Louvers: which side of each outline is open (counted round the outline).
+    pub open_side: u32,
+}
+
+impl FormFeature {
+    pub fn new(sketch: FeatureId, kind: FormKind) -> Self {
+        Self {
+            sketch,
+            kind,
+            height: Scalar::new(3.0),
+            flip: false,
+            open_side: 0,
+        }
+    }
+}
+
+/// One direction of a linear pattern.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct LinearDirection {
+    pub direction: AxisRef,
+    pub spacing: Scalar,
+    /// How many, the original included.
+    pub count: u32,
+    pub flip: bool,
+}
+
+/// How a pattern places its copies.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PatternDef {
+    /// In a row along a direction, or a grid along two.
+    Linear {
+        first: LinearDirection,
+        second: Option<LinearDirection>,
+    },
+    /// Around an axis: `count` copies (the original included) over `angle` degrees; 360
+    /// spaces them evenly all the way round.
+    Circular {
+        axis: AxisRef,
+        count: u32,
+        angle: Scalar,
+        flip: bool,
+    },
+}
+
+/// Copies of features (extrusions, cuts, sheet metal cuts, forms) in a pattern.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PatternFeature {
+    pub seeds: Vec<FeatureId>,
+    pub def: PatternDef,
+}
+
+/// Mirror images of features across a plane.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MirrorFeature {
+    pub seeds: Vec<FeatureId>,
+    pub plane: PlaneRef,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum FeatureKind {
     Sketch(Box<SketchFeature>),
@@ -401,6 +620,14 @@ pub enum FeatureKind {
     BaseFlange(Box<BaseFlangeFeature>),
     EdgeFlange(Box<EdgeFlangeFeature>),
     SheetCut(Box<SheetCutFeature>),
+    Hem(Box<HemFeature>),
+    SketchedBend(Box<SketchedBendFeature>),
+    Jog(Box<JogFeature>),
+    MiterFlange(Box<MiterFlangeFeature>),
+    Corner(Box<CornerFeature>),
+    Form(Box<FormFeature>),
+    Pattern(Box<PatternFeature>),
+    Mirror(Box<MirrorFeature>),
 }
 
 impl FeatureKind {
@@ -416,6 +643,21 @@ impl FeatureKind {
             Self::BaseFlange(_) => "Base flange",
             Self::EdgeFlange(_) => "Edge flange",
             Self::SheetCut(_) => "Sheet metal cut",
+            Self::Hem(_) => "Hem",
+            Self::SketchedBend(_) => "Sketched bend",
+            Self::Jog(_) => "Jog",
+            Self::MiterFlange(_) => "Miter flange",
+            Self::Corner(_) => "Corner",
+            Self::Form(f) => match f.kind {
+                FormKind::Dimple => "Dimple",
+                FormKind::Emboss => "Emboss",
+                FormKind::Louver => "Louver",
+            },
+            Self::Pattern(p) => match p.def {
+                PatternDef::Linear { .. } => "Linear pattern",
+                PatternDef::Circular { .. } => "Circular pattern",
+            },
+            Self::Mirror(_) => "Mirror",
         }
     }
 
@@ -432,6 +674,21 @@ impl FeatureKind {
             Self::BaseFlange(_) => "Base-Flange",
             Self::EdgeFlange(_) => "Edge-Flange",
             Self::SheetCut(_) => "Sheet-Cut",
+            Self::Hem(_) => "Hem",
+            Self::SketchedBend(_) => "Sketched-Bend",
+            Self::Jog(_) => "Jog",
+            Self::MiterFlange(_) => "Miter-Flange",
+            Self::Corner(_) => "Corner",
+            Self::Form(f) => match f.kind {
+                FormKind::Dimple => "Dimple",
+                FormKind::Emboss => "Emboss",
+                FormKind::Louver => "Louver",
+            },
+            Self::Pattern(p) => match p.def {
+                PatternDef::Linear { .. } => "LPattern",
+                PatternDef::Circular { .. } => "CirPattern",
+            },
+            Self::Mirror(_) => "Mirror",
         }
     }
 
@@ -439,7 +696,18 @@ impl FeatureKind {
     pub fn is_solid(&self) -> bool {
         matches!(
             self,
-            Self::Extrude(_) | Self::BaseFlange(_) | Self::EdgeFlange(_) | Self::SheetCut(_)
+            Self::Extrude(_)
+                | Self::BaseFlange(_)
+                | Self::EdgeFlange(_)
+                | Self::SheetCut(_)
+                | Self::Hem(_)
+                | Self::SketchedBend(_)
+                | Self::Jog(_)
+                | Self::MiterFlange(_)
+                | Self::Corner(_)
+                | Self::Form(_)
+                | Self::Pattern(_)
+                | Self::Mirror(_)
         )
     }
 
@@ -447,8 +715,35 @@ impl FeatureKind {
     pub fn is_sheet_metal(&self) -> bool {
         matches!(
             self,
-            Self::BaseFlange(_) | Self::EdgeFlange(_) | Self::SheetCut(_)
+            Self::BaseFlange(_)
+                | Self::EdgeFlange(_)
+                | Self::SheetCut(_)
+                | Self::Hem(_)
+                | Self::SketchedBend(_)
+                | Self::Jog(_)
+                | Self::MiterFlange(_)
+                | Self::Corner(_)
+                | Self::Form(_)
         )
+    }
+
+    /// The sketch the feature is made from, if it has one.
+    pub fn sketch(&self) -> Option<FeatureId> {
+        match self {
+            Self::Extrude(e) => Some(e.sketch),
+            Self::BaseFlange(b) => Some(b.sketch),
+            Self::SheetCut(c) => Some(c.sketch),
+            Self::SketchedBend(b) => Some(b.sketch),
+            Self::Jog(j) => Some(j.sketch),
+            Self::MiterFlange(m) => Some(m.sketch),
+            Self::Form(f) => Some(f.sketch),
+            _ => None,
+        }
+    }
+
+    /// Whether a pattern or a mirror can copy the feature.
+    pub fn can_be_copied(&self) -> bool {
+        matches!(self, Self::Extrude(_) | Self::SheetCut(_) | Self::Form(_))
     }
 
     /// The features this one refers to directly, without duplicates.
@@ -496,6 +791,41 @@ impl FeatureKind {
                 }
             }
             Self::SheetCut(c) => out.push(c.sketch),
+            Self::Hem(h) => {
+                if let Some(edge) = &h.edge {
+                    out.extend(edge.features());
+                }
+            }
+            Self::SketchedBend(b) => out.push(b.sketch),
+            Self::Jog(j) => out.push(j.sketch),
+            Self::MiterFlange(m) => {
+                out.push(m.sketch);
+                for e in &m.edges {
+                    out.extend(e.features());
+                }
+            }
+            Self::Corner(c) => {
+                for f in &c.faces {
+                    out.extend(f.name.features());
+                }
+            }
+            Self::Form(f) => out.push(f.sketch),
+            Self::Pattern(p) => {
+                out.extend(&p.seeds);
+                match &p.def {
+                    PatternDef::Linear { first, second } => {
+                        axis_deps(&first.direction, &mut out);
+                        if let Some(s) = second {
+                            axis_deps(&s.direction, &mut out);
+                        }
+                    }
+                    PatternDef::Circular { axis, .. } => axis_deps(axis, &mut out),
+                }
+            }
+            Self::Mirror(m) => {
+                out.extend(&m.seeds);
+                plane_deps(&m.plane, &mut out);
+            }
         }
         out.sort_unstable();
         out.dedup();
@@ -522,7 +852,36 @@ impl FeatureKind {
                 v.extend(e.radius.as_ref());
                 v
             }
-            Self::SheetCut(_) => Vec::new(),
+            Self::SheetCut(_) | Self::Mirror(_) => Vec::new(),
+            Self::Hem(h) => vec![
+                &h.length,
+                &h.gap,
+                &h.radius,
+                &h.angle,
+                &h.offset_start,
+                &h.offset_end,
+            ],
+            Self::SketchedBend(b) => {
+                let mut v = vec![&b.angle];
+                v.extend(b.radius.as_ref());
+                v
+            }
+            Self::Jog(j) => {
+                let mut v = vec![&j.offset, &j.angle];
+                v.extend(j.radius.as_ref());
+                v
+            }
+            Self::MiterFlange(m) => vec![&m.gap, &m.offset_start, &m.offset_end],
+            Self::Corner(c) => vec![&c.gap, &c.relief_size],
+            Self::Form(f) => vec![&f.height],
+            Self::Pattern(p) => match &p.def {
+                PatternDef::Linear { first, second } => {
+                    let mut v = vec![&first.spacing];
+                    v.extend(second.as_ref().map(|s| &s.spacing));
+                    v
+                }
+                PatternDef::Circular { angle, .. } => vec![angle],
+            },
         }
     }
 }
@@ -536,8 +895,10 @@ fn plane_deps(r: &PlaneRef, out: &mut Vec<FeatureId>) {
 }
 
 fn axis_deps(r: &AxisRef, out: &mut Vec<FeatureId>) {
-    if let AxisRef::Feature(id) = r {
-        out.push(*id);
+    match r {
+        AxisRef::Standard(_) => {}
+        AxisRef::Feature(id) => out.push(*id),
+        AxisRef::Edge(e) => out.extend(e.features()),
     }
 }
 

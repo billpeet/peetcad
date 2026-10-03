@@ -7,11 +7,16 @@
 
 use egui::{Color32, Ui};
 use peet_model::{
-    AxisDef, AxisRef, BaseFlangeFeature, BendModelDef, CoordSystemDef, EdgeFlangeFeature, EdgeRef,
-    EndCondition, FaceRef, FeatureKind, Operation, PlaneDef, PlaneRef, PointDef, PointRef, Scalar,
-    ScalarKind, SheetSettingsDef, StdAxis, VertexRef,
+    AxisDef, AxisRef, BaseFlangeFeature, BendModelDef, CoordSystemDef, CornerFeature,
+    EdgeFlangeFeature, EdgeRef, EndCondition, FaceRef, FeatureId, FeatureKind, FormFeature,
+    HemFeature, JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, Operation,
+    PatternDef, PatternFeature, PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind,
+    SheetSettingsDef, SketchedBendFeature, StdAxis, VertexRef,
 };
-use peet_sheetmetal::{FlangePosition, ReliefType};
+use peet_sheetmetal::corner::{CornerKind, CornerRelief};
+use peet_sheetmetal::{
+    BendLinePosition, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
+};
 use peet_sketch::expr::Parameters;
 
 use crate::document::Document;
@@ -40,6 +45,18 @@ pub enum Slot {
     CsysOrientation,
     /// The edge an edge flange goes on.
     FlangeEdge,
+    /// The edge a hem goes on.
+    HemEdge,
+    /// Another edge for a mitre flange to run along.
+    MiterEdge,
+    /// A flange's face at a corner, for a corner treatment.
+    CornerFace,
+    /// A pattern's direction or axis, as an edge.
+    PatternAxis,
+    /// A linear pattern's second direction, as an edge.
+    PatternAxis2,
+    /// The plane of a mirror.
+    MirrorPlane,
 }
 
 impl Slot {
@@ -56,6 +73,19 @@ impl Slot {
             Self::FlangeEdge => {
                 "Click an edge along the top or bottom face of the sheet metal part (the flange bends towards that face)."
             }
+            Self::HemEdge => {
+                "Click an edge along the top or bottom face of the sheet metal part (the hem folds over that face)."
+            }
+            Self::MiterEdge => {
+                "Click the next edge for the flange to run along: an edge of the same face, joined to the others."
+            }
+            Self::CornerFace => {
+                "Click a face of a flange at the corner: its end face for that corner, or its flat face for both its corners."
+            }
+            Self::PatternAxis | Self::PatternAxis2 => {
+                "Click a straight edge for the direction (or a round edge for an axis through its centre)."
+            }
+            Self::MirrorPlane => "Click a flat face or a plane to mirror across.",
         }
     }
 }
@@ -135,6 +165,47 @@ pub fn apply_pick(kind: &mut FeatureKind, slot: Slot, picked: Picked) -> Result<
             Picked::Edge(r) => e.edge = Some(r),
             _ => return Err("Pick an edge of the sheet metal part, not a face.".into()),
         },
+        (FeatureKind::Hem(h), Slot::HemEdge) => match picked {
+            Picked::Edge(r) => h.edge = Some(r),
+            _ => return Err("Pick an edge of the sheet metal part, not a face.".into()),
+        },
+        (FeatureKind::MiterFlange(m), Slot::MiterEdge) => match picked {
+            Picked::Edge(r) => {
+                if !m.edges.contains(&r) {
+                    m.edges.push(r);
+                }
+            }
+            _ => return Err("Pick an edge of the sheet metal part, not a face.".into()),
+        },
+        (FeatureKind::Corner(c), Slot::CornerFace) => match picked {
+            Picked::Face { face, .. } => {
+                if !c.faces.contains(&face) {
+                    c.faces.push(face);
+                }
+            }
+            _ => return Err("Pick a face of a flange at the corner.".into()),
+        },
+        (FeatureKind::Pattern(p), Slot::PatternAxis | Slot::PatternAxis2) => {
+            let Picked::Edge(e) = picked else {
+                return Err("Pick an edge for the direction.".into());
+            };
+            match (&mut p.def, slot) {
+                (PatternDef::Linear { first, .. }, Slot::PatternAxis) => {
+                    first.direction = AxisRef::Edge(e);
+                }
+                (
+                    PatternDef::Linear {
+                        second: Some(s), ..
+                    },
+                    Slot::PatternAxis2,
+                ) => s.direction = AxisRef::Edge(e),
+                (PatternDef::Circular { axis, .. }, Slot::PatternAxis) => {
+                    *axis = AxisRef::Edge(e);
+                }
+                _ => return Err("That can't be used here.".into()),
+            }
+        }
+        (FeatureKind::Mirror(m), Slot::MirrorPlane) => m.plane = picked.plane()?,
         _ => return Err("That can't be used here.".into()),
     }
     Ok(())
@@ -255,6 +326,7 @@ fn axis_text(doc: &Document, r: &AxisRef) -> String {
     match r {
         AxisRef::Standard(a) => a.label().to_owned(),
         AxisRef::Feature(id) => doc.model.name_of(*id).to_owned(),
+        AxisRef::Edge(_) => "An edge".to_owned(),
     }
 }
 
@@ -585,7 +657,15 @@ pub fn reference_panel(
             | FeatureKind::Extrude(_)
             | FeatureKind::BaseFlange(_)
             | FeatureKind::EdgeFlange(_)
-            | FeatureKind::SheetCut(_) => {}
+            | FeatureKind::SheetCut(_)
+            | FeatureKind::Hem(_)
+            | FeatureKind::SketchedBend(_)
+            | FeatureKind::Jog(_)
+            | FeatureKind::MiterFlange(_)
+            | FeatureKind::Corner(_)
+            | FeatureKind::Form(_)
+            | FeatureKind::Pattern(_)
+            | FeatureKind::Mirror(_) => {}
         });
     out
 }
@@ -830,6 +910,793 @@ pub fn edge_flange_panel(
     ui.weak(
         "Set the offsets to stop the flange short of the corners; reliefs are cut where it does.",
     );
+    out
+}
+
+// ---- Phase 5 panels ----
+
+/// A row with a label and a value field.
+#[allow(clippy::too_many_arguments)]
+fn value_row(
+    ui: &mut Ui,
+    label: &str,
+    tip: &str,
+    id: &str,
+    value: &mut Scalar,
+    kind: ScalarKind,
+    params: &Parameters,
+    out: &mut PanelResult,
+) {
+    let l = ui.label(label);
+    if !tip.is_empty() {
+        l.on_hover_text(tip);
+    }
+    out.committed |= scalar_field(ui, id, value, kind, params);
+    ui.end_row();
+}
+
+/// A custom bend radius, or the body's default.
+fn radius_row(
+    ui: &mut Ui,
+    id: &str,
+    radius: &mut Option<Scalar>,
+    default_radius: Option<f64>,
+    params: &Parameters,
+    out: &mut PanelResult,
+) {
+    ui.label("Bend radius");
+    ui.horizontal(|ui| {
+        let mut custom = radius.is_some();
+        if ui.checkbox(&mut custom, "Custom").changed() {
+            *radius = custom.then(|| Scalar::new(default_radius.unwrap_or(1.0)));
+        }
+        if radius.is_none()
+            && let Some(r) = default_radius
+        {
+            ui.weak(format!("body default, {}", params.units.format_length(r)));
+        }
+    });
+    ui.end_row();
+    if let Some(r) = radius {
+        ui.label("");
+        out.committed |= scalar_field(ui, id, r, ScalarKind::Length, params);
+        ui.end_row();
+    }
+}
+
+fn edge_text(doc: &Document, edge: &EdgeRef) -> String {
+    let names: Vec<String> = edge
+        .faces
+        .iter()
+        .map(|f| doc.model.describe_face(f))
+        .collect();
+    names.join(" / ")
+}
+
+/// Hem: its edge, kind and sizes.
+pub fn hem_panel(
+    ui: &mut Ui,
+    doc: &Document,
+    h: &mut HemFeature,
+    picking: Option<Slot>,
+) -> PanelResult {
+    let mut out = PanelResult::default();
+    let params = &doc.model.parameters;
+    egui::Grid::new("hem_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            let text = h
+                .edge
+                .as_ref()
+                .map_or("None yet".to_owned(), |e| edge_text(doc, e));
+            reference_row(ui, "Edge", text, Slot::HemEdge, picking, &mut out);
+            ui.label("Type");
+            egui::ComboBox::from_id_salt("hem_kind")
+                .selected_text(h.kind.label())
+                .show_ui(ui, |ui| {
+                    for k in HemKind::ALL {
+                        let tip = match k {
+                            HemKind::Closed => "Folded flat onto the sheet.",
+                            HemKind::Open => "Folded back with a gap.",
+                            HemKind::Teardrop => {
+                                "Folded past 180° so the end comes back towards the sheet."
+                            }
+                            HemKind::Rolled => "A curl with no flat end.",
+                        };
+                        ui.selectable_value(&mut h.kind, k, k.label())
+                            .on_hover_text(tip);
+                    }
+                });
+            ui.end_row();
+            match h.kind {
+                HemKind::Closed | HemKind::Open => {
+                    value_row(
+                        ui,
+                        "Length",
+                        "From the outside of the fold to the end of the hem.",
+                        "hem_length",
+                        &mut h.length,
+                        ScalarKind::Length,
+                        params,
+                        &mut out,
+                    );
+                    if h.kind == HemKind::Open {
+                        value_row(
+                            ui,
+                            "Gap",
+                            "Between the sheet and the hem.",
+                            "hem_gap",
+                            &mut h.gap,
+                            ScalarKind::Length,
+                            params,
+                            &mut out,
+                        );
+                    }
+                }
+                HemKind::Teardrop | HemKind::Rolled => {
+                    value_row(
+                        ui,
+                        "Radius",
+                        "Inner radius of the fold.",
+                        "hem_radius",
+                        &mut h.radius,
+                        ScalarKind::Length,
+                        params,
+                        &mut out,
+                    );
+                    value_row(
+                        ui,
+                        "Angle",
+                        "How far the edge turns: more than 180°.",
+                        "hem_angle",
+                        &mut h.angle,
+                        ScalarKind::Angle,
+                        params,
+                        &mut out,
+                    );
+                    if h.kind == HemKind::Teardrop {
+                        value_row(
+                            ui,
+                            "End length",
+                            "The flat end after the fold.",
+                            "hem_length",
+                            &mut h.length,
+                            ScalarKind::Length,
+                            params,
+                            &mut out,
+                        );
+                    }
+                }
+            }
+            ui.label("Position");
+            ui.checkbox(&mut h.inside, "Keep the outline")
+                .on_hover_text("The outside of the fold is flush with the original edge. Off: the fold starts at the edge and the part grows.");
+            ui.end_row();
+            value_row(
+                ui,
+                "Offset start",
+                "",
+                "hem_off0",
+                &mut h.offset_start,
+                ScalarKind::Length,
+                params,
+                &mut out,
+            );
+            value_row(
+                ui,
+                "Offset end",
+                "",
+                "hem_off1",
+                &mut h.offset_end,
+                ScalarKind::Length,
+                params,
+                &mut out,
+            );
+            ui.label("Direction");
+            ui.checkbox(&mut h.flip, "Flip")
+                .on_hover_text("Fold to the other side of the sheet.");
+            ui.end_row();
+        });
+    out
+}
+
+fn position_combo(ui: &mut Ui, id: &str, position: &mut BendLinePosition) {
+    ui.label("Position")
+        .on_hover_text("Where the bend sits relative to the sketched line.");
+    egui::ComboBox::from_id_salt(id)
+        .selected_text(position.label())
+        .show_ui(ui, |ui| {
+            for p in BendLinePosition::ALL {
+                let tip = match p {
+                    BendLinePosition::Centerline => "The line is the middle of the bend.",
+                    BendLinePosition::MaterialInside => {
+                        "The line is where the outer faces of the two sides meet."
+                    }
+                    BendLinePosition::MaterialOutside => {
+                        "The line is where the inner faces of the two sides meet."
+                    }
+                    BendLinePosition::BendOutside => "The bend starts at the line.",
+                };
+                ui.selectable_value(position, p, p.label())
+                    .on_hover_text(tip);
+            }
+        });
+    ui.end_row();
+}
+
+/// Sketched bend: angle, radius, position and directions.
+pub fn sketched_bend_panel(
+    ui: &mut Ui,
+    doc: &Document,
+    b: &mut SketchedBendFeature,
+    default_radius: Option<f64>,
+) -> PanelResult {
+    let mut out = PanelResult::default();
+    let params = &doc.model.parameters;
+    egui::Grid::new("sketched_bend_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Sketch");
+            ui.label(doc.model.name_of(b.sketch));
+            ui.end_row();
+            value_row(
+                ui,
+                "Angle",
+                "",
+                "sb_angle",
+                &mut b.angle,
+                ScalarKind::Angle,
+                params,
+                &mut out,
+            );
+            position_combo(ui, "sb_position", &mut b.position);
+            ui.label("Direction");
+            ui.checkbox(&mut b.flip, "Flip")
+                .on_hover_text("Bend away from the face the sketch is on.");
+            ui.end_row();
+            ui.label("Fixed side");
+            ui.checkbox(&mut b.flip_fixed, "Other side")
+                .on_hover_text("On the part's first face, the larger side stays where it is. Tick to keep the other side instead.");
+            ui.end_row();
+            radius_row(ui, "sb_radius", &mut b.radius, default_radius, params, &mut out);
+        });
+    ui.add_space(6.0);
+    ui.weak("Each line of the sketch is a bend. Draw the lines right across the face.");
+    out
+}
+
+/// Jog: offset, angle, position and directions.
+pub fn jog_panel(
+    ui: &mut Ui,
+    doc: &Document,
+    j: &mut JogFeature,
+    default_radius: Option<f64>,
+) -> PanelResult {
+    let mut out = PanelResult::default();
+    let params = &doc.model.parameters;
+    egui::Grid::new("jog_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Sketch");
+            ui.label(doc.model.name_of(j.sketch));
+            ui.end_row();
+            value_row(
+                ui,
+                "Offset",
+                "How far the far side is stepped.",
+                "jog_offset",
+                &mut j.offset,
+                ScalarKind::Length,
+                params,
+                &mut out,
+            );
+            ui.label("Measured");
+            egui::ComboBox::from_id_salt("jog_dimension")
+                .selected_text(j.dimension.label())
+                .show_ui(ui, |ui| {
+                    for d in JogDimension::ALL {
+                        ui.selectable_value(&mut j.dimension, d, d.label());
+                    }
+                });
+            ui.end_row();
+            value_row(
+                ui,
+                "Angle",
+                "The angle of both bends (90° for a square step).",
+                "jog_angle",
+                &mut j.angle,
+                ScalarKind::Angle,
+                params,
+                &mut out,
+            );
+            position_combo(ui, "jog_position", &mut j.position);
+            ui.label("Direction");
+            ui.checkbox(&mut j.flip, "Flip")
+                .on_hover_text("Step away from the face the sketch is on.");
+            ui.end_row();
+            ui.label("Fixed side");
+            ui.checkbox(&mut j.flip_fixed, "Other side");
+            ui.end_row();
+            radius_row(
+                ui,
+                "jog_radius",
+                &mut j.radius,
+                default_radius,
+                params,
+                &mut out,
+            );
+        });
+    ui.add_space(6.0);
+    ui.weak("The flat pattern keeps its length, so the far side also moves in a little.");
+    out
+}
+
+/// Mitre flange: its profile, edges, gap and offsets.
+pub fn miter_flange_panel(
+    ui: &mut Ui,
+    doc: &Document,
+    m: &mut MiterFlangeFeature,
+    picking: Option<Slot>,
+) -> PanelResult {
+    let mut out = PanelResult::default();
+    let params = &doc.model.parameters;
+    egui::Grid::new("miter_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Profile");
+            ui.label(doc.model.name_of(m.sketch));
+            ui.end_row();
+            ui.label("Edges");
+            ui.horizontal(|ui| {
+                if picking == Some(Slot::MiterEdge) {
+                    ui.colored_label(PICKING, "click an edge…");
+                } else {
+                    ui.label(format!("{} picked", m.edges.len()));
+                }
+                if ui
+                    .small_button("Add")
+                    .on_hover_text(Slot::MiterEdge.prompt())
+                    .clicked()
+                {
+                    out.pick = Some(Slot::MiterEdge);
+                }
+                if !m.edges.is_empty() && ui.small_button("Clear").clicked() {
+                    m.edges.clear();
+                }
+            });
+            ui.end_row();
+            value_row(
+                ui,
+                "Gap",
+                "Left between the flanges where the edges meet.",
+                "miter_gap",
+                &mut m.gap,
+                ScalarKind::Length,
+                params,
+                &mut out,
+            );
+            value_row(
+                ui,
+                "Offset start",
+                "Sets the flange back from the start of the chain of edges.",
+                "miter_off0",
+                &mut m.offset_start,
+                ScalarKind::Length,
+                params,
+                &mut out,
+            );
+            value_row(
+                ui,
+                "Offset end",
+                "",
+                "miter_off1",
+                &mut m.offset_end,
+                ScalarKind::Length,
+                params,
+                &mut out,
+            );
+        });
+    ui.add_space(6.0);
+    ui.weak("Draw the profile square to one of the edges, starting at that edge's top or bottom corner (sketch on the face at the end of the edge). Its lines are measured to the corners; a bend with the body's radius goes at each.");
+    out
+}
+
+/// Corner treatment: faces, kind, gap and relief.
+pub fn corner_panel(
+    ui: &mut Ui,
+    doc: &Document,
+    c: &mut CornerFeature,
+    picking: Option<Slot>,
+) -> PanelResult {
+    let mut out = PanelResult::default();
+    let params = &doc.model.parameters;
+    egui::Grid::new("corner_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Corners");
+            ui.horizontal(|ui| {
+                if picking == Some(Slot::CornerFace) {
+                    ui.colored_label(PICKING, "click a flange's face…");
+                } else if c.faces.is_empty() {
+                    ui.label("Every corner");
+                } else {
+                    ui.label(format!("At {} face(s)", c.faces.len()));
+                }
+                if ui
+                    .small_button("Add")
+                    .on_hover_text(Slot::CornerFace.prompt())
+                    .clicked()
+                {
+                    out.pick = Some(Slot::CornerFace);
+                }
+                if !c.faces.is_empty() && ui.small_button("All").clicked() {
+                    c.faces.clear();
+                }
+            });
+            ui.end_row();
+            ui.label("Type");
+            egui::ComboBox::from_id_salt("corner_kind")
+                .selected_text(c.kind.label())
+                .show_ui(ui, |ui| {
+                    for k in CornerKind::ALL {
+                        let tip = match k {
+                            CornerKind::Butt => {
+                                "The later flange butts against the earlier one, which runs to the corner (a closed corner)."
+                            }
+                            CornerKind::Overlap => {
+                                "The earlier flange butts against the later one (a closed corner, the other way round)."
+                            }
+                            CornerKind::Open => {
+                                "Both flanges stop short of the corner."
+                            }
+                        };
+                        ui.selectable_value(&mut c.kind, k, k.label())
+                            .on_hover_text(tip);
+                    }
+                });
+            ui.end_row();
+            value_row(
+                ui,
+                "Gap",
+                "Left between the flanges.",
+                "corner_gap",
+                &mut c.gap,
+                ScalarKind::Length,
+                params,
+                &mut out,
+            );
+            ui.label("Relief");
+            egui::ComboBox::from_id_salt("corner_relief")
+                .selected_text(c.relief.label())
+                .show_ui(ui, |ui| {
+                    for r in CornerRelief::ALL {
+                        let tip = match r {
+                            CornerRelief::Rectangular => {
+                                "A rectangle cut out where the two bends meet."
+                            }
+                            CornerRelief::Tear => {
+                                "Only what the two bends would share is removed."
+                            }
+                        };
+                        ui.selectable_value(&mut c.relief, r, r.label())
+                            .on_hover_text(tip);
+                    }
+                });
+            ui.end_row();
+            if c.relief == CornerRelief::Rectangular {
+                value_row(
+                    ui,
+                    "Relief size",
+                    "How far the relief reaches past the bends.",
+                    "corner_relief_size",
+                    &mut c.relief_size,
+                    ScalarKind::Length,
+                    params,
+                    &mut out,
+                );
+            }
+        });
+    ui.add_space(6.0);
+    ui.weak("Flanges on neighbouring edges meet in a butt corner with a 0.1 mm gap unless a corner feature says otherwise.");
+    out
+}
+
+/// Form: kind, height and direction.
+pub fn form_panel(ui: &mut Ui, doc: &Document, f: &mut FormFeature) -> PanelResult {
+    let mut out = PanelResult::default();
+    let params = &doc.model.parameters;
+    egui::Grid::new("form_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Sketch");
+            ui.label(doc.model.name_of(f.sketch));
+            ui.end_row();
+            ui.label("Type");
+            egui::ComboBox::from_id_salt("form_kind")
+                .selected_text(f.kind.label())
+                .show_ui(ui, |ui| {
+                    for k in FormKind::ALL {
+                        let tip = match k {
+                            FormKind::Dimple => "A round plateau at each circle.",
+                            FormKind::Emboss => "A plateau for each closed polygon.",
+                            FormKind::Louver => {
+                                "A hood for each closed polygon, cut open along one side."
+                            }
+                        };
+                        ui.selectable_value(&mut f.kind, k, k.label())
+                            .on_hover_text(tip);
+                    }
+                });
+            ui.end_row();
+            value_row(
+                ui,
+                "Height",
+                "How far the plateau stands out of the sheet's face.",
+                "form_height",
+                &mut f.height,
+                ScalarKind::Length,
+                params,
+                &mut out,
+            );
+            ui.label("Direction");
+            ui.checkbox(&mut f.flip, "Flip").on_hover_text(
+                "Press into the face the sketch is on, so the form stands out of the other side.",
+            );
+            ui.end_row();
+            if f.kind == FormKind::Louver {
+                ui.label("Open side");
+                ui.horizontal(|ui| {
+                    ui.label(format!("Side {}", f.open_side + 1));
+                    if ui
+                        .small_button("Next")
+                        .on_hover_text("Open the next side round the outline.")
+                        .clicked()
+                    {
+                        f.open_side = (f.open_side + 1) % 60;
+                    }
+                    if f.open_side > 0 && ui.small_button("First").clicked() {
+                        f.open_side = 0;
+                    }
+                });
+                ui.end_row();
+            }
+        });
+    ui.add_space(6.0);
+    ui.weak("Forms have square walls one thickness thick. The outline is the outside of the wall. On the flat pattern they are marked on the FORMS layer; a louver's open side is cut.");
+    out
+}
+
+/// A choice of axis: the standard axes, reference axes, or an edge to pick.
+#[allow(clippy::too_many_arguments)]
+fn axis_row(
+    ui: &mut Ui,
+    doc: &Document,
+    label: &str,
+    id: &str,
+    axis: &mut AxisRef,
+    slot: Slot,
+    picking: Option<Slot>,
+    out: &mut PanelResult,
+) {
+    ui.label(label);
+    ui.horizontal(|ui| {
+        if picking == Some(slot) {
+            ui.colored_label(PICKING, "click an edge…");
+            return;
+        }
+        egui::ComboBox::from_id_salt(id)
+            .selected_text(axis_text(doc, axis))
+            .show_ui(ui, |ui| {
+                for a in StdAxis::ALL {
+                    ui.selectable_value(axis, AxisRef::Standard(a), a.label());
+                }
+                for f in doc.model.features() {
+                    if matches!(f.kind, FeatureKind::Axis(_) | FeatureKind::CoordSystem(_)) {
+                        ui.selectable_value(axis, AxisRef::Feature(f.id), &f.name);
+                    }
+                }
+                if ui
+                    .selectable_label(matches!(axis, AxisRef::Edge(_)), "Pick an edge…")
+                    .on_hover_text(slot.prompt())
+                    .clicked()
+                {
+                    out.pick = Some(slot);
+                }
+            });
+    });
+    ui.end_row();
+}
+
+/// The features a pattern or a mirror copies, with a way to change them.
+fn seeds_row(ui: &mut Ui, doc: &Document, own: FeatureId, seeds: &mut Vec<FeatureId>) {
+    ui.label("Features");
+    ui.vertical(|ui| {
+        let names: Vec<&str> = seeds.iter().map(|s| doc.model.name_of(*s)).collect();
+        ui.label(if names.is_empty() {
+            "None".to_owned()
+        } else {
+            names.join(", ")
+        });
+        egui::ComboBox::from_id_salt("seed_choice")
+            .selected_text("Change…")
+            .show_ui(ui, |ui| {
+                let before = doc.model.index_of(own).unwrap_or(usize::MAX);
+                for (i, f) in doc.model.features().enumerate() {
+                    if i >= before || !f.kind.can_be_copied() {
+                        continue;
+                    }
+                    let mut on = seeds.contains(&f.id);
+                    if ui.checkbox(&mut on, &f.name).changed() {
+                        if on {
+                            seeds.push(f.id);
+                        } else {
+                            seeds.retain(|s| *s != f.id);
+                        }
+                    }
+                }
+            });
+    });
+    ui.end_row();
+}
+
+fn count_row(ui: &mut Ui, label: &str, count: &mut u32) {
+    ui.label(label)
+        .on_hover_text("How many in all, the original included.");
+    ui.add(egui::DragValue::new(count).range(2..=1000).speed(0.1));
+    ui.end_row();
+}
+
+/// Pattern: what it copies, and where the copies go.
+pub fn pattern_panel(
+    ui: &mut Ui,
+    doc: &Document,
+    own: FeatureId,
+    p: &mut PatternFeature,
+    picking: Option<Slot>,
+) -> PanelResult {
+    let mut out = PanelResult::default();
+    let params = &doc.model.parameters;
+    egui::Grid::new("pattern_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            seeds_row(ui, doc, own, &mut p.seeds);
+            match &mut p.def {
+                PatternDef::Linear { first, second } => {
+                    axis_row(
+                        ui,
+                        doc,
+                        "Direction",
+                        "pattern_dir1",
+                        &mut first.direction,
+                        Slot::PatternAxis,
+                        picking,
+                        &mut out,
+                    );
+                    value_row(
+                        ui,
+                        "Spacing",
+                        "",
+                        "pattern_spacing1",
+                        &mut first.spacing,
+                        ScalarKind::Length,
+                        params,
+                        &mut out,
+                    );
+                    count_row(ui, "Count", &mut first.count);
+                    ui.label("");
+                    ui.checkbox(&mut first.flip, "Reverse");
+                    ui.end_row();
+                    ui.label("Second direction");
+                    let mut on = second.is_some();
+                    if ui.checkbox(&mut on, "A grid").changed() {
+                        *second = on.then(|| LinearDirection {
+                            direction: match first.direction {
+                                AxisRef::Standard(StdAxis::Y) => AxisRef::Standard(StdAxis::X),
+                                _ => AxisRef::Standard(StdAxis::Y),
+                            },
+                            spacing: first.spacing.clone(),
+                            count: 2,
+                            flip: false,
+                        });
+                    }
+                    ui.end_row();
+                    if let Some(s) = second {
+                        axis_row(
+                            ui,
+                            doc,
+                            "Direction 2",
+                            "pattern_dir2",
+                            &mut s.direction,
+                            Slot::PatternAxis2,
+                            picking,
+                            &mut out,
+                        );
+                        value_row(
+                            ui,
+                            "Spacing 2",
+                            "",
+                            "pattern_spacing2",
+                            &mut s.spacing,
+                            ScalarKind::Length,
+                            params,
+                            &mut out,
+                        );
+                        count_row(ui, "Count 2", &mut s.count);
+                        ui.label("");
+                        ui.checkbox(&mut s.flip, "Reverse");
+                        ui.end_row();
+                    }
+                }
+                PatternDef::Circular {
+                    axis,
+                    count,
+                    angle,
+                    flip,
+                } => {
+                    axis_row(
+                        ui,
+                        doc,
+                        "Axis",
+                        "pattern_axis",
+                        axis,
+                        Slot::PatternAxis,
+                        picking,
+                        &mut out,
+                    );
+                    count_row(ui, "Count", count);
+                    value_row(
+                        ui,
+                        "Angle",
+                        "The angle the copies are spread over. 360° spaces them evenly all the way round.",
+                        "pattern_angle",
+                        angle,
+                        ScalarKind::Angle,
+                        params,
+                        &mut out,
+                    );
+                    ui.label("");
+                    ui.checkbox(flip, "Reverse");
+                    ui.end_row();
+                }
+            }
+        });
+    ui.add_space(6.0);
+    ui.weak("Copies extrusions, cuts, sheet metal cuts and forms. Sheet metal copies stay on the face their original is sketched on.");
+    out
+}
+
+/// Mirror: what it copies, and the plane.
+pub fn mirror_panel(
+    ui: &mut Ui,
+    doc: &Document,
+    own: FeatureId,
+    m: &mut MirrorFeature,
+    picking: Option<Slot>,
+) -> PanelResult {
+    let mut out = PanelResult::default();
+    egui::Grid::new("mirror_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            seeds_row(ui, doc, own, &mut m.seeds);
+            reference_row(
+                ui,
+                "Plane",
+                plane_text(doc, &m.plane),
+                Slot::MirrorPlane,
+                picking,
+                &mut out,
+            );
+        });
+    ui.add_space(6.0);
+    ui.weak("Copies extrusions, cuts, sheet metal cuts and forms. For sheet metal, the plane must be square to the face the original is sketched on.");
     out
 }
 
