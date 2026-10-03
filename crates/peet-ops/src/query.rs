@@ -19,7 +19,7 @@ fn status_word(status: Option<&Status>) -> &'static str {
         Some(Status::Ok) => "ok",
         Some(Status::Warning(_)) => "warning",
         Some(Status::Failed(_)) => "failed",
-        Some(Status::Suppressed) => "suppressed",
+        Some(Status::Suppressed | Status::SuppressedBy(_)) => "suppressed",
         Some(Status::RolledBack) => "rolled_back",
         None => "not_built",
     }
@@ -39,7 +39,77 @@ pub fn brief(doc: &Document, id: FeatureId) -> Value {
     if let Some(m) = status.and_then(Status::message) {
         out.insert("message".to_owned(), json!(m));
     }
+    if let Some(Status::SuppressedBy(parent)) = status {
+        out.insert(
+            "suppressed_by".to_owned(),
+            json!(doc.model.name_of(*parent)),
+        );
+    }
+    if doc.model.suppression_differs(id) {
+        out.insert("suppressed_in".to_owned(), json!(suppressed_in(doc, id)));
+    }
     Value::Object(out)
+}
+
+/// The names of the configurations a feature is suppressed in.
+fn suppressed_in(doc: &Document, id: FeatureId) -> Vec<&str> {
+    doc.model
+        .configurations()
+        .iter()
+        .filter(|c| doc.model.suppressed_in(id, c.id) == Some(true))
+        .map(|c| c.name.as_str())
+        .collect()
+}
+
+/// The configurations, which one is active, and what differs between them: for each
+/// feature whose suppression differs, the configurations it is suppressed in; for each
+/// parameter whose expression differs, its expression in every configuration.
+pub fn configurations(doc: &Document) -> Value {
+    let model = &doc.model;
+    let active = model.active_configuration().id;
+    let list: Vec<Value> = model
+        .configurations()
+        .iter()
+        .map(|c| {
+            let mut m = Map::new();
+            m.insert("name".to_owned(), json!(c.name));
+            if c.id == active {
+                m.insert("active".to_owned(), json!(true));
+            }
+            if !c.comment.is_empty() {
+                m.insert("comment".to_owned(), json!(c.comment));
+            }
+            Value::Object(m)
+        })
+        .collect();
+    let suppressed: Map<String, Value> = model
+        .features_that_differ()
+        .into_iter()
+        .map(|id| (model.name_of(id).to_owned(), json!(suppressed_in(doc, id))))
+        .collect();
+    let parameters: Map<String, Value> = model
+        .parameters_that_differ()
+        .into_iter()
+        .map(|name| (name.to_owned(), Value::Object(expressions(doc, name))))
+        .collect();
+    json!({
+        "active": model.active_configuration().name,
+        "configurations": list,
+        "suppressed_in": suppressed,
+        "parameters": parameters,
+    })
+}
+
+/// A parameter's expression in every configuration.
+fn expressions(doc: &Document, name: &str) -> Map<String, Value> {
+    doc.model
+        .configurations()
+        .iter()
+        .filter_map(|c| {
+            let e = doc.model.parameter_in(name, c.id)?;
+            Some((c.name.clone(), json!(e)))
+        })
+        .collect()
 }
 
 /// Every feature that failed to build, in tree order.
@@ -236,11 +306,15 @@ pub fn parameters(doc: &Document) -> Value {
         .entries
         .iter()
         .map(|p| {
-            json!({
+            let mut v = json!({
                 "name": p.name,
                 "expression": p.expression,
                 "value": p.display(&params.units),
-            })
+            });
+            if doc.model.parameter_differs(&p.name) {
+                v["configurations"] = Value::Object(expressions(doc, &p.name));
+            }
+            v
         })
         .collect();
     json!({ "units": params.units.length.suffix(), "parameters": list })
@@ -465,6 +539,10 @@ pub fn status(doc: &Document) -> Value {
         m.insert("file".to_owned(), json!(path.to_string_lossy()));
     }
     m.insert("modified".to_owned(), json!(doc.is_modified()));
+    m.insert(
+        "configuration".to_owned(),
+        json!(doc.model.active_configuration().name),
+    );
     m.insert(
         "units".to_owned(),
         json!(doc.model.parameters.units.length.suffix()),

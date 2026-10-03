@@ -16,14 +16,25 @@ use peet_sketch::Sketch;
 use crate::fields::{FeatureArgs, SketchPlane};
 use crate::host::Host;
 use crate::op::{DatumSel, New, Op, Place, RollTo};
-use crate::value::{FeatureSel, Input};
+use crate::value::{Configs, FeatureSel, Input};
 use crate::{Undo, apply_with};
 
 fn by_id(id: FeatureId) -> FeatureSel {
     FeatureSel::Id(id)
 }
 
+/// What a value set on the model itself applies to: the active configuration if the
+/// value differs between configurations, every configuration if it doesn't.
+fn as_set_directly(differs: bool) -> Configs {
+    if differs { Configs::This } else { Configs::All }
+}
+
 /// The operations that turn the document's model into `new`, in the order to apply them.
+///
+/// The model holds the active configuration, so a tool's change is one to that
+/// configuration where it differs from the others, and to all of them where it doesn't.
+/// Changes to the configurations themselves are operations from the start, not found
+/// here.
 ///
 /// Fails, with the reason, if the change is one the operations can't express.
 pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
@@ -60,6 +71,7 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
                 ops.push(Op::SetParameter {
                     name: p.name.clone(),
                     value: Input::Expr(p.expression.clone()),
+                    configurations: as_set_directly(old.parameter_differs(&p.name)),
                 });
             }
         }
@@ -213,6 +225,7 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
             ops.push(Op::Suppress {
                 feature: by_id(f.id),
                 on: f.suppressed,
+                configurations: as_set_directly(old.suppression_differs(f.id)),
             });
         }
         if f.visible != visible {
@@ -302,6 +315,8 @@ pub fn apply_model(
     key: u64,
 ) -> Translation {
     let undo = Undo::Group(key);
+    let mut new = new;
+    new.tidy_configurations();
     let ops = match diff(doc, &new) {
         Ok(ops) => ops,
         Err(reason) => {

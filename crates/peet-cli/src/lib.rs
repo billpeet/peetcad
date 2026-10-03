@@ -79,12 +79,16 @@ EXIT CODE
 /// The skills: instructions for an agent on using `peet`, kept in this repository and
 /// built into the binary, so they always describe the version being run. `core` comes
 /// first and points to the others.
-pub const SKILLS: [(&str, &str); 5] = [
+pub const SKILLS: [(&str, &str); 6] = [
     ("core", include_str!("../skills/core.md")),
     ("sketching", include_str!("../skills/sketching.md")),
     ("selectors", include_str!("../skills/selectors.md")),
     ("solids", include_str!("../skills/solids.md")),
     ("sheet-metal", include_str!("../skills/sheet-metal.md")),
+    (
+        "configurations",
+        include_str!("../skills/configurations.md"),
+    ),
 ];
 
 /// A skill's `description`, from the front matter at its top: what it is for.

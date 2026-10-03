@@ -263,14 +263,16 @@ fn suppress_and_roll_back() {
     p.rebuild();
     assert_close(p.volume(), plate_volume(100.0, 10.0, 4.0));
 
-    // Suppressing the pocket leaves the features on its floor without their face.
+    // Suppressing the pocket suppresses what is built on its floor with it.
     p.model.feature_mut(pocket).unwrap().suppressed = true;
     p.rebuild();
-    assert!(p.status(hole_sketch).is_failed());
-    assert!(p.status(hole).is_failed());
+    assert_eq!(*p.status(hole_sketch), Status::SuppressedBy(pocket));
+    assert_eq!(*p.status(hole), Status::SuppressedBy(hole_sketch));
     assert_close(p.volume(), 100.0 * 60.0 * 10.0);
     p.model.feature_mut(pocket).unwrap().suppressed = false;
     p.rebuild();
+    p.assert_ok();
+    assert_close(p.volume(), plate_volume(100.0, 10.0, 4.0));
 
     // The rollback bar: only the features above it are built.
     p.model.set_rollback(p.model.index_of(pocket_sketch));
@@ -554,12 +556,12 @@ fn reference_geometry_follows_the_model() {
             .contains(&plate)
     );
 
-    // Suppressing the plane takes down what stands on it, with the reason.
+    // Suppressing the plane suppresses what stands on it, naming what it went with.
     p.model.feature_mut(offset).unwrap().suppressed = true;
     p.rebuild();
-    let m = p.status(boss).message().unwrap();
-    assert!(m.contains("Plane1") && m.contains("suppressed"), "{m}");
-    assert!(p.status(post).is_failed() && p.status(csys).is_failed());
+    assert_eq!(*p.status(boss), Status::SuppressedBy(offset));
+    assert!(p.status(post).is_suppressed() && p.status(csys).is_suppressed());
+    assert!(p.eval().failures().next().is_none());
     assert_close(p.volume(), plate_volume(130.0, 12.0, 4.0));
 }
 

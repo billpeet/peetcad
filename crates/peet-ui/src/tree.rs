@@ -24,7 +24,13 @@ pub enum TreeAction {
     /// Double-click or "Edit": open a sketch, or show a feature's properties.
     Edit(ItemId),
     SetVisible(ItemId, bool),
-    SetSuppressed(FeatureId, bool),
+    /// Suppress or unsuppress a feature: in the active configuration, or (`all`) in every
+    /// configuration.
+    SetSuppressed {
+        feature: FeatureId,
+        on: bool,
+        all: bool,
+    },
     Delete(FeatureId),
     /// Put the rollback bar below this many features (`None`: at the end).
     Rollback(Option<usize>),
@@ -266,7 +272,7 @@ fn feature_row(ui: &mut Ui, cx: &mut RowContext<'_>, feature: &Feature, index: u
             // Solid features have no visibility of their own; keep the column aligned.
             ui.add_visible(false, egui::Checkbox::without_text(&mut false));
         }
-        let faded = matches!(status, Some(Status::Suppressed | Status::RolledBack));
+        let faded = status.is_some_and(|s| s.is_suppressed() || *s == Status::RolledBack);
         type_tile(ui, Icon::for_feature(&feature.kind), dark, faded);
         let selected = view.selected == Some(item);
         let text = row_text(
@@ -282,6 +288,11 @@ fn feature_row(ui: &mut Ui, cx: &mut RowContext<'_>, feature: &Feature, index: u
         let mut r = ui.add(button);
         if let Some(m) = status.and_then(Status::message) {
             r = r.on_hover_text(m);
+        } else if let Some(Status::SuppressedBy(parent)) = status {
+            r = r.on_hover_text(format!(
+                "Suppressed with {}, which it is built on.",
+                doc.model.name_of(*parent)
+            ));
         } else {
             r = r.on_hover_text(feature.kind.type_name());
         }
@@ -311,9 +322,35 @@ fn feature_row(ui: &mut Ui, cx: &mut RowContext<'_>, feature: &Feature, index: u
             } else {
                 "Suppress"
             };
-            if ui.button(label).clicked() {
-                actions.push(TreeAction::SetSuppressed(feature.id, !feature.suppressed));
+            // With several configurations: in the active one, or in all of them.
+            let several = doc.model.configurations().len() > 1;
+            let mut suppress = ui.button(label);
+            if several {
+                suppress = suppress.on_hover_text(format!(
+                    "In this configuration ({}).",
+                    doc.model.active_configuration().name
+                ));
+            }
+            if suppress.clicked() {
+                actions.push(TreeAction::SetSuppressed {
+                    feature: feature.id,
+                    on: !feature.suppressed,
+                    all: false,
+                });
                 ui.close();
+            }
+            if several {
+                for on in [true, false] {
+                    let word = if on { "Suppress" } else { "Unsuppress" };
+                    if ui.button(format!("{word} in All Configurations")).clicked() {
+                        actions.push(TreeAction::SetSuppressed {
+                            feature: feature.id,
+                            on,
+                            all: true,
+                        });
+                        ui.close();
+                    }
+                }
             }
             ui.separator();
             if ui
@@ -416,7 +453,9 @@ fn row_text(
     let mut text = match status {
         Some(Status::Failed(_)) => RichText::new(format!("⚠ {marker}{name}")).color(ERROR),
         Some(Status::Warning(_)) => RichText::new(format!("⚠ {marker}{name}")).color(WARNING),
-        Some(Status::Suppressed) => RichText::new(name).weak().strikethrough(),
+        Some(Status::Suppressed | Status::SuppressedBy(_)) => {
+            RichText::new(name).weak().strikethrough()
+        }
         Some(Status::RolledBack) => RichText::new(name).color(if dark {
             Color32::from_gray(110)
         } else {

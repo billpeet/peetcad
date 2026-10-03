@@ -145,8 +145,21 @@ is rebuilt (the status bar shows the last rebuild time).
 | Edit a feature | Select it; the properties panel edits it in place. Double-click a sketch to open it |
 | Reorder | Drag a feature up or down (it can't move above what it uses) |
 | Roll back | Drag the bar at the end of the tree up; new features are added there |
-| Suppress, delete, roll back to here | Right-click a feature |
+| Suppress, delete, roll back to here | Right-click a feature. What is built on a suppressed feature is suppressed with it |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Y`, for every change to the part |
+
+### Configurations
+
+A part can hold several configurations: versions of it that differ in which features are
+suppressed and in the values of its parameters, such as a panel in two thicknesses and as
+a plain blank. They are listed above the feature tree.
+
+| Action | How |
+|---|---|
+| Add a configuration | **+ Add Configuration**: a copy of the active one, which becomes the active one. Right-click a configuration to copy, rename or delete it |
+| Switch | Double-click a configuration. The active one is what is shown, measured and exported |
+| Suppress a feature in one configuration | Right-click it in the tree and **Suppress**; **Suppress in All Configurations** does what it says |
+| Give a parameter another value | **Tools → Parameters** shows a column per configuration; a value typed in one changes that configuration only. Tie a dimension to a parameter (`thickness`, `flange`) to make it differ |
 
 A feature that can't be built turns red with the reason in its tooltip and properties; the
 rest of the part still builds. **Features → Reference Geometry** adds planes (offset, at an
@@ -201,7 +214,7 @@ crates/
   peet-sketch/    2D sketches: entities, constraints, solver, expressions, editing operations
   peet-kernel/    B-rep kernel: planes, cylinders, cones, spheres, tori and NURBS; extrude, revolve, loft, booleans, fillets and chamfers, shell and draft, validation, tessellation, mass properties
   peet-sheetmetal/ sheet metal: flat layouts of flanges and bends, folding, flat patterns, bend math, recognising sheet metal in a solid
-  peet-model/     the parametric core: feature tree, persistent naming, rebuilds, solid and sheet metal features, undo
+  peet-model/     the parametric core: feature tree, persistent naming, rebuilds, solid and sheet metal features, configurations, undo
   peet-io/        file formats: native .peet, STL export, DXF flat patterns and import, STEP export and import
   peet-document/  the open document, headless: model, rebuilds, undo and bodies, shared by the app and scripts
   peet-ops/       operations: everything a user can do as typed values or JSON, with selectors, queries and replies (docs/scripting.md)

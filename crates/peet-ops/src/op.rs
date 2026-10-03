@@ -14,7 +14,7 @@ use crate::fields::FeatureArgs;
 use crate::host::{AppCommand, word_enum};
 use crate::library::{CheckRule, Gauge};
 use crate::sketch::{self, DrawItem};
-use crate::value::{EdgeSel, FeatureSel, GeomSel, Input, PlaneSel};
+use crate::value::{Configs, EdgeSel, FeatureSel, GeomSel, Input, PlaneSel};
 
 word_enum! {
     /// A sample part that comes with PeetCAD.
@@ -170,6 +170,8 @@ pub enum Query {
     /// One feature: its fields, and a sketch's contents.
     Feature(FeatureSel),
     Parameters,
+    /// The configurations, which one is active, and what differs between them.
+    Configurations,
     /// Bounds, volume, and flat size for sheet metal.
     Bodies,
     /// The faces of one body, or of all.
@@ -244,10 +246,12 @@ pub enum Op {
         feature: FeatureSel,
         name: String,
     },
-    /// Suppress a feature (skip it when rebuilding), or unsuppress it.
+    /// Suppress a feature (skip it when rebuilding, with everything built on it), or
+    /// unsuppress it, in some configurations.
     Suppress {
         feature: FeatureSel,
         on: bool,
+        configurations: Configs,
     },
     /// Show or hide a feature's own geometry (a sketch, a plane).
     Show {
@@ -271,10 +275,34 @@ pub enum Op {
         sketch: FeatureSel,
         content: Box<peet_sketch::Sketch>,
     },
-    /// Add or change a named value usable in every expression.
+    /// Add or change a named value usable in every expression. A new one exists in
+    /// every configuration; an existing one changes in the configurations given.
     SetParameter {
         name: String,
         value: Input,
+        configurations: Configs,
+    },
+    /// Add a configuration: a copy of another (the active one if absent), which becomes
+    /// the active one.
+    AddConfiguration {
+        name: String,
+        copy: Option<String>,
+        comment: Option<String>,
+    },
+    /// Rename a configuration, or change its comment.
+    EditConfiguration {
+        configuration: String,
+        name: Option<String>,
+        comment: Option<String>,
+    },
+    /// Delete a configuration. A part keeps at least one.
+    DeleteConfiguration {
+        configuration: String,
+    },
+    /// Make a configuration the active one: the one built, shown and exported. Like the
+    /// flat pattern view, it is not an undo step.
+    Configuration {
+        configuration: String,
     },
     DeleteParameter {
         name: String,
@@ -396,6 +424,10 @@ impl Op {
             Self::Rollback { .. } => "rollback",
             Self::SetSketch { .. } => "set_sketch",
             Self::SetParameter { .. } => "set_parameter",
+            Self::AddConfiguration { .. } => "add_configuration",
+            Self::EditConfiguration { .. } => "edit_configuration",
+            Self::DeleteConfiguration { .. } => "delete_configuration",
+            Self::Configuration { .. } => "configuration",
             Self::DeleteParameter { .. } => "delete_parameter",
             Self::SetUnits { .. } => "set_units",
             Self::ImportStep { .. } => "import_step",
@@ -420,6 +452,7 @@ impl Op {
                 Query::Features => "features",
                 Query::Feature(_) => "feature",
                 Query::Parameters => "parameters",
+                Query::Configurations => "configurations",
                 Query::Bodies => "bodies",
                 Query::Faces { .. } => "faces",
                 Query::Edges { .. } => "edges",
@@ -537,8 +570,8 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ("rename", "feature, name", "Rename a feature."),
     (
         "suppress",
-        "feature, on (default true)",
-        "Suppress a feature (skip it when rebuilding), or unsuppress it.",
+        "feature, on (default true), configurations (\"this\" (default), \"all\", a name or a list of names)",
+        "Suppress a feature (skip it when rebuilding, with everything built on it), or unsuppress it, in some configurations.",
     ),
     (
         "show",
@@ -558,8 +591,33 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "set_parameter",
-        "name, value",
-        "Add or change a named value usable in every expression.",
+        "name, value, configurations (\"this\" (default), \"all\", a name or a list of names)",
+        "Add or change a named value usable in every expression. A new one exists in every configuration.",
+    ),
+    (
+        "add_configuration",
+        "name, copy (a configuration; default the active one), comment",
+        "Add a configuration, which starts as a copy and becomes the active one.",
+    ),
+    (
+        "edit_configuration",
+        "configuration, name, comment",
+        "Rename a configuration, or change its comment.",
+    ),
+    (
+        "delete_configuration",
+        "configuration",
+        "Delete a configuration. A part keeps at least one.",
+    ),
+    (
+        "configuration",
+        "configuration",
+        "Make a configuration the active one: the one built, shown and exported. Not an undo step.",
+    ),
+    (
+        "configurations",
+        "",
+        "The configurations, which one is active, and what differs between them.",
     ),
     ("delete_parameter", "name", "Remove a named value."),
     (
@@ -709,6 +767,23 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "features" => Op::Query(Query::Features),
         "feature" => Op::Query(Query::Feature(feature(a, "feature")?)),
         "parameters" => Op::Query(Query::Parameters),
+        "configurations" => Op::Query(Query::Configurations),
+        "add_configuration" => Op::AddConfiguration {
+            name: a.required("name", |v| text(v).map(str::to_owned))?,
+            copy: a.string("copy")?,
+            comment: a.string("comment")?,
+        },
+        "edit_configuration" => Op::EditConfiguration {
+            configuration: a.required("configuration", |v| text(v).map(str::to_owned))?,
+            name: a.string("name")?,
+            comment: a.string("comment")?,
+        },
+        "delete_configuration" => Op::DeleteConfiguration {
+            configuration: a.required("configuration", |v| text(v).map(str::to_owned))?,
+        },
+        "configuration" => Op::Configuration {
+            configuration: a.required("configuration", |v| text(v).map(str::to_owned))?,
+        },
         "bodies" => Op::Query(Query::Bodies),
         "faces" => Op::Query(Query::Faces { body: body(a)? }),
         "edges" => Op::Query(Query::Edges { body: body(a)? }),
@@ -849,6 +924,9 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "suppress" => Op::Suppress {
             feature: feature(a, "feature")?,
             on: a.flag("on", true)?,
+            configurations: a
+                .parsed("configurations", Configs::parse)?
+                .unwrap_or_default(),
         },
         "show" if a.has("datum") => Op::ShowDatum {
             datum: a.required("datum", DatumSel::parse)?,
@@ -901,6 +979,9 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "set_parameter" => Op::SetParameter {
             name: a.required("name", |v| text(v).map(str::to_owned))?,
             value: a.required("value", Input::parse)?,
+            configurations: a
+                .parsed("configurations", Configs::parse)?
+                .unwrap_or_default(),
         },
         "delete_parameter" => Op::DeleteParameter {
             name: a.required("name", |v| text(v).map(str::to_owned))?,

@@ -69,8 +69,8 @@ pub use op::{
 };
 pub use sketch::{Draw, DrawItem, Ent, Measure, Relation};
 pub use value::{
-    AxisSel, Bend, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel, HoleStandard,
-    Input, PlaneSel, PointSel, Regions, RevolveAxis, Side, VertexQuery, VertexSel,
+    AxisSel, Bend, Configs, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel,
+    HoleStandard, Input, PlaneSel, PointSel, Regions, RevolveAxis, Side, VertexQuery, VertexSel,
 };
 
 use peet_document::Document;
@@ -271,6 +271,7 @@ fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, V
         Query::Features => object(query::features(doc)),
         Query::Feature(f) => object(query::feature(doc, f.resolve(doc)?)),
         Query::Parameters => object(query::parameters(doc)),
+        Query::Configurations => object(query::configurations(doc)),
         Query::Bodies => object(query::bodies(doc)),
         Query::Faces { body } => object(query::faces(doc, *body)?),
         Query::Edges { body } => object(query::edges(doc, *body)?),
@@ -618,11 +619,13 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.feature = Some(id);
             format!("Rename {}", doc.model.name_of(id))
         }
-        Op::Suppress { feature, on } => {
+        Op::Suppress {
+            feature,
+            on,
+            configurations,
+        } => {
             let id = feature.resolve(doc)?;
-            if let Some(f) = model.feature_mut(id) {
-                f.suppressed = *on;
-            }
+            model.set_suppressed(id, *on, &configurations.resolve(doc)?)?;
             done.feature = Some(id);
             let word = if *on { "Suppress" } else { "Unsuppress" };
             format!("{word} {}", model.name_of(id))
@@ -695,11 +698,14 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.sketch = Some(id);
             format!("Edit {}", model.name_of(id))
         }
-        Op::SetParameter { name, value } => {
+        Op::SetParameter {
+            name,
+            value,
+            configurations,
+        } => {
             model
-                .parameters
-                .set(name, &value.text())
-                .map_err(|e| format!("{name}: {}", e.message))?;
+                .set_parameter(name, &value.text(), &configurations.resolve(doc)?)
+                .map_err(|e| format!("{name}: {e}"))?;
             if let Some(p) = model.parameters.entries.iter().find(|p| p.name == *name) {
                 done.data.insert(
                     "parameter".to_owned(),
@@ -716,8 +722,56 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             if !model.parameters.entries.iter().any(|p| p.name == *name) {
                 return Err(format!("There is no parameter called '{name}'."));
             }
-            model.parameters.remove(name);
+            model.remove_parameter(name);
             format!("Delete {name}")
+        }
+        Op::AddConfiguration {
+            name,
+            copy,
+            comment,
+        } => {
+            let copy = copy
+                .as_deref()
+                .map(|c| value::configuration(doc, c))
+                .transpose()?;
+            let id = model.add_configuration(name, copy)?;
+            if let Some(comment) = comment {
+                model.set_configuration_comment(id, comment);
+            }
+            model.activate_configuration(id);
+            let name = model.active_configuration().name.clone();
+            done.data.insert("configuration".to_owned(), json!(name));
+            format!("Add Configuration {name}")
+        }
+        Op::EditConfiguration {
+            configuration,
+            name,
+            comment,
+        } => {
+            let id = value::configuration(doc, configuration)?;
+            if let Some(name) = name {
+                model.rename_configuration(id, name)?;
+            }
+            if let Some(comment) = comment {
+                model.set_configuration_comment(id, comment);
+            }
+            format!("Edit Configuration {configuration}")
+        }
+        Op::DeleteConfiguration { configuration } => {
+            let id = value::configuration(doc, configuration)?;
+            model.remove_configuration(id)?;
+            done.data.insert(
+                "configuration".to_owned(),
+                json!(model.active_configuration().name),
+            );
+            format!("Delete Configuration {configuration}")
+        }
+        Op::Configuration { configuration } => {
+            let id = value::configuration(doc, configuration)?;
+            done.changed = doc.activate_configuration(id);
+            done.data
+                .insert("configuration".to_owned(), json!(configuration));
+            return Ok(done);
         }
         Op::SetUnits { length } => {
             if let Some((name, e)) = model

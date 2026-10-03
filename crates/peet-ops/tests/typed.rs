@@ -97,6 +97,7 @@ fn typed_operations_build_and_edit_a_part() {
         Op::SetParameter {
             name: "deep".to_owned(),
             value: "10mm".into(),
+            configurations: Default::default(),
         },
     );
     let id = doc.model.features().nth(1).unwrap().id;

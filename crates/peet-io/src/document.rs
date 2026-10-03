@@ -33,8 +33,14 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 ///   bodies. Earlier models decode unchanged (new variants at the end of the feature enum).
 /// - B-rep 4 (Phase 6): cones, spheres and tori as surfaces; blend, shell and import roles
 ///   in face names. Earlier caches decode unchanged.
+/// - Model 5 (configurations): the model holds its configurations. Earlier models have
+///   another layout: they are read as [`peet_model::ModelV4`] and converted, to a part
+///   with one configuration. Their caches are tagged with the hash of the model as it was
+///   stored, so they no longer match and the part is rebuilt once.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 4;
+pub const MODEL_SCHEMA: u16 = 5;
+/// The last model schema without configurations.
+const MODEL_SCHEMA_BEFORE_CONFIGURATIONS: u16 = 4;
 pub const BREP_SCHEMA: u16 = 4;
 pub const MESH_SCHEMA: u16 = 1;
 
@@ -146,9 +152,17 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
     check_schema(&r, SectionKind::METADATA, METADATA_SCHEMA)?;
     check_schema(&r, SectionKind::MODEL, MODEL_SCHEMA)?;
     let metadata: Metadata = r.read(SectionKind::METADATA)?.unwrap_or_default();
-    let mut model: Model = r
-        .read(SectionKind::MODEL)?
-        .ok_or_else(|| PeetError::new("The file is damaged: it has no model in it."))?;
+    let old = r
+        .schema_version(SectionKind::MODEL)
+        .is_some_and(|v| v <= MODEL_SCHEMA_BEFORE_CONFIGURATIONS);
+    let model: Option<Model> = if old {
+        r.read::<peet_model::ModelV4>(SectionKind::MODEL)?
+            .map(Model::from)
+    } else {
+        r.read(SectionKind::MODEL)?
+    };
+    let mut model =
+        model.ok_or_else(|| PeetError::new("The file is damaged: it has no model in it."))?;
     model.validate().map_err(PeetError::new)?;
     let model_hash = peet_model::hash::of(&model);
     let mut warnings = Vec::new();
@@ -285,7 +299,7 @@ mod tests {
         let mut w = Writer::new();
         w.section(SectionKind::METADATA, 1, &Metadata::default())
             .unwrap();
-        w.section(SectionKind::MODEL, 1, &other).unwrap();
+        w.section(SectionKind::MODEL, MODEL_SCHEMA, &other).unwrap();
         w.section(
             SectionKind::BREP_CACHE,
             1,
