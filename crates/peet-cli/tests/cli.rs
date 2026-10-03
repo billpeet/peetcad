@@ -609,6 +609,81 @@ fn what_the_assemblies_skill_says_about_linked_parts_is_true() {
 }
 
 #[test]
+fn what_the_assemblies_skill_says_about_step_is_true() {
+    // The skill's commands, in a folder of their own.
+    let dir = Folder::new("step");
+    let gearbox = dir.path("gearbox.peet");
+    let step = dir.path("gearbox.step");
+    let received = dir.path("received.peet");
+    let script = dir.write(
+        "gearbox.jsonl",
+        r#"{"op": "new", "assembly": true}
+{"op": "insert", "sample": "bracket"}
+{"op": "insert", "component": "Bracket-1", "at": [0, 120, 0]}
+{"op": "insert", "sample": "housing", "name": "Bearing", "at": [60, 40, 30], "rotate": {"axis": "x", "angle": 90}}
+"#,
+    );
+    assert_eq!(peet(&["run", &script, "--new", "-f", &gearbox]).code, OK);
+    let was = peet(&["components", "-f", &gearbox]);
+
+    let out = peet(&["export", &format!("path={step}"), "-f", &gearbox]);
+    assert_eq!(out.code, OK, "{}", out.err);
+    let reply = &out.replies[0];
+    assert_eq!(
+        (
+            reply["parts"].as_u64(),
+            reply["components"].as_u64(),
+            reply["bodies"].as_u64()
+        ),
+        (Some(2), Some(3), Some(3)),
+        "{reply}"
+    );
+    let import = json!({"op": "import_step", "path": step}).to_string();
+    let made = peet(&[
+        "op",
+        r#"{"op": "new", "assembly": true}"#,
+        &import,
+        "--new",
+        "-f",
+        &received,
+    ]);
+    assert_eq!(made.code, OK, "{}", made.err);
+    assert_eq!(
+        made.replies[1]["components"],
+        json!(["Bracket-1", "Bracket-2", "Bearing"])
+    );
+    assert_eq!(made.replies[1]["parts"], 2);
+
+    // The same components in the same places, fixed; two parts.
+    let now = peet(&["components", "-f", &received]);
+    assert_eq!(now.code, OK, "{}", now.err);
+    let (now, was) = (&now.replies[0], &was.replies[0]);
+    assert_eq!(now["parts"].as_array().unwrap().len(), 2);
+    let pairs = now["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .zip(was["components"].as_array().unwrap());
+    for (now, was) in pairs {
+        assert_eq!(now["fixed"], true);
+        assert_eq!(now["status"], "ok");
+        for key in ["min", "max"] {
+            for axis in 0..3 {
+                let (a, b) = (
+                    now[key][axis].as_f64().unwrap(),
+                    was[key][axis].as_f64().unwrap(),
+                );
+                assert!((a - b).abs() < 1e-4, "{key}: {now} / {was}");
+            }
+        }
+    }
+    // "To let mates move it": unfixed, it is free.
+    let freed = peet(&["fix", "component=Bearing", "on=false", "-f", &received]);
+    assert_eq!(freed.code, OK, "{}", freed.err);
+    assert_eq!(freed.replies[0]["component"]["freedom"], 6);
+}
+
+#[test]
 fn what_the_assemblies_skill_says_about_checking_is_true() {
     let skill = peet_cli::SKILLS
         .iter()

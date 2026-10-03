@@ -8,7 +8,11 @@
 use peet_kernel::boolean::{BooleanOp, boolean};
 use peet_kernel::query::{MassProperties, mass_properties};
 use peet_math::{Aabb, DMat3, DVec2, DVec3, Frame, tolerance};
-use peet_model::{CompId, Definition, Model};
+use std::collections::HashMap;
+use std::sync::Arc;
+
+use peet_io::step_import::StepNode;
+use peet_model::{Assembly, CompId, DefId, Definition, ImportedSolid, Model};
 
 use crate::document::Document;
 use crate::solids::symmetric_eigenvalues;
@@ -793,5 +797,202 @@ mod tests {
 
         // An assembly with nothing in it weighs nothing.
         assert_eq!(assembly(&[]).assembly_mass(), None);
+    }
+}
+
+// ---- STEP import ----
+
+/// What a STEP import added to an assembly.
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepAssemblyImported {
+    /// The new components of the assembly itself.
+    pub components: Vec<CompId>,
+    /// How many different parts came in (each once, however often it is used).
+    pub parts: usize,
+    /// How many bodies they show, counting each where it is used.
+    pub bodies: usize,
+    /// The importer's notes for the user: assumptions made and what was left out.
+    pub warnings: Vec<String>,
+}
+
+/// The parts and sub-assemblies made from a STEP file's product structure.
+struct StepModels<'a> {
+    nodes: &'a [StepNode],
+    /// The file's name, for the import features of the parts.
+    source: &'a str,
+    /// The model of each node that has one yet.
+    built: HashMap<usize, Arc<Model>>,
+    parts: usize,
+}
+
+impl StepModels<'_> {
+    /// A part holding `bodies`.
+    fn part(&mut self, name: &str, bodies: &[peet_io::step_import::ImportedBody]) -> Arc<Model> {
+        let mut model = Model::new();
+        name.clone_into(&mut model.name);
+        model.add_import(
+            self.source.to_owned(),
+            bodies
+                .iter()
+                .map(|b| ImportedSolid {
+                    name: b.name.clone(),
+                    solid: b.solid.clone(),
+                })
+                .collect(),
+        );
+        self.parts += 1;
+        Arc::new(model)
+    }
+
+    /// The model of a node: a part for one with solids only, an assembly for one with
+    /// things placed in it. None for a node with nothing in it.
+    fn model(&mut self, index: usize) -> Option<Arc<Model>> {
+        if let Some(model) = self.built.get(&index) {
+            return Some(model.clone());
+        }
+        let node = self.nodes.get(index)?;
+        let model = if node.children.is_empty() {
+            if node.bodies.is_empty() {
+                return None;
+            }
+            self.part(&node.name, &node.bodies)
+        } else {
+            let mut model = Model::new_assembly();
+            node.name.clone_into(&mut model.name);
+            let added = self.fill(model.assembly_mut()?, index, &mut HashMap::new());
+            if added.is_empty() {
+                return None;
+            }
+            Arc::new(model)
+        };
+        self.built.insert(index, model.clone());
+        Some(model)
+    }
+
+    /// Puts what a node holds into `assembly`: its own solids as a part, and what is
+    /// placed in it as components, held where the file has them. `defined` is the nodes
+    /// that are parts of the assembly already.
+    fn fill(
+        &mut self,
+        assembly: &mut Assembly,
+        index: usize,
+        defined: &mut HashMap<usize, DefId>,
+    ) -> Vec<CompId> {
+        let Some(node) = self.nodes.get(index) else {
+            return Vec::new();
+        };
+        let mut added = Vec::new();
+        let mut place = |assembly: &mut Assembly, definition: DefId, name: &str, frame| {
+            if let Some(id) = assembly.insert(definition, frame) {
+                // Called what the file calls it, if that is a name no other has.
+                let name = name.trim();
+                let free = !name.is_empty()
+                    && !name.contains('/')
+                    && !assembly.components().any(|c| c.name == name);
+                if let Some(c) = assembly.component_mut(id) {
+                    c.fixed = true;
+                    if free {
+                        name.clone_into(&mut c.name);
+                    }
+                }
+                added.push(id);
+            }
+        };
+        if !node.bodies.is_empty() {
+            let part = self.part(&node.name, &node.bodies);
+            let definition = assembly.define(part);
+            place(assembly, definition, "", peet_math::Frame::WORLD);
+        }
+        for (child, name, frame) in &node.children {
+            let definition = match defined.get(child) {
+                Some(definition) => *definition,
+                None => {
+                    let Some(model) = self.model(*child) else {
+                        continue;
+                    };
+                    let definition = assembly.define(model);
+                    defined.insert(*child, definition);
+                    definition
+                }
+            };
+            place(assembly, definition, name, *frame);
+        }
+        added
+    }
+}
+
+impl Document {
+    /// Adds what a STEP file (its text) holds to the assembly, keeping the file's
+    /// structure: each of its parts becomes a part of the assembly once, each of its
+    /// assemblies a sub-assembly, and what is placed in its top level become components
+    /// here, fixed where the file has them. A file of parts alone gives a component for
+    /// each. The error says, in plain words, why nothing was imported.
+    pub fn import_step_assembly(
+        &mut self,
+        file_name: &str,
+        text: &str,
+    ) -> Result<StepAssemblyImported, String> {
+        if !self.is_assembly() {
+            return Err(format!("{} is not an assembly.", self.title()));
+        }
+        let read = peet_io::step_import::read(text).map_err(|e| e.to_string())?;
+        if read.bodies.is_empty() {
+            let mut message =
+                "No solid in this STEP file could be imported, so nothing was added.".to_owned();
+            for w in &read.warnings {
+                message.push(' ');
+                message.push_str(w);
+            }
+            return Err(message);
+        }
+        let source = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
+        let mut models = StepModels {
+            nodes: &read.nodes,
+            source,
+            built: HashMap::new(),
+            parts: 0,
+        };
+        let mut model = self.model.clone();
+        let assembly = model
+            .assembly_mut()
+            .ok_or_else(|| "The document is not an assembly.".to_owned())?;
+        let mut components = Vec::new();
+        let mut defined = HashMap::new();
+        for root in &read.roots {
+            let node = &read.nodes[*root];
+            if node.children.is_empty() {
+                // A part at the top of the file: a component of its own.
+                if let Some(part) = models.model(*root) {
+                    let definition = assembly.define(part);
+                    if let Some(id) = assembly.insert(definition, peet_math::Frame::WORLD) {
+                        if let Some(c) = assembly.component_mut(id) {
+                            c.fixed = true;
+                        }
+                        components.push(id);
+                    }
+                }
+            } else {
+                components.extend(models.fill(assembly, *root, &mut defined));
+            }
+        }
+        if components.is_empty() {
+            return Err(
+                "No solid in this STEP file could be imported, so nothing was added.".to_owned(),
+            );
+        }
+        let parts = models.parts;
+        let stem = crate::solids::file_stem(file_name).trim();
+        let label = if stem.is_empty() {
+            "Import STEP".to_owned()
+        } else {
+            format!("Import {stem}")
+        };
+        self.change(&label, |m| *m = model);
+        Ok(StepAssemblyImported {
+            components,
+            parts,
+            bodies: read.bodies.len(),
+            warnings: read.warnings,
+        })
     }
 }

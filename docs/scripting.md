@@ -260,7 +260,7 @@ with their defaults' types):
 | `open` | `path`, `discard` |
 | `open_sample` | `sample` (`bracket`, `enclosure`, `chassis`, `housing`), `discard` |
 | `save` | `path` (optional once the part has a file), `caches` (default true) |
-| `import_step` | `path`: the file's solids become bodies, in one feature named after the file |
+| `import_step` | `path`. In a part: the file's solids become bodies, in one feature named after the file. In an assembly: the file's parts and assemblies become parts and sub-assemblies, placed as components where the file has them (fixed); replies `components`, `parts`, `bodies` |
 | `import_dxf` | `path`, and `sketch` (an existing one) or `on` with `name` (a new one; default the top plane); `unit`, `placement` (`keep`, `centred`, `lower_left`) |
 | `export` | `path`, `format` (`stl`, `dxf`, `step`; taken from the path if absent), `body`, `schema` (`ap214`, `ap242`) |
 
@@ -361,8 +361,10 @@ of the assembly's own, a working copy that `save` stores back.
 
 `failures` (in `status` and in replies) lists the components that need attention (a part
 with no bodies, or with features that can't be built) and the mates that don't hold. `export` writes every component's
-bodies where they are, as STEP or STL (each as a solid of its own: the file has no
-assembly structure). A reply about a component gives it under `component`.
+bodies where they are, as STEP or STL. A STEP file has the assembly's structure: each
+part and sub-assembly once, as a product, and each component as an occurrence of it
+(suppressed components are left out); the reply counts `parts`, `components` and
+`bodies`. `import_step` in an assembly reads such a file back with its structure. A reply about a component gives it under `component`.
 
 ### Sheet metal: materials, checks, flat pattern
 

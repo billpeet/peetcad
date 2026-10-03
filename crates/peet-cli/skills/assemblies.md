@@ -1,6 +1,6 @@
 ---
 name: assemblies
-description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
+description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
 ---
 
 # Assemblies
@@ -266,6 +266,39 @@ Run these when the assembly is put together, before calling it done.
   not a file: it is saved by storing it back.
 - `export` writes every component where it is, as STEP or STL. For a flat pattern DXF,
   open the sheet metal part and export there.
+
+## STEP files
+
+A STEP file carries an assembly's structure both ways: its parts, each once, and where
+each component is.
+
+```sh
+peet export path=gearbox.step -f gearbox.peet
+peet op '{"op": "new", "assembly": true}' '{"op": "import_step", "path": "gearbox.step"}' --new -f received.peet
+peet components -f received.peet
+```
+
+- **`export` of an assembly** writes each part and sub-assembly as a product of its
+  own and each component as an occurrence of it, named after the component. The reply
+  counts `parts`, `components` and `bodies`. Suppressed components are left out; hidden
+  ones are written.
+- **`import_step` in an assembly** keeps the file's structure: each of its parts becomes
+  a part of the assembly, each of its assemblies a sub-assembly, and what the file's
+  top level holds become components here (the reply's `components`), called what the
+  file calls them where it names them. A file with no
+  assembly in it gives one component for each part.
+- **Imported components are fixed** where the file has them, and have no mates: a STEP
+  file has none. To move one, `place` it; to let mates move it,
+  `{"op": "fix", "component": ..., "on": false}`.
+- The parts are imported bodies (one `import_step` feature each): change one with
+  `open_component`, as any part. Their face names are the importer's, so pick mate ends
+  with `faces` first.
+- `import_step` adds to what the assembly has. To bring a file in as **one**
+  sub-assembly, import it into a new assembly document and `insert` that.
+- `import_step` in a **part** takes the same file as bodies where they are, without
+  the structure: use it when the whole is to be one part.
+- `warnings` in the reply says what was left out or assumed (a face that can't be
+  read, units not given).
 
 Done when `components` shows every component with `"status": "ok"` and the `min` and
 `max` that were asked for, `mates` shows every mate `"ok"`, `freedom` is what was

@@ -108,8 +108,7 @@ fn export_assembly(
         out.insert("format".to_owned(), json!("csv"));
         return Ok((crate::analysis::bom_csv(doc, &rows).into_bytes(), out));
     }
-    let solids = crate::assembly::placed_solids(doc);
-    if solids.is_empty() {
+    if doc.evaluation().instances.is_empty() {
         return Err(
             "There are no bodies to export: the assembly has no components that show any."
                 .to_owned(),
@@ -138,8 +137,8 @@ fn export_assembly(
         }
         Format::Csv => unreachable!("handled above"),
         Format::Step => {
-            let named: Vec<(&str, &peet_kernel::Solid)> =
-                solids.iter().map(|(n, s)| (n.as_str(), s)).collect();
+            // With its structure: each part once, and where its components are.
+            let (products, root, bodies) = crate::assembly::step_products(doc);
             let options = peet_io::step::StepOptions {
                 schema,
                 product_name: stem(doc),
@@ -147,8 +146,16 @@ fn export_assembly(
                 organization: String::new(),
                 timestamp: peet_platform::timestamp_iso(),
             };
-            out.insert("bodies".to_owned(), json!(named.len()));
-            (peet_io::step::write(&named, &options).into_bytes(), "step")
+            out.insert("bodies".to_owned(), json!(bodies));
+            out.insert("parts".to_owned(), json!(products.len() - 1));
+            out.insert(
+                "components".to_owned(),
+                json!(products[root].children.len()),
+            );
+            (
+                peet_io::step::write_assembly(&products, root, &options).into_bytes(),
+                "step",
+            )
         }
     };
     out.insert("format".to_owned(), json!(word));

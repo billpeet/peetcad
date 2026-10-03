@@ -108,7 +108,7 @@ fn unique_name(model: &peet_model::Model, stem: &str) -> String {
 }
 
 /// A file's name without its folder and extension: "bracket" for "C:\parts\bracket.step".
-fn file_stem(file_name: &str) -> &str {
+pub(crate) fn file_stem(file_name: &str) -> &str {
     let name = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
     match name.rsplit_once('.') {
         Some((stem, _)) if !stem.is_empty() => stem,

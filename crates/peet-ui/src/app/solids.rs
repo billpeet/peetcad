@@ -355,6 +355,9 @@ impl PeetApp {
         let reply = self.perform_quietly(Op::ImportStep {
             file: Source::loaded(file.name.clone(), file.path.clone(), file.bytes.clone()),
         });
+        if reply.ok && self.doc.is_assembly() {
+            return self.imported_step_assembly(file, &reply.json);
+        }
         let imported = match reply.created.first() {
             Some(id) if reply.ok => Ok(*id),
             _ => Err(reply.json["error"]
@@ -407,6 +410,52 @@ impl PeetApp {
                     error: true,
                 });
             }
+        }
+    }
+
+    /// Says what a STEP file brought into the assembly, and shows it.
+    fn imported_step_assembly(
+        &mut self,
+        file: &peet_platform::OpenedFile,
+        reply: &serde_json::Value,
+    ) {
+        let bounds = self.doc.visible_bounds();
+        let animate = self.settings.animate_views;
+        if let Some(vp) = &mut self.viewport {
+            vp.zoom_to_fit(&bounds, animate);
+        }
+        let count = |key: &str, one: &str, many: &str| {
+            let n = match &reply[key] {
+                serde_json::Value::Array(a) => a.len() as u64,
+                other => other.as_u64().unwrap_or(0),
+            };
+            if n == 1 {
+                format!("1 {one}")
+            } else {
+                format!("{n} {many}")
+            }
+        };
+        let what = format!(
+            "{} of {}",
+            count("components", "component", "components"),
+            count("parts", "part", "parts")
+        );
+        self.info(format!("Imported {what} from {}", file.name));
+        let warnings: Vec<String> = reply["warnings"]
+            .as_array()
+            .map(|w| {
+                w.iter()
+                    .filter_map(|x| x.as_str().map(str::to_owned))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if !warnings.is_empty() {
+            self.notice = Some(Notice {
+                title: "Import STEP".to_owned(),
+                heading: format!("{} was imported ({what}), with these notes:", file.name),
+                lines: warnings,
+                error: false,
+            });
         }
     }
 

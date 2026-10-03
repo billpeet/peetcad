@@ -139,9 +139,16 @@ assembly command is an operation, and a new `assemblies` skill covers them.
   component's properties (name, position, quarter turns, fixed); components drawn
   where they are, the instances of a part sharing a GPU mesh; a click picks a component.
 
-Left of stage 2: STEP import that keeps a file's assembly structure (it still makes one
-body per occurrence, in a part) and STEP export with structure (each component is
-written as a solid of its own, without the product tree). Also open: mass properties
+STEP keeps the structure both ways. Export (`peet_io::step::write_assembly`) writes
+each part and sub-assembly once, as a product with a shape of its own, and each
+component as a `NEXT_ASSEMBLY_USAGE_OCCURRENCE` with a
+`CONTEXT_DEPENDENT_SHAPE_REPRESENTATION` whose transformation takes the part's origin
+to the component's placement: the layout OCCT and the commercial systems write. Import
+(`StepImport::nodes`) gives each product once with what is placed in it;
+`Document::import_step_assembly` makes parts (an import feature each) and
+sub-assemblies of them and places the top level's children as fixed components, as one
+undo step. A part still takes the same file as bodies where they are. The file has no
+mates, so imported components are held, not mated. Also open: mass properties
 and measurements in an assembly (stage 4), an assembly's caches in its file (it is
 rebuilt when opened), selections on a component's faces (stage 3 needs them for mates),
 autosave of documents other than the current one, and a colour per component (a part's

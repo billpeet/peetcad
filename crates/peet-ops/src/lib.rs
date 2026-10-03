@@ -693,6 +693,26 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
         Op::ImportStep { file } => {
             let bytes = file.read()?;
             let text = String::from_utf8_lossy(&bytes);
+            if doc.is_assembly() {
+                // An assembly keeps the file's structure: its parts, each once, placed
+                // as the file places them.
+                let imported = doc.import_step_assembly(&file.name, &text)?;
+                done.changed = true;
+                let names: Vec<&str> = doc
+                    .model
+                    .assembly()
+                    .map(|a| imported.components.iter().map(|c| a.name_of(*c)).collect())
+                    .unwrap_or_default();
+                done.data.insert("components".to_owned(), json!(names));
+                done.data.insert("parts".to_owned(), json!(imported.parts));
+                done.data
+                    .insert("bodies".to_owned(), json!(imported.bodies));
+                if !imported.warnings.is_empty() {
+                    done.data
+                        .insert("warnings".to_owned(), json!(imported.warnings));
+                }
+                return Ok(done);
+            }
             let imported = doc.import_step(&file.name, &text)?;
             done.changed = true;
             done.created.push(imported.feature);

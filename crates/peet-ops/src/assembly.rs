@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use peet_document::Document;
 use peet_math::{DQuat, DVec3, Frame};
-use peet_model::{Assembly, CompId, Component, DefId, Model, Status};
+use peet_model::{Assembly, CompId, DefId, Model, Status};
 use peet_sketch::expr::Units;
 use serde_json::{Map, Value, json};
 
@@ -433,7 +433,6 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
         | Op::Move { .. }
         | Op::Rollback { .. }
         | Op::SetSketch { .. }
-        | Op::ImportStep { .. }
         | Op::ImportDxf { .. }
         | Op::ShowDatum { .. }
         | Op::FlatPattern { .. }
@@ -878,27 +877,99 @@ pub(crate) fn set_part(model: &mut Model, part: DefId, new: &Arc<Model>) -> Resu
     Ok(format!("Edit {}", new.name))
 }
 
-/// The placed solids of an assembly, named by component, for an export.
-pub(crate) fn placed_solids(doc: &Document) -> Vec<(String, peet_kernel::Solid)> {
-    let Some(assembly) = doc.model.assembly() else {
-        return Vec::new();
-    };
-    let mut seen: std::collections::HashMap<CompId, usize> = std::collections::HashMap::new();
-    doc.evaluation()
-        .instances
-        .iter()
-        .filter_map(|i| {
-            let top = *i.path.first()?;
-            let c: &Component = assembly.component(top)?;
-            // A component with several bodies (or a sub-assembly) numbers them.
-            let n = seen.entry(top).or_insert(0);
-            *n += 1;
-            let name = if *n == 1 {
-                c.name.clone()
-            } else {
-                format!("{} ({n})", c.name)
+/// An assembly as the products of a STEP file: every part and sub-assembly once, with
+/// the components placed in each. Returns them with the index of the assembly itself and
+/// how many bodies its components show. Suppressed components are left out, and so is a
+/// part that has no bodies.
+pub(crate) fn step_products(doc: &Document) -> (Vec<peet_io::step::StepProduct>, usize, usize) {
+    use peet_io::step::StepProduct;
+
+    struct Walk<'a> {
+        instances: &'a [peet_model::Instance],
+        products: Vec<StepProduct>,
+        /// The product of each part and sub-assembly. None: nothing in it. Two parts
+        /// that are the same in everything are one product, as in the bill of materials.
+        of_model: Vec<(Arc<Model>, Option<usize>)>,
+    }
+
+    impl Walk<'_> {
+        /// The children of an assembly: its components that have something to show.
+        fn children(&mut self, model: &Model, path: &[CompId]) -> Vec<(usize, String, Frame)> {
+            let Some(assembly) = model.assembly() else {
+                return Vec::new();
             };
-            Some((name, peet_kernel::transform::solid(&i.body.solid, &i.frame)))
-        })
-        .collect()
+            let mut children = Vec::new();
+            for c in assembly.components().filter(|c| !c.suppressed) {
+                let Some(definition) = assembly.definition(c.definition) else {
+                    continue;
+                };
+                let mut path = path.to_vec();
+                path.push(c.id);
+                if let Some(product) = self.product(&definition.model, &path) {
+                    children.push((product, c.name.clone(), c.placement));
+                }
+            }
+            children
+        }
+
+        /// The product of the part or sub-assembly at `path`.
+        fn product(&mut self, model: &Arc<Model>, path: &[CompId]) -> Option<usize> {
+            let known = self
+                .of_model
+                .iter()
+                .find(|(m, _)| Arc::ptr_eq(m, model) || **m == **model);
+            if let Some((_, known)) = known {
+                return *known;
+            }
+            let (bodies, children) = if model.is_assembly() {
+                (Vec::new(), self.children(model, path))
+            } else {
+                let solids: Vec<&peet_kernel::Solid> = self
+                    .instances
+                    .iter()
+                    .filter(|i| i.path == path)
+                    .map(|i| &i.body.solid)
+                    .collect();
+                let bodies = solids
+                    .iter()
+                    .enumerate()
+                    .map(|(n, solid)| {
+                        let name = if n == 0 {
+                            model.name.clone()
+                        } else {
+                            format!("{} ({})", model.name, n + 1)
+                        };
+                        (name, (*solid).clone())
+                    })
+                    .collect();
+                (bodies, Vec::new())
+            };
+            let index = (!bodies.is_empty() || !children.is_empty()).then(|| {
+                self.products.push(StepProduct {
+                    name: model.name.clone(),
+                    bodies,
+                    children,
+                });
+                self.products.len() - 1
+            });
+            self.of_model.push((model.clone(), index));
+            index
+        }
+    }
+
+    let evaluation = doc.evaluation();
+    let mut walk = Walk {
+        instances: &evaluation.instances,
+        products: Vec::new(),
+        of_model: Vec::new(),
+    };
+    let children = walk.children(&doc.model, &[]);
+    walk.products.push(StepProduct {
+        name: doc.model.name.clone(),
+        bodies: Vec::new(),
+        children,
+    });
+    let root = walk.products.len() - 1;
+    // (Every body shown is of a component that is not suppressed.)
+    (walk.products, root, evaluation.instances.len())
 }

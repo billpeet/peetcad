@@ -294,6 +294,11 @@ fn an_assembly_is_saved_opened_and_exported() {
         (out["format"].as_str(), out["bodies"].as_u64()),
         (Some("step"), Some(2))
     );
+    // One part, used twice.
+    assert_eq!(
+        (out["parts"].as_u64(), out["components"].as_u64()),
+        (Some(1), Some(2))
+    );
     let mut read = Document::default();
     ok(&mut read, json!({"op": "import_step", "path": step}));
     let bodies = ok(&mut read, json!({"op": "bodies"}));
@@ -1734,5 +1739,192 @@ fn a_bill_of_materials_goes_through_sub_assemblies() {
     assert_eq!(rows, [("pinned", 2), ("pin", 1)]);
     // Inside the sub-assembly the pin sits in the hole: nothing interferes.
     assert_eq!(ok(&mut doc, json!({"op": "interference"}))["clear"], true);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// How often `what` is in `text`.
+fn count(text: &str, what: &str) -> usize {
+    text.matches(what).count()
+}
+
+#[test]
+fn step_keeps_an_assemblys_structure() {
+    let dir = temp("step");
+    let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+    // A 40 x 30 x 5 plate; a pair of them stacked; and a top assembly with the pair
+    // twice (once turned a quarter about z) and a plate of its own.
+    let mut plate = Document::default();
+    ok(
+        &mut plate,
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 30]}]}),
+    );
+    ok(
+        &mut plate,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+    );
+    ok(
+        &mut plate,
+        json!({"op": "save", "path": path("plate.peet")}),
+    );
+    let mut pair = assembly();
+    ok(
+        &mut pair,
+        json!({"op": "insert", "path": path("plate.peet")}),
+    );
+    ok(
+        &mut pair,
+        json!({"op": "insert", "component": "plate-1", "at": [0, 0, 5]}),
+    );
+    ok(&mut pair, json!({"op": "save", "path": path("pair.peet")}));
+    let mut top = assembly();
+    ok(
+        &mut top,
+        json!({"op": "insert", "path": path("pair.peet"), "at": [100, 0, 0]}),
+    );
+    ok(
+        &mut top,
+        json!({"op": "insert", "component": "pair-1", "at": [0, 200, 0], "rotate": {"axis": "z", "angle": 90}}),
+    );
+    ok(
+        &mut top,
+        json!({"op": "insert", "path": path("plate.peet"), "at": [0, 0, 50], "name": "Lid"}),
+    );
+    // A suppressed component is not exported.
+    ok(
+        &mut top,
+        json!({"op": "insert", "path": path("plate.peet"), "at": [0, 0, 80], "name": "Spare"}),
+    );
+    ok(&mut top, json!({"op": "suppress", "component": "Spare"}));
+    let before = ok(&mut top, json!({"op": "components"}));
+
+    // Out: the plate once (the pair's and the top's own are the same part), the pair
+    // once, five bodies shown.
+    let step = path("top.step");
+    let out = ok(&mut top, json!({"op": "export", "path": step}));
+    assert_eq!(
+        (
+            out["bodies"].as_u64(),
+            out["parts"].as_u64(),
+            out["components"].as_u64()
+        ),
+        (Some(5), Some(2), Some(3)),
+        "{out}"
+    );
+    let text = std::fs::read_to_string(&step).unwrap();
+    assert_eq!(count(&text, "MANIFOLD_SOLID_BREP("), 1);
+    assert_eq!(count(&text, "=PRODUCT("), 3);
+    assert_eq!(count(&text, "NEXT_ASSEMBLY_USAGE_OCCURRENCE("), 5);
+    assert_eq!(count(&text, "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION("), 5);
+    assert!(
+        text.contains("'pair-2'"),
+        "occurrences are named after components"
+    );
+
+    // Back in, into an assembly: the same components in the same places, held there.
+    let mut back = assembly();
+    let read = ok(&mut back, json!({"op": "import_step", "path": step}));
+    assert_eq!(read["components"], json!(["pair-1", "pair-2", "Lid"]));
+    assert_eq!(
+        (read["parts"].as_u64(), read["bodies"].as_u64()),
+        (Some(1), Some(5))
+    );
+    assert_eq!(back.undo_label(), Some("Import top"));
+    let after = ok(&mut back, json!({"op": "components"}));
+    let listed = after["components"].as_array().unwrap();
+    assert_eq!(listed.len(), 3);
+    for (now, was) in listed.iter().zip(before["components"].as_array().unwrap()) {
+        assert_eq!(now["name"], was["name"]);
+        assert_eq!(now["fixed"], true);
+        assert_eq!(now["status"], "ok");
+        for key in ["min", "max"] {
+            for axis in 0..3 {
+                let (a, b) = (
+                    now[key][axis].as_f64().unwrap(),
+                    was[key][axis].as_f64().unwrap(),
+                );
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "{key} of {}: {now} / {was}",
+                    now["name"]
+                );
+            }
+        }
+    }
+    // The pair is a sub-assembly, once; its plates are one part.
+    let parts = after["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(
+        (parts[0]["name"].as_str(), parts[0]["kind"].as_str()),
+        (Some("pair"), Some("assembly"))
+    );
+    let inner = back.model.assembly().unwrap().definitions().next().unwrap();
+    let inner = inner.model.assembly().unwrap();
+    assert_eq!(
+        (inner.definitions().count(), inner.components().count()),
+        (1, 2)
+    );
+    assert_eq!(back.bodies.len(), 5);
+    let mass = ok(&mut back, json!({"op": "mass"}));
+    assert!((mass["total"]["volume_mm3"].as_f64().unwrap() - 5.0 * 6000.0).abs() < 1e-6);
+    let bom = ok(&mut back, json!({"op": "bom"}));
+    let quantities: Vec<u64> = bom["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["quantity"].as_u64().unwrap())
+        .collect();
+    assert_eq!(quantities, [5]);
+
+    // It survives its file, and goes out again as it came.
+    ok(&mut back, json!({"op": "save", "path": path("back.peet")}));
+    let mut opened = Document::default();
+    ok(
+        &mut opened,
+        json!({"op": "open", "path": path("back.peet")}),
+    );
+    assert_eq!(opened.bodies.len(), 5);
+    let again = ok(
+        &mut opened,
+        json!({"op": "export", "path": path("again.step")}),
+    );
+    assert_eq!(
+        (
+            again["bodies"].as_u64(),
+            again["parts"].as_u64(),
+            again["components"].as_u64()
+        ),
+        (Some(5), Some(2), Some(3))
+    );
+
+    // One undo step; and a second import adds to what is there.
+    ok(&mut back, json!({"op": "undo"}));
+    assert_eq!(back.model.assembly().unwrap().components().count(), 0);
+    ok(&mut back, json!({"op": "redo"}));
+    let more = ok(&mut back, json!({"op": "import_step", "path": step}));
+    assert_eq!(more["components"], json!(["pair-3", "pair-4", "plate-1"]));
+
+    // A part takes the same file as bodies where they are, without the structure.
+    let mut flat = Document::default();
+    let read = ok(&mut flat, json!({"op": "import_step", "path": step}));
+    assert_eq!(read["bodies"], 5);
+    let bodies = ok(&mut flat, json!({"op": "bodies"}));
+    assert_eq!(bodies["bodies"][4]["max"], json!([40.0, 30.0, 55.0]));
+
+    // A file of one part gives one component.
+    let single = path("plate.step");
+    ok(&mut plate, json!({"op": "export", "path": single}));
+    let mut one = assembly();
+    let read = ok(&mut one, json!({"op": "import_step", "path": single}));
+    assert_eq!(read["components"], json!(["plate-1"]));
+    assert_eq!(
+        (read["parts"].as_u64(), read["bodies"].as_u64()),
+        (Some(1), Some(1))
+    );
+
+    // Nothing to import: said, and nothing changed.
+    let empty = path("empty.step");
+    std::fs::write(&empty, "hello").unwrap();
+    let e = error(&mut one, json!({"op": "import_step", "path": empty}));
+    assert!(!e.is_empty());
     std::fs::remove_dir_all(dir).ok();
 }

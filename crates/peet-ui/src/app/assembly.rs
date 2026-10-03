@@ -178,6 +178,7 @@ pub(super) fn works_in_assembly(cmd: CommandId) -> bool {
                     | "parameters"
                     | "materials"
                     | "insert"
+                    | "import_step"
                     | "update_links"
                     | "interference"
                     | "bom"
@@ -1696,7 +1697,7 @@ mod tests {
             CommandId::NewSketch,
             CommandId::Extrude,
             CommandId::RefPlane,
-            CommandId::ImportStep,
+            CommandId::ImportDxf,
             CommandId::Fillet,
         ] {
             assert!(!app.command_state(cmd).enabled, "{cmd:?}");
