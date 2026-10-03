@@ -15,6 +15,7 @@ use peet_ops::{Configs, Input, Op};
 
 use crate::bodies::GeomRef;
 use crate::commands::{CommandId, CommandState};
+use crate::config_table::{self, ConfigTable};
 use crate::configs_ui::{self, ConfigAction, ConfigList};
 use crate::document::{Document, FileLocation, ItemId, Persistent, SketchItem};
 use crate::features_ui::{self, ERROR, PICKING, Picked, Slot};
@@ -54,6 +55,7 @@ struct OpenWindows {
     shortcuts: bool,
     about: bool,
     parameters: bool,
+    configurations: bool,
     bend_table: bool,
     sheet_checks: bool,
     gauges: bool,
@@ -103,6 +105,12 @@ pub struct PeetApp {
     param_error: Option<String>,
     /// The configurations list above the feature tree.
     config_list: ConfigList,
+    /// The configurations table window.
+    config_table: ConfigTable,
+    /// Values changed in the panels (feature values, sketch dimensions) change in the
+    /// active configuration only. Otherwise a value that is the same in every
+    /// configuration changes in all of them.
+    values_this_only: bool,
     /// Body face, edge or vertex under the cursor (from GPU picking).
     hovered_geom: Option<GeomRef>,
     /// Selected body faces, edges and vertices.
@@ -207,6 +215,8 @@ impl PeetApp {
             new_param: (String::new(), String::new()),
             param_error: None,
             config_list: ConfigList::default(),
+            config_table: ConfigTable::default(),
+            values_this_only: false,
             hovered_geom: None,
             selected_geom: Vec::new(),
             picking: None,
@@ -1011,7 +1021,7 @@ impl PeetApp {
             CommandId::ExportStep => enabled(!self.doc.bodies.is_empty()),
             CommandId::EditSketch => enabled(!in_sketch && self.selected_sketch().is_some()),
             CommandId::ExitSketch => enabled(in_sketch),
-            CommandId::Parameters => enabled(true),
+            CommandId::Parameters | CommandId::ConfigurationTable => enabled(true),
             CommandId::DeleteSelection => enabled(!in_sketch && self.selected_feature().is_some()),
             CommandId::ToggleSuppress => CommandState {
                 enabled: !in_sketch && self.selected_feature().is_some(),
@@ -1158,6 +1168,7 @@ impl PeetApp {
             }
             CommandId::ExitSketch => self.close_sketch(),
             CommandId::Parameters => self.windows.parameters = true,
+            CommandId::ConfigurationTable => self.windows.configurations = true,
             CommandId::DeleteSelection => {
                 if let Some(id) = self.selected_feature() {
                     let name = self.doc.model.name_of(id).to_owned();
@@ -1613,6 +1624,13 @@ impl PeetApp {
                                 ribbon::stack(ui, |ui| {
                                     tool(ui, pending, CommandId::EditSketch, "Edit Sketch", Small);
                                     tool(ui, pending, CommandId::Parameters, "Parameters", Small);
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::ConfigurationTable,
+                                        "Configurations",
+                                        Small,
+                                    );
                                 });
                             });
                             ribbon::group(ui, "Features", |ui| {
@@ -2066,8 +2084,36 @@ impl PeetApp {
         }
     }
 
+    /// With several configurations: which ones a value changed in the panels (a
+    /// feature's value, a sketch's dimension) is changed in.
+    fn value_scope(&mut self, ui: &mut Ui, pending: &mut Vec<CommandId>) {
+        if self.doc.model.configurations().len() < 2 {
+            self.values_this_only = false;
+            return;
+        }
+        let active = self.doc.model.active_configuration().name.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Values change in");
+            ui.selectable_value(&mut self.values_this_only, false, "all")
+                .on_hover_text("A value you change here changes in every configuration, unless it already differs between them: then it changes in this one.");
+            ui.selectable_value(&mut self.values_this_only, true, "this configuration")
+                .on_hover_text(format!(
+                    "A value you change here (a size, an angle, a sketch dimension) changes in {active} only. Everything else about a feature is the same in every configuration."
+                ));
+            if ui
+                .small_button("Table…")
+                .on_hover_text("What differs between the configurations, with a column for each.")
+                .clicked()
+            {
+                pending.push(CommandId::ConfigurationTable);
+            }
+        });
+        ui.separator();
+    }
+
     fn properties(&mut self, ui: &mut Ui, pending: &mut Vec<CommandId>) {
         ui.add_space(4.0);
+        self.value_scope(ui, pending);
         if let (Some(editor), Some(work)) = (&mut self.sketch, &mut self.sketch_work) {
             let name = editor
                 .item
@@ -2569,6 +2615,32 @@ impl PeetApp {
             });
         self.windows.bend_table = open;
         command
+    }
+
+    fn configurations_window(&mut self, ctx: &egui::Context) {
+        if !self.windows.configurations {
+            return;
+        }
+        let mut open = true;
+        let mut ops = Vec::new();
+        egui::Window::new("Configurations Table")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                if self.sketch.is_some() {
+                    ui.weak("Finish the sketch to change the table.");
+                    return;
+                }
+                let selected = self.selected.and_then(ItemId::feature);
+                ops =
+                    config_table::config_table_ui(ui, &self.doc, &mut self.config_table, selected);
+            });
+        self.windows.configurations = open;
+        for op in ops {
+            let reply = self.perform_quietly(op);
+            self.config_table.error = reply.json["error"].as_str().map(str::to_owned);
+        }
     }
 
     fn parameters_window(&mut self, ctx: &egui::Context) {
@@ -3375,6 +3447,7 @@ impl eframe::App for PeetApp {
         self.shortcuts_window(&ctx);
         self.about_window(&ctx);
         self.parameters_window(&ctx);
+        self.configurations_window(&ctx);
         self.sheet_checks_window(&ctx);
         self.gauge_window(&ctx);
         self.mass_properties_window(&ctx);

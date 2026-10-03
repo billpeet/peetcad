@@ -159,7 +159,7 @@ impl Icon {
             C::NewSketch => Self::NewSketch,
             C::EditSketch => Self::EditSketch,
             C::ExitSketch => Self::Check,
-            C::Parameters => Self::Parameters,
+            C::Parameters | C::ConfigurationTable => Self::Parameters,
             C::Extrude => Self::Extrude,
             C::CutExtrude => Self::Cut,
             C::RefPlane => Self::RefPlane,

@@ -9,7 +9,7 @@ use peet_sketch::Sketch;
 use peet_sketch::expr::Parameters;
 use serde::{Deserialize, Serialize};
 
-use crate::config::Configurations;
+use crate::config::{Configurations, ConfigurationsV5};
 use crate::extrude::{Extrude, Operation};
 use crate::feature::{
     ExtrudeFeature, Feature, FeatureId, FeatureKind, PlaneRef, SketchFeature, StdPlane,
@@ -91,6 +91,35 @@ impl From<ModelV4> for Model {
             next_id: m.next_id,
             name_counters: m.name_counters,
             configurations: Configurations::default(),
+        }
+    }
+}
+
+/// A model as files of model schema 5 hold it: with configurations that differ in
+/// suppression and parameters only.
+#[derive(Deserialize)]
+pub struct ModelV5 {
+    name: String,
+    features: Vec<Arc<Feature>>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+    configurations: ConfigurationsV5,
+}
+
+impl From<ModelV5> for Model {
+    fn from(m: ModelV5) -> Self {
+        Self {
+            name: m.name,
+            features: m.features,
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            configurations: m.configurations.into(),
         }
     }
 }

@@ -273,7 +273,7 @@ Known limits of the freeform stage: a boolean that involves a freeform face take
 - Scripting and agent access: in progress, see [docs/scripting-plan.md](docs/scripting-plan.md). A scripting language (Rust plugins and/or embedded Python or Lua) comes on top of it
 - Installable Progressive Web App (offline use in the browser)
 - Share-by-link: open a read-only model from a URL in the web build
-- Configurations / design tables (part families): in progress, see [docs/configurations-plan.md](docs/configurations-plan.md). Stage 1 is done: named configurations that differ in suppressed features and parameter values
+- Configurations / design tables (part families): in progress, see [docs/configurations-plan.md](docs/configurations-plan.md). Stages 1 and 2 are done: named configurations that differ in suppressed features, parameter values, feature values and sketch dimensions, with a table to edit them
 - Nesting of flat patterns on sheet stock
 - CAM for laser/plasma toolpaths, press brake bend sequencing
 - Collaboration and version control friendly workflows (using the RON/JSON dump for diffs)

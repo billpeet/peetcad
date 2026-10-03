@@ -146,6 +146,41 @@ change returns to the configuration it was made in.
 - A table editor (SolidWorks' *Modify Configurations*): configurations down, the chosen
   values and features across, edited in place.
 
+**Exit criterion:** a plate with a hole in three configurations that differ in two
+sketch dimensions, the hole's diameter and the extrusion's depth, with no parameter in
+between: each configuration's volume matches its hand calculation, the part survives
+save and reopen, and a schema 5 file opens with its configurations.
+
+**Status:** implemented. In `peet-model`: every numeric value of a feature has a name
+(`FeatureKind::slots`, the names the operations use), and a value of a feature or a
+driving dimension of a sketch is a `Slot` that can differ, kept and swapped like the
+stage 1 tables. In `peet-io`: model schema 6, with schema 5 read through its old layout.
+In `peet-ops`: `configurations` on `edit`, `set_dimension` and `set_sketch`; the
+`values` of the `configurations` query; a tool's change translated with the scope the
+application gives it. In `peet-ui`: "Values change in: all / this configuration" at the
+top of the properties panel (for feature values and for the dimensions of the sketch
+being edited), and the Configurations Table window.
+
+`crates/peet-ops/tests/configured_values.rs` runs the exit criterion (31 095.22,
+47 095.22 and 44 230.09 mm³, round the configurations twice, saved, reopened, and through
+the text form), and covers the scopes, the default, expressions that follow each
+configuration's parameters, the refusal of non-numeric fields and a tool's change given
+its scope. `crates/peet-io/tests/migration.rs` opens schema 5 files.
+
+How it differs from the list above: the scope is one switch for the panel, not a control
+beside every value, and values that differ are marked in the table, not in the panels.
+The table lists what differs, plus every value of one chosen feature, with
+configurations across and values down.
+
+Still to do: a hands-on pass in the running app (the switch, the table and the window
+have been driven through their operations in tests, not by hand). Known limits: the
+panels don't mark a value that differs; a value that is given the same number in every
+configuration stops differing, so "all" then changes it everywhere again; a sketch
+dimension changed while the sketch is open takes its scope when the sketch is finished;
+an optional value (a flange's own bend radius) is there or not in every configuration;
+changing a base flange's bend model drops what was kept for the old one; an expression
+typed for another configuration is checked against the active one's parameters.
+
 ### 3. Fields that aren't numbers (medium to large)
 
 - Counts (pattern instances), choices (end condition, operation, flange position, hem
@@ -203,7 +238,7 @@ same mechanism as stages 1 to 3.
 
 - [x] Before starting: scripting stage 3 (the application's changes are applied as operations)
 - [x] Stage 1: core (suppression and parameters per configuration)
-- [ ] Stage 2: any dimension, the table editor
+- [x] Stage 2: any dimension, the table editor
 - [ ] Stage 3: counts, choices, references, sketch relations
 - [ ] Stage 4: derived configurations, CSV design tables, export by configuration
 - [ ] Stage 5: material, colours, custom properties, display states

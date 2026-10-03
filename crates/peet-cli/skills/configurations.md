@@ -1,12 +1,13 @@
 ---
 name: configurations
-description: Configurations in peet - several versions of one part in one file (sizes, with and without features), switching between them, and exporting each.
+description: Configurations in peet - several versions of one part in one file (sizes, with and without features), giving a size, a sketch dimension or a parameter another value in some versions, switching between them, and exporting each.
 ---
 
 # Configurations
 
 A part has one or more **configurations**: versions of it that differ in which features
-are suppressed and in the values of its parameters. A new part has one, `Default`.
+are suppressed and in its numbers: parameters, the numeric values of features (a depth, an
+angle, a hole's diameter) and the dimensions of sketches. A new part has one, `Default`.
 Exactly one is **active**, and every other operation reads, builds, measures and exports
 the active one.
 
@@ -29,21 +30,50 @@ the active one.
 
 - `add_configuration` makes a copy of the active configuration (or of `copy`) **and
   makes it active**, so the operations after it change the new one.
-- Only two things can differ: whether a feature is suppressed, and a parameter's value.
-  To make a size differ, drive it by a parameter (`"depth": "t"`), then give the
-  parameter another value. A size typed as a number is the same in every configuration.
-- Everything else is the part's, in every configuration: a new feature, an `edit`, a
-  sketch, a new parameter.
+- What can differ: whether a feature is suppressed, a parameter's value, a feature's
+  numeric values, and a sketch's dimensions.
+- Everything else is the part's, in every configuration: a new feature, what is drawn in
+  a sketch, a new parameter, and the fields of a feature that aren't numbers (a
+  direction, an end condition, a count, the edges of a fillet).
 
 ## Which configurations a change applies to
 
-`suppress` and `set_parameter` take `configurations`:
+`suppress`, `set_parameter`, `edit` and `set_dimension` take `configurations`:
 
-- left out, or `"this"`: the active configuration only;
+- `"this"`: the active configuration only;
 - `"all"`: every configuration, and the value no longer differs between them;
 - a name or a list of names: those, without making them active.
 
+**Left out, it depends on the operation.** `suppress` and `set_parameter` mean `"this"`.
+`edit` and `set_dimension` change a value that already differs between configurations in
+the active one, and a value that doesn't in all of them: so say `"this"` (or name the
+configurations) the first time a size is to differ, and nothing after that.
+
 With one configuration there is nothing to choose.
+
+## Sizes that differ
+
+A size differs in one of two ways. Use a parameter when several sizes go together (a
+thickness that features and sketches use); set the value itself when it is one number.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [80, 50], "as": "r"}, {"type": "coincident", "of": ["r.bottom.start", "origin"]}, {"type": "length", "of": ["r.bottom"], "value": 80, "name": "width"}, {"type": "length", "of": ["r.right"], "value": 50}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 8}
+{"op": "add_configuration", "name": "Long"}
+{"op": "set_dimension", "sketch": "Sketch1", "name": "width", "value": 120, "configurations": "this"}
+{"op": "edit", "feature": "Extrude1", "depth": 12, "configurations": ["Long"]}
+{"op": "configurations"}
+{"op": "bodies"}
+```
+
+- A sketch dimension can only be set if it has a name to call it by: give dimensions a
+  `name` when drawing, or read the automatic ones (`d1`, `d2`) with `feature`.
+- `edit` with `configurations` other than `"all"` takes numeric fields only. A field
+  that isn't a number is refused there with the reason: change it in an `edit` of its
+  own, without `configurations`.
+- `configurations` shows what differs under `values`, by feature and by the value's
+  name, as it would be typed (`"2 * t"` for an expression). An expression is evaluated
+  with each configuration's own parameters.
 
 ## What is suppressed with a feature
 

@@ -109,6 +109,7 @@ fn typed_operations_build_and_edit_a_part() {
                 depth: Some(Input::Expr("deep".to_owned())),
                 ..Default::default()
             }),
+            configurations: None,
         },
     );
     assert!((volume(&doc) - (80.0 * 50.0 - hole) * 10.0).abs() < 1e-6);
@@ -125,6 +126,7 @@ fn typed_operations_build_and_edit_a_part() {
         &Op::Edit {
             feature: id.into(),
             fields: FeatureArgs::SheetCut(SheetCut::default()),
+            configurations: None,
         },
         Undo::Step,
     );
@@ -224,6 +226,7 @@ fn json_reads_into_the_same_operations() {
                 end: Some(End::UpTo(PlaneSel::Standard(StdPlane::Front))),
                 ..Default::default()
             }),
+            configurations: None,
         }
     );
     assert!(
