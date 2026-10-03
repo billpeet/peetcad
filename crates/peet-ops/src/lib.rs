@@ -42,6 +42,7 @@
 //! - Sketch contents are drawn with lists of [`Draw`] items: see [`sketch`].
 //! - `{"op": "help"}` lists every operation and its fields.
 
+mod analysis;
 mod args;
 mod assembly;
 mod diff;
@@ -320,7 +321,10 @@ fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, V
         Query::Edges { body } => object(query::edges(doc, *body)?),
         Query::BendTable { body } => object(query::bend_table(doc, *body)?),
         Query::Checks { body } => object(query::checks(doc, *body, host.check_rules())?),
+        Query::Mass { body } if doc.is_assembly() => analysis::mass(doc, *body)?,
         Query::Mass { body } => object(query::mass(doc, *body)?),
+        Query::Interference { component } => analysis::interference(doc, component.as_ref())?,
+        Query::Bom { top_level } => analysis::bom(doc, *top_level),
         Query::Measure { a, b } => object(query::measure(doc, a, b.as_deref())?),
         Query::Components => assembly::components(doc)?,
         Query::Mates => mate::mates(doc)?,

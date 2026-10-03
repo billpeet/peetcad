@@ -39,6 +39,8 @@ pub fn coverage(cmd: CommandId) -> Coverage {
         C::NewDocument | C::NewAssembly => Op("new"),
         C::InsertComponent | C::InsertLinkedComponent => Op("insert"),
         C::UpdateLinks => Op("update_links"),
+        C::InterferenceCheck => Op("interference"),
+        C::BillOfMaterials => Op("bom"),
         C::EditComponent => Op("open_component"),
         C::MateCoincident
         | C::MateConcentric
@@ -187,6 +189,8 @@ pub fn command_for(command: &AppCommand) -> CommandId {
             Window::Checks => C::SheetChecks,
             Window::Materials => C::GaugeTables,
             Window::MassProperties => C::MassProperties,
+            Window::Interference => C::InterferenceCheck,
+            Window::Bom => C::BillOfMaterials,
         },
         AppCommand::EditSketch(_) => C::EditSketch,
         AppCommand::ExitSketch => C::ExitSketch,

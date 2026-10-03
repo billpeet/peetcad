@@ -43,7 +43,7 @@ const DENSITIES: [(&str, f64); 8] = [
 const LB_PER_KG: f64 = 2.204_622_621_8;
 
 /// A number to six significant digits, without trailing zeros.
-fn significant(v: f64) -> String {
+pub(super) fn significant(v: f64) -> String {
     if v == 0.0 || !v.is_finite() {
         return if v == 0.0 {
             "0".to_owned()
@@ -76,7 +76,7 @@ fn area_text(units: Units, mm2: f64) -> String {
 }
 
 /// "8000 mm³".
-fn volume_text(units: Units, mm3: f64) -> String {
+pub(super) fn volume_text(units: Units, mm3: f64) -> String {
     let scale = units.length.mm_per_unit();
     format!(
         "{} {}³",
@@ -114,7 +114,7 @@ fn inertia_text(units: Units, moments: [f64; 3], density: f64) -> String {
 }
 
 /// "20, 10, 5 mm".
-fn point_text(units: Units, p: DVec3) -> String {
+pub(super) fn point_text(units: Units, p: DVec3) -> String {
     format!(
         "{}, {}, {} {}",
         units.format_length_value(p.x),
@@ -546,6 +546,10 @@ impl PeetApp {
     pub(super) fn mass_properties_window(&mut self, ctx: &egui::Context) {
         if !self.windows.mass_properties {
             return;
+        }
+        // An assembly is weighed component by component, each part with its material.
+        if self.doc.is_assembly() {
+            return self.assembly_mass_window(ctx);
         }
         let mut open = true;
         let units = self.doc.model.parameters.units;

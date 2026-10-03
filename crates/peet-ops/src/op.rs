@@ -222,6 +222,16 @@ pub enum Query {
     Components,
     /// The mates of an assembly, and the freedom they leave.
     Mates,
+    /// Where the components of an assembly run into each other: every pair, or those
+    /// one component is in.
+    Interference {
+        component: Option<CompSel>,
+    },
+    /// The bill of materials of an assembly: its parts and how many of each. With
+    /// `top_level`, a sub-assembly is one line instead of its parts.
+    Bom {
+        top_level: bool,
+    },
 }
 
 /// A file format to export.
@@ -231,6 +241,8 @@ pub enum Format {
     /// A sheet metal body's flat pattern.
     Dxf,
     Step,
+    /// An assembly's bill of materials.
+    Csv,
 }
 
 /// One operation on a part. A change is one undo step; a query changes nothing.
@@ -553,6 +565,8 @@ impl Op {
                 Query::Measure { .. } => "measure",
                 Query::Components => "components",
                 Query::Mates => "mates",
+                Query::Interference { .. } => "interference",
+                Query::Bom { .. } => "bom",
             },
             Self::Save { .. } => "save",
             Self::Export { .. } => "export",
@@ -738,7 +752,7 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "mass",
         "body",
-        "Mass properties: volume, area, centre of gravity, principal moments of inertia (for a density of 1), and the mass if the part has a material.",
+        "Mass properties: volume, area, centre of gravity, principal moments of inertia (for a density of 1), and the mass if the part has a material. Of an assembly: every component and the whole, each part weighed with its own material.",
     ),
     (
         "measure",
@@ -832,8 +846,8 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "export",
-        "path, format (stl, dxf, step), body, schema (ap214, ap242)",
-        "Export the bodies as STL or STEP, or a sheet metal body's flat pattern as DXF.",
+        "path, format (stl, dxf, step, csv), body, schema (ap214, ap242)",
+        "Export the bodies as STL or STEP, a sheet metal body's flat pattern as DXF, or an assembly's bill of materials as CSV.",
     ),
 ];
 
@@ -986,7 +1000,8 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
                 "stl" => Ok(Format::Stl),
                 "dxf" => Ok(Format::Dxf),
                 "step" | "stp" => Ok(Format::Step),
-                other => Err(format!("'{other}' is not stl, dxf or step")),
+                "csv" => Ok(Format::Csv),
+                other => Err(format!("'{other}' is not stl, dxf, step or csv")),
             })?,
             body: body(a)?,
             schema: a

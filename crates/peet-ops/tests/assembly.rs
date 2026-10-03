@@ -1528,3 +1528,211 @@ fn links_are_relative_to_the_assemblys_folder() {
     assert!(e.contains("\"link\": true"), "{e}");
     std::fs::remove_dir_all(dir).ok();
 }
+
+#[test]
+fn an_assembly_is_checked_listed_and_weighed() {
+    let dir = temp("stage4");
+    let (plate, pin) = plate_and_pin(&dir);
+    // The plate is steel; the pin has no material yet.
+    let mut part = Document::default();
+    ok(&mut part, json!({"op": "open", "path": plate}));
+    ok(
+        &mut part,
+        json!({"op": "set_material", "material": "Mild steel"}),
+    );
+    ok(&mut part, json!({"op": "save"}));
+
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "path": plate}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "component": "plate-1", "name": "Upper", "at": [0, 0, 5]}),
+    );
+    // A pin through both holes, and one that misses the holes and goes through the
+    // corner of the lower plate.
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "name": "Good", "at": [20, 15, -5]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "component": "Good", "name": "Bad", "at": [6, 6, -17]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "sample": "enclosure", "at": [200, 0, 0]}),
+    );
+
+    // Interference: only the pin that misses, and only with the plate it reaches.
+    let pi = std::f64::consts::PI;
+    let found = ok(&mut doc, json!({"op": "interference"}));
+    assert_eq!(found["clear"], false);
+    let hits = found["interferences"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{found}");
+    assert_eq!(
+        (hits[0]["a"].as_str(), hits[0]["b"].as_str()),
+        (Some("plate-1"), Some("Bad"))
+    );
+    // It reaches 3 into the plate: z from 0 to 3.
+    assert!((hits[0]["volume_mm3"].as_f64().unwrap() - pi * 16.0 * 3.0).abs() < 1e-5);
+    assert_eq!(hits[0]["min"], json!([2.0, 2.0, 0.0]));
+    assert_eq!(hits[0]["max"], json!([10.0, 10.0, 3.0]));
+    assert!(found["compared"].as_u64().unwrap() >= 3);
+    // Asked about one component: the pairs it is in.
+    let good = ok(&mut doc, json!({"op": "interference", "component": "Good"}));
+    assert_eq!(good["clear"], true);
+    assert_eq!(good["interferences"], json!([]));
+    let bad = ok(&mut doc, json!({"op": "interference", "component": "Bad"}));
+    assert_eq!(bad["interferences"].as_array().unwrap().len(), 1);
+    // Moved clear, nothing interferes.
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Bad", "at": [-50, 0, 0]}),
+    );
+    assert_eq!(ok(&mut doc, json!({"op": "interference"}))["clear"], true);
+
+    // The bill of materials.
+    let plate_kg = (6000.0 - pi * 80.0) * 7850e-9;
+    let bom = ok(&mut doc, json!({"op": "bom"}));
+    assert_eq!(bom["level"], "parts");
+    assert_eq!(bom["quantity"], 5);
+    let rows = bom["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        (
+            rows[0]["part"].as_str(),
+            rows[0]["quantity"].as_u64(),
+            rows[0]["material"].as_str()
+        ),
+        (Some("plate"), Some(2), Some("Mild steel"))
+    );
+    assert!((rows[0]["mass_kg"].as_f64().unwrap() - plate_kg).abs() < 1e-6);
+    assert!((rows[0]["total_mass_kg"].as_f64().unwrap() - 2.0 * plate_kg).abs() < 1e-6);
+    assert_eq!(rows[0]["components"], json!(["plate-1", "Upper"]));
+    assert_eq!(
+        (rows[1]["part"].as_str(), rows[1]["quantity"].as_u64()),
+        (Some("pin"), Some(2))
+    );
+    assert!(rows[1].get("mass_kg").is_none() && rows[1].get("material").is_none());
+    // The sheet metal part: what to cut it from.
+    assert_eq!(rows[2]["part"], "Enclosure Panel");
+    assert_eq!(rows[2]["thickness"], 1.5);
+    assert_eq!(rows[2]["flat_size"], json!([244.356636, 194.356636]));
+    assert_eq!(rows[2]["bends"], 4);
+    assert_eq!(bom["without_mass"], json!(["pin", "Enclosure Panel"]));
+    assert!(bom.get("mass_kg").is_none());
+    let e = error(&mut doc, json!({"op": "bom", "level": "all"}));
+    assert!(e.contains("\"parts\"") && e.contains("\"top\""), "{e}");
+
+    // As CSV: a header and a line per part.
+    let csv = dir.join("bom.csv");
+    let out = ok(&mut doc, json!({"op": "export", "path": csv}));
+    assert_eq!(
+        (out["format"].as_str(), out["rows"].as_u64()),
+        (Some("csv"), Some(3))
+    );
+    let text = std::fs::read_to_string(&csv).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[0],
+        "item,part,quantity,material,mass_kg,total_mass_kg,thickness_mm,flat_width_mm,flat_height_mm,bends,components"
+    );
+    assert!(
+        lines[1].starts_with("1,plate,2,Mild steel,0.045127,0.090254,,,,,plate-1 Upper"),
+        "{}",
+        lines[1]
+    );
+    assert_eq!(lines[2], "2,pin,2,,,,,,,,Good Bad");
+    assert_eq!(
+        lines[3],
+        "3,Enclosure Panel,1,,,,1.5,244.356636,194.356636,4,Enclosure Panel-1"
+    );
+    assert_eq!(lines.len(), 4);
+
+    // Mass: the parts with a material are weighed; the whole is not, until all are.
+    let mass = ok(&mut doc, json!({"op": "mass"}));
+    assert_eq!(mass["without_material"], json!(["pin", "Enclosure Panel"]));
+    assert!(mass["total"].get("mass_kg").is_none());
+    assert_eq!(mass["total"]["center_of_gravity_of"], "volume");
+    let components = mass["components"].as_array().unwrap();
+    assert_eq!(components.len(), 5);
+    assert_eq!(components[1]["component"], "Upper");
+    assert!((components[1]["mass_kg"].as_f64().unwrap() - plate_kg).abs() < 1e-6);
+    assert_eq!(components[1]["center_of_gravity"], json!([20.0, 15.0, 7.5]));
+    assert!(components[2].get("mass_kg").is_none());
+    // With only the plates left, it is weighed: twice a plate, centred between them.
+    for name in ["Good", "Bad", "Enclosure Panel-1"] {
+        ok(&mut doc, json!({"op": "suppress", "component": name}));
+    }
+    let mass = ok(&mut doc, json!({"op": "mass"}));
+    assert!(mass.get("without_material").is_none());
+    let total = &mass["total"];
+    assert!((total["mass_kg"].as_f64().unwrap() - 2.0 * plate_kg).abs() < 1e-6);
+    assert_eq!(total["center_of_gravity_of"], "mass");
+    assert_eq!(total["center_of_gravity"], json!([20.0, 15.0, 5.0]));
+    assert_eq!(
+        (total["min"].clone(), total["max"].clone()),
+        (json!([0.0, 0.0, 0.0]), json!([40.0, 30.0, 10.0]))
+    );
+    assert!(total["principal_moments_kg_mm2"][0].as_f64().unwrap() > 0.0);
+    let bom = ok(&mut doc, json!({"op": "bom"}));
+    assert!((bom["mass_kg"].as_f64().unwrap() - 2.0 * plate_kg).abs() < 1e-6);
+    let e = error(&mut doc, json!({"op": "mass", "body": 0}));
+    assert!(e.contains("as a whole"), "{e}");
+
+    // These are an assembly's; a part says so.
+    for op in [
+        json!({"op": "interference"}),
+        json!({"op": "bom"}),
+        json!({"op": "export", "path": csv}),
+    ] {
+        let e = error(&mut part, op.clone());
+        assert!(e.contains("assembly"), "{op}: {e}");
+    }
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_bill_of_materials_goes_through_sub_assemblies() {
+    let dir = temp("bom-levels");
+    let (plate, pin) = plate_and_pin(&dir);
+    let sub = dir.join("pinned.peet");
+    let mut inner = assembly();
+    ok(&mut inner, json!({"op": "insert", "path": plate}));
+    ok(
+        &mut inner,
+        json!({"op": "insert", "path": pin, "at": [20, 15, 0]}),
+    );
+    ok(&mut inner, json!({"op": "save", "path": sub}));
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "path": sub}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "component": "pinned-1", "at": [100, 0, 0]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "at": [-40, 0, 0]}),
+    );
+    let parts = ok(&mut doc, json!({"op": "bom"}));
+    let rows: Vec<(&str, u64)> = parts["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["part"].as_str().unwrap(), r["quantity"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(rows, [("plate", 2), ("pin", 3)]);
+    assert_eq!(parts["rows"][1]["components"][0], "pinned-1/pin-1");
+    let top = ok(&mut doc, json!({"op": "bom", "level": "top"}));
+    assert_eq!(top["rows"][0]["kind"], "assembly");
+    let rows: Vec<(&str, u64)> = top["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["part"].as_str().unwrap(), r["quantity"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(rows, [("pinned", 2), ("pin", 1)]);
+    // Inside the sub-assembly the pin sits in the hole: nothing interferes.
+    assert_eq!(ok(&mut doc, json!({"op": "interference"}))["clear"], true);
+    std::fs::remove_dir_all(dir).ok();
+}

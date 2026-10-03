@@ -1,6 +1,6 @@
 ---
 name: assemblies
-description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, linked parts that follow their own files, replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
+description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
 ---
 
 # Assemblies
@@ -218,6 +218,45 @@ peet components -f frame.peet                        # the assembly has the new 
   have the same name). It takes `"absolute": true` too.
 - Linked parts are for files on disk: they are refused in the browser build.
 
+## Interference, bill of materials, mass
+
+Run these when the assembly is put together, before calling it done.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}, {"type": "circle", "center": [30, 20], "radius": 5}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 6}
+{"op": "set_material", "material": "Mild steel"}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 5}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 25}
+{"op": "set_material", "material": "Aluminium 5052-H32"}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Plate"}
+{"op": "insert", "part": 2, "name": "Pin", "at": [30, 20, 0]}
+{"op": "interference"}
+{"op": "bom"}
+{"op": "mass"}
+```
+
+- **`interference`** lists the pairs of components that occupy the same space, with
+  `volume_mm3` and the box (`min`, `max`) where they overlap. `"clear": true` means
+  none do. Components that only **touch** (faces against each other, a pin in a hole of
+  exactly its size) do not interfere. To fix one: move a component (`place`, `drag`, a
+  mate's `flip` or `distance`), or change a part so that it makes room. An entry under
+  `unchecked` is a pair that could not be compared: treat it as not known, not as
+  clear. `"component": NAME` checks just that component against the others.
+- **`bom`** lists each part once with its `quantity`, `material`, `mass_kg` (of one)
+  and `total_mass_kg`, and for a sheet metal part its `thickness`, `flat_size` and
+  `bends`: what to order and cut. By default the parts inside sub-assemblies are counted
+  with the rest; `"level": "top"` lists a sub-assembly as one line.
+  `{"op": "export", "path": "bom.csv"}` writes it as a table.
+- **`mass`** gives each component's mass and centre of gravity, and the whole's under
+  `total`.
+- **A part with no material has no mass**, and then neither has the assembly:
+  `without_material` (in `mass`) and `without_mass` (in `bom`) name the parts. Give each
+  a material in its own document: `open_component`, `set_material` (or, for sheet
+  metal, `apply_material`), `save`, `close`. A linked part: `set_material` in its file.
+
 ## Checking, saving, exporting
 
 - `components` lists every component (`status`, `message`) and every part. A component
@@ -229,5 +268,6 @@ peet components -f frame.peet                        # the assembly has the new 
   open the sheet metal part and export there.
 
 Done when `components` shows every component with `"status": "ok"` and the `min` and
-`max` that were asked for, `mates` shows every mate `"ok"`, and `freedom` is what was
-intended (0 for a rigid assembly; more if something is meant to turn or slide).
+`max` that were asked for, `mates` shows every mate `"ok"`, `freedom` is what was
+intended (0 for a rigid assembly; more if something is meant to turn or slide), and
+`interference` is `"clear": true`.

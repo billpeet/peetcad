@@ -60,8 +60,9 @@ pub(crate) fn format_of(path: &Path) -> Result<Format, String> {
         "stl" => Ok(Format::Stl),
         "dxf" => Ok(Format::Dxf),
         "step" | "stp" => Ok(Format::Step),
+        "csv" => Ok(Format::Csv),
         other => Err(format!(
-            "'{other}' is not a format to export: use stl, dxf or step (or a path ending in one)."
+            "'{other}' is not a format to export: use stl, dxf, step or csv (or a path ending in one)."
         )),
     }
 }
@@ -97,6 +98,16 @@ fn export_assembly(
                 .to_owned(),
         );
     }
+    if format == Format::Csv {
+        let rows = doc.bill_of_materials(true);
+        if rows.is_empty() {
+            return Err("There is nothing to list: the assembly has no components.".to_owned());
+        }
+        let mut out = Map::new();
+        out.insert("rows".to_owned(), json!(rows.len()));
+        out.insert("format".to_owned(), json!("csv"));
+        return Ok((crate::analysis::bom_csv(doc, &rows).into_bytes(), out));
+    }
     let solids = crate::assembly::placed_solids(doc);
     if solids.is_empty() {
         return Err(
@@ -125,6 +136,7 @@ fn export_assembly(
                     .to_owned(),
             );
         }
+        Format::Csv => unreachable!("handled above"),
         Format::Step => {
             let named: Vec<(&str, &peet_kernel::Solid)> =
                 solids.iter().map(|(n, s)| (n.as_str(), s)).collect();
@@ -181,6 +193,11 @@ pub fn export_bytes(
             }
             out.insert("triangles".to_owned(), json!(triangles.len()));
             (peet_io::stl::write_binary(&stem(doc), &triangles), "stl")
+        }
+        Format::Csv => {
+            return Err(
+                "A bill of materials is an assembly's: a part has no parts to list.".to_owned(),
+            );
         }
         Format::Dxf => {
             let sheet_body = doc.sheet_body(body).ok_or_else(|| {

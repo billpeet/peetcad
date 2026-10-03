@@ -75,7 +75,7 @@ impl MassTotal {
 
 /// Eigenvalues of a symmetric 3×3 matrix, ascending (the trigonometric solution of its
 /// characteristic cubic).
-fn symmetric_eigenvalues(m: &DMat3) -> [f64; 3] {
+pub(crate) fn symmetric_eigenvalues(m: &DMat3) -> [f64; 3] {
     let a = m.to_cols_array_2d();
     let off = a[0][1] * a[0][1] + a[0][2] * a[0][2] + a[1][2] * a[1][2];
     let trace = a[0][0] + a[1][1] + a[2][2];

@@ -435,7 +435,7 @@ fn files_are_saved_and_exported() {
             .starts_with("ISO-10303-21")
     );
     let e = error(&mut doc, json!({"op": "export", "path": path("panel.obj")}));
-    assert!(e.contains("stl, dxf or step"), "{e}");
+    assert!(e.contains("stl, dxf, step or csv"), "{e}");
     std::fs::remove_dir_all(&dir).ok();
 }
 

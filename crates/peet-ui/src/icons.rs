@@ -208,6 +208,8 @@ impl Icon {
             C::EditComponent => Self::EditSketch,
             C::InsertLinkedComponent => Self::ImportStep,
             C::UpdateLinks => Self::RollToEnd,
+            C::InterferenceCheck => Self::Checks,
+            C::BillOfMaterials => Self::BendTable,
             C::MateCoincident => Self::RefPlane,
             C::MateConcentric => Self::Circle,
             C::MateParallel => Self::Offset,

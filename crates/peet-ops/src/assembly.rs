@@ -307,6 +307,16 @@ pub(crate) const ASSEMBLY_OPS: &[(&str, &str, &str)] = &[
         "Open a component's part as a document of its own, to change it. 'save' on that document stores it back in the assembly, for every instance.",
     ),
     (
+        "interference",
+        "component (left out: every pair)",
+        "Where components run into each other: the pairs that share space, with how much (mm³) and where. Components that only touch do not interfere.",
+    ),
+    (
+        "bom",
+        "level (parts: every part, through sub-assemblies; top: a sub-assembly is one line; default parts)",
+        "The bill of materials: each part with how many, its material, its mass, and for sheet metal its thickness and flat size.",
+    ),
+    (
         "components",
         "",
         "The components of the assembly (where each is, its part and its status) and its parts.",
@@ -335,6 +345,22 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
             })
         })(),
         "components" => Ok(Op::Query(Query::Components)),
+        "interference" => a
+            .parsed("component", CompSel::parse)
+            .map(|component| Op::Query(Query::Interference { component })),
+        "bom" => a
+            .parsed("level", |v| match text(v)? {
+                "parts" => Ok(false),
+                "top" => Ok(true),
+                other => Err(format!(
+                    "'{other}' is not a level: use \"parts\" (every part, through sub-assemblies) or \"top\" (a sub-assembly is one line)"
+                )),
+            })
+            .map(|top| {
+                Op::Query(Query::Bom {
+                    top_level: top.unwrap_or(false),
+                })
+            }),
         "open_component" => component(a).map(|component| Op::OpenComponent { component }),
         "place" => {
             let placing = Placing::parse(a).and_then(|p| {
@@ -390,7 +416,9 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
             | Op::Drag { .. }
             | Op::Mate { .. }
             | Op::EditMate { .. }
-            | Op::Query(Query::Components | Query::Mates)
+            | Op::Query(
+                Query::Components | Query::Mates | Query::Interference { .. } | Query::Bom { .. }
+            )
     );
     let for_part = match op {
         Op::Add(_)
@@ -421,7 +449,6 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
                 | Query::Edges { .. }
                 | Query::BendTable { .. }
                 | Query::Checks { .. }
-                | Query::Mass { .. }
                 | Query::Measure { .. }
         ),
         _ => false,

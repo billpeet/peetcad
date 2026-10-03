@@ -263,6 +263,26 @@ sub-assembly (the application can pick one, and the model and the solve handle i
 tangent and other mates beyond the roadmap's list. Mates were added to model schema 6,
 which no released version writes, without another version number.
 
+## What stage 4 built
+
+- **Interference** (`Document::interferences`, the `interference` query, the
+  Interference Check window). Every two bodies of different components whose boxes
+  overlap are placed and intersected by the kernel's boolean; a result with volume is an
+  interference, reported with its volume and box. The boolean treats faces on one
+  surface (faces against each other, a pin in a hole of its size) as touching, so mated
+  parts are not reported. A pair the boolean can't handle is listed as not compared,
+  never as clear. Nothing is cached: an assembly is checked when asked.
+- **Bill of materials** (`Document::bill_of_materials`, `bom`, `export` to CSV, the
+  window). One line per part with how many: the same part counts as one wherever it is
+  used, through sub-assemblies (or a sub-assembly is one line). A line has the part's
+  material, volume and mass, and for a sheet metal part its thickness, flat size and
+  number of bends, taken from the part's own sheet definition.
+- **Mass** (`Document::assembly_mass`, `mass`, the Mass Properties window). Each body
+  is measured once (instances share the measurement), placed, and weighed with its own
+  part's density; the centre of gravity and the principal moments are of the mass. If a
+  part has no material the mass is not given, the parts without one are named, and the
+  centre and moments are those of the volume.
+
 ## Consequences
 
 - An assembly file grows with the parts in it, and a part used by two assemblies is two

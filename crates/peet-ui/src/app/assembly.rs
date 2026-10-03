@@ -179,6 +179,9 @@ pub(super) fn works_in_assembly(cmd: CommandId) -> bool {
                     | "materials"
                     | "insert"
                     | "update_links"
+                    | "interference"
+                    | "bom"
+                    | "mass"
                     | "open_component"
                     | "delete"
                     | "suppress"
@@ -195,6 +198,8 @@ pub(super) fn needs_assembly(cmd: CommandId) -> bool {
         CommandId::InsertComponent
             | CommandId::InsertLinkedComponent
             | CommandId::UpdateLinks
+            | CommandId::InterferenceCheck
+            | CommandId::BillOfMaterials
             | CommandId::EditComponent
             | CommandId::MateCoincident
             | CommandId::MateConcentric
@@ -414,6 +419,273 @@ impl PeetApp {
                 ));
             }
         }
+    }
+
+    /// The components that run into each other, with how much and where. Worked out
+    /// when the window opens and when the assembly has changed (not during a drag).
+    pub(super) fn interference_window(&mut self, ctx: &egui::Context) {
+        if !self.windows.interference {
+            return;
+        }
+        if !self.doc.is_assembly() {
+            self.windows.interference = false;
+            return;
+        }
+        let revision = self.doc.revision;
+        let stale = self
+            .interference
+            .as_ref()
+            .is_none_or(|(r, _)| *r != revision);
+        if stale && self.component_drag.is_none() {
+            self.interference = Some((revision, self.doc.interferences(None)));
+        }
+        let units = self.doc.model.parameters.units;
+        let mut open = true;
+        let mut select = None;
+        egui::Window::new("Interference Check")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(420.0)
+            .show(ctx, |ui| {
+                let Some((_, found)) = &self.interference else {
+                    ui.weak("Working it out…");
+                    return;
+                };
+                if found.found.is_empty() && found.unchecked.is_empty() {
+                    ui.label(match found.compared {
+                        0 => "Nothing interferes: no two components are in each other's space.".to_owned(),
+                        1 => "Nothing interferes: the one pair of components close enough to compare only touches, or is apart.".to_owned(),
+                        n => format!("Nothing interferes: the {n} pairs of components close enough to compare only touch, or are apart."),
+                    });
+                    return;
+                }
+                egui::ScrollArea::vertical().max_height(360.0).show(ui, |ui| {
+                    for hit in &found.found {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.colored_label(ERROR, "⚠");
+                            if ui
+                                .link(format!("{} and {}", hit.a, hit.b))
+                                .on_hover_text("Select the first of them.")
+                                .clicked()
+                            {
+                                select = Some(hit.top[0]);
+                            }
+                            ui.label(format!(
+                                "share {} around {}",
+                                super::solids::volume_text(units, hit.volume),
+                                super::solids::point_text(units, hit.bounds.center())
+                            ));
+                        });
+                    }
+                    for (a, b, why) in &found.unchecked {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.colored_label(WARNING, "?");
+                            ui.label(format!("{a} and {b} couldn't be compared: {why}"));
+                        });
+                    }
+                });
+                ui.add_space(4.0);
+                ui.weak("Components that only touch (faces against each other, a pin in a hole of its size) do not interfere.");
+            });
+        if let Some(id) = select {
+            self.selected_component = Some(id);
+            self.selected_mate = None;
+            self.selected_geom.clear();
+        }
+        self.windows.interference = open;
+    }
+
+    /// The parts of the assembly and how many of each.
+    pub(super) fn bill_of_materials_window(&mut self, ctx: &egui::Context) {
+        if !self.windows.bill_of_materials {
+            return;
+        }
+        if !self.doc.is_assembly() {
+            self.windows.bill_of_materials = false;
+            return;
+        }
+        let units = self.doc.model.parameters.units;
+        let rows = self.doc.bill_of_materials(!self.bom_top_level);
+        let mut open = true;
+        let mut top_level = self.bom_top_level;
+        let mut export = false;
+        let kg = |m: f64| format!("{} kg", super::solids::significant(m));
+        egui::Window::new("Bill of Materials")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(620.0)
+            .show(ctx, |ui| {
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut top_level, "Sub-assemblies as one line")
+                        .on_hover_text("Without it, the parts in sub-assemblies are counted with the rest.");
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        export = ui
+                            .add_enabled(!rows.is_empty(), egui::Button::new("Save as CSV…"))
+                            .on_hover_text("Every part, through sub-assemblies, as a table a spreadsheet opens.")
+                            .clicked();
+                    });
+                });
+                ui.separator();
+                if rows.is_empty() {
+                    ui.weak("The assembly has no components yet.");
+                    return;
+                }
+                egui::ScrollArea::both().max_height(420.0).show(ui, |ui| {
+                    egui::Grid::new("bom")
+                        .num_columns(7)
+                        .spacing([14.0, 5.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            for head in ["Item", "Part", "Qty", "Material", "Mass each", "Mass total", "Sheet"] {
+                                ui.strong(head);
+                            }
+                            ui.end_row();
+                            for row in &rows {
+                                ui.label(row.item.to_string());
+                                ui.label(&row.part)
+                                    .on_hover_text(row.components.join(", "));
+                                ui.label(row.quantity.to_string());
+                                ui.label(row.material.as_deref().unwrap_or("—"));
+                                ui.label(row.mass.map_or_else(|| "—".to_owned(), kg));
+                                ui.label(
+                                    row.mass
+                                        .map_or_else(|| "—".to_owned(), |m| kg(m * row.quantity as f64)),
+                                );
+                                ui.label(row.sheet.as_ref().map_or_else(String::new, |s| {
+                                    format!(
+                                        "{} thick, flat {} × {} {}",
+                                        units.format_length_value(s.thickness),
+                                        units.format_length_value(s.flat_size.x),
+                                        units.format_length_value(s.flat_size.y),
+                                        units.length.suffix()
+                                    )
+                                }));
+                                ui.end_row();
+                            }
+                        });
+                });
+                let total: Option<f64> =
+                    rows.iter().map(|r| r.mass.map(|m| m * r.quantity as f64)).sum();
+                ui.add_space(4.0);
+                match total {
+                    Some(total) => {
+                        ui.label(format!("Together: {}.", kg(total)));
+                    }
+                    None => {
+                        ui.weak("A part with no material has no mass: open it (Edit Part) and choose one in Mass Properties.");
+                    }
+                }
+            });
+        self.bom_top_level = top_level;
+        self.windows.bill_of_materials = open;
+        if export {
+            self.export_bill_of_materials();
+        }
+    }
+
+    /// Saves the bill of materials as CSV.
+    fn export_bill_of_materials(&mut self) {
+        let bytes = match peet_ops::export_bytes(
+            &self.doc,
+            peet_ops::Format::Csv,
+            None,
+            peet_io::step::StepSchema::Ap214,
+        ) {
+            Ok((bytes, _)) => bytes,
+            Err(e) => return self.error(e),
+        };
+        let title = self.doc.title();
+        let stem = title.strip_suffix(".peet").unwrap_or(&title).to_owned();
+        match peet_platform::save_file(&format!("{stem} BOM.csv"), ("CSV table", &["csv"]), &bytes)
+        {
+            Ok(peet_platform::SaveOutcome::Saved(to)) => {
+                self.info(format!("Saved the bill of materials to {to}"));
+            }
+            Ok(peet_platform::SaveOutcome::Cancelled) => {}
+            Err(e) => self.error(e),
+        }
+    }
+
+    /// What the assembly weighs, component by component.
+    pub(super) fn assembly_mass_window(&mut self, ctx: &egui::Context) {
+        let units = self.doc.model.parameters.units;
+        let mass = self.doc.assembly_mass();
+        let mut open = true;
+        let kg = |m: Option<f64>| {
+            m.map_or_else(
+                || "—".to_owned(),
+                |m| format!("{} kg", super::solids::significant(m)),
+            )
+        };
+        egui::Window::new("Mass Properties")
+            .open(&mut open)
+            .resizable(true)
+            .default_width(460.0)
+            .show(ctx, |ui| {
+                let Some(mass) = &mass else {
+                    ui.weak("There is nothing to weigh: no component shows a body.");
+                    return;
+                };
+                egui::Grid::new("assembly_mass")
+                    .num_columns(2)
+                    .spacing([12.0, 4.0])
+                    .show(ui, |ui| {
+                        ui.label("Mass");
+                        ui.monospace(kg(mass.mass));
+                        ui.end_row();
+                        ui.label("Volume");
+                        ui.monospace(super::solids::volume_text(units, mass.volume));
+                        ui.end_row();
+                        ui.label("Centre of gravity").on_hover_text(if mass.mass.is_some() {
+                            "Of the mass, in the assembly's coordinates."
+                        } else {
+                            "Of the volume (as if everything were one material), in the assembly's coordinates."
+                        });
+                        ui.monospace(super::solids::point_text(units, mass.centroid));
+                        ui.end_row();
+                        let size = mass.bounds.size();
+                        ui.label("Bounding box");
+                        ui.monospace(format!(
+                            "{} × {} × {} {}",
+                            units.format_length_value(size.x),
+                            units.format_length_value(size.y),
+                            units.format_length_value(size.z),
+                            units.length.suffix()
+                        ));
+                        ui.end_row();
+                    });
+                if !mass.without_material.is_empty() {
+                    ui.add_space(4.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.colored_label(WARNING, "⚠");
+                        ui.label(format!(
+                            "The mass is not known: {} {} no material. Open the part (Edit Part) and choose one in Mass Properties.",
+                            mass.without_material.join(", "),
+                            if mass.without_material.len() == 1 { "has" } else { "have" }
+                        ));
+                    });
+                }
+                ui.separator();
+                egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                    egui::Grid::new("component_mass")
+                        .num_columns(3)
+                        .spacing([14.0, 4.0])
+                        .striped(true)
+                        .show(ui, |ui| {
+                            ui.strong("Component");
+                            ui.strong("Mass");
+                            ui.strong("Centre of gravity");
+                            ui.end_row();
+                            for c in &mass.components {
+                                ui.label(&c.name);
+                                ui.monospace(kg(c.mass));
+                                ui.monospace(super::solids::point_text(units, c.centroid));
+                                ui.end_row();
+                            }
+                        });
+                });
+            });
+        self.windows.mass_properties = open;
     }
 
     /// Reads the assembly's linked parts from their files again.
@@ -1329,6 +1601,85 @@ mod tests {
     }
 
     #[test]
+    fn an_assembly_is_checked_listed_and_weighed_in_its_windows() {
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        // A part has no bill of materials and nothing to interfere with.
+        assert!(!app.command_state(CommandId::InterferenceCheck).enabled);
+        assert!(!app.command_state(CommandId::BillOfMaterials).enabled);
+        app.execute(&ctx, CommandId::NewAssembly);
+        assert!(
+            !app.command_state(CommandId::BillOfMaterials).enabled,
+            "nothing in it yet"
+        );
+        ok(&mut app, &ctx, json!({"op": "insert", "sample": "bracket"}));
+        // A second bracket half inside the first, and a sheet metal part clear of both.
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "insert", "component": "Bracket-1", "at": [30, 0, 0]}),
+        );
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "insert", "sample": "enclosure", "at": [0, 400, 0]}),
+        );
+        for cmd in [
+            CommandId::InterferenceCheck,
+            CommandId::BillOfMaterials,
+            CommandId::MassProperties,
+        ] {
+            assert!(app.command_state(cmd).enabled, "{cmd:?}");
+            app.execute(&ctx, cmd);
+        }
+        let windows = |app: &mut PeetApp| {
+            let mut harness = egui_kittest::Harness::builder()
+                .with_size(egui::vec2(1400.0, 900.0))
+                .build_ui(|ui| {
+                    let ctx = ui.ctx().clone();
+                    app.interference_window(&ctx);
+                    app.bill_of_materials_window(&ctx);
+                    app.mass_properties_window(&ctx);
+                });
+            harness.run_steps(2);
+        };
+        windows(&mut app);
+        let (_, found) = app
+            .interference
+            .as_ref()
+            .expect("checked when the window opened");
+        assert_eq!(found.found.len(), 1);
+        assert_eq!(
+            (found.found[0].a.as_str(), found.found[0].b.as_str()),
+            ("Bracket-1", "Bracket-2")
+        );
+        assert!(found.found[0].volume > 1000.0);
+
+        // Moved clear: checked again at the next frame, and nothing interferes.
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "place", "component": "Bracket-2", "at": [0, -200, 0]}),
+        );
+        app.bom_top_level = true;
+        windows(&mut app);
+        assert!(app.interference.as_ref().unwrap().1.found.is_empty());
+        let rows = app.doc.bill_of_materials(true);
+        assert_eq!(rows.iter().map(|r| r.quantity).collect::<Vec<_>>(), [2, 1]);
+        assert!(
+            app.doc.assembly_mass().unwrap().mass.is_none(),
+            "no materials yet"
+        );
+
+        // In a part the assembly windows close; Mass Properties is the part's again.
+        app.selected_component = Some(CompId(1));
+        app.execute(&ctx, CommandId::EditComponent);
+        windows(&mut app);
+        assert!(!app.windows.interference && !app.windows.bill_of_materials);
+        assert!(app.windows.mass_properties);
+    }
+
+    #[test]
     fn an_assembly_is_worked_on_in_the_application() {
         let ctx = egui::Context::default();
         let mut app = PeetApp::headless();
@@ -1346,7 +1697,6 @@ mod tests {
             CommandId::Extrude,
             CommandId::RefPlane,
             CommandId::ImportStep,
-            CommandId::MassProperties,
             CommandId::Fillet,
         ] {
             assert!(!app.command_state(cmd).enabled, "{cmd:?}");

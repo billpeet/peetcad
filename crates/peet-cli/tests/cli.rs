@@ -609,6 +609,72 @@ fn what_the_assemblies_skill_says_about_linked_parts_is_true() {
 }
 
 #[test]
+fn what_the_assemblies_skill_says_about_checking_is_true() {
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "assemblies")
+        .map(|(_, text)| *text)
+        .unwrap();
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"interference\""))
+        .expect("the script that checks an assembly");
+    let ran = peet_with(&["run", "-q"], &script);
+    assert_eq!(ran.code, OK, "{}", ran.out);
+    let n = ran.replies.len();
+    let (found, bom, mass) = (
+        &ran.replies[n - 3],
+        &ran.replies[n - 2],
+        &ran.replies[n - 1],
+    );
+    // A pin in a hole of exactly its size touches, and does not interfere.
+    assert_eq!(found["clear"], true, "{found}");
+    assert_eq!(found["compared"], 1);
+    // Two parts, each with its material: the whole is weighed.
+    let pi = std::f64::consts::PI;
+    let plate = (60.0 * 40.0 * 6.0 - pi * 25.0 * 6.0) * 7850e-9;
+    let pin = pi * 25.0 * 25.0 * 2680e-9;
+    assert_eq!(bom["rows"].as_array().unwrap().len(), 2);
+    assert_eq!(bom["rows"][1]["material"], "Aluminium 5052-H32");
+    assert!(
+        (bom["mass_kg"].as_f64().unwrap() - (plate + pin)).abs() < 1e-5,
+        "{bom}"
+    );
+    assert!((mass["total"]["mass_kg"].as_f64().unwrap() - (plate + pin)).abs() < 1e-5);
+    assert_eq!(mass["total"]["center_of_gravity_of"], "mass");
+
+    // The pin moved off the hole goes through the plate: the slug it would cut out.
+    let off = script.replace("\"at\": [30, 20, 0]", "\"at\": [12, 20, 0]");
+    assert_ne!(off, script);
+    let ran = peet_with(&["run", "-q"], &off);
+    let found = &ran.replies[ran.replies.len() - 3];
+    assert_eq!(found["clear"], false);
+    let hit = &found["interferences"][0];
+    assert_eq!(
+        (hit["a"].as_str(), hit["b"].as_str()),
+        (Some("Plate"), Some("Pin"))
+    );
+    assert!(
+        (hit["volume_mm3"].as_f64().unwrap() - pi * 25.0 * 6.0).abs() < 1e-4,
+        "{hit}"
+    );
+
+    // A part with no material: the whole has no mass, and the replies say which part.
+    let bare = script.replacen(
+        "{\"op\": \"set_material\", \"material\": \"Aluminium 5052-H32\"}
+",
+        "",
+        1,
+    );
+    assert_ne!(bare, script);
+    let ran = peet_with(&["run", "-q"], &bare);
+    let n = ran.replies.len();
+    assert_eq!(ran.replies[n - 2]["without_mass"], json!(["Part1"]));
+    assert_eq!(ran.replies[n - 1]["without_material"], json!(["Part1"]));
+    assert!(ran.replies[n - 1]["total"].get("mass_kg").is_none());
+}
+
+#[test]
 fn materials_come_from_a_file_for_the_run() {
     let dir = Folder::new("materials");
     let part = dir.path("panel.peet");

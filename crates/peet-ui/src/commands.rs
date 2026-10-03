@@ -121,6 +121,8 @@ pub enum CommandId {
     EditComponent,
     InsertLinkedComponent,
     UpdateLinks,
+    InterferenceCheck,
+    BillOfMaterials,
     MateCoincident,
     MateConcentric,
     MateParallel,
@@ -155,7 +157,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 118] = [
+    pub const ALL: [Self; 120] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -268,6 +270,8 @@ impl CommandId {
         Self::EditComponent,
         Self::InsertLinkedComponent,
         Self::UpdateLinks,
+        Self::InterferenceCheck,
+        Self::BillOfMaterials,
         Self::MateCoincident,
         Self::MateConcentric,
         Self::MateParallel,
@@ -890,6 +894,18 @@ impl CommandId {
                 "Update Linked Parts",
                 "Assembly",
                 "Read the assembly's linked parts from their files again.",
+                None,
+            ),
+            Self::InterferenceCheck => (
+                "Interference Check…",
+                "Assembly",
+                "Find the components that run into each other: which, how much of them overlaps, and where.",
+                None,
+            ),
+            Self::BillOfMaterials => (
+                "Bill of Materials…",
+                "Assembly",
+                "The parts of the assembly and how many of each, with their materials, masses and (for sheet metal) flat sizes. It can be saved as CSV.",
                 None,
             ),
             Self::MateCoincident => (

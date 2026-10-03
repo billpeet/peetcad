@@ -58,6 +58,8 @@ struct OpenWindows {
     sheet_checks: bool,
     gauges: bool,
     mass_properties: bool,
+    interference: bool,
+    bill_of_materials: bool,
 }
 
 /// What dragging an edge flange's length handle asks for this frame.
@@ -140,6 +142,11 @@ pub struct PeetApp {
     selected_mate: Option<peet_model::MateId>,
     /// In an assembly: a component being dragged in the view.
     component_drag: Option<assembly::ComponentDrag>,
+    /// What the last interference check found, with the revision of the assembly it
+    /// was made on.
+    interference: Option<(u64, peet_document::Interferences)>,
+    /// The bill of materials window lists sub-assemblies as one line each.
+    bom_top_level: bool,
     /// The files of the open assemblies' linked parts, as they were last seen.
     link_watch: crate::link_watch::LinkWatch,
     /// Whether the part being inserted is to be linked to its file.
@@ -212,6 +219,8 @@ impl PeetApp {
             component_name: None,
             selected_mate: None,
             component_drag: None,
+            interference: None,
+            bom_top_level: false,
             link_watch: crate::link_watch::LinkWatch::default(),
             inserting_linked: false,
             inserting: None,
@@ -1142,6 +1151,9 @@ impl PeetApp {
             CommandId::InsertLinkedComponent => {
                 enabled(self.inserting.is_none() && !peet_platform::is_web())
             }
+            CommandId::InterferenceCheck | CommandId::BillOfMaterials => {
+                enabled(!self.doc.bodies.is_empty())
+            }
             CommandId::UpdateLinks => enabled(
                 !peet_platform::is_web()
                     && self
@@ -1337,6 +1349,8 @@ impl PeetApp {
             CommandId::Draft => self.start_draft(),
             CommandId::Hole => self.start_hole(),
             CommandId::MassProperties => self.windows.mass_properties = true,
+            CommandId::InterferenceCheck => self.windows.interference = true,
+            CommandId::BillOfMaterials => self.windows.bill_of_materials = true,
             CommandId::NewSketch => match self.selected_plane() {
                 Some((plane, placement)) => self.new_sketch(plane, placement),
                 None => {
@@ -1789,6 +1803,24 @@ impl PeetApp {
                                         pending,
                                         CommandId::UpdateLinks,
                                         "Update Links",
+                                        Small,
+                                    );
+                                });
+                            });
+                            ribbon::group(ui, "Check", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::InterferenceCheck,
+                                        "Interference",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::BillOfMaterials,
+                                        "Bill of Materials",
                                         Small,
                                     );
                                 });
@@ -3597,6 +3629,8 @@ impl eframe::App for PeetApp {
         self.sheet_checks_window(&ctx);
         self.gauge_window(&ctx);
         self.mass_properties_window(&ctx);
+        self.interference_window(&ctx);
+        self.bill_of_materials_window(&ctx);
         self.notice_window(&ctx);
         if let Some(cmd) = self.bend_table_window(&ctx) {
             pending.push(cmd);

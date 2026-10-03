@@ -248,7 +248,7 @@ with their defaults' types):
 | `bend_table` (`body`) | flat size, area, and each bend |
 | `checks` (`body`) | manufacturing checks, and the limits they were run with |
 | `materials` (`material`) | the material and gauge tables |
-| `mass` (`body`) | volume, area, centre of gravity, principal moments (for a density of 1), and `mass_kg` if the part has a material; each body and the total |
+| `mass` (`body`) | volume, area, centre of gravity, principal moments (for a density of 1), and `mass_kg` if the part has a material; each body and the total. In an assembly: see [Assemblies](#assemblies) |
 | `measure` (`a`, `b`) | the exact size of a face, edge or vertex, or with `b` the distance and angle between two. Each is `{"face": selector}`, `{"edge": selector}` or `{"vertex": selector}` |
 | `help` | this reference as data |
 
@@ -315,6 +315,16 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `edit_mate` | `mate`, and `distance` or `angle`, `flip` |
 | `rename`, `suppress`, `delete` | `mate` in place of `feature` |
 | `mates` | every mate (`id`, `name`, `type`, `a`, `b`, `distance` or `angle`, `flip`, `status`, `message`) and the `freedom` left |
+
+| `interference` | `component` (left out: every pair): the pairs of components that share space, each with `a`, `b`, `volume_mm3`, `min`, `max`; `clear`; how many pairs were `compared`; `unchecked` pairs that couldn't be |
+| `bom` | `level` (`parts`, the default: every part, through sub-assemblies; `top`: a sub-assembly is one line): `rows`, each with `item`, `part`, `quantity`, `material`, `volume_mm3`, `mass_kg`, `total_mass_kg`, the `components`, and for sheet metal `thickness`, `flat_size`, `bends`; the total `quantity` and `mass_kg`, or `without_mass` |
+| `mass` | in an assembly: each component's `volume_mm3`, `mass_kg` and `center_of_gravity`, and the `total` (with `center_of_gravity_of`: `mass` if every part has a material, else `volume`; `principal_moments_kg_mm2` or `principal_moments_mm5`); `without_material` |
+| `export` to a `.csv` | the bill of materials (every part) as a table: `item`, `part`, `quantity`, `material`, `mass_kg`, `total_mass_kg`, `thickness_`, `flat_width_`, `flat_height_` (with the document's unit), `bends`, `components` |
+
+**Interference** compares every two bodies of different components whose boxes overlap,
+by intersecting them: what they share is the interference. Bodies that only touch share
+nothing. **Mass** weighs each part with its own material; if a part has none, the whole
+has no mass, and the centre of gravity given is that of the volume.
 
 **Mates.** A flat face stands for its plane, a round face or a round edge for its axis,
 a straight edge for a line, a vertex for a point. Two planes are put against each other
