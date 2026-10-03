@@ -269,7 +269,7 @@ impl Viewport {
                     },
                     show_edges: true,
                     highlight: if component.is_some() && component == params.selected_component {
-                        0.45
+                        0.3
                     } else if component.is_some() && component == params.hovered_component {
                         0.2
                     } else {

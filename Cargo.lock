@@ -2576,6 +2576,7 @@ dependencies = [
  "peet-math",
  "peet-sheetmetal",
  "peet-sketch",
+ "peet-solve",
  "postcard",
  "proptest",
  "serde",

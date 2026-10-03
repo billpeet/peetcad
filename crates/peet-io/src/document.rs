@@ -36,7 +36,9 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 /// - Model 5 (Phase 7): the part's material and colour, which are new fields of the model
 ///   itself. Models up to version 4 are read as [`peet_model::ModelV4`] and converted.
 /// - Model 6 (Phase 7): assemblies. A model can hold an assembly: its parts (each a whole
-///   model) and its components. Version 5 models are read as [`peet_model::ModelV5`].
+///   model), its components and its mates. Version 5 models are read as
+///   [`peet_model::ModelV5`]. (Mates were added to version 6 before any version of
+///   PeetCAD that writes it was released.)
 pub const METADATA_SCHEMA: u16 = 1;
 pub const MODEL_SCHEMA: u16 = 6;
 pub const BREP_SCHEMA: u16 = 4;

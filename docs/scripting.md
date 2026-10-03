@@ -301,14 +301,33 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `new` with `"assembly": true` | starts an empty assembly |
 | `insert` | the part: `path` (a `.peet` file; an assembly becomes a sub-assembly), `sample`, `part` (an open document, by name or id) or `component` (another instance of its part). `name`, `at` (`[x, y, z]`: where the part's origin goes), `rotate` (`{"axis": "x"`, `"y"`, `"z"` or `[x, y, z]`, `"angle": degrees}`, from the part's own orientation), `fixed` (default: only the first component) |
 | `place` | `component`, `at`, `rotate`: the ones given are set, the other is kept |
+| `drag` | `component`, `to` (`[x, y, z]`, in the assembly), `point` (`[x, y, z]` on the component, in its own coordinates; default its origin): pulls the point towards the place as far as the component's mates allow. `short_by` in the reply is how far it still is |
 | `fix` | `component`, `on` (default true) |
 | `replace` | `component`, and `path`, `sample` or `part`: another part, in the same place |
 | `rename`, `suppress`, `show`, `delete` | `component` in place of `feature` |
 | `open_component` | `component`: opens its part as a document of its own and makes it current. `save` without a `path` on that document stores it back, as one undo step of the assembly, for every component of the part. Needs a session |
-| `components` | every component (`id`, `name`, `part`, `at`, `rotate`, `fixed`, `status`, `message`, `min`, `max`) and every part (`id`, `name`, `kind`, how many `components`, `material`) |
+| `components` | every component (`id`, `name`, `part`, `at`, `rotate`, `fixed`, `mates`, `status`, `message`, `min`, `max`) and every part (`id`, `name`, `kind`, how many `components`, `material`); how many `mates`, and the `freedom` left |
+| `mate` | `type` (`coincident`, `concentric`, `parallel`, `distance`, `angle`, `fasten`), `a`, `b`, `distance` or `angle` for those types, `flip`, `name`. An end is `{"component": …, "face": selector}` (or `"edge"`, `"vertex"`), the selector in the part's own coordinates; for `fasten` it is the component alone |
+| `edit_mate` | `mate`, and `distance` or `angle`, `flip` |
+| `rename`, `suppress`, `delete` | `mate` in place of `feature` |
+| `mates` | every mate (`id`, `name`, `type`, `a`, `b`, `distance` or `angle`, `flip`, `status`, `message`) and the `freedom` left |
 
-`failures` (in `status` and in replies) lists the components that need attention: a part
-with no bodies, or with features that can't be built. `export` writes every component's
+**Mates.** A flat face stands for its plane, a round face or a round edge for its axis,
+a straight edge for a line, a vertex for a point. Two planes are put against each other
+unless `flip` is true. The mates are solved whenever the assembly is rebuilt, and the
+components move as little as they can from where they are: so `place` on a mated
+component is a suggestion, and where a component is placed before it is mated decides
+which of several positions it takes. A reply to an operation that moved other components
+lists them under `moved`, and gives the `freedom` left: how many ways the components can
+still move (six for each that is not fixed, less what the mates hold). A mate that
+can't be solved is not a failed operation: it is added and listed under `failures` with
+the reason, as a feature that can't be built is. `drag` moves what the mates leave free:
+the component slides to the place if it can, turns only if sliding can't get it nearer,
+and takes what it is mated to along. When mates contradict each other, the
+earlier ones hold and the later one is flagged.
+
+`failures` (in `status` and in replies) lists the components that need attention (a part
+with no bodies, or with features that can't be built) and the mates that don't hold. `export` writes every component's
 bodies where they are, as STEP or STL (each as a solid of its own: the file has no
 assembly structure). A reply about a component gives it under `component`.
 

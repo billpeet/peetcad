@@ -488,6 +488,8 @@ pub fn status(doc: &Document) -> Value {
             json!(assembly.components().count()),
         );
         m.insert("parts".to_owned(), json!(assembly.definitions().count()));
+        m.insert("mates".to_owned(), json!(assembly.mates().count()));
+        m.insert("freedom".to_owned(), json!(doc.evaluation().freedom));
     } else {
         m.insert("kind".to_owned(), json!("part"));
         m.insert("features".to_owned(), json!(doc.model.len()));

@@ -10,10 +10,11 @@ use peet_sketch::expr::LengthUnit;
 use serde_json::{Map, Value};
 
 use crate::args::{Args, boolean, integer, list, number, text};
-use crate::assembly::{CompSel, ComponentChange, InsertSource, Placing};
+use crate::assembly::{CompSel, ComponentChange, InsertSource, Placing, Point3};
 use crate::fields::FeatureArgs;
 use crate::host::{AppCommand, word_enum};
 use crate::library::{CheckRule, Gauge};
+use crate::mate::{MateChange, MateEndSel, MateSel, MateType};
 use crate::session::SessionCommand;
 use crate::sketch::{self, DrawItem};
 use crate::value::{EdgeSel, FeatureSel, GeomSel, Input, PlaneSel};
@@ -219,6 +220,8 @@ pub enum Query {
     },
     /// The components of an assembly, and its parts.
     Components,
+    /// The mates of an assembly, and the freedom they leave.
+    Mates,
 }
 
 /// A file format to export.
@@ -409,6 +412,30 @@ pub enum Op {
         part: peet_model::DefId,
         model: Arc<peet_model::Model>,
     },
+    /// Pull a point of a component of an assembly towards a place, as with the mouse:
+    /// it goes as far as its mates let it, and what it is mated to comes along.
+    Drag {
+        component: CompSel,
+        /// In the component's own coordinates. Its origin if absent.
+        point: Option<Point3>,
+        /// In the assembly's coordinates.
+        to: Point3,
+    },
+    /// Hold two components of an assembly together by geometry of their parts.
+    Mate {
+        kind: MateType,
+        a: MateEndSel,
+        b: MateEndSel,
+        /// Two flat faces the same way round, instead of against each other.
+        flip: Option<bool>,
+        /// An automatic name (`Coincident1`) if absent.
+        name: Option<String>,
+    },
+    /// Change a mate of an assembly.
+    EditMate {
+        mate: MateSel,
+        change: MateChange,
+    },
     /// Open a component's part as a document of its own (see
     /// [`crate::apply_session`]): saving that document stores it back.
     OpenComponent {
@@ -481,6 +508,9 @@ impl Op {
             Self::Session(command) => command.word(),
             Self::Insert { .. } => "insert",
             Self::Component { change, .. } => change.word(),
+            Self::Drag { .. } => "drag",
+            Self::Mate { .. } => "mate",
+            Self::EditMate { change, .. } => change.word(),
             Self::SetPart { .. } => "set_part",
             Self::OpenComponent { .. } => "open_component",
             Self::Undo => "undo",
@@ -500,6 +530,7 @@ impl Op {
                 Query::Mass { .. } => "mass",
                 Query::Measure { .. } => "measure",
                 Query::Components => "components",
+                Query::Mates => "mates",
             },
             Self::Save { .. } => "save",
             Self::Export { .. } => "export",
@@ -785,6 +816,9 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
 ];
 
 fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
+    if let Some(found) = crate::mate::parse(op, a) {
+        return found;
+    }
     if let Some(found) = crate::assembly::parse(op, a) {
         return found;
     }
@@ -1050,6 +1084,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             all.extend(["tool", "quit"]);
             all.extend(crate::session::SESSION_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::assembly::ASSEMBLY_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::mate::MATE_OPS.iter().map(|(n, ..)| *n));
             all.sort_unstable();
             all.dedup();
             return Err(format!(

@@ -532,3 +532,555 @@ fn the_applications_changes_to_an_assembly_are_made_by_operations() {
     assert!(reply.ok, "{}", reply.json);
     assert_eq!(reply.json["component"]["at"], json!([0.0, 0.0, 80.0]));
 }
+
+/// A 40 x 30 x 5 plate with a hole of radius 4 through its middle, and a pin of radius 4
+/// and length 20, as files in `dir`.
+fn plate_and_pin(dir: &std::path::Path) -> (String, String) {
+    let plate = dir.join("plate.peet").to_string_lossy().into_owned();
+    let pin = dir.join("pin.peet").to_string_lossy().into_owned();
+    let mut doc = Document::default();
+    ok(
+        &mut doc,
+        json!({"op": "sketch", "on": "top", "draw": [
+            {"type": "rectangle", "from": [0, 0], "to": [40, 30]},
+            {"type": "circle", "center": [20, 15], "radius": 4},
+        ]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+    );
+    ok(&mut doc, json!({"op": "save", "path": plate}));
+    let mut doc = Document::default();
+    ok(
+        &mut doc,
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 4}]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 20}),
+    );
+    ok(&mut doc, json!({"op": "save", "path": pin}));
+    (plate, pin)
+}
+
+fn at(reply: &Value) -> [f64; 3] {
+    let p = reply["at"].as_array().unwrap_or_else(|| panic!("{reply}"));
+    [0, 1, 2].map(|i| p[i].as_f64().unwrap())
+}
+
+fn near(a: [f64; 3], b: [f64; 3]) -> bool {
+    a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6)
+}
+
+#[test]
+fn components_are_mated_by_faces_of_their_parts() {
+    let dir = temp("mates");
+    let (plate, pin) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "path": plate}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Top", "at": [70, -20, 33],
+               "rotate": {"axis": [1, 2, 3], "angle": 25}}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "name": "Pin", "at": [-30, 10, 40]}),
+    );
+    let up = json!({"normal": [0, 0, 1]});
+    let down = json!({"normal": [0, 0, -1]});
+
+    // The top plate's underside on the bottom plate's top: it comes down and lies flat.
+    let made = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident",
+               "a": {"component": "plate-1", "face": up},
+               "b": {"component": "Top", "face": down}}),
+    );
+    assert_eq!(
+        made["mate"],
+        json!({
+            "id": 1, "name": "Coincident1", "type": "coincident",
+            "a": {"component": "plate-1", "on": "face"},
+            "b": {"component": "Top", "on": "face"},
+            "status": "ok",
+        })
+    );
+    assert_eq!(
+        made["freedom"], 9,
+        "the top plate slides and turns; the pin is free"
+    );
+    let moved = &made["moved"][0];
+    assert_eq!(moved["name"], "Top");
+    assert_eq!(moved["mates"], json!(["Coincident1"]));
+    assert!(
+        (moved["min"][2].as_f64().unwrap() - 5.0).abs() < 1e-6,
+        "{moved}"
+    );
+    assert!(
+        (moved["max"][2].as_f64().unwrap() - 10.0).abs() < 1e-6,
+        "{moved}"
+    );
+    assert_eq!(doc.undo_label(), Some("Add Coincident1"));
+
+    // The pin in the bottom plate's hole, its end flush with the underside.
+    let hole = json!({"at": [24, 15, 2.5]});
+    let round = json!({"at": [4, 0, 10]});
+    let in_hole = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "concentric", "name": "In hole",
+               "a": {"component": "plate-1", "face": hole},
+               "b": {"component": "Pin", "face": round}}),
+    );
+    assert_eq!(in_hole["freedom"], 5);
+    let flush = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident", "flip": true,
+               "a": {"component": "plate-1", "face": down},
+               "b": {"component": "Pin", "face": down}}),
+    );
+    assert_eq!(flush["mate"]["flip"], true);
+    assert!(near(at(&flush["moved"][0]), [20.0, 15.0, 0.0]), "{flush}");
+    assert_eq!(flush["freedom"], 4);
+
+    // Square it up: two side faces the same way, then a gap between two others.
+    ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident", "flip": true,
+               "a": {"component": "plate-1", "face": {"normal": [-1, 0, 0]}},
+               "b": {"component": "Top", "face": {"normal": [-1, 0, 0]}}}),
+    );
+    let gap = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 12,
+               "a": {"component": "plate-1", "face": {"normal": [0, -1, 0]}},
+               "b": {"component": "Top", "face": {"normal": [0, 1, 0]}}}),
+    );
+    assert_eq!(gap["mate"]["distance"], 12.0);
+    assert!(near(at(&gap["moved"][0]), [0.0, -42.0, 5.0]), "{gap}");
+    assert_eq!(
+        gap["freedom"], 1,
+        "only the turn of the pin about its axis is left"
+    );
+
+    // A value changed moves the component; so does a parameter the value is made of.
+    let edited = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Distance1", "distance": 2}),
+    );
+    assert!(near(at(&edited["moved"][0]), [0.0, -32.0, 5.0]), "{edited}");
+    ok(
+        &mut doc,
+        json!({"op": "set_parameter", "name": "gap", "value": "7mm"}),
+    );
+    let edited = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Distance1", "distance": "gap + 1"}),
+    );
+    assert_eq!(
+        edited["mate"]["distance"],
+        json!({"expression": "gap + 1", "value": 8.0})
+    );
+    let follows = ok(
+        &mut doc,
+        json!({"op": "set_parameter", "name": "gap", "value": "9mm"}),
+    );
+    assert!(
+        near(at(&follows["moved"][0]), [0.0, -40.0, 5.0]),
+        "{follows}"
+    );
+
+    // Placing a mated component is a suggestion: it goes to the nearest place its
+    // mates allow.
+    let placed = ok(
+        &mut doc,
+        json!({"op": "place", "component": "Top", "at": [300, 200, 100]}),
+    );
+    assert!(
+        near(at(&placed["component"]), [0.0, -40.0, 5.0]),
+        "{placed}"
+    );
+    let slid = ok(
+        &mut doc,
+        json!({"op": "place", "component": "Pin", "rotate": {"axis": "z", "angle": 40}}),
+    );
+    assert_eq!(slid["component"]["rotate"]["angle"], 40.0);
+    assert!(near(at(&slid["component"]), [20.0, 15.0, 0.0]));
+
+    let list = ok(&mut doc, json!({"op": "mates"}));
+    assert_eq!(list["mates"].as_array().unwrap().len(), 5);
+    assert_eq!(list["freedom"], 1);
+    let status = ok(&mut doc, json!({"op": "status"}));
+    assert_eq!(
+        (status["mates"].as_u64(), status["freedom"].as_u64()),
+        (Some(5), Some(1))
+    );
+    assert_eq!(status["failures"], json!([]));
+
+    // A mate that can not hold with the others is a failure, and they still hold.
+    let clash = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 30,
+               "a": {"component": "plate-1", "face": up},
+               "b": {"component": "Top", "face": down}}),
+    );
+    assert_eq!(clash["mate"]["status"], "failed");
+    assert!(
+        clash["mate"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("hold together")
+    );
+    assert_eq!(clash["failures"][0]["name"], "Distance2");
+    assert!(clash.get("moved").is_none());
+    ok(&mut doc, json!({"op": "suppress", "mate": "Distance2"}));
+    assert_eq!(ok(&mut doc, json!({"op": "status"}))["failures"], json!([]));
+    ok(
+        &mut doc,
+        json!({"op": "rename", "mate": "Distance2", "name": "Later"}),
+    );
+    let gone = ok(&mut doc, json!({"op": "delete", "mate": "Later"}));
+    assert_eq!(gone["deleted"], json!(["Later"]));
+
+    // Saved and opened again, the mates are there and nothing moves.
+    let file = dir.join("mated.peet").to_string_lossy().into_owned();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let mut again = Document::default();
+    ok(&mut again, json!({"op": "open", "path": file}));
+    assert_eq!(again.model, doc.model);
+    assert!(!again.is_modified());
+
+    // A component deleted takes its mates along; undone, they are back and hold.
+    ok(&mut doc, json!({"op": "delete", "component": "Pin"}));
+    assert_eq!(
+        ok(&mut doc, json!({"op": "mates"}))["mates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    ok(&mut doc, json!({"op": "undo"}));
+    let list = ok(&mut doc, json!({"op": "mates"}));
+    assert_eq!(list["mates"].as_array().unwrap().len(), 5);
+    assert!(
+        list["mates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["status"] == "ok")
+    );
+
+    // Fastened: the pin keeps its place on the top plate, wherever that goes.
+    ok(&mut doc, json!({"op": "delete", "mate": "In hole"}));
+    ok(&mut doc, json!({"op": "delete", "mate": "Coincident2"}));
+    let held = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "fasten", "a": "Top", "b": {"component": "Pin"}}),
+    );
+    assert_eq!(
+        held["mate"]["a"],
+        json!({"component": "Top", "on": "component"})
+    );
+    assert_eq!(held["freedom"], 0);
+    let carried = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Distance1", "distance": 0}),
+    );
+    let moved: Vec<&str> = carried["moved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(moved, ["Top", "Pin"]);
+    assert!(
+        near(at(&carried["moved"][1]), [20.0, 25.0, 0.0]),
+        "{carried}"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn mistakes_with_mates_are_explained() {
+    let dir = temp("mate-errors");
+    let (plate, pin) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "path": plate}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "at": [0, 0, 50]}),
+    );
+    let top = json!({"component": "plate-1", "face": {"normal": [0, 0, 1]}});
+    let end = json!({"component": "pin-1", "face": {"normal": [0, 0, -1]}});
+    for (op, says) in [
+        (json!({"op": "mate", "a": top, "b": end}), "'type'"),
+        (
+            json!({"op": "mate", "type": "welded", "a": top, "b": end}),
+            "coincident, concentric",
+        ),
+        (
+            json!({"op": "mate", "type": "distance", "a": top, "b": end}),
+            "'distance' field",
+        ),
+        (json!({"op": "mate", "type": "coincident", "a": top}), "'b'"),
+        (
+            json!({"op": "mate", "type": "coincident", "a": top, "b": top}),
+            "Both ends are on plate-1",
+        ),
+        (
+            json!({"op": "mate", "type": "coincident", "a": top, "b": "pin-1"}),
+            "only fasten",
+        ),
+        (
+            json!({"op": "mate", "type": "coincident", "a": top, "b": {"component": "Nut-1", "face": {"normal": [0, 0, 1]}}}),
+            "pin-1",
+        ),
+        (
+            json!({"op": "mate", "type": "coincident", "a": top,
+                   "b": {"component": "pin-1", "face": {"normal": [1, 0, 0]}}}),
+            "In pin-1 (its part, pin)",
+        ),
+        (
+            json!({"op": "mate", "type": "coincident", "a": top,
+                   "b": {"component": "pin-1", "face": {}, "edge": {}}}),
+            "expected",
+        ),
+        (
+            json!({"op": "mate", "type": "distance", "distance": "tall", "a": top, "b": end}),
+            "distance",
+        ),
+        (
+            json!({"op": "edit_mate", "mate": "Coincident1", "flip": true}),
+            "no mates yet",
+        ),
+    ] {
+        let e = error(&mut doc, op.clone());
+        assert!(e.contains(says), "{op}: {e}");
+    }
+    // What the solve refuses is not an error of the operation: the mate is added and
+    // says why, as a feature that fails to build does.
+    let wrong = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "concentric", "a": top, "b": end}),
+    );
+    assert_eq!(wrong["mate"]["status"], "failed");
+    assert!(
+        wrong["mate"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("two axes")
+    );
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Concentric1", "distance": 3}),
+    );
+    assert!(e.contains("no distance or angle"), "{e}");
+    let e = error(&mut doc, json!({"op": "edit_mate", "mate": "Concentric1"}));
+    assert!(e.contains("needs a"), "{e}");
+    let e = error(&mut doc, json!({"op": "delete", "mate": "Weld"}));
+    assert!(e.contains("Concentric1"), "{e}");
+    let mut part = Document::default();
+    let e = error(&mut part, json!({"op": "mates"}));
+    assert!(e.contains("is a part"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn the_applications_mates_are_made_by_operations() {
+    let dir = temp("mate-diff");
+    let (plate, _) = plate_and_pin(&dir);
+    let part = Arc::new(
+        peet_io::document::open(&std::fs::read(&plate).unwrap())
+            .unwrap()
+            .model,
+    );
+    // The faces, as a click in the application gives them.
+    let built = Document::from_model((*part).clone(), None);
+    let body = &built.evaluation().bodies[0];
+    let face = |z: f64| {
+        let id = body
+            .solid
+            .face_ids()
+            .find(|f| {
+                matches!(body.solid.face(*f).surface, peet_kernel::Surface::Plane(_))
+                    && (body.face_center(*f).z - z).abs() < 1e-9
+            })
+            .unwrap();
+        peet_model::MateGeom::Face(body.face_ref(id))
+    };
+    let end = |c: u32, z: f64| peet_model::MateEnd {
+        path: vec![peet_model::CompId(c)],
+        geom: Some(face(z)),
+    };
+    let whole = |c: u32| peet_model::MateEnd {
+        path: vec![peet_model::CompId(c)],
+        geom: None,
+    };
+
+    let mut host = Headless::default();
+    let mut direct = Document::from_model(Model::new_assembly(), None);
+    let mut through = Document::from_model(Model::new_assembly(), None);
+    let mut key = 0;
+    let mut change = |label: &str, f: &dyn Fn(&mut Model)| {
+        direct.change(label, f);
+        let mut new = through.model.clone();
+        f(&mut new);
+        key += 1;
+        let done = apply_model(&mut host, &mut through, new, label, key);
+        through.seal_history();
+        assert_eq!(done.untranslated, None, "{label}: {:?}", done.ops);
+        assert_eq!(through.model, direct.model, "{label}");
+        done.ops
+    };
+    change("Insert", &|m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.define(part.clone());
+        a.insert(d, Frame::WORLD);
+        a.insert(
+            d,
+            Frame {
+                origin: DVec3::new(5.0, 9.0, 60.0),
+                ..Frame::WORLD
+            },
+        );
+        a.insert(
+            d,
+            Frame {
+                origin: DVec3::new(90.0, 0.0, 0.0),
+                ..Frame::WORLD
+            },
+        );
+    });
+    use peet_model::{MateId, MateKind, Scalar};
+    let ops = change("Mate", &|m| {
+        let a = m.assembly_mut().unwrap();
+        a.add_mate(
+            MateKind::Distance(Scalar::new(3.0)),
+            end(1, 5.0),
+            end(2, 0.0),
+        );
+        let relative = Frame {
+            origin: DVec3::new(90.0, 0.0, 0.0),
+            ..Frame::WORLD
+        };
+        let held = a.add_mate(MateKind::Fasten(relative), whole(1), whole(3));
+        a.mate_mut(held).unwrap().suppressed = true;
+    });
+    assert_eq!(ops.len(), 3, "{ops:?}");
+    let ops = change("Change", &|m| {
+        let mate = m.assembly_mut().unwrap().mate_mut(MateId(1)).unwrap();
+        mate.kind = MateKind::Distance(Scalar::new(8.0));
+        mate.flip = true;
+        mate.name = "Gap".to_owned();
+    });
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    let ops = change("Delete", &|m| {
+        let a = m.assembly_mut().unwrap();
+        a.remove_mate(MateId(1));
+        // A component goes, and its mate with it: one operation.
+        a.remove(peet_model::CompId(3));
+    });
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    assert_eq!(through.model.assembly().unwrap().mates().count(), 0);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_component_is_dragged_as_far_as_its_mates_allow() {
+    let dir = temp("drag");
+    let (plate, pin) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    // A plate on a pin through its hole: it can only swing round the pin.
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "name": "Post"}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Arm", "at": [-20, -15, 0]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "mate", "type": "concentric",
+               "a": {"component": "Post", "face": {"at": [4, 0, 10]}},
+               "b": {"component": "Arm", "face": {"at": [24, 15, 2.5]}}}),
+    );
+    let held = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident", "flip": true,
+               "a": {"component": "Post", "face": {"normal": [0, 0, -1]}},
+               "b": {"component": "Arm", "face": {"normal": [0, 0, -1]}}}),
+    );
+    assert_eq!(held["freedom"], 1);
+
+    // The middle of its short edge, 20 from the pin along X, pulled to 20 along Y: a
+    // quarter turn.
+    let swung = ok(
+        &mut doc,
+        json!({"op": "drag", "component": "Arm", "point": [40, 15, 0], "to": [0, 20, 0]}),
+    );
+    let turn = &swung["component"]["rotate"];
+    assert!(
+        (turn["angle"].as_f64().unwrap() - 90.0).abs() < 0.01,
+        "{swung}"
+    );
+    assert_eq!(turn["axis"], json!([0.0, 0.0, 1.0]));
+    assert!(swung.get("short_by").is_none(), "{swung}");
+    assert_eq!(swung["freedom"], 1);
+    assert_eq!(doc.undo_label(), Some("Drag Arm"));
+    assert_eq!(ok(&mut doc, json!({"op": "status"}))["failures"], json!([]));
+
+    // Pulled to where it can't go, it gets as near as it can and says how far that is.
+    let short = ok(
+        &mut doc,
+        json!({"op": "drag", "component": "Arm", "point": [40, 15, 0], "to": [0, 50, 0]}),
+    );
+    assert!(
+        (short["short_by"].as_f64().unwrap() - 30.0).abs() < 0.01,
+        "{short}"
+    );
+    // Nothing to do is not a change.
+    let again = apply_json(
+        &mut doc,
+        &json!({"op": "drag", "component": "Arm", "point": [40, 15, 0], "to": [0, 50, 0]}),
+        Undo::Step,
+    );
+    assert!(again.ok && !again.changed, "{}", again.json);
+
+    // A fixed component stays; one with no mates just goes there (its origin, if no
+    // point is given), without turning.
+    let e = error(
+        &mut doc,
+        json!({"op": "drag", "component": "Post", "to": [1, 2, 3]}),
+    );
+    assert!(e.contains("is fixed") && e.contains("\"on\": false"), "{e}");
+    let e = error(&mut doc, json!({"op": "drag", "component": "Arm"}));
+    assert!(e.contains("'to'"), "{e}");
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Loose", "at": [100, 0, 0],
+               "rotate": {"axis": "x", "angle": 30}}),
+    );
+    let moved = ok(
+        &mut doc,
+        json!({"op": "drag", "component": "Loose", "to": [5, 6, 7]}),
+    );
+    assert!(near(at(&moved["component"]), [5.0, 6.0, 7.0]), "{moved}");
+    assert_eq!(moved["component"]["rotate"]["angle"], 30.0);
+
+    // The steps of one drag with the mouse are one undo step.
+    let before = doc.model.clone();
+    for step in 1..=5 {
+        let reply = apply_json(
+            &mut doc,
+            &json!({"op": "drag", "component": "Loose", "to": [5 + step * 4, 6, 7]}),
+            Undo::Group(77),
+        );
+        assert!(reply.ok && reply.changed, "{}", reply.json);
+    }
+    doc.seal_history();
+    ok(&mut doc, json!({"op": "undo"}));
+    assert_eq!(doc.model, before);
+    std::fs::remove_dir_all(dir).ok();
+}

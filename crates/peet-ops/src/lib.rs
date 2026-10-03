@@ -49,6 +49,7 @@ mod export;
 mod fields;
 mod host;
 mod library;
+mod mate;
 mod op;
 mod query;
 pub mod select;
@@ -56,7 +57,7 @@ mod session;
 pub mod sketch;
 mod value;
 
-pub use assembly::{CompSel, ComponentChange, InsertSource, Placing};
+pub use assembly::{CompSel, ComponentChange, InsertSource, Placing, Point3};
 pub use diff::{Translation, apply_model, diff};
 pub use export::export_bytes;
 pub use fields::{
@@ -67,6 +68,7 @@ pub use fields::{
 };
 pub use host::{AppCommand, Headless, Host, SketchTool, Toggle, View, Window};
 pub use library::{CheckRule, Gauge, GaugeBend};
+pub use mate::{MateChange, MateEndSel, MateSel, MateType};
 pub use op::{
     DatumSel, DxfPlacement, DxfTarget, Format, New, Op, Place, Query, RollTo, Sample, Source,
 };
@@ -125,6 +127,10 @@ struct Done {
     sketch: Option<FeatureId>,
     /// A component the operation was about, reported with where it is and its status.
     component: Option<peet_model::CompId>,
+    /// A mate the operation was about, reported with its status.
+    mate: Option<peet_model::MateId>,
+    /// A pull on a component to solve the assembly with, and its undo label.
+    drag: Option<(peet_model::Drag, String)>,
     data: Map<String, Value>,
 }
 
@@ -240,11 +246,16 @@ fn help() -> Map<String, Value> {
             }
         }
     }
-    for (name, fields_text, what) in assembly::ASSEMBLY_OPS {
-        // Words a feature has too (rename, delete): the component's form beside it.
+    for (form, (name, fields_text, what)) in assembly::ASSEMBLY_OPS
+        .iter()
+        .map(|o| ("component", o))
+        .chain(mate::MATE_OPS.iter().map(|o| ("mate", o)))
+    {
+        // Words a feature has too (rename, delete): the component's and the mate's
+        // forms beside it.
         match ops.get_mut(*name) {
             Some(entry) => {
-                entry["component"] = json!({ "does": what, "fields": fields_text });
+                entry[form] = json!({ "does": what, "fields": fields_text });
             }
             None => {
                 ops.insert(
@@ -309,6 +320,7 @@ fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, V
         Query::Mass { body } => object(query::mass(doc, *body)?),
         Query::Measure { a, b } => object(query::measure(doc, a, b.as_deref())?),
         Query::Components => assembly::components(doc)?,
+        Query::Mates => mate::mates(doc)?,
     })
 }
 
@@ -373,7 +385,43 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             label
         }
         Op::SetPart { part, model: new } => assembly::set_part(&mut model, *part, new)?,
+        Op::Mate {
+            kind,
+            a,
+            b,
+            flip,
+            name,
+        } => {
+            let (id, label) = mate::add(doc, &mut model, kind, a, b, *flip, name.as_deref())?;
+            done.mate = Some(id);
+            label
+        }
+        Op::EditMate { mate, change } => {
+            let id = mate.resolve(doc)?;
+            let label = mate::change(doc, &mut model, id, change)?;
+            if *change == MateChange::Delete {
+                done.data.insert(
+                    "deleted".to_owned(),
+                    json!([label.trim_start_matches("Delete ")]),
+                );
+            } else {
+                done.mate = Some(id);
+            }
+            label
+        }
         Op::OpenComponent { .. } => return Err(session::needs_session(op.word())),
+        Op::Drag {
+            component,
+            point,
+            to,
+        } => {
+            // Not a change to the model that is then rebuilt: the rebuild itself is
+            // what moves the components (see `apply_with`).
+            let (drag, label) = assembly::drag(doc, component, point.as_ref(), to)?;
+            done.component = Some(drag.component);
+            done.drag = Some((drag, label));
+            return Ok(done);
+        }
         Op::Query(q) => {
             done.data = query(host, doc, q)?;
             return Ok(done);
@@ -871,6 +919,13 @@ pub(crate) fn apply_with(
         Ok(d) => d,
         Err(e) => return failed(name, e),
     };
+    // Where an assembly's components are, to say which of them the change moved.
+    let placements = |doc: &Document| -> Vec<(peet_model::CompId, peet_math::Frame)> {
+        doc.model.assembly().map_or_else(Vec::new, |a| {
+            a.components().map(|c| (c.id, c.placement)).collect()
+        })
+    };
+    let before = placements(doc);
     if let Some((own, model)) = done.commit.take() {
         let label = label.map_or(own, str::to_owned);
         let set = |m: &mut Model| *m = model;
@@ -878,6 +933,29 @@ pub(crate) fn apply_with(
             Undo::Step => doc.change(&label, set),
             Undo::Group(key) => doc.change_merging(&label, key, set),
         };
+    }
+    if let Some((drag, own)) = done.drag.take() {
+        let label = label.map_or(own, str::to_owned);
+        let key = match undo {
+            Undo::Step => None,
+            Undo::Group(key) => Some(key),
+        };
+        done.changed = doc.drag_component(&label, key, drag);
+        // How far the point still is from where it was pulled to, if its mates held
+        // it back.
+        if let Some(c) = doc
+            .model
+            .assembly()
+            .and_then(|a| a.component(drag.component))
+        {
+            let short = c.placement.to_world(drag.point).distance(drag.to);
+            if short > 1e-3 {
+                done.data.insert(
+                    "short_by".to_owned(),
+                    args::length_out(short, &doc.model.parameters.units),
+                );
+            }
+        }
     }
     if let Some(id) = done.sketch {
         done.data.extend(object(query::sketch_summary(doc, id)));
@@ -898,6 +976,30 @@ pub(crate) fn apply_with(
     }
     if let Some(id) = done.component {
         out.insert("component".to_owned(), assembly::component_out(doc, id));
+    }
+    if let Some(id) = done.mate {
+        out.insert("mate".to_owned(), mate::mate_out(doc, id));
+    }
+    if done.changed && !done.replaced && doc.is_assembly() {
+        // The components that are somewhere else now: what a mate, or a placement that
+        // the mates corrected, came to.
+        let moved: Vec<Value> = placements(doc)
+            .into_iter()
+            .filter(|(id, frame)| {
+                // Somewhere else by more than rounding.
+                let elsewhere = |was: &peet_math::Frame| {
+                    was.origin.distance(frame.origin) > 1e-7
+                        || was.rotation.angle_between(frame.rotation) > 1e-9
+                };
+                Some(*id) != done.component
+                    && before.iter().any(|(b, was)| b == id && elsewhere(was))
+            })
+            .map(|(id, _)| assembly::component_out(doc, id))
+            .collect();
+        if !moved.is_empty() {
+            out.insert("moved".to_owned(), json!(moved));
+        }
+        out.insert("freedom".to_owned(), json!(doc.evaluation().freedom));
     }
     out.extend(done.data);
     if done.changed {

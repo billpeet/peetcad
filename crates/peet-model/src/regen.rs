@@ -39,6 +39,7 @@ use crate::feature::{
     AxisDef, AxisRef, CoordSystemDef, Feature, FeatureId, FeatureKind, PatternDef, PlaneDef,
     PlaneRef, PointDef, PointRef, ScalarKind,
 };
+use crate::mate::{self, MateId};
 use crate::naming::{Body, find_edge, find_face, find_vertex};
 use crate::{Axis, Model, hash, pattern, sheet};
 
@@ -152,6 +153,10 @@ pub struct Evaluation {
     pub instances: Vec<Instance>,
     states: HashMap<FeatureId, FeatureState>,
     components: HashMap<CompId, Status>,
+    mates: HashMap<MateId, Status>,
+    /// For an assembly: how many ways its components can still move (six for each that
+    /// is not fixed, less what the mates hold).
+    pub freedom: usize,
     pub stats: Stats,
 }
 
@@ -159,6 +164,19 @@ impl Evaluation {
     /// How a component of an assembly came out.
     pub fn component_status(&self, id: CompId) -> Option<&Status> {
         self.components.get(&id)
+    }
+
+    /// How a mate of an assembly came out.
+    pub fn mate_status(&self, id: MateId) -> Option<&Status> {
+        self.mates.get(&id)
+    }
+
+    /// The mates that don't hold, with why.
+    pub fn mate_failures(&self) -> impl Iterator<Item = (MateId, &str)> {
+        self.mates.iter().filter_map(|(id, s)| match s {
+            Status::Failed(m) => Some((*id, m.as_str())),
+            _ => None,
+        })
     }
 
     /// The components that need attention, with why.
@@ -198,6 +216,15 @@ struct Cached {
     bodies: Option<Vec<Arc<Body>>>,
 }
 
+/// What rebuilding an assembly gives.
+#[derive(Default)]
+struct Assembled {
+    instances: Vec<Instance>,
+    components: HashMap<CompId, Status>,
+    mates: HashMap<MateId, Status>,
+    freedom: usize,
+}
+
 /// A definition of an assembly as last rebuilt.
 struct Part {
     /// The model that was rebuilt: nothing is done while the definition still has it.
@@ -211,6 +238,10 @@ pub struct Engine {
     cache: HashMap<FeatureId, Cached>,
     /// For an assembly: an engine per definition.
     parts: HashMap<DefId, Part>,
+    /// For an assembly: what is kept between solves of the same mates.
+    mates: mate::Memo,
+    /// A pull on a component, for the next rebuild only.
+    drag: Option<mate::Drag>,
     evaluation: Evaluation,
 }
 
@@ -222,6 +253,12 @@ impl Engine {
     /// The result of the last [`Engine::regenerate`].
     pub fn evaluation(&self) -> &Evaluation {
         &self.evaluation
+    }
+
+    /// Pulls a component of an assembly at the next rebuild (and only that one): a point
+    /// of it towards a place, as far as its mates let it go. See [`crate::Drag`].
+    pub fn set_drag(&mut self, drag: Option<mate::Drag>) {
+        self.drag = drag;
     }
 
     /// Forgets every remembered result, so the next rebuild recomputes everything.
@@ -282,28 +319,29 @@ impl Engine {
             }
         }
         self.cache.retain(|id, _| run.states.contains_key(id));
-        let (instances, components) = self.assemble(model, &mut run.stats);
+        let assembled = self.assemble(model, &mut run.stats);
         run.stats.ms = start.elapsed().as_secs_f64() * 1000.0;
         self.evaluation = Evaluation {
             bodies: run.bodies,
-            instances,
+            instances: assembled.instances,
             states: run.states,
-            components,
+            components: assembled.components,
+            mates: assembled.mates,
+            freedom: assembled.freedom,
             stats: run.stats,
         };
         &self.evaluation
     }
 
-    /// Rebuilds the parts of an assembly (those whose model changed) and places their
-    /// bodies. A part's solved sketches are written back into its definition.
-    fn assemble(
-        &mut self,
-        model: &mut Model,
-        stats: &mut Stats,
-    ) -> (Vec<Instance>, HashMap<CompId, Status>) {
+    /// Rebuilds the parts of an assembly (those whose model changed), solves its mates
+    /// and places the parts' bodies. A part's solved sketches are written back into its
+    /// definition, and the placements the mates come to into the components.
+    fn assemble(&mut self, model: &mut Model, stats: &mut Stats) -> Assembled {
         let Some(assembly) = model.assembly() else {
             self.parts.clear();
-            return (Vec::new(), HashMap::new());
+            self.drag = None;
+            self.mates = mate::Memo::default();
+            return Assembled::default();
         };
         // ---- The definitions ----
         let mut written = Vec::new();
@@ -331,6 +369,57 @@ impl Engine {
         self.parts
             .retain(|id, _| assembly.definition(*id).is_some());
 
+        // ---- The mates ----
+        // Solved from where the components are, with the bodies of their parts (and, for
+        // a sub-assembly, of the parts in it) to find the mates' faces in.
+        let placed: Vec<mate::Placed> = assembly
+            .components()
+            .filter(|c| !c.suppressed)
+            .filter_map(|c| {
+                let built = self.parts.get(&c.definition)?.engine.evaluation();
+                let bodies = built
+                    .bodies
+                    .iter()
+                    .map(|b| (Vec::new(), b.clone(), Frame::WORLD))
+                    .chain(
+                        built
+                            .instances
+                            .iter()
+                            .map(|i| (i.path.clone(), i.body.clone(), i.frame)),
+                    )
+                    .collect();
+                Some(mate::Placed {
+                    id: c.id,
+                    name: c.name.clone(),
+                    frame: c.placement,
+                    fixed: c.fixed,
+                    bodies,
+                })
+            })
+            .collect();
+        let mates: Vec<&crate::Mate> = assembly.mates().collect();
+        let structure: Vec<(CompId, DefId, bool, bool)> = assembly
+            .components()
+            .map(|c| (c.id, c.definition, c.fixed, c.suppressed))
+            .collect();
+        let key = hash::of(&(&mates, structure, &model.parameters));
+        let drag = self.drag.take();
+        let solved = mate::solve(
+            &mates,
+            placed,
+            &model.parameters,
+            key,
+            &mut self.mates,
+            drag,
+        );
+        let moved: Vec<(CompId, Frame)> = assembly
+            .components()
+            .filter_map(|c| {
+                let frame = *solved.frames.get(&c.id)?;
+                (frame != c.placement).then_some((c.id, frame))
+            })
+            .collect();
+
         // ---- The components ----
         let mut instances = Vec::new();
         let mut components = HashMap::new();
@@ -342,13 +431,14 @@ impl Engine {
             let Some(part) = self.parts.get(&c.definition) else {
                 continue;
             };
+            let placement = solved.frames.get(&c.id).copied().unwrap_or(c.placement);
             let built = part.engine.evaluation();
             let before = instances.len();
             for body in &built.bodies {
                 instances.push(Instance {
                     path: vec![c.id],
                     body: body.clone(),
-                    frame: c.placement,
+                    frame: placement,
                     color: part.model.color,
                 });
             }
@@ -360,12 +450,14 @@ impl Engine {
                 instances.push(Instance {
                     path,
                     body: inner.body.clone(),
-                    frame: c.placement.compose(&inner.frame),
+                    frame: placement.compose(&inner.frame),
                     color: inner.color,
                 });
             }
             let name = &part.model.name;
-            let failed = built.failures().count() + built.component_problems().count();
+            let failed = built.failures().count()
+                + built.component_problems().count()
+                + built.mate_failures().count();
             let status = if failed > 0 {
                 Status::Warning(if part.model.is_assembly() {
                     format!(
@@ -387,12 +479,24 @@ impl Engine {
             };
             components.insert(c.id, status);
         }
-        if let Some(assembly) = model.assembly_mut() {
+        if (!written.is_empty() || !moved.is_empty())
+            && let Some(assembly) = model.assembly_mut()
+        {
             for (id, rebuilt) in written {
                 assembly.set_model(id, rebuilt);
             }
+            for (id, frame) in moved {
+                if let Some(c) = assembly.component_mut(id) {
+                    c.placement = frame;
+                }
+            }
         }
-        (instances, components)
+        Assembled {
+            instances,
+            components,
+            mates: solved.statuses,
+            freedom: solved.freedom,
+        }
     }
 
     /// Builds one feature (or reuses its remembered result) and records its state.

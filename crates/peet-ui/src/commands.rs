@@ -119,6 +119,12 @@ pub enum CommandId {
     NewAssembly,
     InsertComponent,
     EditComponent,
+    MateCoincident,
+    MateConcentric,
+    MateParallel,
+    MateDistance,
+    MateAngle,
+    MateFasten,
 }
 
 /// Static description of a command.
@@ -147,7 +153,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 110] = [
+    pub const ALL: [Self; 116] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -258,6 +264,12 @@ impl CommandId {
         Self::NewAssembly,
         Self::InsertComponent,
         Self::EditComponent,
+        Self::MateCoincident,
+        Self::MateConcentric,
+        Self::MateParallel,
+        Self::MateDistance,
+        Self::MateAngle,
+        Self::MateFasten,
     ];
 
     pub fn info(self) -> CommandInfo {
@@ -862,6 +874,42 @@ impl CommandId {
                 "Edit Part",
                 "Assembly",
                 "Open the selected component's part as a document of its own. Saving it stores it back in the assembly, for every component of that part.",
+                None,
+            ),
+            Self::MateCoincident => (
+                "Coincident Mate",
+                "Assembly",
+                "Put the two selected faces against each other (or two edges in line, a corner on a face). Select a face, edge or corner on each of two components first.",
+                None,
+            ),
+            Self::MateConcentric => (
+                "Concentric Mate",
+                "Assembly",
+                "Put the axes of the two selected round faces or round edges in line: a pin in a hole.",
+                None,
+            ),
+            Self::MateParallel => (
+                "Parallel Mate",
+                "Assembly",
+                "Keep the two selected faces or straight edges parallel.",
+                None,
+            ),
+            Self::MateDistance => (
+                "Distance Mate",
+                "Assembly",
+                "Keep the two selected faces (or edges, or corners) a distance apart. The distance is set in the mate's properties.",
+                None,
+            ),
+            Self::MateAngle => (
+                "Angle Mate",
+                "Assembly",
+                "Keep the two selected faces or straight edges at an angle. The angle is set in the mate's properties.",
+                None,
+            ),
+            Self::MateFasten => (
+                "Fasten",
+                "Assembly",
+                "Hold the two selected components together as they are now: the second keeps its place relative to the first.",
                 None,
             ),
             Self::OpenSampleHousing => (

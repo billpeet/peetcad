@@ -373,6 +373,30 @@ impl Document {
         true
     }
 
+    /// Pulls a component of an assembly: the point `point` of it (in the component's
+    /// coordinates) towards `to` (in the assembly's), as far as its mates let it go,
+    /// taking what it is mated to along (see [`peet_model::Drag`]). Returns whether
+    /// anything moved. It is an undo step called `label`; with a `key`, consecutive
+    /// drags with the same key are one step.
+    pub fn drag_component(
+        &mut self,
+        label: &str,
+        key: Option<u64>,
+        drag: peet_model::Drag,
+    ) -> bool {
+        let before = self.model.clone();
+        self.engine.set_drag(Some(drag));
+        self.rebuild();
+        if self.model == before {
+            return false;
+        }
+        match key {
+            Some(k) => self.history.record_merging(label, k, before),
+            None => self.history.record(label, before),
+        }
+        true
+    }
+
     /// Ends a run of merged changes (a drag), so the next change is a new undo step.
     pub fn seal_history(&mut self) {
         self.history.seal();

@@ -1,7 +1,7 @@
 # ADR 0009: Assemblies
 
-**Status:** accepted (Phase 7). Stage 1 (groundwork) and most of stage 2 (assembly
-documents) are implemented; the rest is the plan.
+**Status:** accepted (Phase 7). Stage 1 (groundwork), most of stage 2 (assembly
+documents) and most of stage 3 (mates) are implemented; the rest is the plan.
 
 ## Context
 
@@ -149,6 +149,72 @@ and measurements in an assembly (stage 4), an assembly's caches in its file (it 
 rebuilt when opened), selections on a component's faces (stage 3 needs them for mates),
 autosave of documents other than the current one, and a colour per component (a part's
 colour is baked into its mesh, so it needs a colour per drawn object).
+
+## What stage 3 built so far
+
+- `peet_model::Mate`: a kind (coincident, concentric, parallel, distance, angle,
+  fasten), two ends, `flip`. An end is the path of components down to a part and a
+  `FaceRef`, `EdgeRef` or `VertexRef` in it. A flat face stands for its plane, a round
+  face or a round edge for its axis, a straight edge for a line, a vertex (or a sphere)
+  for a point.
+- The solve (`peet-model/src/mate.rs`, where the formulation is written up). Each
+  component that is not fixed has six unknowns: its origin, and a rotation vector from
+  the orientation it had when the solve started, scaled by the component's size so that
+  the Jacobian's entries are of order one. Every mate is made of four kinds of residual
+  (two directions at an angle; a point at a distance along a direction of the other
+  end; a distance between points; a distance from a line), with analytic gradients,
+  checked against finite differences. `peet-solve` solves them with minimum norm steps,
+  so the components move as little as they can.
+- **Where a component is, is the suggestion.** The mates are solved whenever the
+  assembly is rebuilt, from where the components are, and the placements they come to
+  are stored in the components (as a sketch's solved points are stored in the sketch).
+  So placing a mated component is a request, and there is no separate "solved" state to
+  keep in step.
+- **Groups.** Components joined by mates are solved as a group of their own; a fixed
+  component joins nothing. A group whose mates already hold is not touched, so a solved
+  assembly is bit for bit the same after any number of rebuilds (which matters for
+  "is the file modified" and for undo), and a mate added in one place moves nothing in
+  another.
+- **Which way round** two planes go (against each other, or the same way with `flip`)
+  can't be told apart by equations that are well behaved at the solution, so a
+  component that is the wrong way round is turned over before the solve.
+- **Conflicts.** If a group's mates can't all hold, they are added one at a time in
+  their order; each that can't be satisfied with those before it is flagged and left
+  out, and the rest hold. A mate that can't be set up (a face that is gone, two ends on
+  one component, a flat face for a concentric mate) is flagged the same way, with what
+  to do. Redundant mates that agree are not flagged.
+- **Freedom**: six for each component that is not fixed, less the rank of the
+  Jacobian. It is reported for the assembly as a whole.
+- The solver's structure and the freedom are kept between solves of the same mates, so
+  a drag costs only the numeric solve: 50 components held by 147 mates take about 3 ms
+  per step in a release build, against the 4 ms budget
+  (`crates/peet-model/tests/mates.rs`).
+- Operations `mate`, `edit_mate`, `mates`, and `rename`, `suppress`, `delete` with a
+  `mate`. A script describes an end with the selectors a part's operations take, in the
+  part's own coordinates. Replies list the components an operation moved. In the
+  application: a click in an assembly picks a face, an edge or a corner (and with it
+  its component), six mate commands that work on two picked ends, the mates in the
+  tree, and a mate's properties.
+
+- **Dragging.** A drag pulls a point of a component towards a place (`peet_model::Drag`,
+  the `drag` operation, the left mouse button on a component in the view). The
+  component's group is moved in steps, as the sketcher drags: the least squares answer
+  to the mates' equations, linearised, with weak equations that pull the point; then
+  the mates solved exactly. A pull is taken a reach (10 mm) at a time, so that a far or
+  unreachable place doesn't bend the mates in the step it asks for, and a step that
+  overshoots round a curve is halved. It is done first without letting the dragged
+  component turn, then letting it: a part that can slide to the place slides, a hinged
+  one swings. In the view the point is the one under the pointer when the button went
+  down, and it is pulled in the plane through it that faces the viewer; the steps of
+  one drag are one undo step. Pulling a stack of 50 plates held by 147 mates by a
+  corner takes about 3 ms a step in a release build (7 ms for the first, which sets the
+  solver up).
+
+Left of stage 3: freedom per component, to show
+which ones are still loose; a script can't describe a face of a part inside a
+sub-assembly (the application can pick one, and the model and the solve handle it);
+tangent and other mates beyond the roadmap's list. Mates were added to model schema 6,
+which no released version writes, without another version number.
 
 ## Consequences
 

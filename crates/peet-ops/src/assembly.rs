@@ -140,6 +140,24 @@ impl Placing {
     }
 }
 
+/// A point or a place.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Point3 {
+    /// As a script writes it: in document units.
+    Units([f64; 3]),
+    /// In mm: what the application passes.
+    Mm(DVec3),
+}
+
+impl Point3 {
+    pub(crate) fn mm(&self, units: &Units) -> DVec3 {
+        match self {
+            Self::Units(p) => crate::args::mm3(*p, units),
+            Self::Mm(p) => *p,
+        }
+    }
+}
+
 /// The part a component is an instance of.
 #[derive(Clone, Debug, PartialEq)]
 pub enum InsertSource {
@@ -253,6 +271,11 @@ pub(crate) const ASSEMBLY_OPS: &[(&str, &str, &str)] = &[
         "Put a component somewhere: its part's origin at a point, turned about an axis from the part's own orientation.",
     ),
     (
+        "drag",
+        "component, to ([x, y, z]), point ([x, y, z] in the component's own coordinates; default its origin)",
+        "Pull a point of a component towards a place, as with the mouse: it goes as far as its mates let it, sliding if it can and turning if it must, and what it is mated to comes along.",
+    ),
+    (
         "fix",
         "component, on (default true)",
         "Hold a component where it is, or let it go.",
@@ -317,6 +340,13 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
             });
             change(a, placing.map(ComponentChange::Place))
         }
+        "drag" => (|| {
+            Ok(Op::Drag {
+                component: component(a)?,
+                point: a.parsed("point", coordinates::<3>)?.map(Point3::Units),
+                to: Point3::Units(a.required("to", coordinates::<3>)?),
+            })
+        })(),
         "fix" => {
             let on = a.flag("on", true).map(ComponentChange::Fix);
             change(a, on)
@@ -352,7 +382,10 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
             | Op::Component { .. }
             | Op::SetPart { .. }
             | Op::OpenComponent { .. }
-            | Op::Query(Query::Components)
+            | Op::Drag { .. }
+            | Op::Mate { .. }
+            | Op::EditMate { .. }
+            | Op::Query(Query::Components | Query::Mates)
     );
     let for_part = match op {
         Op::Add(_)
@@ -454,6 +487,10 @@ pub(crate) fn component_out(doc: &Document, id: CompId) -> Value {
     }
     placement_out(&mut m, &c.placement, units);
     m.insert("fixed".to_owned(), json!(c.fixed));
+    let mates: Vec<&str> = assembly.mates_of(id).map(|m| m.name.as_str()).collect();
+    if !mates.is_empty() {
+        m.insert("mates".to_owned(), json!(mates));
+    }
     if !c.visible {
         m.insert("hidden".to_owned(), json!(true));
     }
@@ -482,6 +519,7 @@ pub(crate) fn problems(doc: &Document) -> Vec<Value> {
                 .is_some_and(|s| s.message().is_some())
         })
         .map(|c| component_out(doc, c.id))
+        .chain(crate::mate::failures(doc))
         .collect()
 }
 
@@ -516,6 +554,8 @@ pub(crate) fn components(doc: &Document) -> Result<Map<String, Value>, String> {
     let mut out = Map::new();
     out.insert("components".to_owned(), json!(list));
     out.insert("parts".to_owned(), json!(parts));
+    out.insert("mates".to_owned(), json!(assembly.mates().count()));
+    out.insert("freedom".to_owned(), json!(doc.evaluation().freedom));
     Ok(out)
 }
 
@@ -625,11 +665,44 @@ pub(crate) fn change(
             }
             format!("Replace {was}")
         }
+        // Its mates go with it.
         ComponentChange::Delete => {
             assembly.remove(id).ok_or_else(gone)?;
             format!("Delete {was}")
         }
     })
+}
+
+/// What a drag operation asks of the solve, with the undo label.
+pub(crate) fn drag(
+    doc: &Document,
+    component: &CompSel,
+    point: Option<&Point3>,
+    to: &Point3,
+) -> Result<(peet_model::Drag, String), String> {
+    let id = component.resolve(doc)?;
+    let c = the_assembly(doc)?
+        .component(id)
+        .ok_or_else(|| "The component no longer exists.".to_owned())?;
+    if c.fixed {
+        return Err(format!(
+            "{name} is fixed, so it stays where it is: drag another component, or let it go first with {{\"op\": \"fix\", \"component\": \"{name}\", \"on\": false}}.",
+            name = c.name
+        ));
+    }
+    if c.suppressed {
+        return Err(format!(
+            "{} is suppressed: there is nothing to drag.",
+            c.name
+        ));
+    }
+    let units = &doc.model.parameters.units;
+    let drag = peet_model::Drag {
+        component: id,
+        point: point.map_or(DVec3::ZERO, |p| p.mm(units)),
+        to: to.mm(units),
+    };
+    Ok((drag, format!("Drag {}", c.name)))
 }
 
 /// Stores a part's model as one of the assembly's parts. Returns the undo label.

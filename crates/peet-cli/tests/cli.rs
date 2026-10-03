@@ -437,6 +437,95 @@ fn an_assembly_is_built_and_changed_across_calls() {
 }
 
 #[test]
+fn what_the_assemblies_skill_says_about_mates_is_true() {
+    // The skill's own script: a pin, placed roughly, ends up in the hole of a plate.
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "assemblies")
+        .map(|(_, text)| *text)
+        .unwrap();
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"concentric\""))
+        .expect("the mates script");
+    let ran = peet_with(&["run", "-q"], &script);
+    assert_eq!(ran.code, OK, "{}", ran.out);
+    let replies = &ran.replies;
+    let in_hole = &replies[replies.len() - 3];
+    assert_eq!(in_hole["mate"]["status"], "ok");
+    assert_eq!(in_hole["moved"][0]["name"], "Pin");
+    let flush = &replies[replies.len() - 2];
+    let pin = &flush["moved"][0];
+    // In the hole at (30, 20), its end flush with the underside, standing up through it.
+    assert_eq!(pin["at"], json!([30.0, 20.0, 0.0]));
+    assert_eq!(pin["max"][2], 25.0);
+    let mates = replies.last().unwrap();
+    assert_eq!(mates["freedom"], 1, "it can still turn in the hole");
+
+    // Without flip the two undersides are put against each other: the pin hangs below.
+    let against = script.replace("\"flip\": true, ", "");
+    assert_ne!(against, script);
+    let ran = peet_with(&["run", "-q"], &against);
+    let flush = &ran.replies[ran.replies.len() - 2];
+    assert_eq!(flush["mate"]["status"], "ok");
+    assert_eq!(flush["moved"][0]["min"][2], -25.0);
+    assert_eq!(flush["moved"][0]["max"][2], 0.0);
+
+    // A part's faces are described in the part's own coordinates, wherever it is.
+    let moved = script.replace(
+        "\"at\": [100, 0, 50]",
+        "\"at\": [-300, 80, 7], \"rotate\": {\"axis\": \"x\", \"angle\": 70}",
+    );
+    assert_ne!(moved, script);
+    let ran = peet_with(&["run", "-q"], &moved);
+    assert_eq!(ran.code, OK, "{}", ran.out);
+    assert_eq!(ran.replies.last().unwrap()["freedom"], 1);
+}
+
+#[test]
+fn what_the_assemblies_skill_says_about_dragging_is_true() {
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "assemblies")
+        .map(|(_, text)| *text)
+        .unwrap();
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"drag\""))
+        .expect("the drag script");
+    // The arm swings a quarter turn about the post: its end goes from +X to +Y.
+    let ran = peet_with(&["run", "-q"], &script);
+    assert_eq!(ran.code, OK, "{}", ran.out);
+    let swung = ran.replies.last().unwrap();
+    assert!(swung.get("short_by").is_none(), "{swung}");
+    let turn = &swung["component"]["rotate"];
+    assert_eq!(turn["axis"], json!([0.0, 0.0, 1.0]));
+    assert!(
+        (turn["angle"].as_f64().unwrap() - 90.0).abs() < 0.01,
+        "{swung}"
+    );
+    assert_eq!(swung["freedom"], 1);
+
+    // Out of reach, it says by how much; a fixed component is refused.
+    let far = script.replace("\"to\": [0, 70, 0]", "\"to\": [0, 100, 0]");
+    let ran = peet_with(&["run", "-q"], &far);
+    let short = ran.replies.last().unwrap()["short_by"].as_f64().unwrap();
+    assert!((short - 30.0).abs() < 0.01, "{short}");
+    let fixed = script.replace(
+        "\"drag\", \"component\": \"Arm\"",
+        "\"drag\", \"component\": \"Post\"",
+    );
+    let ran = peet_with(&["run", "-q"], &fixed);
+    assert_eq!(ran.code, FAILED);
+    assert!(
+        ran.replies.last().unwrap()["error"]
+            .as_str()
+            .unwrap()
+            .contains("is fixed")
+    );
+}
+
+#[test]
 fn materials_come_from_a_file_for_the_run() {
     let dir = Folder::new("materials");
     let part = dir.path("panel.peet");

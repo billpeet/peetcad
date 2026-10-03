@@ -7,6 +7,9 @@
 //! drawn once. A definition can itself be an assembly: a sub-assembly, placed as one
 //! rigid thing.
 //!
+//! *Mates* ([`crate::Mate`]) hold components together: they are solved when the assembly
+//! is rebuilt, and the placements they come to are stored in the components.
+//!
 //! The design is recorded in `docs/adr/0009-assemblies.md`.
 
 use std::sync::Arc;
@@ -15,6 +18,7 @@ use peet_math::Frame;
 use serde::{Deserialize, Serialize};
 
 use crate::Model;
+use crate::mate::{Mate, MateEnd, MateId, MateKind};
 
 /// Identifies a definition within its assembly. Ids are not reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -62,6 +66,9 @@ pub struct Assembly {
     components: Vec<Arc<Component>>,
     next_definition: u32,
     next_component: u32,
+    /// In the order they were added: when they can't all hold, the earlier ones win.
+    mates: Vec<Arc<Mate>>,
+    next_mate: u32,
 }
 
 impl Assembly {
@@ -99,6 +106,20 @@ impl Assembly {
             .iter()
             .filter(|c| c.definition == id)
             .count()
+    }
+
+    pub fn mates(&self) -> impl ExactSizeIterator<Item = &Mate> {
+        self.mates.iter().map(|m| &**m)
+    }
+
+    pub fn mate(&self, id: MateId) -> Option<&Mate> {
+        self.mates.iter().find(|m| m.id == id).map(|m| &**m)
+    }
+
+    /// The mates with an end on the component.
+    pub fn mates_of(&self, id: CompId) -> impl Iterator<Item = &Mate> {
+        self.mates()
+            .filter(move |m| m.a.component() == Some(id) || m.b.component() == Some(id))
     }
 
     /// The definition a component is an instance of.
@@ -163,10 +184,46 @@ impl Assembly {
             .map(Arc::make_mut)
     }
 
-    /// Removes a component, and its definition if nothing else uses it.
+    /// Adds a mate between two ends, with an automatic name (`Coincident1`).
+    pub fn add_mate(&mut self, kind: MateKind, a: MateEnd, b: MateEnd) -> MateId {
+        self.next_mate += 1;
+        let id = MateId(self.next_mate);
+        let prefix = kind.name_prefix();
+        let name = (1..)
+            .map(|n| format!("{prefix}{n}"))
+            .find(|name| !self.mates.iter().any(|m| m.name == *name))
+            .unwrap_or_default();
+        self.mates.push(Arc::new(Mate {
+            id,
+            name,
+            kind,
+            a,
+            b,
+            flip: false,
+            suppressed: false,
+        }));
+        id
+    }
+
+    /// The mate, for changing it. Other snapshots of the assembly are not affected.
+    pub fn mate_mut(&mut self, id: MateId) -> Option<&mut Mate> {
+        self.mates
+            .iter_mut()
+            .find(|m| m.id == id)
+            .map(Arc::make_mut)
+    }
+
+    pub fn remove_mate(&mut self, id: MateId) -> Option<Mate> {
+        let index = self.mates.iter().position(|m| m.id == id)?;
+        Some(Arc::unwrap_or_clone(self.mates.remove(index)))
+    }
+
+    /// Removes a component, with its mates, and its definition if nothing else uses it.
     pub fn remove(&mut self, id: CompId) -> Option<Component> {
         let index = self.components.iter().position(|c| c.id == id)?;
         let removed = self.components.remove(index);
+        self.mates
+            .retain(|m| m.a.component() != Some(id) && m.b.component() != Some(id));
         self.prune();
         Some(Arc::unwrap_or_clone(removed))
     }
@@ -242,6 +299,24 @@ impl Assembly {
         self.next_component = self
             .next_component
             .max(max(&mut self.components.iter().map(|c| c.id.0)));
+        let mut seen = std::collections::HashSet::new();
+        for m in &self.mates {
+            if !seen.insert(m.id.0) {
+                return Err(format!(
+                    "The assembly is damaged: two mates have the id {}.",
+                    m.id.0
+                ));
+            }
+            if m.a.path.is_empty() || m.b.path.is_empty() {
+                return Err(format!(
+                    "The assembly is damaged: {} is not on two components.",
+                    m.name
+                ));
+            }
+        }
+        self.next_mate = self
+            .next_mate
+            .max(max(&mut self.mates.iter().map(|m| m.id.0)));
         for d in &mut self.definitions {
             let mut model = (*d.model).clone();
             model.validate()?;

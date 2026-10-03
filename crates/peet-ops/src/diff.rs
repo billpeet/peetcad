@@ -14,8 +14,9 @@ use peet_model::{Datum, FeatureId, FeatureKind, Model, StdPlane};
 use peet_sketch::Sketch;
 
 use crate::assembly::{ComponentChange, InsertSource, Placing};
-use crate::fields::{FeatureArgs, SketchPlane};
+use crate::fields::{FeatureArgs, SketchPlane, input_of};
 use crate::host::Host;
+use crate::mate::{MateChange, MateEndSel, MateType};
 use crate::op::{DatumSel, New, Op, Place, RollTo};
 use crate::value::{FeatureSel, Input};
 use crate::{Undo, apply_with};
@@ -150,6 +151,87 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
                 }
             }
         }
+        _ => {}
+    }
+    if let (Some(before), Some(after)) = (old.assembly(), new.assembly()) {
+        use peet_model::MateKind;
+        let edit = |m: &peet_model::Mate, change| Op::EditMate {
+            mate: m.id.into(),
+            change,
+        };
+        for m in before.mates() {
+            // A deleted component's mates went with it.
+            let with_component = [&m.a, &m.b]
+                .iter()
+                .any(|e| e.component().is_some_and(|c| after.component(c).is_none()));
+            if after.mate(m.id).is_none() && !with_component {
+                ops.push(edit(m, MateChange::Delete));
+            }
+        }
+        let mut added: Vec<&peet_model::Mate> = after
+            .mates()
+            .filter(|m| before.mate(m.id).is_none())
+            .collect();
+        added.sort_by_key(|m| m.id);
+        for m in added {
+            ops.push(Op::Mate {
+                kind: match &m.kind {
+                    MateKind::Coincident => MateType::Coincident,
+                    MateKind::Concentric => MateType::Concentric,
+                    MateKind::Parallel => MateType::Parallel,
+                    MateKind::Distance(s) => MateType::Distance(input_of(s)),
+                    MateKind::Angle(s) => MateType::Angle(input_of(s)),
+                    MateKind::Fasten(relative) => MateType::Fasten(Some(*relative)),
+                },
+                a: MateEndSel::Ref(m.a.clone()),
+                b: MateEndSel::Ref(m.b.clone()),
+                flip: Some(m.flip),
+                name: Some(m.name.clone()),
+            });
+            if m.suppressed {
+                ops.push(edit(m, MateChange::Suppress(true)));
+            }
+        }
+        for m in after.mates() {
+            let Some(o) = before.mate(m.id) else {
+                continue;
+            };
+            if o.a != m.a || o.b != m.b {
+                return Err(format!(
+                    "{} was put on other faces, which no operation does (delete it and add a new one)",
+                    m.name
+                ));
+            }
+            if o.name != m.name {
+                ops.push(edit(m, MateChange::Rename(m.name.clone())));
+            }
+            let value = match (&o.kind, &m.kind) {
+                (a, b) if a == b => None,
+                (MateKind::Distance(_), MateKind::Distance(s))
+                | (MateKind::Angle(_), MateKind::Angle(s)) => Some(input_of(s)),
+                _ => {
+                    return Err(format!(
+                        "{} was made another kind of mate, which no operation does",
+                        m.name
+                    ));
+                }
+            };
+            if value.is_some() || o.flip != m.flip {
+                ops.push(edit(
+                    m,
+                    MateChange::Edit {
+                        value,
+                        flip: (o.flip != m.flip).then_some(m.flip),
+                    },
+                ));
+            }
+            if o.suppressed != m.suppressed {
+                ops.push(edit(m, MateChange::Suppress(m.suppressed)));
+            }
+        }
+    }
+    match (old.is_assembly(), new.is_assembly()) {
+        (a, b) if a == b => {}
         _ => {
             return Err(
                 "the document was changed from a part to an assembly or back, which no operation does"

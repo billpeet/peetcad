@@ -39,6 +39,12 @@ pub fn coverage(cmd: CommandId) -> Coverage {
         C::NewDocument | C::NewAssembly => Op("new"),
         C::InsertComponent => Op("insert"),
         C::EditComponent => Op("open_component"),
+        C::MateCoincident
+        | C::MateConcentric
+        | C::MateParallel
+        | C::MateDistance
+        | C::MateAngle
+        | C::MateFasten => Op("mate"),
         C::OpenDocument => Op("open"),
         C::SaveDocument | C::SaveDocumentAs => Op("save"),
         C::OpenSample | C::OpenSampleEnclosure | C::OpenSampleChassis | C::OpenSampleHousing => {
@@ -341,6 +347,16 @@ impl PeetApp {
         let reply = self.perform_quietly(op);
         if let Some(e) = reply.json["error"].as_str().filter(|_| !reply.ok) {
             self.error(e.to_owned());
+        }
+        reply
+    }
+
+    /// Applies an operation that is one step of a drag: consecutive ones with the same
+    /// `key` are one undo step (seal the history when the drag ends).
+    pub(super) fn perform_merging(&mut self, op: Op, key: u64) -> Reply {
+        let reply = self.apply_to_document(&op, Undo::Group(key));
+        if reply.ok && reply.changed {
+            self.journal.record([op]);
         }
         reply
     }

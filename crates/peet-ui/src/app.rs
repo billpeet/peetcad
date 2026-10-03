@@ -136,6 +136,10 @@ pub struct PeetApp {
     hovered_component: Option<peet_model::CompId>,
     /// A component's name while it is being typed in its properties.
     component_name: Option<(peet_model::CompId, String)>,
+    /// In an assembly: the selected mate.
+    selected_mate: Option<peet_model::MateId>,
+    /// In an assembly: a component being dragged in the view.
+    component_drag: Option<assembly::ComponentDrag>,
     /// The file dialog of Insert Part, waiting for an answer.
     inserting: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
 }
@@ -202,6 +206,8 @@ impl PeetApp {
             selected_component: None,
             hovered_component: None,
             component_name: None,
+            selected_mate: None,
+            component_drag: None,
             inserting: None,
             selected: None,
             hovered: None,
@@ -301,6 +307,8 @@ impl PeetApp {
         self.selected_component = None;
         self.hovered_component = None;
         self.component_name = None;
+        self.selected_mate = None;
+        self.component_drag = None;
     }
 
     /// A tab per open document, shown while more than one is open: click to work on a
@@ -1076,7 +1084,19 @@ impl PeetApp {
         if is_assembly {
             match cmd {
                 CommandId::DeleteSelection => {
-                    return enabled(self.selected_component().is_some());
+                    return enabled(
+                        self.selected_mate().is_some() || self.selected_component().is_some(),
+                    );
+                }
+                CommandId::ToggleSuppress if self.selected_mate().is_some() => {
+                    let suppressed = self
+                        .selected_mate()
+                        .and_then(|id| self.doc.model.assembly()?.mate(id))
+                        .is_some_and(|m| m.suppressed);
+                    return CommandState {
+                        enabled: true,
+                        checked: Some(suppressed),
+                    };
                 }
                 CommandId::ToggleSuppress => {
                     let selected = self
@@ -1094,6 +1114,12 @@ impl PeetApp {
             CommandId::NewAssembly => enabled(true),
             CommandId::InsertComponent => enabled(self.inserting.is_none()),
             CommandId::EditComponent => enabled(self.selected_component().is_some()),
+            CommandId::MateCoincident
+            | CommandId::MateConcentric
+            | CommandId::MateParallel
+            | CommandId::MateDistance
+            | CommandId::MateAngle
+            | CommandId::MateFasten => enabled(self.mate_ends().is_some()),
             CommandId::Undo => enabled(self.doc.can_undo()),
             CommandId::Redo => enabled(self.doc.can_redo()),
             CommandId::NewSketch => enabled(!in_sketch),
@@ -1295,6 +1321,28 @@ impl PeetApp {
             CommandId::NewAssembly => self.guard_unsaved(AfterDiscard::NewAssembly),
             CommandId::InsertComponent => self.start_insert_component(),
             CommandId::EditComponent => self.open_selected_component(),
+            CommandId::MateCoincident
+            | CommandId::MateConcentric
+            | CommandId::MateParallel
+            | CommandId::MateDistance
+            | CommandId::MateAngle
+            | CommandId::MateFasten => self.add_mate(cmd),
+            CommandId::DeleteSelection | CommandId::ToggleSuppress
+                if self.selected_mate().is_some() =>
+            {
+                if let Some(m) = self
+                    .selected_mate()
+                    .and_then(|id| self.doc.model.assembly()?.mate(id))
+                {
+                    let (id, on) = (m.id, !m.suppressed);
+                    let change = if cmd == CommandId::DeleteSelection {
+                        peet_ops::MateChange::Delete
+                    } else {
+                        peet_ops::MateChange::Suppress(on)
+                    };
+                    self.change_mate(id, change);
+                }
+            }
             CommandId::DeleteSelection if self.doc.is_assembly() => {
                 if let Some(id) = self.selected_component() {
                     self.change_component(id, peet_ops::ComponentChange::Delete);
@@ -1689,6 +1737,30 @@ impl PeetApp {
                                     Large,
                                 );
                                 tool(ui, pending, CommandId::EditComponent, "Edit Part", Large);
+                            });
+                            ribbon::group(ui, "Mates", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::MateCoincident,
+                                        "Coincident",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::MateConcentric,
+                                        "Concentric",
+                                        Small,
+                                    );
+                                    tool(ui, pending, CommandId::MateParallel, "Parallel", Small);
+                                });
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::MateDistance, "Distance", Small);
+                                    tool(ui, pending, CommandId::MateAngle, "Angle", Small);
+                                    tool(ui, pending, CommandId::MateFasten, "Fasten", Small);
+                                });
                             });
                             ribbon::group(ui, "Samples", |ui| {
                                 ribbon::stack(ui, |ui| {
@@ -2204,12 +2276,16 @@ impl PeetApp {
         }
         ui.strong("Properties");
         ui.separator();
+        if let Some(id) = self.selected_mate() {
+            egui::ScrollArea::vertical().show(ui, |ui| self.mate_properties(ui, id));
+            return;
+        }
         if let Some(id) = self.selected_component() {
             egui::ScrollArea::vertical().show(ui, |ui| self.component_properties(ui, id));
             return;
         }
         if self.doc.is_assembly() {
-            ui.weak("Select a component, in the tree or in the view, to see where it is and to move it.");
+            ui.weak("Select a component, in the tree or in the view, to see where it is and to move it. To mate two components, click a face on one, Shift-click a face on the other, and pick a mate on the File tab.");
             return;
         }
         if let Some(ItemId::Feature(id)) = self.selected {
@@ -3318,6 +3394,7 @@ impl eframe::App for PeetApp {
 
         let dark = ctx.theme() == egui::Theme::Dark;
         let mut pick_click = None;
+        let mut component_drag = None;
         let mut flange_edit = None;
         let mut sketch_plane_click = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -3337,12 +3414,7 @@ impl eframe::App for PeetApp {
                     hovered: self.hovered,
                     dark,
                     editing_sketch: self.sketch.as_ref().map(|e| e.item),
-                    // In an assembly a click picks a component, not a face of it.
-                    hovered_geom: if self.sketch.is_some() || self.doc.is_assembly() {
-                        None
-                    } else {
-                        self.hovered_geom
-                    },
+                    hovered_geom: if self.sketch.is_some() { None } else { self.hovered_geom },
                     selected_geom: &self.selected_geom,
                     show_std_planes: self.picking_sketch_plane,
                     selected_component: self.selected_component,
@@ -3354,10 +3426,22 @@ impl eframe::App for PeetApp {
                 geom.and_then(|g| self.doc.placed.get(g.body())?.component())
             };
             self.hovered_component = component_at(viewport.hovered_geom);
+            if let Some(response) = &events.response
+                && self.sketch.is_none()
+            {
+                component_drag = assembly::drag_in_view(
+                    ui,
+                    viewport,
+                    &self.doc,
+                    response,
+                    viewport.hovered_geom,
+                    &mut self.component_drag,
+                );
+            }
+            // In an assembly a click picks a face (for a mate) and with it its component.
             if self.doc.is_assembly() && events.clicked_background {
                 self.selected_component = component_at(events.clicked_geom);
-                self.selected = None;
-                self.selected_geom.clear();
+                self.selected_mate = None;
             }
             let handles = self.sketch.is_none()
                 && self.picking.is_none()
@@ -3375,7 +3459,7 @@ impl eframe::App for PeetApp {
                 if let Some(response) = &events.response {
                     editor.show(ui, response, &viewport.camera, work, &self.doc.model.parameters, dark);
                 }
-            } else if events.clicked_background && !self.doc.is_assembly() {
+            } else if events.clicked_background {
                 let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
                 if self.picking_sketch_plane {
                     sketch_plane_click = Some((events.clicked_geom, events.clicked_plane));
@@ -3421,6 +3505,9 @@ impl eframe::App for PeetApp {
             }
         });
 
+        if let Some(event) = component_drag {
+            self.apply_drag(event);
+        }
         match flange_edit {
             Some(FlangeEdit::Length { id, length }) => {
                 let label = format!("Drag {} Length", self.doc.model.name_of(id));
