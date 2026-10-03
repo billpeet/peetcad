@@ -118,6 +118,9 @@ pub enum CommandId {
     CutLoft,
     ConvertToSheet,
     SketchSpline,
+    CheckForUpdates,
+    InstallUpdate,
+    ToggleAutoUpdates,
 }
 
 /// Static description of a command.
@@ -146,7 +149,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 109] = [
+    pub const ALL: [Self; 112] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -256,6 +259,9 @@ impl CommandId {
         Self::CutLoft,
         Self::ConvertToSheet,
         Self::SketchSpline,
+        Self::CheckForUpdates,
+        Self::InstallUpdate,
+        Self::ToggleAutoUpdates,
     ];
 
     pub fn info(self) -> CommandInfo {
@@ -438,6 +444,24 @@ impl CommandId {
                 None,
             ),
             Self::Quit => ("Quit", "File", "Close PeetCAD.", ctrl(Key::Q)),
+            Self::CheckForUpdates => (
+                "Check for Updates",
+                "Help",
+                "Look for a newer PeetCAD and download it.",
+                None,
+            ),
+            Self::InstallUpdate => (
+                "Restart to Update",
+                "Help",
+                "Restart PeetCAD to install the update that was downloaded.",
+                None,
+            ),
+            Self::ToggleAutoUpdates => (
+                "Check for Updates Automatically",
+                "Help",
+                "Look for a newer PeetCAD when it starts, and download it.",
+                None,
+            ),
             Self::NewSketch => (
                 "New Sketch",
                 "Sketch",
@@ -876,6 +900,10 @@ impl CommandId {
         match self {
             // Closing the tab is the browser's job.
             Self::Quit => !peet_platform::is_web(),
+            // The web build is always the newest: the page is.
+            Self::CheckForUpdates | Self::InstallUpdate | Self::ToggleAutoUpdates => {
+                !peet_platform::is_web()
+            }
             _ => true,
         }
     }

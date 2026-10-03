@@ -1031,7 +1031,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
                 "edit_sketch",
                 "exit_sketch",
             ]);
-            all.extend(["tool", "quit"]);
+            all.extend(["tool", "check_for_updates", "install_update", "quit"]);
             all.sort_unstable();
             all.dedup();
             return Err(format!(

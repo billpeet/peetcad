@@ -5,7 +5,8 @@
 //! the two lives here, behind a small API that is identical on both.
 //!
 //! That covers the clock, file dialogs ([`open_file`], [`save_file_as`], [`write_file`]),
-//! the autosave store ([`storage`]) and crash reports ([`crash`]). Operations the browser
+//! the autosave store ([`storage`]), crash reports ([`crash`]) and updates of an installed
+//! copy ([`update`]). Operations the browser
 //! can only do asynchronously return a [`Pending`]. Background workers will be added here
 //! when a later phase needs them.
 
@@ -13,6 +14,7 @@ pub mod crash;
 mod files;
 mod pending;
 pub mod storage;
+pub mod update;
 
 pub use files::{
     OpenedFile, SaveOutcome, SavedFile, open_file, save_file, save_file_as, write_file,

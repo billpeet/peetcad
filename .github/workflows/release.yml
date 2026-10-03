@@ -1,0 +1,80 @@
+name: Release
+
+# Pushing a tag `v1.2.3` publishes PeetCAD 1.2.3 as a GitHub release: an installer
+# (`…-Setup.exe`) and the packages installed copies update themselves from
+# (`peet_platform::update`). The tag must be the version in Cargo.toml.
+
+on:
+  push:
+    tags: ["v[0-9]+.[0-9]+.[0-9]+*"]
+
+env:
+  CARGO_TERM_COLOR: always
+  # The same version as the `velopack` crate in Cargo.lock.
+  VPK_VERSION: 1.2.161
+  # Not "PeetCAD": the installer owns %LOCALAPPDATA%\<id> and removes it when PeetCAD is
+  # uninstalled, and %LOCALAPPDATA%\PeetCAD is where the user's autosaves and crash reports are.
+  PACK_ID: billpeet.PeetCAD
+  REPO_URL: https://github.com/${{ github.repository }}
+
+jobs:
+  windows:
+    name: Windows installer and update packages
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v5
+      - run: rustup show
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Check the tag is the version in Cargo.toml
+        id: version
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          built=$(cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | select(.name == "peetcad") | .version')
+          if [ "$version" != "$built" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME was pushed, but Cargo.toml says version $built. Change [workspace.package] version first."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - run: cargo build --release -p peetcad -p peet-cli
+
+      - name: Collect the files to install
+        run: |
+          mkdir -p package
+          cp target/release/peetcad.exe target/release/peet.exe LICENSE package/
+
+      - run: dotnet tool install -g vpk --version "$VPK_VERSION"
+
+      # The release before this one, so the update from it is a small delta package.
+      # There is none before the first release.
+      - name: Download the previous release
+        continue-on-error: true
+        run: vpk download github --repoUrl "$REPO_URL" --token "${{ secrets.GITHUB_TOKEN }}" --outputDir Releases
+
+      - name: Package
+        run: |
+          vpk pack \
+            --packId "$PACK_ID" \
+            --packVersion "${{ steps.version.outputs.version }}" \
+            --packDir package \
+            --mainExe peetcad.exe \
+            --packTitle PeetCAD \
+            --packAuthors "PeetCAD contributors" \
+            --outputDir Releases
+
+      - name: Publish
+        run: |
+          vpk upload github \
+            --repoUrl "$REPO_URL" \
+            --token "${{ secrets.GITHUB_TOKEN }}" \
+            --outputDir Releases \
+            --tag "$GITHUB_REF_NAME" \
+            --releaseName "PeetCAD ${{ steps.version.outputs.version }}" \
+            --publish

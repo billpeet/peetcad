@@ -367,12 +367,22 @@ Without one they are refused.
 |---|---|
 | `view` | `to` (`isometric`, `front`, `back`, `left`, `right`, `top`, `bottom`) |
 | `zoom_to_fit` | |
-| `toggle` | `what` (`perspective`, `grid`, `view_cube`, `feature_tree`, `properties`, `performance_overlay`, `relations`, `construction`), `on` (left out: the other way) |
+| `toggle` | `what` (`perspective`, `grid`, `view_cube`, `feature_tree`, `properties`, `performance_overlay`, `relations`, `construction`, `automatic_updates`), `on` (left out: the other way) |
 | `window` | `open` (`command_palette`, `settings`, `keyboard_shortcuts`, `about`, `parameters`, `configurations`, `bend_table`, `checks`, `materials`, `mass`) |
 | `edit_sketch` | `sketch`: open it in the sketch editor |
 | `exit_sketch` | finish the open sketch, writing it to the part |
 | `tool` | `tool` (`select`, `line`, `rectangle`, `center_rectangle`, `circle`, `arc`, `slot`, `polygon`, `point`, `trim`, `extend`, `fillet`, `offset`, `mirror`, `dimension`) |
+| `check_for_updates` | look for a newer PeetCAD and download it; replies with `update` |
+| `install_update` | restart PeetCAD to install the update that was downloaded |
 | `quit` | |
+
+`check_for_updates` works in the background, so its reply says how far it is, not how it
+ended: `"update": {"status": …, "current": "0.1.0"}`. Send it again to follow it. The
+status is `not_installed` (this copy was built from source, so it never updates),
+`idle`, `checking`, `downloading` (with `version` and `percent`), `ready` (with
+`version`: `install_update` installs it), `up_to_date` or `failed` (with `error`).
+`install_update` closes PeetCAD, so the session ends with it; with unsaved changes the
+user is asked about them first. See [Updates](../README.md#updates).
 
 While a sketch is open for editing in the application, operations that change the part
 are refused until it is finished (`exit_sketch`); queries are not.

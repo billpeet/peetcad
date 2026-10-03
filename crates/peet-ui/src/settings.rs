@@ -212,6 +212,8 @@ pub struct Settings {
     pub check_rules: peet_sheetmetal::CheckRules,
     /// The density mass properties are worked out with, in kg/m³.
     pub density: f64,
+    /// Look for a newer PeetCAD when it starts, and download it (installed copies only).
+    pub check_for_updates: bool,
 }
 
 impl Default for Settings {
@@ -232,6 +234,7 @@ impl Default for Settings {
             materials: peet_sheetmetal::MaterialLibrary::builtin(),
             check_rules: peet_sheetmetal::CheckRules::default(),
             density: STEEL_DENSITY,
+            check_for_updates: true,
         }
     }
 }

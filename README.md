@@ -12,7 +12,26 @@ It runs as a native Windows app and in the browser (WebAssembly), from one codeb
 > geometry, undo and a native file format).
 > See [ROADMAP.md](ROADMAP.md) for the plan.
 
-## Running
+## Installing
+
+On Windows, download `billpeet.PeetCAD-win-Setup.exe` from the
+[latest release](https://github.com/billpeet/peetcad/releases/latest) and run it. It
+installs PeetCAD for the current user (no administrator rights) with `peet` next to it,
+and starts it.
+
+### Updates
+
+An installed PeetCAD looks for a newer release on GitHub when it starts (and every six
+hours while it is open), downloads it in the background, and then offers to restart.
+"Restart Now" closes PeetCAD (asking about unsaved changes first), installs the update
+and starts it again. "Later" leaves it for the next start, when it is installed before
+the window opens; until then the status bar keeps a "Restart to update" link.
+
+Help > Updates looks straight away, and Help > About shows where it is. Settings has
+"Check for updates automatically" to turn the looking off. A PeetCAD built from source
+is not an installed copy, so it never updates itself.
+
+## Running from source
 
 You need Rust (stable, installed through [rustup](https://rustup.rs)). The pinned toolchain
 in `rust-toolchain.toml` pulls in the WebAssembly target automatically.
@@ -37,6 +56,18 @@ trunk build --release --cargo-profile release-web   # optimised build into dist/
 ```
 
 The browser needs WebGPU or WebGL2 (any current browser).
+
+### Releasing
+
+1. Set `version` under `[workspace.package]` in `Cargo.toml`, and commit.
+2. Tag that commit `v<version>` and push the tag: `git tag v0.2.0 && git push origin v0.2.0`.
+
+`.github/workflows/release.yml` builds it, packages it with
+[Velopack](https://velopack.io) and publishes the GitHub release. Installed copies pick
+it up from there. The version only ever goes up: a copy doesn't update to an older one.
+
+To try a release before publishing it, package it into a folder (`vpk pack`, as in the
+workflow) and start an installed PeetCAD with `PEETCAD_UPDATE_SOURCE` set to that folder.
 
 ## Controls
 

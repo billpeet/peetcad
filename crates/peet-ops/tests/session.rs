@@ -373,6 +373,8 @@ fn application_commands_go_to_the_application() {
         json!({"op": "edit_sketch", "sketch": "Sketch1"}),
         json!({"op": "tool", "tool": "line"}),
         json!({"op": "exit_sketch"}),
+        json!({"op": "check_for_updates"}),
+        json!({"op": "install_update"}),
         json!({"op": "quit"}),
     ];
     // With no application, each says so and nothing happens.

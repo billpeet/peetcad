@@ -25,6 +25,8 @@ pub enum AfterDiscard {
     SampleChassis,
     SampleHousing,
     Quit,
+    /// Close, install the downloaded update and start again.
+    InstallUpdate,
 }
 
 pub struct FileState {

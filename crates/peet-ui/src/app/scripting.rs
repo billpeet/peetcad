@@ -141,6 +141,9 @@ pub fn coverage(cmd: CommandId) -> Coverage {
         C::EditSketch => App("edit_sketch"),
         C::ExitSketch => App("exit_sketch"),
         C::SketchSelect => App("tool"),
+        C::CheckForUpdates => App("check_for_updates"),
+        C::InstallUpdate => App("install_update"),
+        C::ToggleAutoUpdates => App("toggle"),
         C::Quit => App("quit"),
     }
 }
@@ -169,6 +172,7 @@ pub fn command_for(command: &AppCommand) -> CommandId {
             Toggle::PerformanceOverlay => C::TogglePerfOverlay,
             Toggle::Relations => C::ToggleRelations,
             Toggle::Construction => C::ToggleConstruction,
+            Toggle::AutomaticUpdates => C::ToggleAutoUpdates,
         },
         AppCommand::Window(window) => match window {
             Window::CommandPalette => C::CommandPalette,
@@ -202,6 +206,8 @@ pub fn command_for(command: &AppCommand) -> CommandId {
             SketchTool::Dimension => C::SmartDimension,
             SketchTool::Spline => C::SketchSpline,
         },
+        AppCommand::CheckForUpdates => C::CheckForUpdates,
+        AppCommand::InstallUpdate => C::InstallUpdate,
         AppCommand::Quit => C::Quit,
     }
 }
@@ -416,6 +422,20 @@ impl PeetApp {
             out.insert("editing".to_owned(), json!(self.doc.model.name_of(id)));
             return Ok(out);
         }
+        // These say how far the update is, and why there is none to install.
+        match command {
+            AppCommand::CheckForUpdates => {
+                self.check_for_updates(true);
+                out.insert("update".to_owned(), self.update_json());
+                return Ok(out);
+            }
+            AppCommand::InstallUpdate => {
+                self.install_update()?;
+                out.insert("update".to_owned(), self.update_json());
+                return Ok(out);
+            }
+            _ => {}
+        }
         let cmd = command_for(command);
         let state = self.command_state(cmd);
         if !state.enabled {
@@ -456,6 +476,8 @@ mod tests {
         let mut all = vec![
             AppCommand::ZoomToFit,
             AppCommand::ExitSketch,
+            AppCommand::CheckForUpdates,
+            AppCommand::InstallUpdate,
             AppCommand::Quit,
             AppCommand::EditSketch(FeatureSel::Name("Sketch1".to_owned())),
         ];

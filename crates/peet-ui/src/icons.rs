@@ -139,6 +139,7 @@ pub enum Icon {
     Performance,
     Keyboard,
     About,
+    Update,
 }
 
 impl Icon {
@@ -240,6 +241,7 @@ impl Icon {
             C::TogglePerfOverlay => Self::Performance,
             C::KeyboardShortcuts => Self::Keyboard,
             C::About => Self::About,
+            C::CheckForUpdates | C::InstallUpdate | C::ToggleAutoUpdates => Self::Update,
             _ => return None,
         })
     }
@@ -371,7 +373,8 @@ impl Icon {
             | I::Suppress
             | I::RollToEnd
             | I::Keyboard
-            | I::About => Category::Neutral,
+            | I::About
+            | I::Update => Category::Neutral,
             I::ViewCube | I::TreePanel | I::PropertiesPanel | I::Performance => Category::View,
         }
     }
@@ -1195,6 +1198,11 @@ impl<'a> Pen<'a> {
                     self.disc((x, 10.0), 1.1, fg);
                 }
                 self.line(&[(7.0, 14.5), (17.0, 14.5)], ac);
+            }
+            Icon::Update => {
+                // Down into a tray.
+                self.line(&[(4.5, 15.5), (4.5, 20.0), (19.5, 20.0), (19.5, 15.5)], fg);
+                self.arrow((12.0, 3.5), (12.0, 15.5), ac);
             }
             Icon::About => {
                 self.circle((12.0, 12.0), 9.0, fg);

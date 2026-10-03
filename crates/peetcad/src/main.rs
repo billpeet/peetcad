@@ -22,6 +22,10 @@ fn install_crash_reporting() {
 #[cfg(not(target_arch = "wasm32"))]
 fn main() -> eframe::Result {
     let process_start = Instant::now();
+    // First of all: the installer starts PeetCAD to tell it of an install or uninstall,
+    // and an update downloaded last time is installed now. (Before logging starts, so a
+    // copy that was not installed doesn't log that as an error on every start.)
+    peet_platform::update::startup();
     env_logger::Builder::from_env(
         env_logger::Env::default().default_filter_or("info,wgpu_core=warn,wgpu_hal=warn,naga=warn"),
     )

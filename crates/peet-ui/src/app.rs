@@ -35,6 +35,7 @@ mod convert;
 mod live;
 pub mod scripting;
 mod solids;
+mod updates;
 
 pub const APP_NAME: &str = "PeetCAD";
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -141,6 +142,8 @@ pub struct PeetApp {
     step_import: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
     /// A message to read and dismiss (what an import left out, or why it failed).
     notice: Option<solids::Notice>,
+    /// Looking for a newer PeetCAD, and offering to install it.
+    updates: updates::Updates,
     /// This session, as `peet` reaches it (not in the browser).
     #[cfg(not(target_arch = "wasm32"))]
     live: Option<peet_live::Server>,
@@ -158,10 +161,10 @@ impl PeetApp {
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
             .unwrap_or_default();
 
-        #[cfg_attr(target_arch = "wasm32", expect(unused_mut))]
         let mut app = Self::with_renderer(settings, cc.wgpu_render_state.clone(), process_start);
         #[cfg(not(target_arch = "wasm32"))]
         app.start_live(&cc.egui_ctx);
+        app.start_updates(&cc.egui_ctx);
         app
     }
 
@@ -243,6 +246,7 @@ impl PeetApp {
             dxf_import: None,
             step_import: None,
             notice: None,
+            updates: updates::Updates::default(),
             #[cfg(not(target_arch = "wasm32"))]
             live: None,
         }
@@ -884,6 +888,15 @@ impl PeetApp {
                 self.doc.mark_saved(None);
                 self.quit_requested = true;
             }
+            AfterDiscard::InstallUpdate => match self.updates.install_on_exit() {
+                // The installer waits for PeetCAD to close, and starts it again.
+                Ok(()) => {
+                    self.files.discard_autosave();
+                    self.doc.mark_saved(None);
+                    self.quit_requested = true;
+                }
+                Err(e) => self.error(e),
+            },
         }
     }
 
@@ -1075,6 +1088,9 @@ impl PeetApp {
             | CommandId::KeyboardShortcuts
             | CommandId::About
             | CommandId::Quit => enabled(true),
+            CommandId::CheckForUpdates => enabled(self.updates.can_check()),
+            CommandId::InstallUpdate => enabled(self.updates.ready().is_some()),
+            CommandId::ToggleAutoUpdates => on(self.settings.check_for_updates),
             // Sketch commands outside sketch mode.
             _ => enabled(false),
         }
@@ -1255,6 +1271,13 @@ impl PeetApp {
             CommandId::KeyboardShortcuts => self.windows.shortcuts = true,
             CommandId::About => self.windows.about = true,
             CommandId::Quit => self.guard_unsaved(AfterDiscard::Quit),
+            CommandId::CheckForUpdates => self.check_for_updates(true),
+            CommandId::InstallUpdate => {
+                if let Err(e) = self.install_update() {
+                    self.error(e);
+                }
+            }
+            CommandId::ToggleAutoUpdates => self.settings.check_for_updates ^= true,
             // Sketch commands outside sketch mode.
             _ => {}
         }
@@ -1963,6 +1986,7 @@ impl PeetApp {
                                     Large,
                                 );
                                 tool(ui, pending, CommandId::About, "About", Large);
+                                tool(ui, pending, CommandId::CheckForUpdates, "Updates", Large);
                             });
                         }
                     }
@@ -1970,7 +1994,7 @@ impl PeetApp {
             });
     }
 
-    fn status_bar(&self, ui: &mut Ui) {
+    fn status_bar(&self, ui: &mut Ui, pending: &mut Vec<CommandId>) {
         let units = self.doc.model.parameters.units;
         if let Some(editor) = &self.sketch {
             ui.horizontal(|ui| {
@@ -2027,6 +2051,9 @@ impl PeetApp {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.label(units.length.suffix());
                 ui.separator();
+                if self.updates.status_bar(ui) {
+                    pending.push(CommandId::InstallUpdate);
+                }
                 ui.label(if self.settings.perspective {
                     "Perspective"
                 } else {
@@ -2973,6 +3000,12 @@ impl PeetApp {
                 ui.checkbox(&mut s.save_caches, "Save display data with parts")
                     .on_hover_text("Parts open instantly, but the files are larger. Without it the part is rebuilt when opened.");
                 ui.add_space(8.0);
+                if CommandId::ToggleAutoUpdates.available() {
+                    ui.heading("Updates");
+                    ui.checkbox(&mut s.check_for_updates, "Check for updates automatically")
+                        .on_hover_text("Looks for a newer PeetCAD when it starts, downloads it, and offers to restart. Nothing is installed while you work.");
+                    ui.add_space(8.0);
+                }
                 if ui.button("Reset to defaults").clicked() {
                     *s = Settings::default();
                     projection_changed = true;
@@ -3028,8 +3061,13 @@ impl PeetApp {
             });
     }
 
-    fn about_window(&mut self, ctx: &egui::Context) {
+    fn about_window(&mut self, ctx: &egui::Context, pending: &mut Vec<CommandId>) {
         let (adapter, backend) = (&self.adapter_name, &self.backend_name);
+        let updates = CommandId::CheckForUpdates
+            .available()
+            .then(|| self.updates.describe());
+        let can_check = self.updates.can_check();
+        let ready = self.updates.ready().is_some();
         egui::Window::new("About PeetCAD")
             .open(&mut self.windows.about)
             .collapsible(false)
@@ -3048,7 +3086,26 @@ impl PeetApp {
                     ui.weak("License");
                     ui.label("MIT");
                     ui.end_row();
+                    if let Some(text) = &updates {
+                        ui.weak("Updates");
+                        ui.label(text);
+                        ui.end_row();
+                    }
                 });
+                if updates.is_some() && (can_check || ready) {
+                    ui.add_space(6.0);
+                    ui.horizontal(|ui| {
+                        if ready && ui.button("Restart to Update").clicked() {
+                            pending.push(CommandId::InstallUpdate);
+                        }
+                        if ui
+                            .add_enabled(can_check, egui::Button::new("Check for Updates"))
+                            .clicked()
+                        {
+                            pending.push(CommandId::CheckForUpdates);
+                        }
+                    });
+                }
             });
     }
 }
@@ -3291,9 +3348,13 @@ fn menu_button(ui: &mut Ui, cmd: CommandId, state: CommandState) -> bool {
 impl eframe::App for PeetApp {
     /// What `peet` sent is applied here and not in `ui`: this runs while the window is
     /// minimised too, when nothing is drawn.
-    #[cfg(not(target_arch = "wasm32"))]
     fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // First, so an operation that asks about updates is told how things are now.
+        self.poll_updates();
+        #[cfg(not(target_arch = "wasm32"))]
         self.serve_live(ctx);
+        #[cfg(target_arch = "wasm32")]
+        let _ = ctx;
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
@@ -3335,7 +3396,7 @@ impl eframe::App for PeetApp {
             ui.add_space(3.0);
         });
         self.ribbon_tab = tab;
-        egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
+        egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui, &mut pending));
         if self.settings.show_feature_tree {
             egui::Panel::left("feature_tree")
                 .resizable(true)
@@ -3464,13 +3525,14 @@ impl eframe::App for PeetApp {
         }
         self.settings_window(&ctx);
         self.shortcuts_window(&ctx);
-        self.about_window(&ctx);
+        self.about_window(&ctx, &mut pending);
         self.parameters_window(&ctx);
         self.configurations_window(&ctx);
         self.sheet_checks_window(&ctx);
         self.gauge_window(&ctx);
         self.mass_properties_window(&ctx);
         self.notice_window(&ctx);
+        self.update_window(&ctx, &mut pending);
         if let Some(cmd) = self.bend_table_window(&ctx) {
             pending.push(cmd);
         }

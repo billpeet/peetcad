@@ -50,7 +50,29 @@ peet view to=front --live
 - **Paths** in `save`, `export` and the imports are relative to where `peet` is run, as
   they are for a file.
 - **The application's own operations** work only here: `view`, `zoom_to_fit`, `toggle`,
-  `window`, `edit_sketch`, `exit_sketch`, `tool`, `quit` (`peet ops` marks them "needs a
-  running PeetCAD"). Use `view` and `zoom_to_fit` to show the user what was done.
+  `window`, `edit_sketch`, `exit_sketch`, `tool`, `check_for_updates`, `install_update`,
+  `quit` (`peet ops` marks them "needs a running PeetCAD"). Use `view` and `zoom_to_fit`
+  to show the user what was done.
 - If PeetCAD doesn't take an operation within 20 seconds (a file dialog is open in it),
   the reply is `"ok": false` saying so, and the operation is not applied.
+
+## Updating PeetCAD
+
+An installed PeetCAD looks for a newer release when it starts and downloads it; the
+user is offered a restart. Only do this when asked to.
+
+```sh
+peet check_for_updates --live     # "update": {"status": "ready", "version": "0.2.0", "current": "0.1.0"}
+peet install_update --live        # PeetCAD closes, installs it and starts again
+```
+
+- `check_for_updates` returns at once and works in the background: send it again until
+  `status` is `ready`, `up_to_date` or `failed` (`error` says why; usually no connection).
+- `not_installed` means this PeetCAD was built from source: it never updates, and
+  `install_update` is refused.
+- `install_update` needs `ready`. It ends the session (`peet sessions` shows the new one
+  a few seconds later). If the part has unsaved changes the user is asked about them in
+  PeetCAD first, and nothing restarts until they answer: `save` beforehand if that is
+  what was asked for.
+- `{"op": "toggle", "what": "automatic_updates", "on": false}` stops PeetCAD looking by
+  itself.

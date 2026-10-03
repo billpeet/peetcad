@@ -110,6 +110,8 @@ word_enum! {
         /// In a sketch: new geometry is construction geometry (or, with geometry
         /// selected, whether it is).
         Construction = "construction",
+        /// Look for a newer PeetCAD when it starts, and download it.
+        AutomaticUpdates = "automatic_updates",
     }
 }
 
@@ -171,6 +173,10 @@ pub enum AppCommand {
     ExitSketch,
     /// Pick a tool of the sketch editor.
     Tool(SketchTool),
+    /// Look for a newer PeetCAD and download it. The reply says how far that is.
+    CheckForUpdates,
+    /// Restart PeetCAD to install the update that was downloaded.
+    InstallUpdate,
     Quit,
 }
 
@@ -185,6 +191,8 @@ impl AppCommand {
             Self::EditSketch(_) => "edit_sketch",
             Self::ExitSketch => "exit_sketch",
             Self::Tool(_) => "tool",
+            Self::CheckForUpdates => "check_for_updates",
+            Self::InstallUpdate => "install_update",
             Self::Quit => "quit",
         }
     }
@@ -206,6 +214,8 @@ impl AppCommand {
                 .map(Self::EditSketch),
             "exit_sketch" => Ok(Self::ExitSketch),
             "tool" => a.required("tool", SketchTool::parse).map(Self::Tool),
+            "check_for_updates" => Ok(Self::CheckForUpdates),
+            "install_update" => Ok(Self::InstallUpdate),
             "quit" => Ok(Self::Quit),
             _ => return None,
         })
@@ -249,6 +259,16 @@ pub(crate) fn app_ops() -> Vec<(&'static str, String, &'static str)> {
             "tool",
             format!("tool ({})", SketchTool::words()),
             "Pick a tool of the sketch editor.",
+        ),
+        (
+            "check_for_updates",
+            String::new(),
+            "Look for a newer PeetCAD and download it. The reply says how far that is.",
+        ),
+        (
+            "install_update",
+            String::new(),
+            "Restart PeetCAD to install the update that was downloaded.",
         ),
         ("quit", String::new(), "Close the application."),
     ]
