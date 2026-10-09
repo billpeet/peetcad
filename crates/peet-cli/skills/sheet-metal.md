@@ -27,7 +27,8 @@ features. It always has an exact **flat pattern**, which is what the DXF export 
 - `thickness`, `radius` (the default inner bend radius) and `bend` (`{"k_factor":
   0.44}`, or an `allowance` or `deduction`) apply to the whole body. Defaults: 1.5 mm,
   1.5 mm, K 0.44. Or take them from the material tables: `peet materials`, then
-  `{"op": "apply_material", "material": ..., "gauge": ...}`.
+  `{"op": "apply_material", "material": ..., "gauge": ...}`. That also makes it the
+  part's material, so `mass` gives `mass_kg`.
 - `relief` and `relief_ratio` are also set here, for the whole body. A **relief** is the
   small cut at each end of a bend that stops short of the end of its edge, so the sheet
   doesn't tear. `relief`: `rectangular` (the default), `obround` or `tear` (no cut: the

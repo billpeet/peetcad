@@ -19,11 +19,13 @@ pub const FILTER: (&str, &[&str]) = ("PeetCAD part", &["peet"]);
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AfterDiscard {
     New,
+    NewAssembly,
     Open,
     Sample,
     SampleEnclosure,
     SampleChassis,
     SampleHousing,
+    SampleAssembly,
     Quit,
 }
 

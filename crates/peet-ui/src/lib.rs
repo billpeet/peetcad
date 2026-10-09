@@ -13,6 +13,8 @@ mod document;
 mod features_ui;
 mod files;
 mod icons;
+mod link_watch;
+mod lod;
 mod palette;
 mod perf;
 mod ribbon;

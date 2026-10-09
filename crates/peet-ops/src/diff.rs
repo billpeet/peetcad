@@ -13,8 +13,10 @@ use peet_document::Document;
 use peet_model::{Datum, FeatureId, FeatureKind, Model, StdPlane};
 use peet_sketch::Sketch;
 
-use crate::fields::{FeatureArgs, SketchPlane};
+use crate::assembly::{ComponentChange, InsertSource, Placing};
+use crate::fields::{FeatureArgs, SketchPlane, input_of};
 use crate::host::Host;
+use crate::mate::{MateChange, MateEndSel, MateType};
 use crate::op::{DatumSel, New, Op, Place, RollTo};
 use crate::value::{Configs, FeatureSel, Input};
 use crate::{Undo, apply_with};
@@ -94,6 +96,286 @@ pub fn diff_scoped(
         .eq(after.entries.iter().map(|p| p.name.as_str()))
     {
         return Err("the parameters were put in another order, which no operation does".to_owned());
+    }
+
+    // ---- An assembly's parts and components ----
+    match (old.assembly(), new.assembly()) {
+        (None, None) => {}
+        (Some(before), Some(after)) => {
+            for d in after.definitions() {
+                let was = before.definition(d.id);
+                if was.map_or(d.link.is_some(), |o| o.link != d.link) {
+                    return Err(format!(
+                        "{} was linked to a file or unlinked, which is done by an operation, not by a change to the model",
+                        d.name()
+                    ));
+                }
+                if before.definition(d.id).is_some_and(|o| o.model != d.model) {
+                    ops.push(Op::SetPart {
+                        part: d.id,
+                        model: d.model.clone(),
+                    });
+                }
+            }
+            let component = |c: &peet_model::Component, change| Op::Component {
+                component: c.id.into(),
+                change,
+            };
+            // The patterns that are gone, first: their copies go with them.
+            let edit_pattern =
+                |p: &peet_model::ComponentPattern, change| Op::EditComponentPattern {
+                    pattern: p.id.into(),
+                    change,
+                };
+            for p in before.patterns() {
+                // (A pattern whose originals were all deleted went with them.)
+                let originals = p.seeds.iter().any(|s| after.component(*s).is_some());
+                if after.pattern(p.id).is_none() && originals {
+                    ops.push(edit_pattern(p, crate::PatternChange::Delete));
+                }
+            }
+            for c in before.components() {
+                // A pattern's copy goes with its pattern, its original or a lower count.
+                if after.component(c.id).is_none() && c.pattern.is_none() {
+                    ops.push(component(c, ComponentChange::Delete));
+                }
+            }
+            // New ones in the order they were made, so that they get the same ids.
+            let mut added: Vec<&peet_model::Component> = after
+                .components()
+                .filter(|c| before.component(c.id).is_none() && c.pattern.is_none())
+                .collect();
+            added.sort_by_key(|c| c.id);
+            for c in added {
+                let part = after
+                    .definition(c.definition)
+                    .ok_or_else(|| format!("{} has no part", c.name))?;
+                ops.push(Op::Insert {
+                    from: InsertSource::Model(part.model.clone()),
+                    name: Some(c.name.clone()),
+                    placing: Some(Placing::Frame(c.placement)),
+                    fixed: Some(c.fixed),
+                    link: false,
+                    absolute: false,
+                });
+                if c.suppressed {
+                    ops.push(component(c, ComponentChange::Suppress(true)));
+                }
+                if !c.visible {
+                    ops.push(component(c, ComponentChange::Show(false)));
+                }
+                if c.color.is_some() {
+                    ops.push(component(c, ComponentChange::Color(c.color)));
+                }
+            }
+            for c in after.components() {
+                let Some(o) = before.component(c.id) else {
+                    continue;
+                };
+                if o.definition != c.definition {
+                    let part = after
+                        .definition(c.definition)
+                        .ok_or_else(|| format!("{} has no part", c.name))?;
+                    ops.push(component(
+                        c,
+                        ComponentChange::Replace(InsertSource::Model(part.model.clone())),
+                    ));
+                }
+                if o.name != c.name {
+                    ops.push(component(c, ComponentChange::Rename(c.name.clone())));
+                }
+                // (A pattern's copy is placed by its pattern.)
+                if o.placement != c.placement && c.pattern.is_none() {
+                    ops.push(component(
+                        c,
+                        ComponentChange::Place(Placing::Frame(c.placement)),
+                    ));
+                }
+                if o.fixed != c.fixed && c.pattern.is_none() {
+                    ops.push(component(c, ComponentChange::Fix(c.fixed)));
+                }
+                if o.suppressed != c.suppressed {
+                    ops.push(component(c, ComponentChange::Suppress(c.suppressed)));
+                }
+                if o.visible != c.visible {
+                    ops.push(component(c, ComponentChange::Show(c.visible)));
+                }
+                if o.color != c.color {
+                    ops.push(component(c, ComponentChange::Color(c.color)));
+                }
+            }
+            // The patterns: new ones (which make their copies), and changed ones.
+            let mut new_patterns: Vec<&peet_model::ComponentPattern> = after
+                .patterns()
+                .filter(|p| before.pattern(p.id).is_none())
+                .collect();
+            new_patterns.sort_by_key(|p| p.id);
+            for p in new_patterns {
+                ops.push(Op::ComponentPattern {
+                    components: p.seeds.iter().map(|c| (*c).into()).collect(),
+                    kind: crate::PatternSpec::Exact(p.kind.clone()),
+                    name: Some(p.name.clone()),
+                });
+            }
+            for p in after.patterns() {
+                let Some(o) = before.pattern(p.id) else {
+                    continue;
+                };
+                if o.name != p.name {
+                    ops.push(edit_pattern(
+                        p,
+                        crate::PatternChange::Rename(p.name.clone()),
+                    ));
+                }
+                if o.kind != p.kind {
+                    ops.push(edit_pattern(p, crate::PatternChange::Set(p.kind.clone())));
+                }
+            }
+            // The exploded view's steps. What a deleted component took with it (itself
+            // out of its steps, and the steps it left empty) needs no operation.
+            let edit = |s: &peet_model::ExplodeStep, change| Op::EditExplodeStep {
+                step: s.id.into(),
+                change,
+            };
+            let left = |s: &peet_model::ExplodeStep| -> Vec<peet_model::CompId> {
+                s.components
+                    .iter()
+                    .copied()
+                    .filter(|c| after.component(*c).is_some())
+                    .collect()
+            };
+            let selectors = |ids: &[peet_model::CompId]| -> Vec<crate::CompSel> {
+                ids.iter().map(|c| (*c).into()).collect()
+            };
+            for s in before.explode_steps() {
+                if after.explode_step(s.id).is_none() && !left(s).is_empty() {
+                    ops.push(edit(s, crate::ExplodeChange::Delete));
+                }
+            }
+            let mut added: Vec<&peet_model::ExplodeStep> = after
+                .explode_steps()
+                .filter(|s| before.explode_step(s.id).is_none())
+                .collect();
+            added.sort_by_key(|s| s.id);
+            for s in added {
+                ops.push(Op::ExplodeStep {
+                    components: selectors(&s.components),
+                    by: crate::Point3::Mm(s.offset),
+                    name: Some(s.name.clone()),
+                });
+            }
+            for s in after.explode_steps() {
+                let Some(o) = before.explode_step(s.id) else {
+                    continue;
+                };
+                if o.name != s.name {
+                    ops.push(edit(s, crate::ExplodeChange::Rename(s.name.clone())));
+                }
+                let components = (left(o) != s.components).then(|| selectors(&s.components));
+                let by = (o.offset != s.offset).then_some(crate::Point3::Mm(s.offset));
+                if by.is_some() || components.is_some() {
+                    ops.push(edit(s, crate::ExplodeChange::Edit { by, components }));
+                }
+            }
+        }
+        _ => {}
+    }
+    if let (Some(before), Some(after)) = (old.assembly(), new.assembly()) {
+        use peet_model::MateKind;
+        let edit = |m: &peet_model::Mate, change| Op::EditMate {
+            mate: m.id.into(),
+            change,
+        };
+        for m in before.mates() {
+            // A deleted component's mates went with it.
+            let with_component = [&m.a, &m.b]
+                .iter()
+                .any(|e| e.component().is_some_and(|c| after.component(c).is_none()));
+            if after.mate(m.id).is_none() && !with_component {
+                ops.push(edit(m, MateChange::Delete));
+            }
+        }
+        let mut added: Vec<&peet_model::Mate> = after
+            .mates()
+            .filter(|m| before.mate(m.id).is_none())
+            .collect();
+        added.sort_by_key(|m| m.id);
+        for m in added {
+            ops.push(Op::Mate {
+                kind: match &m.kind {
+                    MateKind::Coincident => MateType::Coincident,
+                    MateKind::Concentric => MateType::Concentric,
+                    MateKind::Parallel => MateType::Parallel,
+                    MateKind::Distance(s) => MateType::Distance(input_of(s)),
+                    MateKind::Angle(s) => MateType::Angle(input_of(s)),
+                    MateKind::Fasten(relative) => MateType::Fasten(Some(*relative)),
+                },
+                a: MateEndSel::Ref(m.a.clone()),
+                b: MateEndSel::Ref(m.b.clone()),
+                flip: Some(m.flip),
+                name: Some(m.name.clone()),
+            });
+            if m.suppressed {
+                ops.push(edit(m, MateChange::Suppress(true)));
+            }
+        }
+        for m in after.mates() {
+            let Some(o) = before.mate(m.id) else {
+                continue;
+            };
+            if o.a != m.a || o.b != m.b {
+                return Err(format!(
+                    "{} was put on other faces, which no operation does (delete it and add a new one)",
+                    m.name
+                ));
+            }
+            if o.name != m.name {
+                ops.push(edit(m, MateChange::Rename(m.name.clone())));
+            }
+            let value = match (&o.kind, &m.kind) {
+                (a, b) if a == b => None,
+                (MateKind::Distance(_), MateKind::Distance(s))
+                | (MateKind::Angle(_), MateKind::Angle(s)) => Some(input_of(s)),
+                _ => {
+                    return Err(format!(
+                        "{} was made another kind of mate, which no operation does",
+                        m.name
+                    ));
+                }
+            };
+            if value.is_some() || o.flip != m.flip {
+                ops.push(edit(
+                    m,
+                    MateChange::Edit {
+                        value,
+                        flip: (o.flip != m.flip).then_some(m.flip),
+                    },
+                ));
+            }
+            if o.suppressed != m.suppressed {
+                ops.push(edit(m, MateChange::Suppress(m.suppressed)));
+            }
+        }
+    }
+    match (old.is_assembly(), new.is_assembly()) {
+        (a, b) if a == b => {}
+        _ => {
+            return Err(
+                "the document was changed from a part to an assembly or back, which no operation does"
+                    .to_owned(),
+            );
+        }
+    }
+
+    // ---- What the part is made of, and its colour ----
+    if old.material != new.material {
+        ops.push(Op::SetMaterial {
+            material: new.material.as_ref().map(|m| m.name.clone()),
+            density: new.material.as_ref().map(|m| m.density),
+        });
+    }
+    if old.color != new.color {
+        ops.push(Op::SetColor { color: new.color });
     }
 
     // ---- Features removed ----

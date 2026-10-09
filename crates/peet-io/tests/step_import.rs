@@ -389,6 +389,113 @@ fn names_and_several_bodies() {
     assert_close(measure::volume(&imported.bodies[1].solid), 2.0);
 }
 
+// ---- Assemblies through PeetCAD's own exporter ----
+
+#[test]
+fn an_assemblys_structure_round_trips() {
+    use peet_io::step::StepProduct;
+    // A 2 x 1 x 1 block; a pair of them (the second on top, turned a quarter about z);
+    // a top level with the pair twice and the block once.
+    let solid = block(&Plane::TOP, DVec2::ZERO, v2(2.0, 1.0), 0.0, 1.0);
+    let quarter = Frame {
+        origin: v3(0.0, 0.0, 1.0),
+        rotation: DQuat::from_rotation_z(FRAC_PI_2),
+    };
+    let moved = |x: f64| Frame {
+        origin: v3(x, 0.0, 0.0),
+        ..Frame::WORLD
+    };
+    let products = [
+        StepProduct {
+            name: "Block".to_owned(),
+            bodies: vec![("Block".to_owned(), solid)],
+            children: Vec::new(),
+        },
+        StepProduct {
+            name: "Pair".to_owned(),
+            bodies: Vec::new(),
+            children: vec![
+                (0, "Block-1".to_owned(), Frame::WORLD),
+                (0, "Block-2".to_owned(), quarter),
+            ],
+        },
+        StepProduct {
+            name: "Top".to_owned(),
+            bodies: Vec::new(),
+            children: vec![
+                (1, "Left".to_owned(), moved(-10.0)),
+                (1, "Right".to_owned(), moved(10.0).compose(&quarter)),
+                (0, "Block-3".to_owned(), moved(50.0)),
+            ],
+        },
+    ];
+    for schema in [StepSchema::Ap214, StepSchema::Ap242] {
+        let mut o = options(schema);
+        o.product_name = "Machine".to_owned();
+        let imported = import(&step::write_assembly(&products, 2, &o));
+        assert!(imported.warnings.is_empty(), "{:?}", imported.warnings);
+        assert_eq!(imported.product_name, "Machine");
+
+        // The structure: three nodes, the block's solid once.
+        assert_eq!(imported.nodes.len(), 3);
+        let node = |name: &str| {
+            let at = imported.nodes.iter().position(|n| n.name == name);
+            at.unwrap_or_else(|| panic!("no node called {name}"))
+        };
+        let (block, pair, top) = (node("Block"), node("Pair"), node("Machine"));
+        assert_eq!(imported.roots, [top]);
+        assert_eq!(imported.nodes[block].bodies.len(), 1);
+        assert_close(measure::volume(&imported.nodes[block].bodies[0].solid), 2.0);
+        assert!(imported.nodes[pair].bodies.is_empty());
+        for (index, product) in [(pair, &products[1]), (top, &products[2])] {
+            let children = &imported.nodes[index].children;
+            assert_eq!(children.len(), product.children.len());
+            for ((child, name, frame), (was, was_name, was_frame)) in
+                children.iter().zip(&product.children)
+            {
+                assert_eq!(*child, [block, pair][*was]);
+                assert_eq!(name, was_name);
+                assert!(frame.origin.distance(was_frame.origin) < 1e-9);
+                for axis in [DVec3::X, DVec3::Z] {
+                    let (a, b) = (frame.vector_to_world(axis), was_frame.vector_to_world(axis));
+                    assert!(a.distance(b) < 1e-9, "{name}: {a} / {b}");
+                }
+            }
+        }
+
+        // And in place: five blocks, the last where it was put.
+        assert_eq!(imported.bodies.len(), 5);
+        for body in &imported.bodies {
+            valid(&body.solid);
+            assert_close(measure::volume(&body.solid), 2.0);
+        }
+        let mut reach: Vec<(f64, f64)> = imported
+            .bodies
+            .iter()
+            .map(|b| {
+                let bounds = b.solid.bounds();
+                (
+                    (bounds.min.x * 1e6).round() / 1e6,
+                    (bounds.max.z * 1e6).round() / 1e6,
+                )
+            })
+            .collect();
+        reach.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        // Left pair: x from -10 and (turned) from -11; right pair, itself turned and one
+        // up: its first block reaches from x = 9, its second (two quarter turns) from 8.
+        assert_eq!(
+            reach,
+            [
+                (-11.0, 2.0),
+                (-10.0, 1.0),
+                (8.0, 3.0),
+                (9.0, 2.0),
+                (50.0, 1.0)
+            ]
+        );
+    }
+}
+
 // ---- Freeform solids through PeetCAD's own exporter ----
 
 fn plane_at(z: f64) -> Plane {
@@ -1563,7 +1670,9 @@ fn assembly_places_each_occurrence() {
     }
     let imported = import(&w.file());
     assert_eq!(imported.warnings, Vec::<String>::new());
-    assert_eq!(imported.product_name, "Block");
+    // An assembly is called what its top level is.
+    assert_eq!(imported.product_name, "Machine");
+    assert_eq!(imported.nodes.len(), 2);
     assert_eq!(imported.bodies.len(), 2);
     for body in &imported.bodies {
         assert_eq!(body.name, "Block");

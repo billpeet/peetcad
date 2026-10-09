@@ -62,13 +62,13 @@ impl Silhouettes {
         {
             return Self { faces };
         }
-        let samples = sample_edges(solid, BOUNDARY_TOLERANCE);
+        let samples = sample_edges(solid, BOUNDARY_TOLERANCE.into());
         for id in solid.face_ids() {
             let surface = solid.face(id).surface.clone();
             if matches!(surface, Surface::Plane(_)) {
                 continue;
             }
-            let b = face_boundary(solid, id, &samples, BOUNDARY_TOLERANCE);
+            let b = face_boundary(solid, id, &samples, BOUNDARY_TOLERANCE.into());
             let mirror = if b.mirrored { -1.0 } else { 1.0 };
             let to_param = |p: DVec2| DVec2::new(p.x * mirror / b.scale.x, p.y / b.scale.y);
             let mut segments = Vec::with_capacity(b.param.len());

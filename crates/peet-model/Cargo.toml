@@ -10,6 +10,7 @@ authors.workspace = true
 [dependencies]
 peet-math.workspace = true
 peet-sketch.workspace = true
+peet-solve.workspace = true
 peet-kernel.workspace = true
 peet-sheetmetal.workspace = true
 web-time.workspace = true

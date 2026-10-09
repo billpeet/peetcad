@@ -22,8 +22,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use peet_math::tolerance;
 
-use super::equations::{Eq, MAX_SLOTS, NONE, Owner};
-use super::problem::{Options, Problem, Space};
+use peet_solve::{Equation, MAX_SLOTS, NONE, Options, Problem, Space};
+
+use super::equations::{Eq, Owner};
 use super::structure::{Structure, constraint_refs, curve_points};
 use super::{Analysis, ConstraintStatus, Diagnosis, DofStatus};
 use crate::sketch::{ConstraintId, EntityId, Geometry, Sketch};

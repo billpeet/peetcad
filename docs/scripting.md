@@ -75,6 +75,8 @@ peet pack IN.ron PART.peet         # and back
   and `export` operations.
 - **Features that can't be built** are not failed operations: the reply lists them under
   `failures` and the part is saved. `--strict` makes them a failure.
+- **Other documents.** A script can open more documents beside the part
+  ([several documents](#several-documents)); it saves those itself.
 - **Material tables and check limits** are the built-in ones (or `--materials`), and
   changes to them last for the run. The command line does not read or change the
   application's settings.
@@ -84,7 +86,7 @@ peet pack IN.ron PART.peet         # and back
 `peet skills` lists instructions written for an agent that is going to use `peet`, and
 `peet skills NAME` prints one. `core` is the one to start with: it gives the working loop
 and points to the others (`sketching`, `selectors`, `solids`, `sheet-metal`,
-`configurations`, `live`) for when a
+`assemblies`, `configurations`, `live`) for when a
 task reaches them. They are in `crates/peet-cli/skills/` and are built into the binary,
 so they describe the version being run. Every script in them is run by a test, and
 [AGENTS.md](../AGENTS.md) asks that a new feature is added to them.
@@ -278,6 +280,8 @@ with their defaults' types):
 | `set_parameter` | `name`, `value`, `configurations`. A new parameter exists in every configuration |
 | `delete_parameter` | `name` |
 | `set_units` | `length` (`mm`, `cm`, `m`, `in`, `ft`) |
+| `set_material` | `material` (a name, or `null` for none), `density` in kg/m³ (left out: the material tables' density for that material). What the part is made of: saved with it, and what `mass` weighs it with |
+| `set_color` | `color` (`"#rrggbb"` or `[r, g, b]`, or `null` for the usual colour): what the part is drawn in |
 | `undo`, `redo` | |
 
 ### Configurations
@@ -314,7 +318,7 @@ in all of them. Only the numeric fields of a feature can differ: an `edit` with
 
 | Operation | Gives |
 |---|---|
-| `status` | name, file, units, counts, failures, undo and redo labels |
+| `status` | name, file, units, material, colour, counts, failures, undo and redo labels |
 | `features` | the tree, each feature's status and what it uses |
 | `feature` (`feature`) | its fields; a sketch's plane, definition, entities, relations and dimensions |
 | `parameters` | named values and units; a parameter that differs between configurations lists its expression in each |
@@ -324,7 +328,7 @@ in all of them. Only the numeric fields of a feature can differ: an `edit` with
 | `bend_table` (`body`) | flat size, area, and each bend |
 | `checks` (`body`) | manufacturing checks, and the limits they were run with |
 | `materials` (`material`) | the material and gauge tables |
-| `mass` (`body`) | for a density of 1: volume, area, centre of gravity, principal moments; each body and the total |
+| `mass` (`body`) | volume, area, centre of gravity, principal moments (for a density of 1), and `mass_kg` if the part has a material; each body and the total. In an assembly: see [Assemblies](#assemblies) |
 | `measure` (`a`, `b`) | the exact size of a face, edge or vertex, or with `b` the distance and angle between two. Each is `{"face": selector}`, `{"edge": selector}` or `{"vertex": selector}` |
 | `help` | this reference as data |
 
@@ -334,22 +338,150 @@ in all of them. Only the numeric fields of a feature can differ: an `edit` with
 |---|---|
 | `new` | `discard` |
 | `open` | `path`, `discard` |
-| `open_sample` | `sample` (`bracket`, `enclosure`, `chassis`, `housing`), `discard` |
-| `save` | `path` (optional once the part has a file), `caches` (default true) |
-| `import_step` | `path`: the file's solids become bodies, in one feature named after the file |
+| `open_sample` | `sample` (`bracket`, `enclosure`, `chassis`, `housing`, `cover`, `bolt`, `screw`, or `assembly`: an assembly of the last five, mated), `discard` |
+| `save` | `path` (optional once the part has a file), `caches` (default true: a part's file keeps its built bodies and their display meshes, so it opens without rebuilding; an assembly's keeps the display meshes the application has drawn) |
+| `import_step` | `path`. In a part: the file's solids become bodies, in one feature named after the file. In an assembly: the file's parts and assemblies become parts and sub-assemblies, placed as components where the file has them (fixed); replies `components`, `parts`, `bodies` |
 | `import_dxf` | `path`, and `sketch` (an existing one) or `on` with `name` (a new one; default the top plane); `unit`, `placement` (`keep`, `centred`, `lower_left`) |
 | `export` | `path`, `format` (`stl`, `dxf`, `step`; taken from the path if absent), `body`, `schema` (`ap214`, `ap242`) |
 
 `new`, `open` and `open_sample` replace the document. They are refused while the part has
-unsaved changes, unless `discard` is true.
+unsaved changes, unless `discard` is true. With `"keep": true` they open a document
+beside the one that is open instead (see below), and there is nothing to discard.
+
+### Several documents
+
+The application and the command line hold a *session*: the documents that are open
+together, one of them *current*. An operation goes to the current document. Any
+operation can take `"document"` (a name or an id, as `documents` lists them): it is then
+applied to that document, which does not become current.
+
+| Operation | Fields |
+|---|---|
+| `new`, `open`, `open_sample` with `"keep": true` | opens a document beside the others and makes it current. The reply's `document` is its id |
+| `documents` | the open documents: `id`, `name`, `file`, `modified`, `current` |
+| `switch` | `document`: make it current. The reply has its `status` |
+| `close` | `document` (default the current one), `discard` (default false). Refused if it has unsaved changes, unless `discard` is true. Closing the last one leaves a new, empty part |
+
+From the command line, the part of `--file` is the first document and the one a run
+saves by itself, whichever is current at the end. A document opened with `keep` is saved
+by a `save` operation sent to it; a run that leaves one changed and unsaved says so.
+Undo is per document. `apply` and `apply_json` on a `Document` alone (Rust) refuse these:
+a session is applied to with `apply_session` and `apply_session_json`.
+
+### Assemblies
+
+An assembly is a document with components in place of features: `status` gives
+`"kind": "assembly"`. A component is a placed instance of a part, and the part is copied
+into the assembly (once, however many components use it). The operations on features and
+bodies are refused in an assembly, and these are refused in a part; each says what to do
+instead. The design is in [ADR 0009](adr/0009-assemblies.md).
+
+| Operation | Fields |
+|---|---|
+| `new` with `"assembly": true` | starts an empty assembly |
+| `insert` | the part: `path` (a `.peet` file; an assembly becomes a sub-assembly), `sample`, `part` (an open document, by name or id) or `component` (another instance of its part). `name`, `at` (`[x, y, z]`: where the part's origin goes), `rotate` (`{"axis": "x"`, `"y"`, `"z"` or `[x, y, z]`, `"angle": degrees}`, from the part's own orientation), `fixed` (default: only the first component) |
+| `insert` with `"link": true` | with `path`: the component follows the part's file instead of the assembly keeping a copy. The link is relative to the assembly's folder unless `"absolute": true` |
+| `update_links` | reads every linked part from its file again. Replies `updated` (the parts that changed) and `warnings` (files that can't be found or read) |
+| `link` | `part` (a part's name or id, as `components` lists the parts), `path`, `absolute` (default false): links the part to the file if there is one (the part becomes what is in it), else writes the part there first |
+| `unlink` | `part`: the assembly keeps the part as it is and no longer follows the file |
+| `place` | `component`, `at`, `rotate`: the ones given are set, the other is kept |
+| `drag` | `component`, `to` (`[x, y, z]`, in the assembly), `point` (`[x, y, z]` on the component, in its own coordinates; default its origin): pulls the point towards the place as far as the component's mates allow. `short_by` in the reply is how far it still is |
+| `fix` | `component`, `on` (default true) |
+| `replace` | `component`, and `path`, `sample` or `part`: another part, in the same place |
+| `rename`, `suppress`, `show`, `delete` | `component` in place of `feature` |
+| `component_pattern` | `components` (the originals), `type` (`linear`, `circular`), `name`. Linear: `direction`, `spacing`, `count` (the original included), `flip`, `second` (`{direction, spacing, count, flip}`). Circular: `axis`, `angle` (default 360), `count`, `flip`. A direction or axis is `"x"`, `"y"`, `"z"`, `[x, y, z]`, `{"origin": …, "direction": …}`, or `{"component": …, "edge" or "face": selector}` |
+| `edit_component_pattern` | `pattern`, and any of `count`, `spacing`, `angle`, `flip`, `direction`, `axis`, `second` (`null` removes it) |
+| `rename`, `delete` | `pattern` in place of `feature` |
+| `set_color` with `component` | `color` (`"#rrggbb"`, `[r, g, b]`, or `null` for its part's): a colour for that component alone |
+| `show_all` | shows every hidden component; replies `shown` |
+| `isolate` | `components` (names or ids): shows these and hides every other; replies `hidden` |
+| `explode_step` | `components`, `by` (`[x, y, z]`: how far, along the assembly's axes), `name`: adds a step to the exploded view |
+| `edit_explode_step` | `explode_step`, and `by` or `components` |
+| `rename`, `delete` | `explode_step` in place of `feature` |
+| `explode` | `on` (left out: the other way): shows the assembly exploded, or as it is. A view, not an undo step |
+| `explode_steps` | every step (`id`, `name`, `components`, `by`), whether the assembly is shown `exploded`, and under `moved` each component the steps move with its total `by` and where it is drawn exploded (`at`) |
+| `open_component` | `component`: opens its part as a document of its own and makes it current. `save` without a `path` on that document stores it back, as one undo step of the assembly, for every component of the part. Needs a session |
+| `components` | every component (`id`, `name`, `part`, `at`, `rotate`, `fixed`, `freedom`, `mates`, `status`, `message`, `min`, `max`) and every part (`id`, `name`, `kind`, how many `components`, `material`); how many `mates`, and the `freedom` left |
+| `mate` | `type` (`coincident`, `concentric`, `parallel`, `distance`, `angle`, `fasten`), `a`, `b`, `distance` or `angle` for those types, `flip`, `name`. An end is `{"component": …, "face": selector}` (or `"edge"`, `"vertex"`), the selector in the part's own coordinates; for `fasten` it is the component alone |
+| `edit_mate` | `mate`, and `distance` or `angle`, `flip` |
+| `rename`, `suppress`, `delete` | `mate` in place of `feature` |
+| `mates` | every mate (`id`, `name`, `type`, `a`, `b`, `distance` or `angle`, `flip`, `status`, `message`) and the `freedom` left |
+
+| `interference` | `component` (left out: every pair): the pairs of components that share space, each with `a`, `b`, `volume_mm3`, `min`, `max`; `clear`; how many pairs were `compared`; `unchecked` pairs that couldn't be |
+| `bom` | `level` (`parts`, the default: every part, through sub-assemblies; `top`: a sub-assembly is one line): `rows`, each with `item`, `part`, `quantity`, `material`, `volume_mm3`, `mass_kg`, `total_mass_kg`, the `components`, and for sheet metal `thickness`, `flat_size`, `bends`; the total `quantity` and `mass_kg`, or `without_mass` |
+| `mass` | in an assembly: each component's `volume_mm3`, `mass_kg` and `center_of_gravity`, and the `total` (with `center_of_gravity_of`: `mass` if every part has a material, else `volume`; `principal_moments_kg_mm2` or `principal_moments_mm5`); `without_material` |
+| `export` to a `.csv` | the bill of materials (every part) as a table: `item`, `part`, `quantity`, `material`, `mass_kg`, `total_mass_kg`, `thickness_`, `flat_width_`, `flat_height_` (with the document's unit), `bends`, `components` |
+
+**Component patterns** copy components in rows (one direction or two) or round an axis.
+The copies are components of the same part, and `components` lists each with the
+`pattern` that made it, and the patterns themselves under `patterns` (`id`, `name`,
+`type`, `components`, `copies`, and the fields above, `status`, `message`). A copy is
+placed by its pattern after the mates are solved: where its original is, moved by its
+place in the pattern. So it has no freedom, and `place`, `drag`, `fix`, `mate`,
+`replace` and `delete` on it are refused; hiding, colouring, renaming and suppressing
+it are not. A direction or axis taken from a component's geometry follows that
+component. Changing a pattern's count adds and removes copies; deleting a pattern
+deletes its copies; deleting an original deletes its pattern.
+
+**Visibility and the exploded view** change what is drawn, not the assembly. A hidden
+component is still mated, checked, counted, weighed and exported (a suppressed one is
+not). An exploded view is a list of steps stored in the assembly, each moving some of
+its components by a distance; a component in several steps moves by their sum. Whether
+the assembly is shown exploded is a view, like `flat_pattern`: it is not saved and not
+undone, and every other operation means the assembly as it is put together.
+
+**Interference** compares every two bodies of different components whose boxes overlap,
+by intersecting them: what they share is the interference. Bodies that only touch share
+nothing. **Mass** weighs each part with its own material; if a part has none, the whole
+has no mass, and the centre of gravity given is that of the volume.
+
+**Mates.** A flat face stands for its plane, a round face or a round edge for its axis,
+a straight edge for a line, a vertex for a point. Two planes are put against each other
+unless `flip` is true. The mates are solved whenever the assembly is rebuilt, and the
+components move as little as they can from where they are: so `place` on a mated
+component is a suggestion, and where a component is placed before it is mated decides
+which of several positions it takes. A reply to an operation that moved other components
+lists them under `moved`, and gives the `freedom` left: how many ways the components can
+still move (six for each that is not fixed, less what the mates hold). Each component
+has a `freedom` of its own, 0 to 6: how many ways it can still move, by itself or along
+with what it is mated to (so the ones above 0 are the ones not yet held). A mate that
+can't be solved is not a failed operation: it is added and listed under `failures` with
+the reason, as a feature that can't be built is. `drag` moves what the mates leave free:
+the component slides to the place if it can, turns only if sliding can't get it nearer,
+and takes what it is mated to along. When mates contradict each other, the
+earlier ones hold and the later one is flagged.
+
+**Linked parts** (desktop only: they are files on disk, and are refused in the browser).
+A linked part is read from its file when the assembly is opened, by `update_links`, and
+when the part's document is saved in the same session (that `save` replies `updated_in`
+with the assemblies that followed). The assembly keeps the part as it last read it, so
+it opens whole when the file is missing, with a warning. A link is written in the
+assembly's file relative to the folder that file is in (`../parts/pin.peet`), so an
+assembly and its parts can be moved or copied together; with `"absolute": true` it is a
+full path. Saving an assembly somewhere else keeps it pointing at the same part files
+(the relative links are rewritten from the new place). If nothing is where a link says,
+a file of the same name next to the assembly's is used. `components` gives a linked
+part's `link` (as the file has it), `link_file` (the file it means now) and
+`link_status` (`current`, `changed`, `missing`). In the application, an open assembly
+is told by the system when a linked part's file is changed by another program, and
+reads the part again a moment later (this can be turned off in the settings); the
+command line reads them at each call. `open_component` on a linked part opens its file as a document; on a part
+of the assembly's own, a working copy that `save` stores back.
+
+`failures` (in `status` and in replies) lists the components that need attention (a part
+with no bodies, or with features that can't be built) and the mates that don't hold. `export` writes every component's
+bodies where they are, as STEP or STL. A STEP file has the assembly's structure: each
+part and sub-assembly once, as a product, and each component as an occurrence of it
+(suppressed components are left out); the reply counts `parts`, `components` and
+`bodies`. `import_step` in an assembly reads such a file back with its structure. A reply about a component gives it under `component`.
 
 ### Sheet metal: materials, checks, flat pattern
 
 | Operation | Fields |
 |---|---|
 | `flat_pattern` | `on` (left out: the other way). A view, not an undo step; selectors and exports always mean the folded part |
-| `apply_material` | `material`, and `gauge` or `thickness` (the nearest gauge); `feature` (a base flange; default the first) |
-| `set_gauge` | `material`, `gauge`, `thickness`, `radius`, `bend` (`{"k_factor": …}`, `{"allowance": …}` or `{"deduction": …}`), `notes`: adds a row, or changes one |
+| `apply_material` | `material`, and `gauge` or `thickness` (the nearest gauge); `feature` (a base flange; default the first). Also makes it the part's material, if the table has a density |
+| `set_gauge` | `material`, `gauge`, `thickness`, `radius`, `bend` (`{"k_factor": …}`, `{"allowance": …}` or `{"deduction": …}`), `notes`: adds a row, or changes one. `density` (kg/m³) is the material's, not the row's |
 | `delete_gauge` | `material`, `gauge` (left out: the whole table) |
 | `import_materials`, `export_materials` | `path` (CSV) |
 | `set_check_rule` | `rule` (`min_flange`, `hole_to_bend`, `hole_to_edge`, `hole_to_hole`, `min_hole`, `collision`), `thickness`, `radius`, `constant`: the limit is that many thicknesses plus that many bend radii plus a constant in mm |

@@ -49,6 +49,7 @@ This makes unfolding exact and trivial instead of a fragile geometric operation,
 | Compression | `lz4_flex` | Pure Rust, so it builds for WASM without a C toolchain, and it decompresses very fast |
 | Web build | `trunk` / `wasm-bindgen` | |
 | Testing | `cargo test`, `proptest`, snapshot tests (`insta`) | Heavy property testing on the kernel and solver |
+| File watching | `notify` (desktop only) | Tells an open assembly when a linked part's file changes |
 | Profiling | Built-in performance overlay, `tracy` for deep dives | Built in from day one |
 
 ### Workspace layout (initial)
@@ -56,6 +57,7 @@ This makes unfolding exact and trivial instead of a fragile geometric operation,
 ```
 crates/
   peet-math/        f64 vectors, transforms, tolerances, robust predicates
+  peet-solve/       the constraint solvers' numerical core (added in Phase 7)
   peet-sketch/      2D sketch entities + geometric constraint solver
   peet-kernel/      B-rep topology & geometry, extrude/cut, tessellation
   peet-sheetmetal/  sheet definition, bend math, fold/unfold, flat pattern
@@ -259,12 +261,52 @@ The last part of the phase adds: sketch splines (`peet-sketch/src/spline.rs`, wi
 Known limits of the freeform stage: freeform booleans, shells, drafts, fillets and sweeps take from a few tenths of a second to about a second each (analytic ones take microseconds), and several times that in a debug build; faces that touch along a curve without crossing, or cross exactly at an edge, can't be intersected; a fillet or chamfer on a freeform edge must close on itself or end on flat faces, can't mitre into another blend at a corner (the rectangular end of a rectangle-to-circle loft), and isn't checked against distant parts of the body; a shell's wall must be thinner than the tightest curve of every freeform face, and a hollow that crosses itself inside the body isn't detected; a draft replaces a freeform face by a ruled one through its neutral curve, and the face must cross the neutral plane along its whole width; splines have no tangent handles and take no tangent or point-on-curve relation, and can't be trimmed, extended, offset or used in sheet metal; a spline can't meet an arc along a loft's side or touch a revolve's axis; a sweep along a spline has no corners, its path is flat (the kernel follows paths in space, the sketcher can't draw them), and its sides are freeform even where the path is straight; STEP import refuses freeform faces that come to a point where their surface is pinched together (a dome's tip written as a B-spline), bands that wrap a closed surface with no seam, offset surfaces and edges given only as parameter-space curves, and has only been tested on hand-written files in other systems' styles; a loft's profiles need the same number of edges, and there are no guide curves or end tangency; converting to sheet metal refuses pressed forms, conical bends, sharp bends, and walls of different thickness; volumes of freeform bodies are measured to about a part in 10⁵; none of the new commands or tools has been exercised by hand in the running app.
 
 ### Phase 7: Assemblies
-- [ ] Multi-part documents, part instancing, external references
-- [ ] Mates/joints: coincident, concentric, distance, angle, and rigid groups (reusing the constraint solver in 3D)
-- [ ] Assembly tree, component visibility and colors, exploded views
-- [ ] Interference detection
-- [ ] Bill of materials (with sheet metal flat sizes and material)
-- [ ] Large assembly performance: instanced rendering, lazy loading, LOD
+*Goal: put parts together, hold them with mates, and report on the whole.*
+
+The design is recorded in [ADR 0009](docs/adr/0009-assemblies.md). The work is in six stages:
+
+**Stage 1: groundwork**
+- [x] A part has a material, a density and a colour (they were application settings or constants)
+- [x] `peet-solve`: the constraint solver's numerical core, out of `peet-sketch`, behind a trait for a system of equations
+- [x] A session of several open documents, one current; operations apply to the current one, or to one they name
+
+**Stage 2: assembly documents and instancing**
+- [x] The assembly: definitions (parts embedded in the file, sub-assemblies), components with placements, saved in the model section of `.peet`
+- [x] Assembly tree; drawing components with shared meshes; picking by instance
+- [x] Insert, move, fix, replace, delete and open a component for editing (the part alone, not in context). *Moving is by typed position; dragging in the view comes with mates*
+- [x] Operations, the `assemblies` skill and the reference
+- [x] STEP import that keeps an assembly's structure; STEP export of an assembly
+- [x] Linked parts: a component that follows a part file, by a path relative to the assembly (desktop only); the application watches the files and updates
+
+**Stage 3: mates**
+- [x] Coincident, concentric, distance, angle, parallel, and fasten (a rigid group), on persistent references
+- [x] Solving with `peet-solve`: six unknowns per free component; rigid sub-assemblies
+- [x] Conflicting mates told apart and explained; the freedom left in the assembly. *Redundant mates that agree are accepted silently*
+- [x] Dragging a component in the view with a live solve (and the `drag` operation)
+- [x] Freedom per component, to show which are still loose
+
+**Stage 4: interference, bill of materials, mass**
+- [x] Interference detection (bounding boxes, then the kernel's intersection), with volumes
+- [x] Bill of materials: quantities, material, mass, sheet metal flat sizes; CSV export
+- [x] Mass properties of an assembly
+
+**Stage 5: visibility, colours, exploded views**
+- [x] Show, hide and colour components
+- [x] Exploded views as stored steps that don't affect mates
+
+**Stage 6: large assemblies**
+- [x] Instanced rendering, culling, loading from the mesh cache on demand, level of detail
+- [x] Component patterns (linear and circular), and the exit assembly as a sample
+
+**Exit criteria:** An enclosure is assembled from the chassis sample, a cover, the housing and patterned fasteners, fully mated, with no interference and a bill of materials that matches the hand count and hand-calculated masses and flat sizes. Changing the chassis's width moves every component to the right place. A mate solve during a drag takes under 4 ms with 50 components, and 1,000 instances of 50 parts draw at 60 FPS.
+
+**Left out on purpose:** editing a part in the context of its assembly (features that refer to neighbouring parts), and flexible sub-assemblies.
+
+**Status:** All six stages are implemented and the exit criteria are met in tests; the application has not been exercised by hand. The exit assembly is `samples::enclosure_assembly` (**File → Open Sample Assembly**): the chassis, a cover on its rim, the housing bolted to the cover, six M8 socket screws from a circular component pattern round the housing's bore and four M4 screws from a linear pattern along the chassis's walls: 13 components of 5 parts held by 12 mates, nothing left free. `crates/peet-ops/tests/enclosure_exit.rs` checks it: every mate holds and the freedom is 0; nothing interferes; the bill of materials is 1 + 1 + 1 + 6 + 4 with masses from the sizes (cover 0.4382 kg) and the flat sizes (chassis 333.572 × 215.876, cover 240 × 160); and making the chassis 40 mm wider moves the cover, the housing and its bolts with the wall they hang on while the screws stay in their holes. The two timing criteria are measured on larger synthetic assemblies (a drag step at about 3 ms with 50 components; 1,000 instances at about 1 ms a frame). Component patterns copy components in rows or round an axis; the copies are components placed by the pattern after the mates are solved, following their original, with a direction or axis that can be taken from a component's geometry. Large assemblies: the instances of a part are drawn in one call each for faces and edges, what is outside the view is left out, a body is tessellated and uploaded when it is first seen, an assembly's file keeps the meshes that were drawn, and bodies small on screen get a coarser mesh and no edges. `crates/peet-render/tests/gpu.rs` draws 1,000 instances of 50 parts (1.9 million triangles) on the machine's graphics adapter in about 1 ms a frame (an RTX 4070 Super; the criterion is 16.7 ms) with 102 draw calls, and picks two instances of one mesh each in its own place; before this stage instances that shared a mesh were all drawn where the last one was. Components can be hidden, isolated and given a colour of their own, and an assembly has an exploded view: stored steps that each move some components by a distance, shown as a view that moves only where bodies are drawn (mates, interference, mass and exports use the assembly as it is put together; `crates/peet-ops/tests/assembly.rs` checks that showing it exploded changes no reply and not the model). In the application the view opens and closes over 0.4 s; this was tested without a window, not by hand. STEP carries an assembly's structure both ways: export writes each part and sub-assembly once as a product and each component as a placed occurrence of it, and import into an assembly makes parts, sub-assemblies and fixed components of what the file holds (`crates/peet-ops/tests/assembly.rs` sends a three-level assembly out and back and compares every component's place, the parts' counts and the volume); these files have only been read by our own importer, not by another CAD system. Interference between components is found by intersecting every two bodies whose boxes overlap, with the volume and place of each overlap; parts that only touch (a pin in a hole of its size, faces against each other) are not reported. The bill of materials counts each part through sub-assemblies, with material, mass, and thickness and flat size for sheet metal, and goes out as CSV. An assembly is weighed with each part's own material. `crates/peet-document/src/assembly.rs` checks these against hand values (a slug of π·4²·5 mm³ where a pin goes through a plate with no hole, the enclosure panel's 244.357 × 194.357 blank in the bill, a mass-weighted centre of gravity of three components). A component can be linked to its part's file instead of the assembly keeping a copy (desktop only): the link is relative to the assembly's folder by default; the file is read when the assembly is opened, on request, when the part is saved in the same session, and (in the application) when it changes on disk; the assembly keeps the part as last read, so it opens whole when the file is missing. `crates/peet-ops/tests/assembly.rs` covers a part changed behind the assembly's back, a missing file, a folder moved as a whole, and a linked part edited in its own file. Mates (coincident, concentric, parallel, distance, angle, fasten) join faces, edges and corners of two components' parts by persistent references, and are solved whenever the assembly is rebuilt: the components move as little as they can from where they are, groups of components that mates join are solved on their own, and a solved assembly is left bit for bit as it is. `crates/peet-model/tests/mates.rs` checks positions against hand values (plates stacked and squared up, a pin in a hole, an angle, a fastened pair carried along, a part turned over by `flip`), conflicts (the earlier mate holds, the later is flagged), mates that follow a face through an edit to the part, a mate to a part inside a sub-assembly, and 50 components held by 147 mates dragged at about 3 ms per step in a release build (budget 4 ms). `crates/peet-ops/tests/assembly.rs` covers the operations (`mate`, `edit_mate`, `mates`), and the command line's tests run the skill's mate script and check what the skill says about it. A component is dragged with the left mouse button, or by the `drag` operation: a point of it is pulled towards a place and it goes as far as its mates let it, sliding if it can and turning if it must, taking what it is mated to along (a plate on a pin swings a quarter turn; a stack of 50 plates is pulled by a corner at about 3 ms a step). In the application a click in an assembly picks a face, edge or corner, six mate commands join two picked ends, and the tree and properties show mates; tested without a window, not by hand.
+
+Before mates: An assembly is a `Model` with an `Assembly` in place of features: definitions (whole part models, stored once) and components (instances with placements). The engine rebuilds each part with an engine of its own, only when that part changed, and gives instances that share their bodies; `crates/peet-model/tests/assembly.rs` checks that moving a component rebuilds nothing and that an edit to a part reaches every instance. `crates/peet-ops/tests/assembly.rs` covers the operations (`insert`, `place`, `fix`, `replace`, `open_component`, `components`), files, sub-assemblies, export and the translation of the application's changes; the `assemblies` skill's scripts run in the command line's tests. A part of an assembly is edited as a working copy in a document of its own and stored back with `save`, as one undo step of the assembly. In the application: New Assembly, Insert Part, Edit Part, a component tree and properties, and a viewport that draws instances with shared meshes; these were tested without a window, not exercised by hand. Each component reports how many ways it can still move, and the tree marks the ones that can. Known limits: a script can't describe a face inside a sub-assembly; mass properties, measurements and face selection don't work in an assembly yet; an assembly's parts are rebuilt when it is opened (its file caches their display meshes, not their geometry).
+
+Stage 1: A part's `Model` has a material (name and density) and a colour, saved with it (model schema 8, with assemblies; older files still open) and set with `set_material` and `set_color`; the material tables carry densities, and `mass` gives the mass. The solver's core is the new `peet-solve` crate, which `peet-sketch` now uses: its 186 tests pass unchanged and the drag benchmark is the same to within noise. `peet_document::Session` holds the open documents; `peet_ops::apply_session` sends an operation to the current one or to one it names, with `documents`, `switch`, `close` and `"keep": true` on `new`, `open` and `open_sample`; the command line and the application hold a session. Still to do in this stage's area: the mass properties window's new material and colour rows and the document tabs have been compile-checked and tested through the operations, not exercised by hand; the application can't yet open a second document from its own menus (stage 2 adds the commands that do); autosave covers the current document only.
 
 ### Phase 8: Drawings
 - [ ] 2D drawing sheets, templates, title blocks
@@ -296,6 +338,8 @@ Known limits of the freeform stage: freeform booleans, shells, drafts, fillets a
 | Sketch solve during drag | < 2 ms |
 | Regenerate a 20-feature part after an edit | < 100 ms |
 | Unfold / flat pattern | < 20 ms |
+| Mate solve during a drag (50 components) | < 4 ms |
+| Viewport frame time (1,000 instances of 50 parts) | < 16 ms |
 | Memory for an empty document | < 100 MB |
 
 Benchmarks (`criterion`) run in CI for the solver, kernel operations and regeneration, so regressions are visible.
@@ -348,6 +392,7 @@ Benchmarks (`criterion`) run in CI for the solver, kernel operations and regener
 | Sheet metal features | Flanges are profiles of bends and flats; sketched bends split a flange in place; corners are declared and resolved at build time; forms are square-walled and present in both solids; patterns copy features, not geometry ([ADR 0005](docs/adr/0005-sheet-metal-phase-5.md)) |
 | Configurations | The model holds the active configuration; what differs between configurations is kept on the side and swapped in on activation; edits carry a scope ([ADR 0009](docs/adr/0009-configurations.md)) |
 | General solid modelling | Analytic first: cones, spheres and tori as surfaces of revolution with poles at vertices; fillets and chamfers as boolean tools; shell and draft by solving the same topology on new surfaces; imported bodies as features. NURBS are one more kind of surface, with marched intersections ([ADR 0006](docs/adr/0006-general-solid-modelling.md), [ADR 0008](docs/adr/0008-freeform-geometry.md)) |
+| Assemblies | A second kind of document in the same container; parts embedded in the assembly's file first, linked files second; components are instances of definitions; rigid sub-assemblies; no in-context editing; mates on persistent references, solved by the sketch solver's core ([ADR 0009](docs/adr/0009-assemblies.md)) |
 
 ## Open questions
 

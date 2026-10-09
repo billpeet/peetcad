@@ -143,6 +143,9 @@ fn expressions(doc: &Document, name: &str) -> Map<String, Value> {
 
 /// Every feature that failed to build, in tree order.
 pub fn failures(doc: &Document) -> Vec<Value> {
+    if doc.is_assembly() {
+        return crate::assembly::problems(doc);
+    }
     doc.model
         .features()
         .filter(|f| doc.status(f.id).is_some_and(Status::is_failed))
@@ -623,8 +626,29 @@ pub fn status(doc: &Document) -> Value {
         "units".to_owned(),
         json!(doc.model.parameters.units.length.suffix()),
     );
-    m.insert("features".to_owned(), json!(doc.model.len()));
-    m.insert("bodies".to_owned(), json!(doc.evaluation().bodies.len()));
+    if let Some(material) = &doc.model.material {
+        m.insert(
+            "material".to_owned(),
+            crate::library::material_out(material),
+        );
+    }
+    if let Some(color) = doc.model.color {
+        m.insert("color".to_owned(), crate::library::color_out(color));
+    }
+    if let Some(assembly) = doc.model.assembly() {
+        m.insert("kind".to_owned(), json!("assembly"));
+        m.insert(
+            "components".to_owned(),
+            json!(assembly.components().count()),
+        );
+        m.insert("parts".to_owned(), json!(assembly.definitions().count()));
+        m.insert("mates".to_owned(), json!(assembly.mates().count()));
+        m.insert("freedom".to_owned(), json!(doc.evaluation().freedom));
+    } else {
+        m.insert("kind".to_owned(), json!("part"));
+        m.insert("features".to_owned(), json!(doc.model.len()));
+    }
+    m.insert("bodies".to_owned(), json!(doc.bodies.len()));
     m.insert("failures".to_owned(), json!(failures(doc)));
     if let Some(l) = doc.undo_label() {
         m.insert("undo".to_owned(), json!(l));
@@ -646,6 +670,9 @@ fn mass_out(
     let units = &doc.model.parameters.units;
     let mut m = Map::new();
     m.insert("volume_mm3".to_owned(), json!(round(volume)));
+    if let Some(material) = &doc.model.material {
+        m.insert("mass_kg".to_owned(), json!(round(material.mass_kg(volume))));
+    }
     m.insert("area_mm2".to_owned(), json!(round(area)));
     m.insert("center_of_gravity".to_owned(), point3_out(centroid, units));
     m.insert(
@@ -657,7 +684,8 @@ fn mass_out(
     m
 }
 
-/// Mass properties for a density of 1: of one body, or of each and of all together.
+/// Mass properties of one body, or of each and of all together. The moments are for a
+/// density of 1; the mass is given if the part has a material.
 pub fn mass(doc: &Document, body: Option<usize>) -> Result<Value, String> {
     let mut parts = Vec::new();
     let mut list = Vec::new();
@@ -679,6 +707,12 @@ pub fn mass(doc: &Document, body: Option<usize>) -> Result<Value, String> {
         parts.push(p);
     }
     let mut out = Map::new();
+    if let Some(material) = &doc.model.material {
+        out.insert(
+            "material".to_owned(),
+            crate::library::material_out(material),
+        );
+    }
     out.insert("bodies".to_owned(), json!(list));
     if let Some(t) = peet_document::MassTotal::of(&parts) {
         out.insert(

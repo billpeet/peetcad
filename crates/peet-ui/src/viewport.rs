@@ -14,6 +14,7 @@ use peet_render::{
 
 use crate::bodies::GeomRef;
 use crate::document::{Document, ItemId};
+use crate::lod::{BodyInfo, Detail};
 use crate::settings::{NavAction, Settings};
 use crate::view_cube;
 use peet_model::{Datum, FeatureKind, Output};
@@ -46,6 +47,9 @@ pub struct ViewportParams<'a> {
     pub selected_geom: &'a [GeomRef],
     /// Show the standard planes even if hidden (while picking a plane to sketch on).
     pub show_std_planes: bool,
+    /// In an assembly: the component that is selected, and the one under the cursor.
+    pub selected_component: Option<peet_model::CompId>,
+    pub hovered_component: Option<peet_model::CompId>,
 }
 
 pub struct Viewport {
@@ -55,9 +59,14 @@ pub struct Viewport {
     texture_id: Option<egui::TextureId>,
     overlay: Overlay,
 
-    /// GPU meshes of the document's bodies by body stamp, and the document revision.
-    body_meshes: Vec<(u64, MeshId)>,
+    /// GPU meshes by body stamp and colour, fine and coarse: uploaded when a body is
+    /// first drawn that way, and shared by every body with the same key.
+    gpu_meshes: HashMap<(u64, bool), MeshId>,
+    /// What is kept for each shown body, and the document revision it is of.
+    body_infos: Vec<BodyInfo>,
     body_revision: Option<u64>,
+    /// How each shown body is drawn this frame.
+    details: Vec<Detail>,
     active_drag: Option<NavAction>,
     /// MSAA sample count in use.
     pub samples: u32,
@@ -98,8 +107,10 @@ impl Viewport {
             texture_id: None,
             overlay: Overlay::default(),
 
-            body_meshes: Vec::new(),
+            gpu_meshes: HashMap::new(),
+            body_infos: Vec::new(),
             body_revision: None,
+            details: Vec::new(),
             active_drag: None,
             samples,
             stats: RenderStats::default(),
@@ -236,21 +247,43 @@ impl Viewport {
             return events;
         }
 
-        self.sync_meshes(params);
         let wpp = self.camera.world_per_pixel(f64::from(rect.height()));
+        self.sync_meshes(params, rect);
         self.build_overlay(params, wpp);
         self.body_overlay(params, wpp);
 
+        // One object per body that is drawn, where it is (the pick ids stay the bodies'
+        // indices). Those that share a mesh are drawn together by the renderer.
+        let doc = params.document;
         let objects: Vec<ObjectDraw> = self
-            .body_meshes
+            .body_infos
             .iter()
+            .zip(&self.details)
+            .zip(&doc.placed)
             .enumerate()
-            .map(|(i, (_, mesh))| ObjectDraw {
-                mesh: *mesh,
-                transform: DMat4::IDENTITY,
-                show_edges: true,
-                highlight: 0.0,
-                pick_object: Some(i as u32),
+            .filter_map(|(i, ((info, detail), placed))| {
+                let mesh = *self.gpu_meshes.get(&(info.key, detail.is_coarse()))?;
+                detail.is_drawn().then_some((i, mesh, detail, placed))
+            })
+            .map(|(i, mesh, detail, placed)| {
+                let component = placed.component();
+                ObjectDraw {
+                    mesh,
+                    transform: if placed.shown == peet_math::Frame::WORLD {
+                        DMat4::IDENTITY
+                    } else {
+                        placed.shown.to_mat4()
+                    },
+                    show_edges: detail.edges(),
+                    highlight: if component.is_some() && component == params.selected_component {
+                        0.3
+                    } else if component.is_some() && component == params.hovered_component {
+                        0.2
+                    } else {
+                        0.0
+                    },
+                    pick_object: Some(i as u32),
+                }
             })
             .collect();
 
@@ -473,26 +506,53 @@ impl Viewport {
         }
     }
 
-    fn sync_meshes(&mut self, params: &ViewportParams<'_>) {
-        if self.body_revision == Some(params.document.revision) {
-            return;
+    /// Works out how each body is drawn this frame, and makes sure the meshes for that
+    /// are on the GPU. A body is tessellated and uploaded when it is first drawn (fine
+    /// or coarse), not before: what is hidden or never comes into view costs nothing.
+    fn sync_meshes(&mut self, params: &ViewportParams<'_>, rect: Rect) {
+        let doc = params.document;
+        if self.body_revision != Some(doc.revision) {
+            // GPU meshes are kept per body stamp and colour: unchanged bodies keep
+            // theirs, and the instances of one part in an assembly share one.
+            self.body_infos = crate::lod::body_infos(doc);
+            let keys: std::collections::HashSet<u64> =
+                self.body_infos.iter().map(|i| i.key).collect();
+            let renderer = &mut self.renderer;
+            self.gpu_meshes.retain(|(key, _), id| {
+                let keep = keys.contains(key);
+                if !keep {
+                    renderer.remove_mesh(*id);
+                }
+                keep
+            });
+            self.body_revision = Some(doc.revision);
         }
-        // GPU meshes are kept per body stamp: unchanged bodies keep theirs.
-        let mut old: HashMap<u64, MeshId> = self.body_meshes.drain(..).collect();
-        for body in &params.document.bodies {
-            let id = match old.remove(&body.stamp) {
-                Some(id) => id,
-                None => self.renderer.upload_mesh(
-                    &params.render_state.device,
-                    &crate::bodies::to_mesh_data(body.tess()),
-                ),
-            };
-            self.body_meshes.push((body.stamp, id));
+        let aspect = f64::from(rect.width() / rect.height().max(1.0));
+        let view = crate::lod::LodView {
+            camera: &self.camera,
+            view_proj: self
+                .camera
+                .view_projection(aspect, &doc.visible_body_bounds()),
+            height_px: f64::from(rect.height()),
+        };
+        self.details.clear();
+        for ((info, body), placed) in self.body_infos.iter().zip(&doc.bodies).zip(&doc.placed) {
+            let detail = view.detail(info, &placed.shown);
+            self.details.push(detail);
+            if !detail.is_drawn() {
+                continue;
+            }
+            let coarse = detail.is_coarse();
+            self.gpu_meshes
+                .entry((info.key, coarse))
+                .or_insert_with(|| {
+                    let tess = if coarse { body.coarse() } else { body.tess() };
+                    self.renderer.upload_mesh(
+                        &params.render_state.device,
+                        &crate::bodies::to_mesh_data(tess, placed.color),
+                    )
+                });
         }
-        for id in old.into_values() {
-            self.renderer.remove_mesh(id);
-        }
-        self.body_revision = Some(params.document.revision);
     }
 
     fn build_overlay(&mut self, params: &ViewportParams<'_>, wpp: f64) {
@@ -722,9 +782,41 @@ impl Viewport {
         } else {
             [28, 30, 36, 255]
         };
-        for body in &params.document.bodies {
-            for [a, b] in body.silhouettes().lines(view) {
-                self.overlay.line(a, b, edge_color);
+        let doc = params.document;
+        // Bodies of one part turned the same way have the same silhouette in a parallel
+        // view: it is worked out once for them all.
+        let mut same: HashMap<(u64, [u64; 4]), Vec<[DVec3; 2]>> = HashMap::new();
+        for ((body, placed), detail) in doc.bodies.iter().zip(&doc.placed).zip(&self.details) {
+            // Not for what is not drawn, or drawn too small for lines.
+            if !detail.edges() {
+                continue;
+            }
+            // Seen from where the viewer is in the body's own coordinates.
+            let frame = &placed.shown;
+            let local = match view {
+                peet_kernel::tessellate::View::Orthographic { dir } => {
+                    peet_kernel::tessellate::View::Orthographic {
+                        dir: frame.vector_to_local(dir),
+                    }
+                }
+                peet_kernel::tessellate::View::Perspective { eye } => {
+                    peet_kernel::tessellate::View::Perspective {
+                        eye: frame.to_local(eye),
+                    }
+                }
+            };
+            let lines = match local {
+                peet_kernel::tessellate::View::Orthographic { .. } => same
+                    .entry((body.stamp, frame.rotation.to_array().map(f64::to_bits)))
+                    .or_insert_with(|| body.silhouettes().lines(local))
+                    .as_slice(),
+                peet_kernel::tessellate::View::Perspective { .. } => {
+                    &body.silhouettes().lines(local)[..]
+                }
+            };
+            for [a, b] in lines {
+                self.overlay
+                    .line(frame.to_world(*a), frame.to_world(*b), edge_color);
             }
         }
         // Bend lines on both sides of flat patterns, dashed.
@@ -768,6 +860,11 @@ impl Viewport {
             let Some(body) = params.document.bodies.get(geom.body()) else {
                 continue;
             };
+            let frame = params
+                .document
+                .placed
+                .get(geom.body())
+                .map_or(peet_math::Frame::WORLD, |p| p.shown);
             let (fill, line): ([u8; 4], [u8; 4]) = if selected {
                 ([255, 150, 30, 110], [255, 150, 30, 255])
             } else {
@@ -781,7 +878,7 @@ impl Viewport {
                         for t in &fm.triangles {
                             for &i in t {
                                 let i = i as usize;
-                                let p = fm.positions[i] + fm.normals[i] * lift;
+                                let p = frame.to_world(fm.positions[i] + fm.normals[i] * lift);
                                 self.overlay
                                     .triangles
                                     .push(peet_render::ColorVertex::new(p, fill));
@@ -792,7 +889,8 @@ impl Viewport {
                 GeomRef::Edge { edge, .. } => {
                     if let Some(ep) = body.tess().edges.iter().find(|e| e.edge == edge) {
                         for w in ep.points.windows(2) {
-                            self.overlay.line(w[0], w[1], line);
+                            self.overlay
+                                .line(frame.to_world(w[0]), frame.to_world(w[1]), line);
                         }
                     }
                 }
@@ -802,7 +900,7 @@ impl Viewport {
                         continue;
                     };
                     let r = wpp * 5.0;
-                    let p = v.point - self.camera.forward() * (wpp * 2.0);
+                    let p = frame.to_world(v.point) - self.camera.forward() * (wpp * 2.0);
                     let (x, y) = (self.camera.right() * r, self.camera.up() * r);
                     for corner in [p + x, p + y, p - x, p + x, p - x, p - y] {
                         self.overlay

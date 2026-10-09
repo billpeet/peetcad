@@ -10,9 +10,12 @@ use peet_sketch::expr::LengthUnit;
 use serde_json::{Map, Value};
 
 use crate::args::{Args, boolean, integer, list, number, text};
+use crate::assembly::{CompSel, ComponentChange, InsertSource, Placing, Point3};
 use crate::fields::FeatureArgs;
 use crate::host::{AppCommand, word_enum};
 use crate::library::{CheckRule, Gauge};
+use crate::mate::{MateChange, MateEndSel, MateSel, MateType};
+use crate::session::SessionCommand;
 use crate::sketch::{self, DrawItem};
 use crate::value::{Configs, EdgeSel, FeatureSel, GeomSel, Input, PlaneSel};
 
@@ -27,6 +30,36 @@ word_enum! {
         Chassis = "chassis",
         /// A revolved housing with a bolt circle.
         Housing = "housing",
+        /// A flat sheet metal cover for the chassis, with holes for the housing.
+        Cover = "cover",
+        /// An M8 socket head screw, for the housing's counterbores.
+        Bolt = "bolt",
+        /// An M4 socket head screw, for the chassis's mounting holes.
+        Screw = "screw",
+        /// An assembly: the chassis, the cover, the housing and their screws, mated.
+        Assembly = "assembly",
+    }
+}
+
+impl Sample {
+    /// The sample, built.
+    pub fn model(self) -> peet_model::Model {
+        match self {
+            Self::Bracket => peet_model::samples::bracket().0,
+            Self::Enclosure => peet_model::samples::enclosure().0,
+            Self::Chassis => peet_model::samples::chassis().0,
+            Self::Housing => peet_model::samples::housing().0,
+            Self::Cover => peet_model::samples::cover().0,
+            Self::Bolt => {
+                use peet_model::samples::{enclosure_size, socket_screw};
+                socket_screw("Bolt M8", enclosure_size::M8).0
+            }
+            Self::Screw => {
+                use peet_model::samples::{enclosure_size, socket_screw};
+                socket_screw("Screw M4", enclosure_size::M4).0
+            }
+            Self::Assembly => peet_model::samples::enclosure_assembly().0,
+        }
     }
 }
 
@@ -193,8 +226,9 @@ pub enum Query {
     Materials {
         material: Option<String>,
     },
-    /// Mass properties for a density of 1: volume, area, centre of gravity, principal
-    /// moments of inertia. Of one body, or of all (each, and together).
+    /// Mass properties: volume, area, centre of gravity, principal moments of inertia
+    /// (for a density of 1), and the mass if the part has a material. Of one body, or of
+    /// all (each, and together).
     Mass {
         body: Option<usize>,
     },
@@ -203,6 +237,22 @@ pub enum Query {
     Measure {
         a: Box<GeomSel>,
         b: Option<Box<GeomSel>>,
+    },
+    /// The components of an assembly, and its parts.
+    Components,
+    /// The mates of an assembly, and the freedom they leave.
+    Mates,
+    /// The steps of an assembly's exploded view.
+    ExplodeSteps,
+    /// Where the components of an assembly run into each other: every pair, or those
+    /// one component is in.
+    Interference {
+        component: Option<CompSel>,
+    },
+    /// The bill of materials of an assembly: its parts and how many of each. With
+    /// `top_level`, a sub-assembly is one line instead of its parts.
+    Bom {
+        top_level: bool,
     },
 }
 
@@ -213,6 +263,8 @@ pub enum Format {
     /// A sheet metal body's flat pattern.
     Dxf,
     Step,
+    /// An assembly's bill of materials.
+    Csv,
 }
 
 /// One operation on a part. A change is one undo step; a query changes nothing.
@@ -354,6 +406,17 @@ pub enum Op {
         /// The first base flange if absent.
         feature: Option<FeatureSel>,
     },
+    /// Say what the part is made of: a material of the tables, or any name with a
+    /// density in kg/m³. No material clears it.
+    SetMaterial {
+        material: Option<String>,
+        /// The tables' density for the material if absent.
+        density: Option<f64>,
+    },
+    /// The colour the part is drawn in (sRGB), or `None` for the usual one.
+    SetColor {
+        color: Option<[u8; 3]>,
+    },
     /// Add a row to a material's gauge table, or change one.
     SetGauge(Gauge),
     /// Remove a gauge from a material's table, or (with no gauge) the whole table.
@@ -377,18 +440,133 @@ pub enum Op {
         constant: Option<f64>,
     },
     /// Start a new, empty part. Refused if the part has unsaved changes, unless told to
-    /// discard them.
+    /// discard them. With `keep`, the part that is open stays open beside the new one
+    /// (see [`crate::apply_session`]), and so there is nothing to discard.
     New {
         discard: bool,
+        keep: bool,
+        /// An assembly, not a part.
+        assembly: bool,
     },
-    /// Open a part from a `.peet` file.
+    /// Open a part from a `.peet` file: in place of the one that is open, or with `keep`
+    /// beside it.
     Open {
         file: Source,
         discard: bool,
+        keep: bool,
     },
     OpenSample {
         sample: Sample,
         discard: bool,
+        keep: bool,
+    },
+    /// Something about the documents that are open together: list them, switch, close.
+    Session(SessionCommand),
+    /// Add a component to an assembly: an instance of a part, which is copied into the
+    /// assembly (once, however many instances it has).
+    Insert {
+        from: InsertSource,
+        /// An automatic name (`Bracket-1`) if absent.
+        name: Option<String>,
+        /// At the assembly's origin, as the part is, if absent.
+        placing: Option<Placing>,
+        /// The first component of an assembly is fixed, the others are not, if absent.
+        fixed: Option<bool>,
+        /// Link the part to its file instead of copying it into the assembly: the
+        /// assembly then follows the file. Needs a file on disk.
+        link: bool,
+        /// Keep the link as a full path, not relative to the assembly's folder.
+        absolute: bool,
+    },
+    /// Read the linked parts of an assembly from their files again.
+    UpdateLinks,
+    /// Link a part of an assembly to a file: to the file if there is one, else the part
+    /// is written there first.
+    Link {
+        part: crate::links::PartSel,
+        path: PathBuf,
+        /// Keep the link as a full path, not relative to the assembly's folder.
+        absolute: bool,
+    },
+    /// Make a linked part the assembly's own again.
+    Unlink {
+        part: crate::links::PartSel,
+    },
+    /// Change a component of an assembly.
+    Component {
+        component: CompSel,
+        change: ComponentChange,
+    },
+    /// Replace the model of one of an assembly's parts: how a part that was opened from
+    /// an assembly and edited is stored back. A script saves that part instead.
+    SetPart {
+        part: peet_model::DefId,
+        model: Arc<peet_model::Model>,
+    },
+    /// Pull a point of a component of an assembly towards a place, as with the mouse:
+    /// it goes as far as its mates let it, and what it is mated to comes along.
+    Drag {
+        component: CompSel,
+        /// In the component's own coordinates. Its origin if absent.
+        point: Option<Point3>,
+        /// In the assembly's coordinates.
+        to: Point3,
+    },
+    /// Hold two components of an assembly together by geometry of their parts.
+    Mate {
+        kind: MateType,
+        a: MateEndSel,
+        b: MateEndSel,
+        /// Two flat faces the same way round, instead of against each other.
+        flip: Option<bool>,
+        /// An automatic name (`Coincident1`) if absent.
+        name: Option<String>,
+    },
+    /// Change a mate of an assembly.
+    EditMate {
+        mate: MateSel,
+        change: MateChange,
+    },
+    /// Copy components of an assembly in rows or round an axis.
+    ComponentPattern {
+        /// The originals.
+        components: Vec<CompSel>,
+        kind: crate::pattern::PatternSpec,
+        /// An automatic name (`LPattern1`, `CirPattern1`) if absent.
+        name: Option<String>,
+    },
+    /// Change a component pattern of an assembly.
+    EditComponentPattern {
+        pattern: crate::pattern::PatternSel,
+        change: crate::pattern::PatternChange,
+    },
+    /// Add a step to an assembly's exploded view: components shown moved by a distance.
+    ExplodeStep {
+        components: Vec<CompSel>,
+        /// How far, in the assembly's directions.
+        by: crate::assembly::Point3,
+        /// An automatic name (`Explode1`) if absent.
+        name: Option<String>,
+    },
+    /// Change a step of an assembly's exploded view.
+    EditExplodeStep {
+        step: crate::explode::ExplodeSel,
+        change: crate::explode::ExplodeChange,
+    },
+    /// Show an assembly exploded, or as it is (`None`: the other way). A view.
+    Explode {
+        on: Option<bool>,
+    },
+    /// Show every hidden component of an assembly.
+    ShowAll,
+    /// Show these components of an assembly and hide every other.
+    Isolate {
+        components: Vec<CompSel>,
+    },
+    /// Open a component's part as a document of its own (see
+    /// [`crate::apply_session`]): saving that document stores it back.
+    OpenComponent {
+        component: CompSel,
     },
     /// Something for the application itself, not the part: it needs a running PeetCAD.
     App(AppCommand),
@@ -447,6 +625,8 @@ impl Op {
             Self::ShowDatum { .. } => "show",
             Self::FlatPattern { .. } => "flat_pattern",
             Self::ApplyMaterial { .. } => "apply_material",
+            Self::SetMaterial { .. } => "set_material",
+            Self::SetColor { .. } => "set_color",
             Self::SetGauge(_) => "set_gauge",
             Self::DeleteGauge { .. } => "delete_gauge",
             Self::ImportMaterials { .. } => "import_materials",
@@ -456,6 +636,24 @@ impl Op {
             Self::Open { .. } => "open",
             Self::OpenSample { .. } => "open_sample",
             Self::App(command) => command.word(),
+            Self::Session(command) => command.word(),
+            Self::Insert { .. } => "insert",
+            Self::UpdateLinks => "update_links",
+            Self::Link { .. } => "link",
+            Self::Unlink { .. } => "unlink",
+            Self::Component { change, .. } => change.word(),
+            Self::Drag { .. } => "drag",
+            Self::Mate { .. } => "mate",
+            Self::EditMate { change, .. } => change.word(),
+            Self::ComponentPattern { .. } => "component_pattern",
+            Self::EditComponentPattern { change, .. } => change.word(),
+            Self::ExplodeStep { .. } => "explode_step",
+            Self::EditExplodeStep { change, .. } => change.word(),
+            Self::Explode { .. } => "explode",
+            Self::ShowAll => "show_all",
+            Self::Isolate { .. } => "isolate",
+            Self::SetPart { .. } => "set_part",
+            Self::OpenComponent { .. } => "open_component",
             Self::Undo => "undo",
             Self::Redo => "redo",
             Self::Query(q) => match q {
@@ -473,6 +671,11 @@ impl Op {
                 Query::Materials { .. } => "materials",
                 Query::Mass { .. } => "mass",
                 Query::Measure { .. } => "measure",
+                Query::Components => "components",
+                Query::Mates => "mates",
+                Query::ExplodeSteps => "explode_steps",
+                Query::Interference { .. } => "interference",
+                Query::Bom { .. } => "bom",
             },
             Self::Save { .. } => "save",
             Self::Export { .. } => "export",
@@ -687,7 +890,7 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "mass",
         "body",
-        "Mass properties for a density of 1: volume, area, centre of gravity, principal moments of inertia.",
+        "Mass properties: volume, area, centre of gravity, principal moments of inertia (for a density of 1), and the mass if the part has a material. Of an assembly: every component and the whole, each part weighed with its own material.",
     ),
     (
         "measure",
@@ -723,11 +926,21 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "apply_material",
         "material, gauge or thickness (the nearest gauge), feature (a base flange; default the first)",
-        "Set a sheet metal body's thickness, bend radius and bend model from the material tables.",
+        "Set a sheet metal body's thickness, bend radius and bend model from the material tables, and the part's material.",
+    ),
+    (
+        "set_material",
+        "material (a name, or null for none), density (kg/m³; default the material tables')",
+        "Say what the part is made of: its name in a bill of materials and the density its mass is worked out with.",
+    ),
+    (
+        "set_color",
+        "color (\"#rrggbb\" or [r, g, b], or null for the usual one)",
+        "The colour the part is drawn in.",
     ),
     (
         "set_gauge",
-        "material, gauge, thickness, radius, bend ({k_factor} | {allowance} | {deduction}), notes",
+        "material, gauge, thickness, radius, bend ({k_factor} | {allowance} | {deduction}), notes, density (kg/m³, of the material)",
         "Add a row to a material's gauge table, or change one.",
     ),
     (
@@ -752,18 +965,18 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "new",
-        "discard (default false)",
-        "Start a new, empty part. Refused if there are unsaved changes, unless discard is true.",
+        "discard (default false), keep (default false), assembly (default false)",
+        "Start a new, empty part, or with assembly an empty assembly. Refused if there are unsaved changes, unless discard is true. With keep, the document that is open stays open beside the new one.",
     ),
     (
         "open",
-        "path, discard (default false)",
-        "Open a part from a .peet file.",
+        "path, discard (default false), keep (default false)",
+        "Open a part from a .peet file: in place of the one that is open, or with keep beside it.",
     ),
     (
         "open_sample",
-        "sample (bracket, enclosure, chassis, housing), discard (default false)",
-        "Open one of the sample parts.",
+        "sample (bracket, enclosure, chassis, housing, cover, bolt, screw; assembly: an assembly of the last five), discard (default false), keep (default false)",
+        "Open one of the sample parts: in place of the one that is open, or with keep beside it.",
     ),
     (
         "save",
@@ -772,12 +985,24 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "export",
-        "path, format (stl, dxf, step), body, schema (ap214, ap242)",
-        "Export the bodies as STL or STEP, or a sheet metal body's flat pattern as DXF.",
+        "path, format (stl, dxf, step, csv), body, schema (ap214, ap242)",
+        "Export the bodies as STL or STEP, a sheet metal body's flat pattern as DXF, or an assembly's bill of materials as CSV.",
     ),
 ];
 
 fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
+    if let Some(found) = crate::pattern::parse(op, a) {
+        return found;
+    }
+    if let Some(found) = crate::explode::parse(op, a) {
+        return found;
+    }
+    if let Some(found) = crate::mate::parse(op, a) {
+        return found;
+    }
+    if let Some(found) = crate::assembly::parse(op, a) {
+        return found;
+    }
     Ok(match op {
         "help" => Op::Query(Query::Help),
         "status" => Op::Query(Query::Status),
@@ -809,16 +1034,29 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "materials" => Op::Query(Query::Materials {
             material: a.string("material")?,
         }),
+        "update_links" => Op::UpdateLinks,
+        "link" => Op::Link {
+            part: a.required("part", crate::links::PartSel::parse)?,
+            path: path(a, "link")?,
+            absolute: a.flag("absolute", false)?,
+        },
+        "unlink" => Op::Unlink {
+            part: a.required("part", crate::links::PartSel::parse)?,
+        },
         "new" => Op::New {
             discard: a.flag("discard", false)?,
+            keep: a.flag("keep", false)?,
+            assembly: a.flag("assembly", false)?,
         },
         "open" => Op::Open {
             file: Source::path(path(a, "open")?),
             discard: a.flag("discard", false)?,
+            keep: a.flag("keep", false)?,
         },
         "open_sample" => Op::OpenSample {
             sample: a.required("sample", Sample::parse)?,
             discard: a.flag("discard", false)?,
+            keep: a.flag("keep", false)?,
         },
         "flat_pattern" => Op::FlatPattern {
             on: a.parsed("on", boolean)?,
@@ -856,6 +1094,33 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             gauge: a.string("gauge")?,
             thickness: a.parsed("thickness", number)?,
             feature: a.parsed("feature", FeatureSel::parse)?,
+        },
+        "set_material" => {
+            let material = match a.take_nullable("material") {
+                None => {
+                    return Err(
+                        "'set_material' needs a 'material' field (null for no material)."
+                            .to_owned(),
+                    );
+                }
+                Some(Value::Null) => None,
+                Some(v) => Some(text(&v).map_err(|e| format!("material: {e}"))?.to_owned()),
+            };
+            Op::SetMaterial {
+                material,
+                density: a.parsed("density", number)?,
+            }
+        }
+        "set_color" => Op::SetColor {
+            color: match a.take_nullable("color") {
+                None => {
+                    return Err(
+                        "'set_color' needs a 'color' field (null for the usual colour).".to_owned(),
+                    );
+                }
+                Some(Value::Null) => None,
+                Some(v) => Some(crate::library::color(&v).map_err(|e| format!("color: {e}"))?),
+            },
         },
         "set_gauge" => Op::SetGauge(Gauge::parse(a)?),
         "delete_gauge" => Op::DeleteGauge {
@@ -897,7 +1162,8 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
                 "stl" => Ok(Format::Stl),
                 "dxf" => Ok(Format::Dxf),
                 "step" | "stp" => Ok(Format::Step),
-                other => Err(format!("'{other}' is not stl, dxf or step")),
+                "csv" => Ok(Format::Csv),
+                other => Err(format!("'{other}' is not stl, dxf, step or csv")),
             })?,
             body: body(a)?,
             schema: a
@@ -1011,6 +1277,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         },
         _ if FeatureArgs::adds(op) => Op::Add(new_features(op, a)?),
         _ if let Some(command) = AppCommand::parse(op, a) => Op::App(command?),
+        _ if let Some(command) = SessionCommand::parse(op, a) => Op::Session(command?),
         other => {
             let mut all: Vec<&str> = OTHER_OPS
                 .iter()
@@ -1032,6 +1299,12 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
                 "exit_sketch",
             ]);
             all.extend(["tool", "quit"]);
+            all.extend(crate::session::SESSION_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::assembly::ASSEMBLY_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::mate::MATE_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::links::LINK_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::explode::EXPLODE_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::pattern::PATTERN_OPS.iter().map(|(n, ..)| *n));
             all.sort_unstable();
             all.dedup();
             return Err(format!(

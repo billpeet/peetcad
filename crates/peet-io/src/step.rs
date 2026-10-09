@@ -19,7 +19,9 @@
 //!   voids), named after the body it came from.
 //!
 //! Several bodies go into the one product and representation, one brep each, the way a
-//! multi-body part is usually exported; they are not made into an assembly.
+//! multi-body part is usually exported; they are not made into an assembly. An assembly
+//! is written by [`write_assembly`], with a product for each part and sub-assembly and an
+//! occurrence for each component.
 //!
 //! **Topology.** Kernel elements map one to one: shell → `CLOSED_SHELL`, face →
 //! `ADVANCED_FACE` on a `PLANE`, `CYLINDRICAL_SURFACE`, `CONICAL_SURFACE`, `SPHERICAL_SURFACE` or
@@ -129,44 +131,9 @@ pub struct StepOptions {
 /// Writes `bodies` (each a name and a solid) as one part in a STEP file.
 pub fn write(bodies: &[(&str, &Solid)], options: &StepOptions) -> String {
     let mut w = Writer::default();
-    let (context_text, protocol, year) = options.schema.application();
-
-    // Product structure.
-    let app = w.add(format!("APPLICATION_CONTEXT({})", string(context_text)));
-    w.add(format!(
-        "APPLICATION_PROTOCOL_DEFINITION('international standard',{},{year},#{app})",
-        string(protocol)
-    ));
-    let product_context = w.add(format!("PRODUCT_CONTEXT('',#{app},'mechanical')"));
+    let shared = Shared::new(&mut w, options);
     let name = string(&options.product_name);
-    let product = w.add(format!("PRODUCT({name},{name},'',(#{product_context}))"));
-    w.add(format!(
-        "PRODUCT_RELATED_PRODUCT_CATEGORY('part',$,(#{product}))"
-    ));
-    let formation = w.add(format!("PRODUCT_DEFINITION_FORMATION('','',#{product})"));
-    let definition_context = w.add(format!(
-        "PRODUCT_DEFINITION_CONTEXT('part definition',#{app},'design')"
-    ));
-    let definition = w.add(format!(
-        "PRODUCT_DEFINITION('design','',#{formation},#{definition_context})"
-    ));
-    let definition_shape = w.add(format!("PRODUCT_DEFINITION_SHAPE('','',#{definition})"));
-
-    // Units and the representation context.
-    let mm = w.add("( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) )".to_owned());
-    let rad = w.add("( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) )".to_owned());
-    let sr = w.add("( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() )".to_owned());
-    let uncertainty = w.add(format!(
-        "UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE({}),#{mm},'distance_accuracy_value',\
-         'confusion accuracy')",
-        real(tolerance::LINEAR)
-    ));
-    let context = w.add(format!(
-        "( GEOMETRIC_REPRESENTATION_CONTEXT(3) \
-         GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#{uncertainty})) \
-         GLOBAL_UNIT_ASSIGNED_CONTEXT((#{mm},#{rad},#{sr})) \
-         REPRESENTATION_CONTEXT('Context #1','3D Context with UNIT and UNCERTAINTY') )"
-    ));
+    let (_, shape) = shared.product(&mut w, &name, "part");
 
     // Geometry.
     let mut items = vec![w.axis(&Frame::WORLD)];
@@ -174,13 +141,211 @@ pub fn write(bodies: &[(&str, &Solid)], options: &StepOptions) -> String {
         items.extend(w.solid(body_name, solid));
     }
     let representation = w.add(format!(
-        "ADVANCED_BREP_SHAPE_REPRESENTATION({name},{},#{context})",
-        refs(&items)
+        "ADVANCED_BREP_SHAPE_REPRESENTATION({name},{},#{})",
+        refs(&items),
+        shared.context
     ));
     w.add(format!(
-        "SHAPE_DEFINITION_REPRESENTATION(#{definition_shape},#{representation})"
+        "SHAPE_DEFINITION_REPRESENTATION(#{shape},#{representation})"
     ));
+    file(&w, options)
+}
 
+/// A part or an assembly of a product structure to export: see [`write_assembly`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepProduct {
+    pub name: String,
+    /// A part's solids, each with its name. An assembly has none.
+    pub bodies: Vec<(String, Solid)>,
+    /// An assembly's components: which product (its index), the component's name, and
+    /// where it is in the assembly.
+    pub children: Vec<(usize, String, Frame)>,
+}
+
+/// Writes an assembly with its product structure: every part and sub-assembly once, as a
+/// product with a shape of its own, and every component as an occurrence of its product
+/// placed in its assembly. `root` is the index of the assembly itself in `products`; a
+/// child's index must be of a product that is not above it.
+///
+/// **File layout**, as OCCT (FreeCAD) and the commercial exporters write assemblies:
+///
+/// - a part is a `PRODUCT` with an `ADVANCED_BREP_SHAPE_REPRESENTATION` holding its
+///   solids in its own coordinates;
+/// - an assembly is a `PRODUCT` with a `SHAPE_REPRESENTATION` holding a placement
+///   (`AXIS2_PLACEMENT_3D`) for each component;
+/// - a component is a `NEXT_ASSEMBLY_USAGE_OCCURRENCE` between the two product
+///   definitions, with a `CONTEXT_DEPENDENT_SHAPE_REPRESENTATION` tying it to a
+///   `REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION` between the two representations,
+///   whose `ITEM_DEFINED_TRANSFORMATION` takes the origin placement of the component's
+///   shape onto its placement in the assembly.
+pub fn write_assembly(products: &[StepProduct], root: usize, options: &StepOptions) -> String {
+    let mut w = Writer::default();
+    let shared = Shared::new(&mut w, options);
+    // Each product: its definition, its representation, the placement at its origin,
+    // and for an assembly the placements of its components.
+    struct Written {
+        definition: u32,
+        representation: u32,
+        origin: u32,
+        placements: Vec<u32>,
+    }
+    let mut written: Vec<Written> = Vec::with_capacity(products.len());
+    for (index, product) in products.iter().enumerate() {
+        // The root is called what the file is; two products of one name are told apart
+        // by their ids.
+        let label = if index == root && !options.product_name.is_empty() {
+            &options.product_name
+        } else {
+            &product.name
+        };
+        let name = string(label);
+        let is_assembly = !product.children.is_empty() || product.bodies.is_empty();
+        let (definition, shape) = shared.product_with_id(
+            &mut w,
+            &string(&format!("{label}#{}", index + 1)),
+            &name,
+            if is_assembly { "assembly" } else { "part" },
+        );
+        let origin = w.axis(&Frame::WORLD);
+        let placements: Vec<u32> = product
+            .children
+            .iter()
+            .map(|(_, _, frame)| w.axis(frame))
+            .collect();
+        let mut items = vec![origin];
+        items.extend(&placements);
+        for (body_name, solid) in &product.bodies {
+            items.extend(w.solid(body_name, solid));
+        }
+        let kind = if product.bodies.is_empty() {
+            "SHAPE_REPRESENTATION"
+        } else {
+            "ADVANCED_BREP_SHAPE_REPRESENTATION"
+        };
+        let representation = w.add(format!(
+            "{kind}({name},{},#{})",
+            refs(&items),
+            shared.context
+        ));
+        w.add(format!(
+            "SHAPE_DEFINITION_REPRESENTATION(#{shape},#{representation})"
+        ));
+        written.push(Written {
+            definition,
+            representation,
+            origin,
+            placements,
+        });
+    }
+    // The components.
+    let mut occurrence = 0;
+    for (product, parent) in products.iter().zip(&written) {
+        for ((child, name, _), placement) in product.children.iter().zip(&parent.placements) {
+            let Some(child) = written.get(*child) else {
+                continue;
+            };
+            occurrence += 1;
+            let usage = w.add(format!(
+                "NEXT_ASSEMBLY_USAGE_OCCURRENCE({},{},'',#{},#{},$)",
+                string(&occurrence.to_string()),
+                string(name),
+                parent.definition,
+                child.definition
+            ));
+            let shape = w.add(format!(
+                "PRODUCT_DEFINITION_SHAPE('Placement','Placement of an item',#{usage})"
+            ));
+            let transformation = w.add(format!(
+                "ITEM_DEFINED_TRANSFORMATION('','',#{},#{placement})",
+                child.origin
+            ));
+            // A complex instance, its parts in alphabetical order.
+            let relationship = w.add(format!(
+                "( REPRESENTATION_RELATIONSHIP('','',#{},#{}) \
+                 REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION(#{transformation}) \
+                 SHAPE_REPRESENTATION_RELATIONSHIP() )",
+                child.representation, parent.representation
+            ));
+            w.add(format!(
+                "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION(#{relationship},#{shape})"
+            ));
+        }
+    }
+    file(&w, options)
+}
+
+/// What every product of a file refers to.
+struct Shared {
+    app: u32,
+    product_context: u32,
+    definition_context: u32,
+    /// The representation context: millimetres, radians, and the tolerance.
+    context: u32,
+}
+
+impl Shared {
+    fn new(w: &mut Writer, options: &StepOptions) -> Self {
+        let (context_text, protocol, year) = options.schema.application();
+        let app = w.add(format!("APPLICATION_CONTEXT({})", string(context_text)));
+        w.add(format!(
+            "APPLICATION_PROTOCOL_DEFINITION('international standard',{},{year},#{app})",
+            string(protocol)
+        ));
+        let product_context = w.add(format!("PRODUCT_CONTEXT('',#{app},'mechanical')"));
+        let definition_context = w.add(format!(
+            "PRODUCT_DEFINITION_CONTEXT('part definition',#{app},'design')"
+        ));
+        // Units and the representation context.
+        let mm = w.add("( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) )".to_owned());
+        let rad = w.add("( NAMED_UNIT(*) PLANE_ANGLE_UNIT() SI_UNIT($,.RADIAN.) )".to_owned());
+        let sr = w.add("( NAMED_UNIT(*) SI_UNIT($,.STERADIAN.) SOLID_ANGLE_UNIT() )".to_owned());
+        let uncertainty = w.add(format!(
+            "UNCERTAINTY_MEASURE_WITH_UNIT(LENGTH_MEASURE({}),#{mm},'distance_accuracy_value',\
+             'confusion accuracy')",
+            real(tolerance::LINEAR)
+        ));
+        let context = w.add(format!(
+            "( GEOMETRIC_REPRESENTATION_CONTEXT(3) \
+             GLOBAL_UNCERTAINTY_ASSIGNED_CONTEXT((#{uncertainty})) \
+             GLOBAL_UNIT_ASSIGNED_CONTEXT((#{mm},#{rad},#{sr})) \
+             REPRESENTATION_CONTEXT('Context #1','3D Context with UNIT and UNCERTAINTY') )"
+        ));
+        Self {
+            app,
+            product_context,
+            definition_context,
+            context,
+        }
+    }
+
+    /// A product called `name` (already quoted) of a category. Returns its definition
+    /// and its definition's shape.
+    fn product(&self, w: &mut Writer, name: &str, category: &str) -> (u32, u32) {
+        self.product_with_id(w, name, name, category)
+    }
+
+    fn product_with_id(&self, w: &mut Writer, id: &str, name: &str, category: &str) -> (u32, u32) {
+        let _ = self.app;
+        let product = w.add(format!(
+            "PRODUCT({id},{name},'',(#{}))",
+            self.product_context
+        ));
+        w.add(format!(
+            "PRODUCT_RELATED_PRODUCT_CATEGORY('{category}',$,(#{product}))"
+        ));
+        let formation = w.add(format!("PRODUCT_DEFINITION_FORMATION('','',#{product})"));
+        let definition = w.add(format!(
+            "PRODUCT_DEFINITION('design','',#{formation},#{})",
+            self.definition_context
+        ));
+        let shape = w.add(format!("PRODUCT_DEFINITION_SHAPE('','',#{definition})"));
+        (definition, shape)
+    }
+}
+
+/// The file around the entities a writer has collected.
+fn file(w: &Writer, options: &StepOptions) -> String {
+    let name = string(&options.product_name);
     let mut out = String::with_capacity(w.data.len() + 1024);
     out.push_str("ISO-10303-21;\nHEADER;\n");
     out.push_str("FILE_DESCRIPTION(('PeetCAD model'),'2;1');\n");

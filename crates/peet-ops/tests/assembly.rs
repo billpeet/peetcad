@@ -1,0 +1,2533 @@
+//! Assemblies through the operations: components inserted, placed, changed and replaced,
+//! parts opened and stored back, and what is refused in which kind of document.
+
+use std::sync::Arc;
+
+use peet_document::{Document, Session};
+use peet_math::{DVec3, Frame};
+use peet_model::Model;
+use peet_ops::{
+    CompSel, ComponentChange, Headless, InsertSource, Op, Placing, Undo, apply, apply_json,
+    apply_model, apply_session_json,
+};
+use serde_json::{Value, json};
+
+fn ok(doc: &mut Document, op: Value) -> Value {
+    let reply = apply_json(doc, &op, Undo::Step);
+    assert!(reply.ok, "{op} failed: {}", reply.json["error"]);
+    reply.json
+}
+
+fn error(doc: &mut Document, op: Value) -> String {
+    let before = doc.model.clone();
+    let reply = apply_json(doc, &op, Undo::Step);
+    assert!(!reply.ok, "{op} should have failed: {}", reply.json);
+    assert_eq!(doc.model, before, "a failed operation changes nothing");
+    reply.json["error"].as_str().unwrap().to_owned()
+}
+
+fn temp(name: &str) -> std::path::PathBuf {
+    let dir = std::env::temp_dir().join(format!("peet-asm-{name}-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn assembly() -> Document {
+    let mut doc = Document::default();
+    let made = ok(&mut doc, json!({"op": "new", "assembly": true}));
+    assert_eq!(made["kind"], "assembly");
+    assert_eq!(made["components"], 0);
+    doc
+}
+
+#[test]
+fn components_are_inserted_placed_and_changed() {
+    let mut doc = assembly();
+    let first = ok(&mut doc, json!({"op": "insert", "sample": "bracket"}));
+    assert_eq!(
+        first["component"],
+        json!({
+            "id": 1, "name": "Bracket-1", "part": "Bracket", "at": [0.0, 0.0, 0.0],
+            "fixed": true, "freedom": 0, "status": "ok",
+            "min": first["component"]["min"], "max": first["component"]["max"],
+        })
+    );
+    assert_eq!(doc.undo_label(), Some("Insert Bracket-1"));
+    let size = |c: &Value| {
+        let (lo, hi) = (c["min"].as_array().unwrap(), c["max"].as_array().unwrap());
+        [0, 1, 2].map(|i| hi[i].as_f64().unwrap() - lo[i].as_f64().unwrap())
+    };
+    let own = size(&first["component"]);
+
+    // A second instance, placed and turned: a quarter turn about Z swaps its X and Y.
+    let second = ok(
+        &mut doc,
+        json!({"op": "insert", "component": "Bracket-1", "name": "Left",
+               "at": [200, 0, 0], "rotate": {"axis": "z", "angle": 90}}),
+    );
+    let c = &second["component"];
+    assert_eq!(
+        (c["name"].as_str(), c["fixed"].as_bool()),
+        (Some("Left"), Some(false))
+    );
+    assert_eq!(c["rotate"], json!({"axis": [0.0, 0.0, 1.0], "angle": 90.0}));
+    let turned = size(c);
+    assert!((turned[0] - own[1]).abs() < 1e-6 && (turned[1] - own[0]).abs() < 1e-6);
+    assert!((turned[2] - own[2]).abs() < 1e-6);
+
+    let list = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(list["components"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        list["parts"],
+        json!([{"id": 1, "name": "Bracket", "kind": "part", "components": 2}]),
+        "one part, however many instances"
+    );
+    assert_eq!(doc.bodies.len(), 2);
+    assert!(Arc::ptr_eq(&doc.bodies[0], &doc.bodies[1]));
+
+    // Placing: the parts left out stay.
+    let moved = ok(
+        &mut doc,
+        json!({"op": "place", "component": "Left", "at": [0, 300, 10]}),
+    );
+    assert_eq!(moved["component"]["at"], json!([0.0, 300.0, 10.0]));
+    assert_eq!(moved["component"]["rotate"]["angle"], 90.0);
+    assert_eq!(doc.undo_label(), Some("Move Left"));
+    let turned = ok(
+        &mut doc,
+        json!({"op": "place", "component": 2, "rotate": {"axis": [0, 0, 2], "angle": 0}}),
+    );
+    assert!(turned["component"].get("rotate").is_none());
+    assert_eq!(turned["component"]["at"], json!([0.0, 300.0, 10.0]));
+
+    // The other changes.
+    ok(&mut doc, json!({"op": "fix", "component": "Left"}));
+    ok(
+        &mut doc,
+        json!({"op": "rename", "component": "Left", "name": "Second"}),
+    );
+    let hidden = ok(
+        &mut doc,
+        json!({"op": "show", "component": "Second", "on": false}),
+    );
+    assert_eq!(hidden["component"]["hidden"], true);
+    let off = ok(&mut doc, json!({"op": "suppress", "component": "Second"}));
+    assert_eq!(off["component"]["status"], "suppressed");
+    assert_eq!(doc.bodies.len(), 1);
+    ok(
+        &mut doc,
+        json!({"op": "suppress", "component": "Second", "on": false}),
+    );
+    let c = doc.model.assembly().unwrap().components().nth(1).unwrap();
+    assert!(c.fixed && !c.visible && !c.suppressed && c.name == "Second");
+
+    // Replaced where it is: another part, the same place.
+    let replaced = ok(
+        &mut doc,
+        json!({"op": "replace", "component": "Second", "sample": "housing"}),
+    );
+    assert_eq!(replaced["component"]["part"], "Housing");
+    assert_eq!(replaced["component"]["at"], json!([0.0, 300.0, 10.0]));
+    let status = ok(&mut doc, json!({"op": "status"}));
+    assert_eq!(
+        (status["components"].as_u64(), status["parts"].as_u64()),
+        (Some(2), Some(2))
+    );
+    assert_eq!(status["failures"], json!([]));
+
+    // Deleting the last instance of a part takes the part along; undo brings both back.
+    let deleted = ok(&mut doc, json!({"op": "delete", "component": "Second"}));
+    assert_eq!(deleted["deleted"], json!(["Second"]));
+    assert_eq!(doc.model.assembly().unwrap().definitions().count(), 1);
+    ok(&mut doc, json!({"op": "undo"}));
+    assert_eq!(doc.model.assembly().unwrap().definitions().count(), 2);
+    assert_eq!(doc.bodies.len(), 2);
+}
+
+#[test]
+fn mistakes_are_explained_and_change_nothing() {
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "sample": "bracket"}));
+    for (op, says) in [
+        (json!({"op": "insert"}), "needs one of"),
+        (
+            json!({"op": "insert", "sample": "bracket", "path": "a.peet"}),
+            "only one of",
+        ),
+        (json!({"op": "insert", "sample": "gearbox"}), "bracket"),
+        (
+            json!({"op": "insert", "path": "no-such.peet"}),
+            "no-such.peet",
+        ),
+        (json!({"op": "insert", "component": "Nut-1"}), "Bracket-1"),
+        (
+            json!({"op": "insert", "sample": "bracket", "name": "Bracket-1"}),
+            "already called",
+        ),
+        (
+            json!({"op": "insert", "sample": "bracket", "at": [1, 2]}),
+            "3 coordinates",
+        ),
+        (
+            json!({"op": "insert", "sample": "bracket", "rotate": {"axis": [0, 0, 0], "angle": 9}}),
+            "no direction",
+        ),
+        (
+            json!({"op": "insert", "sample": "bracket", "rotate": {"axis": "up", "angle": 9}}),
+            "axis",
+        ),
+        (
+            json!({"op": "insert", "sample": "bracket", "rotate": {"axis": "z"}}),
+            "angle",
+        ),
+        (
+            json!({"op": "place", "component": "Bracket-1"}),
+            "'at' or a 'rotate'",
+        ),
+        (
+            json!({"op": "place", "component": 7, "at": [0, 0, 0]}),
+            "id 7",
+        ),
+        (
+            json!({"op": "replace", "component": "Bracket-1", "component2": 1}),
+            "needs one of",
+        ),
+        (
+            json!({"op": "rename", "component": "Bracket-1", "name": " "}),
+            "empty",
+        ),
+        (
+            json!({"op": "fix", "component": "Bracket-1", "off": true}),
+            "no field 'off'",
+        ),
+        // Part operations are for parts.
+        (json!({"op": "sketch", "on": "top"}), "is an assembly"),
+        (json!({"op": "bodies"}), "open_component"),
+        (
+            json!({"op": "set_material", "material": "Mild steel"}),
+            "is an assembly",
+        ),
+        // A session is needed for these.
+        (json!({"op": "insert", "part": "Bracket"}), "open together"),
+        (
+            json!({"op": "open_component", "component": "Bracket-1"}),
+            "open together",
+        ),
+    ] {
+        let e = error(&mut doc, op.clone());
+        assert!(e.contains(says), "{op}: {e}");
+    }
+    // And assembly operations are for assemblies.
+    let mut part = Document::default();
+    for op in [
+        json!({"op": "insert", "sample": "bracket"}),
+        json!({"op": "components"}),
+        json!({"op": "place", "component": 1, "at": [0, 0, 0]}),
+    ] {
+        let e = error(&mut part, op);
+        assert!(
+            e.contains("is a part") && e.contains("\"assembly\": true"),
+            "{e}"
+        );
+    }
+}
+
+#[test]
+fn an_assembly_is_saved_opened_and_exported() {
+    let dir = temp("files");
+    let part = dir.join("plate.peet").to_string_lossy().into_owned();
+    let file = dir.join("pair.peet").to_string_lossy().into_owned();
+    // A part file of our own: a 40 x 30 x 5 plate.
+    let mut plate = Document::default();
+    ok(
+        &mut plate,
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 30]}]}),
+    );
+    ok(
+        &mut plate,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+    );
+    ok(&mut plate, json!({"op": "save", "path": part}));
+
+    let mut doc = assembly();
+    let a = ok(&mut doc, json!({"op": "insert", "path": part}));
+    // Called after its file.
+    assert_eq!(a["component"]["name"], "plate-1");
+    let b = ok(
+        &mut doc,
+        json!({"op": "insert", "path": part, "at": [0, 0, 5]}),
+    );
+    assert_eq!(b["component"]["max"], json!([40.0, 30.0, 10.0]));
+    assert_eq!(doc.model.assembly().unwrap().definitions().count(), 1);
+
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    assert!(!doc.is_modified());
+    let mut again = Document::default();
+    let opened = ok(&mut again, json!({"op": "open", "path": file}));
+    assert_eq!(
+        (opened["kind"].as_str(), opened["components"].as_u64()),
+        (Some("assembly"), Some(2))
+    );
+    assert_eq!(again.model, doc.model);
+    // The file is whole: the part's own file is not needed.
+    std::fs::remove_file(&part).unwrap();
+    let mut alone = Document::default();
+    ok(&mut alone, json!({"op": "open", "path": file}));
+    assert_eq!(alone.bodies.len(), 2);
+
+    // An assembly in an assembly: a sub-assembly, placed as one thing.
+    let mut top = assembly();
+    let sub = ok(
+        &mut top,
+        json!({"op": "insert", "path": file, "at": [100, 0, 0]}),
+    );
+    assert_eq!(sub["component"]["part"], "pair");
+    assert_eq!(sub["component"]["max"], json!([140.0, 30.0, 10.0]));
+    let parts = ok(&mut top, json!({"op": "components"}));
+    assert_eq!(parts["parts"][0]["kind"], "assembly");
+    assert_eq!(top.bodies.len(), 2);
+
+    // Exported where they are: two boxes stacked, 2 x 6000 mm³.
+    let step = dir.join("pair.step").to_string_lossy().into_owned();
+    let out = ok(&mut doc, json!({"op": "export", "path": step}));
+    assert_eq!(
+        (out["format"].as_str(), out["bodies"].as_u64()),
+        (Some("step"), Some(2))
+    );
+    // One part, used twice.
+    assert_eq!(
+        (out["parts"].as_u64(), out["components"].as_u64()),
+        (Some(1), Some(2))
+    );
+    let mut read = Document::default();
+    ok(&mut read, json!({"op": "import_step", "path": step}));
+    let bodies = ok(&mut read, json!({"op": "bodies"}));
+    let boxes = bodies["bodies"].as_array().unwrap();
+    assert_eq!(boxes.len(), 2);
+    assert_eq!(boxes[1]["max"], json!([40.0, 30.0, 10.0]));
+    assert!((boxes[1]["volume_mm3"].as_f64().unwrap() - 6000.0).abs() < 1e-6);
+    let stl = dir.join("pair.stl").to_string_lossy().into_owned();
+    let out = ok(&mut doc, json!({"op": "export", "path": stl}));
+    assert_eq!(out["triangles"], 24);
+    let e = error(&mut doc, json!({"op": "export", "path": step, "body": 0}));
+    assert!(e.contains("exported whole"), "{e}");
+    let e = error(&mut doc, json!({"op": "export", "path": dir.join("a.dxf")}));
+    assert!(e.contains("open_component"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_part_is_opened_from_its_assembly_and_stored_back() {
+    let mut host = Headless::default();
+    let mut session = Session::default();
+    let mut run =
+        |session: &mut Session, op: Value| apply_session_json(&mut host, session, &op, Undo::Step);
+    let ok = |reply: peet_ops::Reply| {
+        assert!(reply.ok, "{}", reply.json);
+        reply.json
+    };
+    let err = |reply: peet_ops::Reply| {
+        assert!(!reply.ok, "{}", reply.json);
+        reply.json["error"].as_str().unwrap().to_owned()
+    };
+
+    // A part open in the session, made a component of a new assembly beside it.
+    ok(run(
+        &mut session,
+        json!({"op": "open_sample", "sample": "bracket"}),
+    ));
+    let part = session.current_id();
+    let made = ok(run(
+        &mut session,
+        json!({"op": "new", "assembly": true, "keep": true}),
+    ));
+    let asm = session.current_id();
+    assert_eq!(made["kind"], "assembly");
+    ok(run(
+        &mut session,
+        json!({"op": "insert", "part": "Bracket"}),
+    ));
+    ok(run(
+        &mut session,
+        json!({"op": "insert", "part": part.0, "at": [0, 0, 50]}),
+    ));
+    assert_eq!(session.model.assembly().unwrap().definitions().count(), 1);
+    let e = err(run(&mut session, json!({"op": "insert", "part": asm.0})));
+    assert!(e.contains("of itself"), "{e}");
+    let e = err(run(&mut session, json!({"op": "insert", "part": "Lid"})));
+    assert!(e.contains("'Lid'"), "{e}");
+    // The assembly has its own copy: the document it came from can go.
+    ok(run(
+        &mut session,
+        json!({"op": "close", "document": part.0}),
+    ));
+    assert_eq!(session.bodies.len(), 2);
+    let height = |doc: &Document| doc.visible_body_bounds().size().z;
+    let before = height(&session);
+    let stamp = session.bodies[0].stamp;
+
+    // Open the part of a component: a document of its own, which is a part.
+    let opened = run(
+        &mut session,
+        json!({"op": "open_component", "component": "Bracket-2"}),
+    );
+    assert!(opened.replaced);
+    let opened = ok(opened);
+    assert_eq!(
+        (opened["part"].as_str(), opened["kind"].as_str()),
+        (Some("Bracket"), Some("part"))
+    );
+    let editing = session.current_id();
+    assert!(session.embedded.is_some() && !session.is_modified());
+    assert_eq!(session.count(), 2);
+    // Opening it again, from the other instance, goes to the same document.
+    ok(run(
+        &mut session,
+        json!({"op": "open_component", "component": "Bracket-1", "document": asm.0}),
+    ));
+    assert_eq!((session.count(), session.current_id()), (2, editing));
+
+    // Change it. The assembly doesn't change until the part is saved.
+    ok(run(
+        &mut session,
+        json!({"op": "edit", "feature": "Extrude1", "depth": 12}),
+    ));
+    assert!(session.is_modified());
+    assert_eq!(session.get(asm).unwrap().bodies[0].stamp, stamp);
+    let e = err(run(&mut session, json!({"op": "close"})));
+    assert!(e.contains("unsaved changes"), "{e}");
+    let e = err(run(&mut session, json!({"op": "close", "document": asm.0})));
+    assert!(e.contains("Bracket has unsaved changes"), "{e}");
+    let e = err(run(
+        &mut session,
+        json!({"op": "save", "path": "bracket.peet"}),
+    ));
+    assert!(e.contains("leave 'path' out"), "{e}");
+    let stored = run(&mut session, json!({"op": "save"}));
+    assert!(stored.changed);
+    assert_eq!(
+        stored.json,
+        json!({"ok": true, "op": "save", "stored": "Bracket", "in": "Assembly1"})
+    );
+    assert!(!session.is_modified());
+    let assembly = session.get(asm).unwrap();
+    assert_ne!(
+        assembly.bodies[0].stamp, stamp,
+        "both instances are rebuilt"
+    );
+    assert_eq!(assembly.undo_label(), Some("Edit Bracket"));
+    assert!(Arc::ptr_eq(&assembly.bodies[0], &assembly.bodies[1]));
+    // Nothing changed since: saving again is not another step.
+    assert!(!run(&mut session, json!({"op": "save"})).changed);
+
+    // Undone in the assembly, the instances are as before; the part document keeps its
+    // edit and can be stored again.
+    ok(run(&mut session, json!({"op": "undo", "document": asm.0})));
+    assert_eq!(session.get(asm).unwrap().bodies[0].stamp, stamp);
+    assert_eq!(height(session.get(asm).unwrap()), before);
+
+    // A part whose components are gone can't be stored; closing the assembly closes
+    // the parts opened from it.
+    ok(run(
+        &mut session,
+        json!({"op": "edit", "feature": "Extrude1", "depth": 13}),
+    ));
+    for name in ["Bracket-1", "Bracket-2"] {
+        ok(run(
+            &mut session,
+            json!({"op": "delete", "component": name, "document": asm.0}),
+        ));
+    }
+    let e = err(run(&mut session, json!({"op": "save"})));
+    assert!(e.contains("no longer in the assembly"), "{e}");
+    let closed = ok(run(
+        &mut session,
+        json!({"op": "close", "document": asm.0, "discard": true}),
+    ));
+    assert_eq!(closed["closed"], "Assembly1");
+    assert_eq!(session.count(), 1);
+    assert!(session.embedded.is_none() && session.model.is_empty());
+}
+
+#[test]
+fn the_applications_changes_to_an_assembly_are_made_by_operations() {
+    // As the application's tools change an assembly (on a copy of the model), applied
+    // as operations: the same model must come out.
+    let mut host = Headless::default();
+    let mut direct = Document::from_model(Model::new_assembly(), None);
+    let mut through = Document::from_model(Model::new_assembly(), None);
+    let bracket = Arc::new(peet_model::samples::bracket().0);
+    let housing = Arc::new(peet_model::samples::housing().0);
+    let far = Frame {
+        origin: DVec3::new(0.0, 0.0, 80.0),
+        ..Frame::WORLD
+    };
+    let mut key = 0;
+    let mut change = |label: &str, f: &dyn Fn(&mut Model)| {
+        direct.change(label, f);
+        let mut new = through.model.clone();
+        f(&mut new);
+        key += 1;
+        let done = apply_model(&mut host, &mut through, new, label, key);
+        through.seal_history();
+        assert_eq!(done.untranslated, None, "{label}: {:?}", done.ops);
+        assert_eq!(through.model, direct.model, "{label}");
+        done.ops
+    };
+    let ops = change("Insert", &|m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.define(bracket.clone());
+        a.insert(d, Frame::WORLD);
+        a.insert(d, far);
+    });
+    assert_eq!(ops.len(), 2);
+    let second = peet_model::CompId(2);
+    let ops = change("Change", &|m| {
+        let c = m.assembly_mut().unwrap().component_mut(second).unwrap();
+        c.placement.origin.x = 25.0;
+        c.fixed = true;
+        c.visible = false;
+        c.suppressed = true;
+        c.name = "Top".to_owned();
+    });
+    assert_eq!(ops.len(), 5, "{ops:?}");
+    let ops = change("Replace", &|m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.define(housing.clone());
+        a.replace(second, d);
+    });
+    assert!(matches!(
+        &ops[..],
+        [Op::Component {
+            change: ComponentChange::Replace(InsertSource::Model(_)),
+            ..
+        }]
+    ));
+    let mut thicker = (*bracket).clone();
+    thicker.name = "Thick bracket".to_owned();
+    let thicker = Arc::new(thicker);
+    let ops = change("Edit part", &|m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.components().next().unwrap().definition;
+        a.set_model(d, thicker.clone());
+    });
+    assert!(matches!(&ops[..], [Op::SetPart { .. }]));
+    let ops = change("Delete", &|m| {
+        m.assembly_mut().unwrap().remove(second);
+    });
+    assert_eq!(
+        ops,
+        [Op::Component {
+            component: CompSel::Id(second),
+            change: ComponentChange::Delete
+        }]
+    );
+
+    // Typed, as the application builds them.
+    let reply = apply(
+        &mut through,
+        &Op::Insert {
+            from: InsertSource::Model(housing),
+            name: None,
+            placing: Some(Placing::Frame(far)),
+            fixed: None,
+            link: false,
+            absolute: false,
+        },
+        Undo::Step,
+    );
+    assert!(reply.ok, "{}", reply.json);
+    assert_eq!(reply.json["component"]["at"], json!([0.0, 0.0, 80.0]));
+}
+
+/// A 40 x 30 x 5 plate with a hole of radius 4 through its middle, and a pin of radius 4
+/// and length 20, as files in `dir`.
+fn plate_and_pin(dir: &std::path::Path) -> (String, String) {
+    let plate = dir.join("plate.peet").to_string_lossy().into_owned();
+    let pin = dir.join("pin.peet").to_string_lossy().into_owned();
+    let mut doc = Document::default();
+    ok(
+        &mut doc,
+        json!({"op": "sketch", "on": "top", "draw": [
+            {"type": "rectangle", "from": [0, 0], "to": [40, 30]},
+            {"type": "circle", "center": [20, 15], "radius": 4},
+        ]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+    );
+    ok(&mut doc, json!({"op": "save", "path": plate}));
+    let mut doc = Document::default();
+    ok(
+        &mut doc,
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 4}]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 20}),
+    );
+    ok(&mut doc, json!({"op": "save", "path": pin}));
+    (plate, pin)
+}
+
+fn at(reply: &Value) -> [f64; 3] {
+    let p = reply["at"].as_array().unwrap_or_else(|| panic!("{reply}"));
+    [0, 1, 2].map(|i| p[i].as_f64().unwrap())
+}
+
+fn near(a: [f64; 3], b: [f64; 3]) -> bool {
+    a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6)
+}
+
+#[test]
+fn components_are_mated_by_faces_of_their_parts() {
+    let dir = temp("mates");
+    let (plate, pin) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "path": plate}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Top", "at": [70, -20, 33],
+               "rotate": {"axis": [1, 2, 3], "angle": 25}}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "name": "Pin", "at": [-30, 10, 40]}),
+    );
+    let up = json!({"normal": [0, 0, 1]});
+    let down = json!({"normal": [0, 0, -1]});
+
+    // The top plate's underside on the bottom plate's top: it comes down and lies flat.
+    let made = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident",
+               "a": {"component": "plate-1", "face": up},
+               "b": {"component": "Top", "face": down}}),
+    );
+    assert_eq!(
+        made["mate"],
+        json!({
+            "id": 1, "name": "Coincident1", "type": "coincident",
+            "a": {"component": "plate-1", "on": "face"},
+            "b": {"component": "Top", "on": "face"},
+            "status": "ok",
+        })
+    );
+    assert_eq!(
+        made["freedom"], 9,
+        "the top plate slides and turns; the pin is free"
+    );
+    let moved = &made["moved"][0];
+    assert_eq!(moved["name"], "Top");
+    assert_eq!(moved["mates"], json!(["Coincident1"]));
+    assert_eq!(moved["freedom"], 3, "it slides two ways and turns one");
+    assert!(
+        (moved["min"][2].as_f64().unwrap() - 5.0).abs() < 1e-6,
+        "{moved}"
+    );
+    assert!(
+        (moved["max"][2].as_f64().unwrap() - 10.0).abs() < 1e-6,
+        "{moved}"
+    );
+    assert_eq!(doc.undo_label(), Some("Add Coincident1"));
+
+    // The pin in the bottom plate's hole, its end flush with the underside.
+    let hole = json!({"at": [24, 15, 2.5]});
+    let round = json!({"at": [4, 0, 10]});
+    let in_hole = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "concentric", "name": "In hole",
+               "a": {"component": "plate-1", "face": hole},
+               "b": {"component": "Pin", "face": round}}),
+    );
+    assert_eq!(in_hole["freedom"], 5);
+    let flush = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident", "flip": true,
+               "a": {"component": "plate-1", "face": down},
+               "b": {"component": "Pin", "face": down}}),
+    );
+    assert_eq!(flush["mate"]["flip"], true);
+    assert!(near(at(&flush["moved"][0]), [20.0, 15.0, 0.0]), "{flush}");
+    assert_eq!(flush["freedom"], 4);
+
+    // Square it up: two side faces the same way, then a gap between two others.
+    ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident", "flip": true,
+               "a": {"component": "plate-1", "face": {"normal": [-1, 0, 0]}},
+               "b": {"component": "Top", "face": {"normal": [-1, 0, 0]}}}),
+    );
+    let gap = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 12,
+               "a": {"component": "plate-1", "face": {"normal": [0, -1, 0]}},
+               "b": {"component": "Top", "face": {"normal": [0, 1, 0]}}}),
+    );
+    assert_eq!(gap["mate"]["distance"], 12.0);
+    assert!(near(at(&gap["moved"][0]), [0.0, -42.0, 5.0]), "{gap}");
+    assert_eq!(
+        gap["freedom"], 1,
+        "only the turn of the pin about its axis is left"
+    );
+
+    // A value changed moves the component; so does a parameter the value is made of.
+    let edited = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Distance1", "distance": 2}),
+    );
+    assert!(near(at(&edited["moved"][0]), [0.0, -32.0, 5.0]), "{edited}");
+    ok(
+        &mut doc,
+        json!({"op": "set_parameter", "name": "gap", "value": "7mm"}),
+    );
+    let edited = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Distance1", "distance": "gap + 1"}),
+    );
+    assert_eq!(
+        edited["mate"]["distance"],
+        json!({"expression": "gap + 1", "value": 8.0})
+    );
+    let follows = ok(
+        &mut doc,
+        json!({"op": "set_parameter", "name": "gap", "value": "9mm"}),
+    );
+    assert!(
+        near(at(&follows["moved"][0]), [0.0, -40.0, 5.0]),
+        "{follows}"
+    );
+
+    // Placing a mated component is a suggestion: it goes to the nearest place its
+    // mates allow.
+    let placed = ok(
+        &mut doc,
+        json!({"op": "place", "component": "Top", "at": [300, 200, 100]}),
+    );
+    assert!(
+        near(at(&placed["component"]), [0.0, -40.0, 5.0]),
+        "{placed}"
+    );
+    let slid = ok(
+        &mut doc,
+        json!({"op": "place", "component": "Pin", "rotate": {"axis": "z", "angle": 40}}),
+    );
+    assert_eq!(slid["component"]["rotate"]["angle"], 40.0);
+    assert!(near(at(&slid["component"]), [20.0, 15.0, 0.0]));
+
+    let list = ok(&mut doc, json!({"op": "mates"}));
+    assert_eq!(list["mates"].as_array().unwrap().len(), 5);
+    assert_eq!(list["freedom"], 1);
+    // Which component it is that can still move: the pin, turning in its hole.
+    let loose: Vec<(String, u64)> = ok(&mut doc, json!({"op": "components"}))["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["name"].as_str().unwrap().to_owned(),
+                c["freedom"].as_u64().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        loose,
+        [
+            ("plate-1".to_owned(), 0),
+            ("Top".to_owned(), 0),
+            ("Pin".to_owned(), 1)
+        ]
+    );
+    let status = ok(&mut doc, json!({"op": "status"}));
+    assert_eq!(
+        (status["mates"].as_u64(), status["freedom"].as_u64()),
+        (Some(5), Some(1))
+    );
+    assert_eq!(status["failures"], json!([]));
+
+    // A mate that can not hold with the others is a failure, and they still hold.
+    let clash = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 30,
+               "a": {"component": "plate-1", "face": up},
+               "b": {"component": "Top", "face": down}}),
+    );
+    assert_eq!(clash["mate"]["status"], "failed");
+    assert!(
+        clash["mate"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("hold together")
+    );
+    assert_eq!(clash["failures"][0]["name"], "Distance2");
+    assert!(clash.get("moved").is_none());
+    ok(&mut doc, json!({"op": "suppress", "mate": "Distance2"}));
+    assert_eq!(ok(&mut doc, json!({"op": "status"}))["failures"], json!([]));
+    ok(
+        &mut doc,
+        json!({"op": "rename", "mate": "Distance2", "name": "Later"}),
+    );
+    let gone = ok(&mut doc, json!({"op": "delete", "mate": "Later"}));
+    assert_eq!(gone["deleted"], json!(["Later"]));
+
+    // Saved and opened again, the mates are there and nothing moves.
+    let file = dir.join("mated.peet").to_string_lossy().into_owned();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let mut again = Document::default();
+    ok(&mut again, json!({"op": "open", "path": file}));
+    assert_eq!(again.model, doc.model);
+    assert!(!again.is_modified());
+
+    // A component deleted takes its mates along; undone, they are back and hold.
+    ok(&mut doc, json!({"op": "delete", "component": "Pin"}));
+    assert_eq!(
+        ok(&mut doc, json!({"op": "mates"}))["mates"]
+            .as_array()
+            .unwrap()
+            .len(),
+        3
+    );
+    ok(&mut doc, json!({"op": "undo"}));
+    let list = ok(&mut doc, json!({"op": "mates"}));
+    assert_eq!(list["mates"].as_array().unwrap().len(), 5);
+    assert!(
+        list["mates"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|m| m["status"] == "ok")
+    );
+
+    // Fastened: the pin keeps its place on the top plate, wherever that goes.
+    ok(&mut doc, json!({"op": "delete", "mate": "In hole"}));
+    ok(&mut doc, json!({"op": "delete", "mate": "Coincident2"}));
+    let held = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "fasten", "a": "Top", "b": {"component": "Pin"}}),
+    );
+    assert_eq!(
+        held["mate"]["a"],
+        json!({"component": "Top", "on": "component"})
+    );
+    assert_eq!(held["freedom"], 0);
+    let carried = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Distance1", "distance": 0}),
+    );
+    let moved: Vec<&str> = carried["moved"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(moved, ["Top", "Pin"]);
+    assert!(
+        near(at(&carried["moved"][1]), [20.0, 25.0, 0.0]),
+        "{carried}"
+    );
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn mistakes_with_mates_are_explained() {
+    let dir = temp("mate-errors");
+    let (plate, pin) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "path": plate}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "at": [0, 0, 50]}),
+    );
+    let top = json!({"component": "plate-1", "face": {"normal": [0, 0, 1]}});
+    let end = json!({"component": "pin-1", "face": {"normal": [0, 0, -1]}});
+    for (op, says) in [
+        (json!({"op": "mate", "a": top, "b": end}), "'type'"),
+        (
+            json!({"op": "mate", "type": "welded", "a": top, "b": end}),
+            "coincident, concentric",
+        ),
+        (
+            json!({"op": "mate", "type": "distance", "a": top, "b": end}),
+            "'distance' field",
+        ),
+        (json!({"op": "mate", "type": "coincident", "a": top}), "'b'"),
+        (
+            json!({"op": "mate", "type": "coincident", "a": top, "b": top}),
+            "Both ends are on plate-1",
+        ),
+        (
+            json!({"op": "mate", "type": "coincident", "a": top, "b": "pin-1"}),
+            "only fasten",
+        ),
+        (
+            json!({"op": "mate", "type": "coincident", "a": top, "b": {"component": "Nut-1", "face": {"normal": [0, 0, 1]}}}),
+            "pin-1",
+        ),
+        (
+            json!({"op": "mate", "type": "coincident", "a": top,
+                   "b": {"component": "pin-1", "face": {"normal": [1, 0, 0]}}}),
+            "In pin-1 (its part, pin)",
+        ),
+        (
+            json!({"op": "mate", "type": "coincident", "a": top,
+                   "b": {"component": "pin-1", "face": {}, "edge": {}}}),
+            "expected",
+        ),
+        (
+            json!({"op": "mate", "type": "distance", "distance": "tall", "a": top, "b": end}),
+            "distance",
+        ),
+        (
+            json!({"op": "edit_mate", "mate": "Coincident1", "flip": true}),
+            "no mates yet",
+        ),
+    ] {
+        let e = error(&mut doc, op.clone());
+        assert!(e.contains(says), "{op}: {e}");
+    }
+    // What the solve refuses is not an error of the operation: the mate is added and
+    // says why, as a feature that fails to build does.
+    let wrong = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "concentric", "a": top, "b": end}),
+    );
+    assert_eq!(wrong["mate"]["status"], "failed");
+    assert!(
+        wrong["mate"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("two axes")
+    );
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Concentric1", "distance": 3}),
+    );
+    assert!(e.contains("no distance or angle"), "{e}");
+    let e = error(&mut doc, json!({"op": "edit_mate", "mate": "Concentric1"}));
+    assert!(e.contains("needs a"), "{e}");
+    let e = error(&mut doc, json!({"op": "delete", "mate": "Weld"}));
+    assert!(e.contains("Concentric1"), "{e}");
+    let mut part = Document::default();
+    let e = error(&mut part, json!({"op": "mates"}));
+    assert!(e.contains("is a part"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn the_applications_mates_are_made_by_operations() {
+    let dir = temp("mate-diff");
+    let (plate, _) = plate_and_pin(&dir);
+    let part = Arc::new(
+        peet_io::document::open(&std::fs::read(&plate).unwrap())
+            .unwrap()
+            .model,
+    );
+    // The faces, as a click in the application gives them.
+    let built = Document::from_model((*part).clone(), None);
+    let body = &built.evaluation().bodies[0];
+    let face = |z: f64| {
+        let id = body
+            .solid
+            .face_ids()
+            .find(|f| {
+                matches!(body.solid.face(*f).surface, peet_kernel::Surface::Plane(_))
+                    && (body.face_center(*f).z - z).abs() < 1e-9
+            })
+            .unwrap();
+        peet_model::MateGeom::Face(body.face_ref(id))
+    };
+    let end = |c: u32, z: f64| peet_model::MateEnd {
+        path: vec![peet_model::CompId(c)],
+        geom: Some(face(z)),
+    };
+    let whole = |c: u32| peet_model::MateEnd {
+        path: vec![peet_model::CompId(c)],
+        geom: None,
+    };
+
+    let mut host = Headless::default();
+    let mut direct = Document::from_model(Model::new_assembly(), None);
+    let mut through = Document::from_model(Model::new_assembly(), None);
+    let mut key = 0;
+    let mut change = |label: &str, f: &dyn Fn(&mut Model)| {
+        direct.change(label, f);
+        let mut new = through.model.clone();
+        f(&mut new);
+        key += 1;
+        let done = apply_model(&mut host, &mut through, new, label, key);
+        through.seal_history();
+        assert_eq!(done.untranslated, None, "{label}: {:?}", done.ops);
+        assert_eq!(through.model, direct.model, "{label}");
+        done.ops
+    };
+    change("Insert", &|m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.define(part.clone());
+        a.insert(d, Frame::WORLD);
+        a.insert(
+            d,
+            Frame {
+                origin: DVec3::new(5.0, 9.0, 60.0),
+                ..Frame::WORLD
+            },
+        );
+        a.insert(
+            d,
+            Frame {
+                origin: DVec3::new(90.0, 0.0, 0.0),
+                ..Frame::WORLD
+            },
+        );
+    });
+    use peet_model::{MateId, MateKind, Scalar};
+    let ops = change("Mate", &|m| {
+        let a = m.assembly_mut().unwrap();
+        a.add_mate(
+            MateKind::Distance(Scalar::new(3.0)),
+            end(1, 5.0),
+            end(2, 0.0),
+        );
+        let relative = Frame {
+            origin: DVec3::new(90.0, 0.0, 0.0),
+            ..Frame::WORLD
+        };
+        let held = a.add_mate(MateKind::Fasten(relative), whole(1), whole(3));
+        a.mate_mut(held).unwrap().suppressed = true;
+    });
+    assert_eq!(ops.len(), 3, "{ops:?}");
+    let ops = change("Change", &|m| {
+        let mate = m.assembly_mut().unwrap().mate_mut(MateId(1)).unwrap();
+        mate.kind = MateKind::Distance(Scalar::new(8.0));
+        mate.flip = true;
+        mate.name = "Gap".to_owned();
+    });
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    let ops = change("Delete", &|m| {
+        let a = m.assembly_mut().unwrap();
+        a.remove_mate(MateId(1));
+        // A component goes, and its mate with it: one operation.
+        a.remove(peet_model::CompId(3));
+    });
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    assert_eq!(through.model.assembly().unwrap().mates().count(), 0);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_component_is_dragged_as_far_as_its_mates_allow() {
+    let dir = temp("drag");
+    let (plate, pin) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    // A plate on a pin through its hole: it can only swing round the pin.
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "name": "Post"}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Arm", "at": [-20, -15, 0]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "mate", "type": "concentric",
+               "a": {"component": "Post", "face": {"at": [4, 0, 10]}},
+               "b": {"component": "Arm", "face": {"at": [24, 15, 2.5]}}}),
+    );
+    let held = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident", "flip": true,
+               "a": {"component": "Post", "face": {"normal": [0, 0, -1]}},
+               "b": {"component": "Arm", "face": {"normal": [0, 0, -1]}}}),
+    );
+    assert_eq!(held["freedom"], 1);
+
+    // The middle of its short edge, 20 from the pin along X, pulled to 20 along Y: a
+    // quarter turn.
+    let swung = ok(
+        &mut doc,
+        json!({"op": "drag", "component": "Arm", "point": [40, 15, 0], "to": [0, 20, 0]}),
+    );
+    let turn = &swung["component"]["rotate"];
+    assert!(
+        (turn["angle"].as_f64().unwrap() - 90.0).abs() < 0.01,
+        "{swung}"
+    );
+    assert_eq!(turn["axis"], json!([0.0, 0.0, 1.0]));
+    assert!(swung.get("short_by").is_none(), "{swung}");
+    assert_eq!(swung["freedom"], 1);
+    assert_eq!(doc.undo_label(), Some("Drag Arm"));
+    assert_eq!(ok(&mut doc, json!({"op": "status"}))["failures"], json!([]));
+
+    // Pulled to where it can't go, it gets as near as it can and says how far that is.
+    let short = ok(
+        &mut doc,
+        json!({"op": "drag", "component": "Arm", "point": [40, 15, 0], "to": [0, 50, 0]}),
+    );
+    assert!(
+        (short["short_by"].as_f64().unwrap() - 30.0).abs() < 0.01,
+        "{short}"
+    );
+    // Nothing to do is not a change.
+    let again = apply_json(
+        &mut doc,
+        &json!({"op": "drag", "component": "Arm", "point": [40, 15, 0], "to": [0, 50, 0]}),
+        Undo::Step,
+    );
+    assert!(again.ok && !again.changed, "{}", again.json);
+
+    // A fixed component stays; one with no mates just goes there (its origin, if no
+    // point is given), without turning.
+    let e = error(
+        &mut doc,
+        json!({"op": "drag", "component": "Post", "to": [1, 2, 3]}),
+    );
+    assert!(e.contains("is fixed") && e.contains("\"on\": false"), "{e}");
+    let e = error(&mut doc, json!({"op": "drag", "component": "Arm"}));
+    assert!(e.contains("'to'"), "{e}");
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Loose", "at": [100, 0, 0],
+               "rotate": {"axis": "x", "angle": 30}}),
+    );
+    let moved = ok(
+        &mut doc,
+        json!({"op": "drag", "component": "Loose", "to": [5, 6, 7]}),
+    );
+    assert!(near(at(&moved["component"]), [5.0, 6.0, 7.0]), "{moved}");
+    assert_eq!(moved["component"]["rotate"]["angle"], 30.0);
+
+    // The steps of one drag with the mouse are one undo step.
+    let before = doc.model.clone();
+    for step in 1..=5 {
+        let reply = apply_json(
+            &mut doc,
+            &json!({"op": "drag", "component": "Loose", "to": [5 + step * 4, 6, 7]}),
+            Undo::Group(77),
+        );
+        assert!(reply.ok && reply.changed, "{}", reply.json);
+    }
+    doc.seal_history();
+    ok(&mut doc, json!({"op": "undo"}));
+    assert_eq!(doc.model, before);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// Changes the depth of the plate in a part file, as another program (or another
+/// session) would: the file is read, edited and written back.
+fn set_depth(path: &str, depth: f64) {
+    let mut doc = Document::default();
+    ok(&mut doc, json!({"op": "open", "path": path}));
+    ok(
+        &mut doc,
+        json!({"op": "edit", "feature": "Extrude1", "depth": depth}),
+    );
+    ok(&mut doc, json!({"op": "save"}));
+}
+
+fn top_of(doc: &mut Document, component: usize) -> f64 {
+    ok(doc, json!({"op": "components"}))["components"][component]["max"][2]
+        .as_f64()
+        .unwrap()
+}
+
+#[test]
+fn a_linked_part_follows_its_file() {
+    let dir = temp("links");
+    let (plate, _) = plate_and_pin(&dir);
+    let file = dir.join("stack.peet").to_string_lossy().into_owned();
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+
+    // Two components of one linked part: the assembly follows the file.
+    let first = ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "link": true}),
+    );
+    assert_eq!(first["component"]["part"], "plate");
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "link": true, "at": [0, 0, 20]}),
+    );
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    let parts = listed["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 1, "one part, linked once");
+    assert_eq!(parts[0]["link_status"], "current");
+    // Relative to the assembly's folder, where the plate's file also is.
+    assert_eq!(parts[0]["link"], "plate.peet");
+    assert!(std::path::Path::new(parts[0]["link_file"].as_str().unwrap()).is_absolute());
+    // The same part inserted without a link is the assembly's own copy: another part.
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "at": [100, 0, 0]}),
+    );
+    assert_eq!(
+        doc.model.assembly().unwrap().definitions().count(),
+        2,
+        "a copy is not the linked part"
+    );
+    ok(&mut doc, json!({"op": "save"}));
+    assert_eq!(top_of(&mut doc, 0), 5.0);
+
+    // The file changes behind the assembly's back: it says so, and reads it when asked.
+    set_depth(&plate, 9.0);
+    let stale = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(stale["parts"][0]["link_status"], "changed");
+    assert!(
+        stale["parts"][0]["link_message"]
+            .as_str()
+            .unwrap()
+            .contains("update_links")
+    );
+    assert_eq!(top_of(&mut doc, 0), 5.0, "not until it is read again");
+    let updated = apply_json(&mut doc, &json!({"op": "update_links"}), Undo::Step);
+    assert!(updated.ok && updated.changed);
+    assert_eq!(updated.json["updated"], json!(["plate"]));
+    assert_eq!(doc.undo_label(), Some("Update Links"));
+    assert_eq!((top_of(&mut doc, 0), top_of(&mut doc, 1)), (9.0, 29.0));
+    assert_eq!(top_of(&mut doc, 2), 5.0, "the copy is not the file's");
+    let again = apply_json(&mut doc, &json!({"op": "update_links"}), Undo::Step);
+    assert!(again.ok && !again.changed, "{}", again.json);
+    assert_eq!(again.json["updated"], json!([]));
+    ok(&mut doc, json!({"op": "save"}));
+
+    // Opening the assembly reads the linked parts as they are now, and that is not an
+    // unsaved change.
+    set_depth(&plate, 12.0);
+    let mut opened = Document::default();
+    let reply = ok(&mut opened, json!({"op": "open", "path": file}));
+    assert_eq!(reply["updated"], json!(["plate"]));
+    assert!(!opened.is_modified() && !opened.can_undo());
+    assert_eq!(top_of(&mut opened, 0), 12.0);
+
+    // The file gone: the assembly opens with the part as it last read it, and says so.
+    let away = dir.join("elsewhere.peet");
+    std::fs::rename(&plate, &away).unwrap();
+    let mut alone = Document::default();
+    let reply = ok(&mut alone, json!({"op": "open", "path": file}));
+    assert!(
+        reply["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("can't be found"),
+        "{reply}"
+    );
+    assert_eq!(alone.bodies.len(), 3);
+    assert_eq!(top_of(&mut alone, 0), 9.0, "as saved");
+    let parts = ok(&mut alone, json!({"op": "components"}));
+    assert_eq!(parts["parts"][0]["link_status"], "missing");
+    assert!(
+        parts["parts"][0]["link_message"]
+            .as_str()
+            .unwrap()
+            .contains("unlink")
+    );
+    let again = apply_json(&mut alone, &json!({"op": "update_links"}), Undo::Step);
+    assert!(again.ok && !again.changed);
+    assert!(
+        again.json["warnings"][0]
+            .as_str()
+            .unwrap()
+            .contains("plate.peet")
+    );
+    // Made the assembly's own, it is a part like any other.
+    // (By its id: the assembly has two parts called plate, the linked one and the copy.)
+    let e = error(&mut alone, json!({"op": "unlink", "part": "plate"}));
+    assert!(
+        e.contains("More than one part") && e.contains("1 (plate), 2 (plate)"),
+        "{e}"
+    );
+    ok(&mut alone, json!({"op": "unlink", "part": 1}));
+    assert_eq!(alone.undo_label(), Some("Unlink plate"));
+    let parts = ok(&mut alone, json!({"op": "components"}));
+    assert!(parts["parts"][0].get("link").is_none());
+    let e = error(&mut alone, json!({"op": "unlink", "part": 1}));
+    assert!(e.contains("not linked"), "{e}");
+
+    // Moved together to another folder, the part is found next to the assembly.
+    let moved = dir.join("moved");
+    std::fs::create_dir_all(&moved).unwrap();
+    std::fs::rename(&away, moved.join("plate.peet")).unwrap();
+    let there = moved.join("stack.peet");
+    std::fs::copy(&file, &there).unwrap();
+    let mut found = Document::default();
+    let reply = ok(&mut found, json!({"op": "open", "path": there}));
+    assert!(reply.get("warnings").is_none(), "{reply}");
+    assert_eq!(top_of(&mut found, 0), 12.0);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn parts_are_linked_to_files_and_mistakes_are_explained() {
+    let dir = temp("link-ops");
+    let (plate, pin) = plate_and_pin(&dir);
+    let file = dir.join("asm.peet").to_string_lossy().into_owned();
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    ok(&mut doc, json!({"op": "insert", "sample": "bracket"}));
+
+    // The assembly's own part, written to a file of its own and linked to it.
+    let out = dir.join("bracket.peet").to_string_lossy().into_owned();
+    ok(
+        &mut doc,
+        json!({"op": "link", "part": "Bracket", "path": out}),
+    );
+    assert_eq!(doc.undo_label(), Some("Link Bracket"));
+    let mut written = Document::default();
+    let opened = ok(&mut written, json!({"op": "open", "path": out}));
+    assert_eq!(
+        (opened["kind"].as_str(), opened["bodies"].as_u64()),
+        (Some("part"), Some(1))
+    );
+    let parts = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(parts["parts"][0]["link_status"], "current");
+    // Linked to a file that is there, a part becomes what is in the file.
+    ok(&mut doc, json!({"op": "unlink", "part": 1}));
+    let swapped = ok(&mut doc, json!({"op": "link", "part": 1, "path": pin}));
+    assert_eq!(swapped["failures"], Value::Null);
+    let parts = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(parts["parts"][0]["name"], "pin");
+    assert_eq!(parts["components"][0]["max"], json!([4.0, 4.0, 20.0]));
+
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "at": [50, 0, 0]}),
+    );
+    for (op, says) in [
+        (
+            json!({"op": "insert", "sample": "bracket", "link": true}),
+            "needs the part's 'path'",
+        ),
+        (
+            json!({"op": "insert", "component": "pin-1", "link": true}),
+            "needs the part's 'path'",
+        ),
+        (
+            json!({"op": "insert", "path": file, "link": true}),
+            "of itself",
+        ),
+        (
+            json!({"op": "insert", "path": "nowhere.peet", "link": true}),
+            "nowhere.peet",
+        ),
+        (json!({"op": "link", "part": "plate"}), "'path'"),
+        (
+            json!({"op": "link", "part": "plate", "path": file}),
+            "own file",
+        ),
+        (
+            json!({"op": "link", "part": "plate", "path": pin}),
+            "already linked",
+        ),
+        (json!({"op": "link", "part": "lid", "path": out}), "1 (pin)"),
+        (json!({"op": "unlink", "part": "plate"}), "not linked"),
+    ] {
+        let e = error(&mut doc, op.clone());
+        assert!(e.contains(says), "{op}: {e}");
+    }
+    let mut part = Document::default();
+    let e = error(&mut part, json!({"op": "update_links"}));
+    assert!(e.contains("is a part"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_linked_part_is_edited_in_its_own_file() {
+    let dir = temp("link-session");
+    let (plate, _) = plate_and_pin(&dir);
+    let file = dir.join("asm.peet").to_string_lossy().into_owned();
+    let mut host = Headless::default();
+    let mut session = Session::default();
+    let mut run =
+        |session: &mut Session, op: Value| apply_session_json(&mut host, session, &op, Undo::Step);
+    let ok = |reply: peet_ops::Reply| {
+        assert!(reply.ok, "{}", reply.json);
+        reply.json
+    };
+    ok(run(&mut session, json!({"op": "new", "assembly": true})));
+    ok(run(&mut session, json!({"op": "save", "path": file})));
+    ok(run(
+        &mut session,
+        json!({"op": "insert", "path": plate, "link": true}),
+    ));
+    ok(run(
+        &mut session,
+        json!({"op": "insert", "component": "plate-1", "at": [0, 0, 30]}),
+    ));
+    ok(run(&mut session, json!({"op": "save"})));
+    let asm = session.current_id();
+
+    // Its part opens as the file it is: a document with a path, not a working copy.
+    let opened = ok(run(
+        &mut session,
+        json!({"op": "open_component", "component": "plate-2"}),
+    ));
+    assert_eq!(opened["part"], "plate.peet");
+    assert!(opened["note"].as_str().unwrap().contains("its own file"));
+    assert!(session.embedded.is_none());
+    assert!(session.file.as_ref().unwrap().path.is_some());
+    let part = session.current_id();
+    // Again, from the other component: the same document.
+    ok(run(
+        &mut session,
+        json!({"op": "open_component", "component": "plate-1", "document": asm.0}),
+    ));
+    assert_eq!((session.count(), session.current_id()), (2, part));
+
+    // Saved, the file is written and the assembly that links to it follows, as a step
+    // of its own that can be undone there.
+    ok(run(
+        &mut session,
+        json!({"op": "edit", "feature": "Extrude1", "depth": 8}),
+    ));
+    let saved = ok(run(&mut session, json!({"op": "save"})));
+    assert_eq!(saved["updated_in"], json!(["asm.peet"]));
+    let assembly = session.get(asm).unwrap();
+    assert_eq!(assembly.undo_label(), Some("Update plate"));
+    assert!(assembly.is_modified());
+    let tops: Vec<f64> = assembly
+        .model
+        .assembly()
+        .unwrap()
+        .components()
+        .map(|c| assembly.component_bounds(c.id).max.z)
+        .collect();
+    assert_eq!(tops, [8.0, 38.0]);
+    // Saving it again changes nothing there.
+    let saved = ok(run(&mut session, json!({"op": "save"})));
+    assert!(saved.get("updated_in").is_none(), "{saved}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// The links of an assembly's file, as the file has them.
+fn links_in_file(path: &std::path::Path) -> Vec<(String, bool)> {
+    let model = peet_io::document::open(&std::fs::read(path).unwrap())
+        .unwrap()
+        .model;
+    model
+        .assembly()
+        .unwrap()
+        .definitions()
+        .filter_map(|d| d.link.as_ref().map(|l| (l.path.clone(), l.relative)))
+        .collect()
+}
+
+#[test]
+fn links_are_relative_to_the_assemblys_folder() {
+    let dir = temp("relative");
+    let (made, pin) = plate_and_pin(&dir);
+    // A job folder with the assembly in one folder and its parts in another.
+    let job = dir.join("job");
+    std::fs::create_dir_all(job.join("asm")).unwrap();
+    std::fs::create_dir_all(job.join("parts")).unwrap();
+    let plate = job.join("parts").join("plate.peet");
+    std::fs::rename(&made, &plate).unwrap();
+    let file = job.join("asm").join("stack.peet");
+
+    // Linked before the assembly has a file: there is nothing to be relative to yet.
+    let mut doc = assembly();
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "link": true}),
+    );
+    let before = ok(&mut doc, json!({"op": "components"}));
+    assert!(std::path::Path::new(before["parts"][0]["link"].as_str().unwrap()).is_absolute());
+    // Saved, the link is written from the assembly's folder; an absolute one as it is.
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "link": true, "absolute": true, "at": [80, 0, 0]}),
+    );
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let pin_full = std::path::absolute(&pin)
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    assert_eq!(
+        links_in_file(&file),
+        [
+            ("../parts/plate.peet".to_owned(), true),
+            (pin_full.clone(), false)
+        ]
+    );
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(listed["parts"][0]["link"], "../parts/plate.peet");
+    assert_eq!(listed["parts"][1]["link"], pin_full);
+    assert_eq!(listed["parts"][0]["link_status"], "current");
+    assert!(!doc.is_modified());
+
+    // Opened again it is the same assembly, and not changed by being opened.
+    let mut again = Document::default();
+    let reply = ok(&mut again, json!({"op": "open", "path": file}));
+    assert!(
+        reply.get("warnings").is_none() && reply.get("updated").is_none(),
+        "{reply}"
+    );
+    assert_eq!(again.model, doc.model);
+    assert!(!again.is_modified());
+
+    // The whole job copied elsewhere: the copy's assembly follows the copy's parts, not
+    // the originals, though the full path stays where it pointed.
+    let copy = dir.join("backup");
+    for folder in ["asm", "parts"] {
+        std::fs::create_dir_all(copy.join(folder)).unwrap();
+    }
+    std::fs::copy(&file, copy.join("asm").join("stack.peet")).unwrap();
+    std::fs::copy(&plate, copy.join("parts").join("plate.peet")).unwrap();
+    set_depth(
+        &copy.join("parts").join("plate.peet").to_string_lossy(),
+        11.0,
+    );
+    let mut copied = Document::default();
+    let reply = ok(
+        &mut copied,
+        json!({"op": "open", "path": copy.join("asm").join("stack.peet")}),
+    );
+    assert_eq!(reply["updated"], json!(["plate"]));
+    assert_eq!(top_of(&mut copied, 0), 11.0);
+    let parts = ok(&mut copied, json!({"op": "components"}));
+    assert!(
+        parts["parts"][0]["link_file"]
+            .as_str()
+            .unwrap()
+            .contains("backup"),
+        "{parts}"
+    );
+    assert_eq!(parts["parts"][1]["link_file"], pin_full);
+    assert_eq!(top_of(&mut doc, 0), 5.0, "the original is as it was");
+
+    // Saved somewhere else, the assembly still means the same part files: its relative
+    // link is written from the new place.
+    let elsewhere = dir.join("stack-copy.peet");
+    ok(&mut doc, json!({"op": "save", "path": elsewhere}));
+    assert_eq!(links_in_file(&elsewhere)[0].0, "job/parts/plate.peet");
+    let mut moved = Document::default();
+    ok(&mut moved, json!({"op": "open", "path": elsewhere}));
+    assert_eq!(moved.model, doc.model);
+
+    // A part of the assembly's own, linked: relative by default, or a full path.
+    ok(
+        &mut doc,
+        json!({"op": "insert", "sample": "bracket", "at": [0, 100, 0]}),
+    );
+    let out = dir.join("bracket.peet");
+    ok(
+        &mut doc,
+        json!({"op": "link", "part": "Bracket", "path": out}),
+    );
+    ok(&mut doc, json!({"op": "save"}));
+    assert_eq!(
+        links_in_file(&elsewhere)[2],
+        ("bracket.peet".to_owned(), true)
+    );
+    ok(&mut doc, json!({"op": "unlink", "part": "Bracket"}));
+    ok(
+        &mut doc,
+        json!({"op": "link", "part": "Bracket", "path": out, "absolute": true}),
+    );
+    ok(&mut doc, json!({"op": "save"}));
+    assert!(!links_in_file(&elsewhere)[2].1);
+    let e = error(
+        &mut doc,
+        json!({"op": "insert", "sample": "bracket", "absolute": true}),
+    );
+    assert!(e.contains("\"link\": true"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn an_assembly_is_checked_listed_and_weighed() {
+    let dir = temp("stage4");
+    let (plate, pin) = plate_and_pin(&dir);
+    // The plate is steel; the pin has no material yet.
+    let mut part = Document::default();
+    ok(&mut part, json!({"op": "open", "path": plate}));
+    ok(
+        &mut part,
+        json!({"op": "set_material", "material": "Mild steel"}),
+    );
+    ok(&mut part, json!({"op": "save"}));
+
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "path": plate}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "component": "plate-1", "name": "Upper", "at": [0, 0, 5]}),
+    );
+    // A pin through both holes, and one that misses the holes and goes through the
+    // corner of the lower plate.
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "name": "Good", "at": [20, 15, -5]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "component": "Good", "name": "Bad", "at": [6, 6, -17]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "sample": "enclosure", "at": [200, 0, 0]}),
+    );
+
+    // Interference: only the pin that misses, and only with the plate it reaches.
+    let pi = std::f64::consts::PI;
+    let found = ok(&mut doc, json!({"op": "interference"}));
+    assert_eq!(found["clear"], false);
+    let hits = found["interferences"].as_array().unwrap();
+    assert_eq!(hits.len(), 1, "{found}");
+    assert_eq!(
+        (hits[0]["a"].as_str(), hits[0]["b"].as_str()),
+        (Some("plate-1"), Some("Bad"))
+    );
+    // It reaches 3 into the plate: z from 0 to 3.
+    assert!((hits[0]["volume_mm3"].as_f64().unwrap() - pi * 16.0 * 3.0).abs() < 1e-5);
+    assert_eq!(hits[0]["min"], json!([2.0, 2.0, 0.0]));
+    assert_eq!(hits[0]["max"], json!([10.0, 10.0, 3.0]));
+    assert!(found["compared"].as_u64().unwrap() >= 3);
+    // Asked about one component: the pairs it is in.
+    let good = ok(&mut doc, json!({"op": "interference", "component": "Good"}));
+    assert_eq!(good["clear"], true);
+    assert_eq!(good["interferences"], json!([]));
+    let bad = ok(&mut doc, json!({"op": "interference", "component": "Bad"}));
+    assert_eq!(bad["interferences"].as_array().unwrap().len(), 1);
+    // Moved clear, nothing interferes.
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Bad", "at": [-50, 0, 0]}),
+    );
+    assert_eq!(ok(&mut doc, json!({"op": "interference"}))["clear"], true);
+
+    // The bill of materials.
+    let plate_kg = (6000.0 - pi * 80.0) * 7850e-9;
+    let bom = ok(&mut doc, json!({"op": "bom"}));
+    assert_eq!(bom["level"], "parts");
+    assert_eq!(bom["quantity"], 5);
+    let rows = bom["rows"].as_array().unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(
+        (
+            rows[0]["part"].as_str(),
+            rows[0]["quantity"].as_u64(),
+            rows[0]["material"].as_str()
+        ),
+        (Some("plate"), Some(2), Some("Mild steel"))
+    );
+    assert!((rows[0]["mass_kg"].as_f64().unwrap() - plate_kg).abs() < 1e-6);
+    assert!((rows[0]["total_mass_kg"].as_f64().unwrap() - 2.0 * plate_kg).abs() < 1e-6);
+    assert_eq!(rows[0]["components"], json!(["plate-1", "Upper"]));
+    assert_eq!(
+        (rows[1]["part"].as_str(), rows[1]["quantity"].as_u64()),
+        (Some("pin"), Some(2))
+    );
+    assert!(rows[1].get("mass_kg").is_none() && rows[1].get("material").is_none());
+    // The sheet metal part: what to cut it from.
+    assert_eq!(rows[2]["part"], "Enclosure Panel");
+    assert_eq!(rows[2]["thickness"], 1.5);
+    assert_eq!(rows[2]["flat_size"], json!([244.356636, 194.356636]));
+    assert_eq!(rows[2]["bends"], 4);
+    assert_eq!(bom["without_mass"], json!(["pin", "Enclosure Panel"]));
+    assert!(bom.get("mass_kg").is_none());
+    let e = error(&mut doc, json!({"op": "bom", "level": "all"}));
+    assert!(e.contains("\"parts\"") && e.contains("\"top\""), "{e}");
+
+    // As CSV: a header and a line per part.
+    let csv = dir.join("bom.csv");
+    let out = ok(&mut doc, json!({"op": "export", "path": csv}));
+    assert_eq!(
+        (out["format"].as_str(), out["rows"].as_u64()),
+        (Some("csv"), Some(3))
+    );
+    let text = std::fs::read_to_string(&csv).unwrap();
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(
+        lines[0],
+        "item,part,quantity,material,mass_kg,total_mass_kg,thickness_mm,flat_width_mm,flat_height_mm,bends,components"
+    );
+    assert!(
+        lines[1].starts_with("1,plate,2,Mild steel,0.045127,0.090254,,,,,plate-1 Upper"),
+        "{}",
+        lines[1]
+    );
+    assert_eq!(lines[2], "2,pin,2,,,,,,,,Good Bad");
+    assert_eq!(
+        lines[3],
+        "3,Enclosure Panel,1,,,,1.5,244.356636,194.356636,4,Enclosure Panel-1"
+    );
+    assert_eq!(lines.len(), 4);
+
+    // Mass: the parts with a material are weighed; the whole is not, until all are.
+    let mass = ok(&mut doc, json!({"op": "mass"}));
+    assert_eq!(mass["without_material"], json!(["pin", "Enclosure Panel"]));
+    assert!(mass["total"].get("mass_kg").is_none());
+    assert_eq!(mass["total"]["center_of_gravity_of"], "volume");
+    let components = mass["components"].as_array().unwrap();
+    assert_eq!(components.len(), 5);
+    assert_eq!(components[1]["component"], "Upper");
+    assert!((components[1]["mass_kg"].as_f64().unwrap() - plate_kg).abs() < 1e-6);
+    assert_eq!(components[1]["center_of_gravity"], json!([20.0, 15.0, 7.5]));
+    assert!(components[2].get("mass_kg").is_none());
+    // With only the plates left, it is weighed: twice a plate, centred between them.
+    for name in ["Good", "Bad", "Enclosure Panel-1"] {
+        ok(&mut doc, json!({"op": "suppress", "component": name}));
+    }
+    let mass = ok(&mut doc, json!({"op": "mass"}));
+    assert!(mass.get("without_material").is_none());
+    let total = &mass["total"];
+    assert!((total["mass_kg"].as_f64().unwrap() - 2.0 * plate_kg).abs() < 1e-6);
+    assert_eq!(total["center_of_gravity_of"], "mass");
+    assert_eq!(total["center_of_gravity"], json!([20.0, 15.0, 5.0]));
+    assert_eq!(
+        (total["min"].clone(), total["max"].clone()),
+        (json!([0.0, 0.0, 0.0]), json!([40.0, 30.0, 10.0]))
+    );
+    assert!(total["principal_moments_kg_mm2"][0].as_f64().unwrap() > 0.0);
+    let bom = ok(&mut doc, json!({"op": "bom"}));
+    assert!((bom["mass_kg"].as_f64().unwrap() - 2.0 * plate_kg).abs() < 1e-6);
+    let e = error(&mut doc, json!({"op": "mass", "body": 0}));
+    assert!(e.contains("as a whole"), "{e}");
+
+    // These are an assembly's; a part says so.
+    for op in [
+        json!({"op": "interference"}),
+        json!({"op": "bom"}),
+        json!({"op": "export", "path": csv}),
+    ] {
+        let e = error(&mut part, op.clone());
+        assert!(e.contains("assembly"), "{op}: {e}");
+    }
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_bill_of_materials_goes_through_sub_assemblies() {
+    let dir = temp("bom-levels");
+    let (plate, pin) = plate_and_pin(&dir);
+    let sub = dir.join("pinned.peet");
+    let mut inner = assembly();
+    ok(&mut inner, json!({"op": "insert", "path": plate}));
+    ok(
+        &mut inner,
+        json!({"op": "insert", "path": pin, "at": [20, 15, 0]}),
+    );
+    ok(&mut inner, json!({"op": "save", "path": sub}));
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "path": sub}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "component": "pinned-1", "at": [100, 0, 0]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "at": [-40, 0, 0]}),
+    );
+    let parts = ok(&mut doc, json!({"op": "bom"}));
+    let rows: Vec<(&str, u64)> = parts["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["part"].as_str().unwrap(), r["quantity"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(rows, [("plate", 2), ("pin", 3)]);
+    assert_eq!(parts["rows"][1]["components"][0], "pinned-1/pin-1");
+    let top = ok(&mut doc, json!({"op": "bom", "level": "top"}));
+    assert_eq!(top["rows"][0]["kind"], "assembly");
+    let rows: Vec<(&str, u64)> = top["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| (r["part"].as_str().unwrap(), r["quantity"].as_u64().unwrap()))
+        .collect();
+    assert_eq!(rows, [("pinned", 2), ("pin", 1)]);
+    // Inside the sub-assembly the pin sits in the hole: nothing interferes.
+    assert_eq!(ok(&mut doc, json!({"op": "interference"}))["clear"], true);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+/// How often `what` is in `text`.
+fn count(text: &str, what: &str) -> usize {
+    text.matches(what).count()
+}
+
+#[test]
+fn step_keeps_an_assemblys_structure() {
+    let dir = temp("step");
+    let path = |name: &str| dir.join(name).to_string_lossy().into_owned();
+    // A 40 x 30 x 5 plate; a pair of them stacked; and a top assembly with the pair
+    // twice (once turned a quarter about z) and a plate of its own.
+    let mut plate = Document::default();
+    ok(
+        &mut plate,
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 30]}]}),
+    );
+    ok(
+        &mut plate,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+    );
+    ok(
+        &mut plate,
+        json!({"op": "save", "path": path("plate.peet")}),
+    );
+    let mut pair = assembly();
+    ok(
+        &mut pair,
+        json!({"op": "insert", "path": path("plate.peet")}),
+    );
+    ok(
+        &mut pair,
+        json!({"op": "insert", "component": "plate-1", "at": [0, 0, 5]}),
+    );
+    ok(&mut pair, json!({"op": "save", "path": path("pair.peet")}));
+    let mut top = assembly();
+    ok(
+        &mut top,
+        json!({"op": "insert", "path": path("pair.peet"), "at": [100, 0, 0]}),
+    );
+    ok(
+        &mut top,
+        json!({"op": "insert", "component": "pair-1", "at": [0, 200, 0], "rotate": {"axis": "z", "angle": 90}}),
+    );
+    ok(
+        &mut top,
+        json!({"op": "insert", "path": path("plate.peet"), "at": [0, 0, 50], "name": "Lid"}),
+    );
+    // A suppressed component is not exported.
+    ok(
+        &mut top,
+        json!({"op": "insert", "path": path("plate.peet"), "at": [0, 0, 80], "name": "Spare"}),
+    );
+    ok(&mut top, json!({"op": "suppress", "component": "Spare"}));
+    let before = ok(&mut top, json!({"op": "components"}));
+
+    // Out: the plate once (the pair's and the top's own are the same part), the pair
+    // once, five bodies shown.
+    let step = path("top.step");
+    let out = ok(&mut top, json!({"op": "export", "path": step}));
+    assert_eq!(
+        (
+            out["bodies"].as_u64(),
+            out["parts"].as_u64(),
+            out["components"].as_u64()
+        ),
+        (Some(5), Some(2), Some(3)),
+        "{out}"
+    );
+    let text = std::fs::read_to_string(&step).unwrap();
+    assert_eq!(count(&text, "MANIFOLD_SOLID_BREP("), 1);
+    assert_eq!(count(&text, "=PRODUCT("), 3);
+    assert_eq!(count(&text, "NEXT_ASSEMBLY_USAGE_OCCURRENCE("), 5);
+    assert_eq!(count(&text, "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION("), 5);
+    assert!(
+        text.contains("'pair-2'"),
+        "occurrences are named after components"
+    );
+
+    // Back in, into an assembly: the same components in the same places, held there.
+    let mut back = assembly();
+    let read = ok(&mut back, json!({"op": "import_step", "path": step}));
+    assert_eq!(read["components"], json!(["pair-1", "pair-2", "Lid"]));
+    assert_eq!(
+        (read["parts"].as_u64(), read["bodies"].as_u64()),
+        (Some(1), Some(5))
+    );
+    assert_eq!(back.undo_label(), Some("Import top"));
+    let after = ok(&mut back, json!({"op": "components"}));
+    let listed = after["components"].as_array().unwrap();
+    assert_eq!(listed.len(), 3);
+    for (now, was) in listed.iter().zip(before["components"].as_array().unwrap()) {
+        assert_eq!(now["name"], was["name"]);
+        assert_eq!(now["fixed"], true);
+        assert_eq!(now["status"], "ok");
+        for key in ["min", "max"] {
+            for axis in 0..3 {
+                let (a, b) = (
+                    now[key][axis].as_f64().unwrap(),
+                    was[key][axis].as_f64().unwrap(),
+                );
+                assert!(
+                    (a - b).abs() < 1e-6,
+                    "{key} of {}: {now} / {was}",
+                    now["name"]
+                );
+            }
+        }
+    }
+    // The pair is a sub-assembly, once; its plates are one part.
+    let parts = after["parts"].as_array().unwrap();
+    assert_eq!(parts.len(), 2);
+    assert_eq!(
+        (parts[0]["name"].as_str(), parts[0]["kind"].as_str()),
+        (Some("pair"), Some("assembly"))
+    );
+    let inner = back.model.assembly().unwrap().definitions().next().unwrap();
+    let inner = inner.model.assembly().unwrap();
+    assert_eq!(
+        (inner.definitions().count(), inner.components().count()),
+        (1, 2)
+    );
+    assert_eq!(back.bodies.len(), 5);
+    let mass = ok(&mut back, json!({"op": "mass"}));
+    assert!((mass["total"]["volume_mm3"].as_f64().unwrap() - 5.0 * 6000.0).abs() < 1e-6);
+    let bom = ok(&mut back, json!({"op": "bom"}));
+    let quantities: Vec<u64> = bom["rows"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["quantity"].as_u64().unwrap())
+        .collect();
+    assert_eq!(quantities, [5]);
+
+    // It survives its file, and goes out again as it came.
+    ok(&mut back, json!({"op": "save", "path": path("back.peet")}));
+    let mut opened = Document::default();
+    ok(
+        &mut opened,
+        json!({"op": "open", "path": path("back.peet")}),
+    );
+    assert_eq!(opened.bodies.len(), 5);
+    let again = ok(
+        &mut opened,
+        json!({"op": "export", "path": path("again.step")}),
+    );
+    assert_eq!(
+        (
+            again["bodies"].as_u64(),
+            again["parts"].as_u64(),
+            again["components"].as_u64()
+        ),
+        (Some(5), Some(2), Some(3))
+    );
+
+    // One undo step; and a second import adds to what is there.
+    ok(&mut back, json!({"op": "undo"}));
+    assert_eq!(back.model.assembly().unwrap().components().count(), 0);
+    ok(&mut back, json!({"op": "redo"}));
+    let more = ok(&mut back, json!({"op": "import_step", "path": step}));
+    assert_eq!(more["components"], json!(["pair-3", "pair-4", "plate-1"]));
+
+    // A part takes the same file as bodies where they are, without the structure.
+    let mut flat = Document::default();
+    let read = ok(&mut flat, json!({"op": "import_step", "path": step}));
+    assert_eq!(read["bodies"], 5);
+    let bodies = ok(&mut flat, json!({"op": "bodies"}));
+    assert_eq!(bodies["bodies"][4]["max"], json!([40.0, 30.0, 55.0]));
+
+    // A file of one part gives one component.
+    let single = path("plate.step");
+    ok(&mut plate, json!({"op": "export", "path": single}));
+    let mut one = assembly();
+    let read = ok(&mut one, json!({"op": "import_step", "path": single}));
+    assert_eq!(read["components"], json!(["plate-1"]));
+    assert_eq!(
+        (read["parts"].as_u64(), read["bodies"].as_u64()),
+        (Some(1), Some(1))
+    );
+
+    // Nothing to import: said, and nothing changed.
+    let empty = path("empty.step");
+    std::fs::write(&empty, "hello").unwrap();
+    let e = error(&mut one, json!({"op": "import_step", "path": empty}));
+    assert!(!e.is_empty());
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn components_are_shown_hidden_and_coloured() {
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "sample": "bracket"}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "component": "Bracket-1", "at": [0, 200, 0]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "sample": "housing", "at": [300, 0, 0]}),
+    );
+    let part = doc.placed[0].color;
+
+    // A colour of its own, for one instance; the other keeps the part's.
+    let red = ok(
+        &mut doc,
+        json!({"op": "set_color", "component": "Bracket-2", "color": "#c82828"}),
+    );
+    assert_eq!(red["component"]["color"], "#c82828");
+    assert_eq!(doc.undo_label(), Some("Colour Bracket-2"));
+    assert_eq!(doc.placed[0].color, part);
+    assert_eq!(doc.placed[1].color, Some([200, 40, 40]));
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert!(listed["components"][0].get("color").is_none());
+    assert_eq!(listed["components"][1]["color"], "#c82828");
+    let back = ok(
+        &mut doc,
+        json!({"op": "set_color", "component": "Bracket-2", "color": null}),
+    );
+    assert!(back["component"].get("color").is_none());
+    assert_eq!(doc.placed[1].color, part);
+    let e = error(
+        &mut doc,
+        json!({"op": "set_color", "component": "Bracket-2"}),
+    );
+    assert!(e.contains("null for the part's colour"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "set_color", "component": "Bracket-2", "color": "red"}),
+    );
+    assert!(e.contains("#c82828"), "{e}");
+
+    // Isolate: the others are hidden, in one undo step. What is hidden is still there:
+    // counted, weighed and exported.
+    let all = doc.visible_body_bounds();
+    let alone = ok(
+        &mut doc,
+        json!({"op": "isolate", "components": ["Housing-1"]}),
+    );
+    assert_eq!(alone["hidden"], json!(["Bracket-1", "Bracket-2"]));
+    assert_eq!(doc.undo_label(), Some("Isolate Housing-1"));
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(listed["components"][0]["hidden"], true);
+    assert!(listed["components"][2].get("hidden").is_none());
+    assert_eq!(doc.bodies.len(), 3);
+    assert!((0..2).all(|i| doc.is_hidden(i)) && !doc.is_hidden(2));
+    // Zoom to fit frames what is shown.
+    let shown = doc.visible_body_bounds();
+    assert!(shown.min.x > all.min.x + 100.0, "{shown:?} / {all:?}");
+    let bom = ok(&mut doc, json!({"op": "bom"}));
+    assert_eq!(bom["quantity"], 3);
+    // The same again changes nothing.
+    ok(
+        &mut doc,
+        json!({"op": "isolate", "components": "Housing-1"}),
+    );
+    ok(&mut doc, json!({"op": "undo"}));
+    assert!((0..3).all(|i| !doc.is_hidden(i)), "one undo step");
+    ok(&mut doc, json!({"op": "redo"}));
+
+    let shown = ok(&mut doc, json!({"op": "show_all"}));
+    assert_eq!(shown["shown"], json!(["Bracket-1", "Bracket-2"]));
+    assert_eq!(doc.undo_label(), Some("Show All"));
+    assert!((0..3).all(|i| !doc.is_hidden(i)));
+    let nothing = ok(&mut doc, json!({"op": "show_all"}));
+    assert_eq!(nothing["shown"], json!([]));
+    assert_eq!(doc.undo_label(), Some("Show All"));
+    ok(&mut doc, json!({"op": "undo"}));
+    assert!(doc.is_hidden(0));
+
+    let e = error(&mut doc, json!({"op": "isolate", "components": ["Lid"]}));
+    assert!(e.contains("Bracket-1"), "{e}");
+    let e = error(&mut doc, json!({"op": "isolate", "components": []}));
+    assert!(e.contains("at least one"), "{e}");
+    let mut part = Document::default();
+    let e = error(&mut part, json!({"op": "show_all"}));
+    assert!(e.contains("works on an assembly"), "{e}");
+    // Configurations are a part's: an assembly has none of its own to add or list.
+    for op in [
+        json!({"op": "add_configuration", "name": "Long"}),
+        json!({"op": "configurations"}),
+    ] {
+        let e = error(&mut doc, op);
+        assert!(
+            e.contains("is an assembly") && e.contains("open_component"),
+            "{e}"
+        );
+    }
+}
+
+#[test]
+fn an_exploded_view_is_stored_steps_that_move_nothing() {
+    let dir = temp("explode");
+    let (plate, pin) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "path": plate}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "at": [30, 30, 40]}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "at": [0, 0, 100], "name": "Lid"}),
+    );
+    let before = ok(&mut doc, json!({"op": "components"}));
+    let mates = ok(&mut doc, json!({"op": "mates"}));
+
+    // Two steps: the lid up, then the lid and the pin further.
+    let first = ok(
+        &mut doc,
+        json!({"op": "explode_step", "components": ["Lid"], "by": [0, 0, 50]}),
+    );
+    assert_eq!(
+        first["explode_step"],
+        json!({"id": 1, "name": "Explode1", "components": ["Lid"], "by": [0.0, 0.0, 50.0]})
+    );
+    assert_eq!(doc.undo_label(), Some("Add Explode1"));
+    let second = ok(
+        &mut doc,
+        json!({"op": "explode_step", "components": ["Lid", "pin-1", "Lid"], "by": [20, 0, 30], "name": "Apart"}),
+    );
+    assert_eq!(
+        second["explode_step"]["components"],
+        json!(["Lid", "pin-1"])
+    );
+
+    // Stored, and nothing moved: the components and the mates are as they were.
+    assert_eq!(ok(&mut doc, json!({"op": "components"})), before);
+    assert_eq!(ok(&mut doc, json!({"op": "mates"})), mates);
+    let steps = ok(&mut doc, json!({"op": "explode_steps"}));
+    assert_eq!(steps["exploded"], false);
+    assert_eq!(steps["steps"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        steps["moved"],
+        json!([
+            {"component": "pin-1", "by": [20.0, 0.0, 30.0], "at": [50.0, 30.0, 70.0]},
+            {"component": "Lid", "by": [20.0, 0.0, 80.0], "at": [20.0, 0.0, 180.0]},
+        ])
+    );
+
+    // Shown exploded: a view. The bodies are drawn moved; everything asked about the
+    // assembly still means it as it is.
+    let hash = peet_model::hash::of(&doc.model);
+    let shown = ok(&mut doc, json!({"op": "explode"}));
+    assert_eq!(shown["exploded"], true);
+    assert_eq!(doc.undo_label(), Some("Add Apart"));
+    assert_eq!(peet_model::hash::of(&doc.model), hash);
+    let lid = doc
+        .placed
+        .iter()
+        .rposition(|p| p.path == [peet_model::CompId(3)])
+        .unwrap();
+    assert_eq!(doc.placed[lid].frame.origin, DVec3::new(0.0, 0.0, 100.0));
+    assert_eq!(doc.placed[lid].shown.origin, DVec3::new(20.0, 0.0, 180.0));
+    assert_eq!(doc.placed[0].shown, doc.placed[0].frame);
+    assert_eq!(ok(&mut doc, json!({"op": "components"})), before);
+    assert_eq!(
+        ok(&mut doc, json!({"op": "explode_steps"}))["exploded"],
+        true
+    );
+    // Half way, as the application moves between the two.
+    doc.set_explode(0.5);
+    assert_eq!(doc.placed[lid].shown.origin, DVec3::new(10.0, 0.0, 140.0));
+    doc.set_explode(1.0);
+
+    // A change to a step shows at once.
+    let edited = ok(
+        &mut doc,
+        json!({"op": "edit_explode_step", "explode_step": "Explode1", "by": [0, 0, 10]}),
+    );
+    assert_eq!(edited["explode_step"]["by"], json!([0.0, 0.0, 10.0]));
+    assert_eq!(doc.placed[lid].shown.origin, DVec3::new(20.0, 0.0, 140.0));
+    ok(
+        &mut doc,
+        json!({"op": "edit_explode_step", "explode_step": "Apart", "components": ["pin-1"]}),
+    );
+    assert_eq!(doc.placed[lid].shown.origin, DVec3::new(0.0, 0.0, 110.0));
+    ok(
+        &mut doc,
+        json!({"op": "rename", "explode_step": 1, "name": "Lift lid"}),
+    );
+    assert_eq!(doc.undo_label(), Some("Rename Explode1"));
+    let off = ok(&mut doc, json!({"op": "explode", "on": false}));
+    assert_eq!(off["exploded"], false);
+    assert_eq!(doc.placed[lid].shown, doc.placed[lid].frame);
+
+    // Saved with the assembly.
+    let file = dir.join("exploded.peet").to_string_lossy().into_owned();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let mut opened = Document::default();
+    ok(&mut opened, json!({"op": "open", "path": file}));
+    assert_eq!(opened.model, doc.model);
+    let steps = ok(&mut opened, json!({"op": "explode_steps"}));
+    assert_eq!(steps["steps"][0]["name"], "Lift lid");
+
+    // A deleted component leaves its steps; a step with nothing left goes with it.
+    ok(&mut doc, json!({"op": "delete", "component": "pin-1"}));
+    let steps = ok(&mut doc, json!({"op": "explode_steps"}));
+    assert_eq!(steps["steps"].as_array().unwrap().len(), 1);
+    ok(&mut doc, json!({"op": "undo"}));
+    let gone = ok(&mut doc, json!({"op": "delete", "explode_step": "Apart"}));
+    assert_eq!(gone["deleted"], json!(["Apart"]));
+
+    // Mistakes.
+    let e = error(
+        &mut doc,
+        json!({"op": "explode_step", "components": ["Lid"], "by": [0, 0, 0]}),
+    );
+    assert!(e.contains("moves nothing"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "explode_step", "components": ["Cover"], "by": [0, 0, 5]}),
+    );
+    assert!(e.contains("Lid"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "explode_step", "components": ["Lid"]}),
+    );
+    assert!(e.contains("by"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_explode_step", "explode_step": "Apart", "by": [1, 0, 0]}),
+    );
+    assert!(e.contains("Lift lid"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_explode_step", "explode_step": 1}),
+    );
+    assert!(e.contains("'by' or a 'components'"), "{e}");
+    let mut bare = assembly();
+    let e = error(&mut bare, json!({"op": "explode"}));
+    assert!(e.contains("explode_step"), "{e}");
+    let mut part = Document::default();
+    let e = error(&mut part, json!({"op": "explode_steps"}));
+    assert!(e.contains("works on an assembly"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn the_applications_colours_and_explode_steps_are_made_by_operations() {
+    let mut host = Headless::default();
+    let mut direct = Document::from_model(Model::new_assembly(), None);
+    let mut through = Document::from_model(Model::new_assembly(), None);
+    let bracket = Arc::new(peet_model::samples::bracket().0);
+    let mut key = 100;
+    let mut change = |label: &str, f: &dyn Fn(&mut Model)| {
+        direct.change(label, f);
+        let mut new = through.model.clone();
+        f(&mut new);
+        key += 1;
+        let done = apply_model(&mut host, &mut through, new, label, key);
+        through.seal_history();
+        assert_eq!(done.untranslated, None, "{label}: {:?}", done.ops);
+        assert_eq!(through.model, direct.model, "{label}");
+        done.ops
+    };
+    let (one, two) = (peet_model::CompId(1), peet_model::CompId(2));
+    change("Insert", &|m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.define(bracket.clone());
+        a.insert(d, Frame::WORLD);
+        a.insert(d, Frame::WORLD);
+    });
+    let ops = change("Colour", &|m| {
+        m.assembly_mut().unwrap().component_mut(two).unwrap().color = Some([1, 2, 3]);
+    });
+    assert_eq!(ops.len(), 1);
+    let ops = change("Explode", &|m| {
+        let a = m.assembly_mut().unwrap();
+        a.add_explode_step(&[one, two], DVec3::new(0.0, 0.0, 40.0));
+        a.add_explode_step(&[two], DVec3::X);
+    });
+    assert_eq!(ops.len(), 2);
+    let step = peet_model::ExplodeId(1);
+    let ops = change("Edit step", &|m| {
+        let s = m.assembly_mut().unwrap().explode_step_mut(step).unwrap();
+        s.offset.z = 60.0;
+        s.components = vec![one];
+        s.name = "Up".to_owned();
+    });
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    // A deleted component takes itself out of its steps: one operation.
+    let ops = change("Delete component", &|m| {
+        m.assembly_mut().unwrap().remove(two);
+    });
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    let ops = change("Delete step", &|m| {
+        m.assembly_mut().unwrap().remove_explode_step(step);
+    });
+    assert_eq!(ops.len(), 1, "{ops:?}");
+}
+
+#[test]
+fn components_are_patterned_and_the_copies_follow_the_original() {
+    let dir = temp("pattern");
+    let (plate, pin) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    ok(&mut doc, json!({"op": "insert", "path": plate}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "at": [5, 5, 5]}),
+    );
+
+    // Three along x and two along y: five copies of the pin, components of its part.
+    let made = ok(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["pin-1"], "type": "linear",
+            "direction": "x", "spacing": 10, "count": 3,
+            "second": {"direction": [0, 1, 0], "spacing": 20, "count": 2}}),
+    );
+    let pattern = &made["pattern"];
+    assert_eq!(pattern["name"], "LPattern1");
+    assert_eq!(pattern["type"], "linear");
+    assert_eq!(pattern["components"], json!(["pin-1"]));
+    assert_eq!(
+        pattern["copies"],
+        json!(["pin-2", "pin-3", "pin-4", "pin-5", "pin-6"])
+    );
+    assert_eq!(pattern["direction"], json!([1.0, 0.0, 0.0]));
+    assert_eq!(pattern["second"]["spacing"], 20.0);
+    assert_eq!(pattern["status"], "ok");
+    assert_eq!(doc.undo_label(), Some("Add LPattern1"));
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    let components = listed["components"].as_array().unwrap();
+    assert_eq!(components.len(), 7);
+    assert_eq!(components[6]["at"], json!([25.0, 25.0, 5.0]));
+    assert_eq!(components[6]["pattern"], "LPattern1");
+    assert_eq!(components[6]["freedom"], 0);
+    assert!(components[1].get("pattern").is_none());
+    assert_eq!(listed["patterns"][0]["name"], "LPattern1");
+    assert_eq!(listed["parts"][1]["components"], 6);
+    // Counted and weighed like any component.
+    let bom = ok(&mut doc, json!({"op": "bom"}));
+    assert_eq!(bom["rows"][1]["quantity"], 6);
+
+    // The original is moved: every copy goes with it.
+    let moved = ok(
+        &mut doc,
+        json!({"op": "place", "component": "pin-1", "at": [0, 0, 5]}),
+    );
+    assert_eq!(moved["moved"].as_array().unwrap().len(), 5, "{moved}");
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(listed["components"][6]["at"], json!([20.0, 20.0, 5.0]));
+
+    // A copy is the pattern's: it can't be moved, mated or deleted by itself.
+    for op in [
+        json!({"op": "place", "component": "pin-3", "at": [0, 0, 0]}),
+        json!({"op": "delete", "component": "pin-3"}),
+        json!({"op": "fix", "component": "pin-3"}),
+        json!({"op": "drag", "component": "pin-3", "to": [0, 0, 0]}),
+        json!({"op": "mate", "type": "fasten", "a": "plate-1", "b": "pin-3"}),
+        json!({"op": "component_pattern", "components": ["pin-3"], "type": "linear", "direction": "z", "spacing": 5, "count": 2}),
+    ] {
+        let e = error(&mut doc, op);
+        assert!(
+            e.contains("copy made by LPattern1") && e.contains("pin-1"),
+            "{e}"
+        );
+    }
+    // But it can be hidden, coloured and renamed.
+    ok(
+        &mut doc,
+        json!({"op": "show", "component": "pin-3", "on": false}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "rename", "component": "pin-3", "name": "Middle"}),
+    );
+
+    // Changed: copies come and go, and the ones that stay keep their names.
+    let fewer = ok(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": "LPattern1", "count": 2, "spacing": 15, "second": null}),
+    );
+    assert_eq!(fewer["pattern"]["copies"], json!(["pin-2"]));
+    assert_eq!(doc.undo_label(), Some("Edit LPattern1"));
+    assert_eq!(doc.model.assembly().unwrap().components().count(), 3);
+    let more = ok(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": 1, "count": 3, "flip": true}),
+    );
+    assert_eq!(more["pattern"]["copies"].as_array().unwrap().len(), 2);
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(listed["components"][3]["at"], json!([-30.0, 0.0, 5.0]));
+    ok(
+        &mut doc,
+        json!({"op": "rename", "pattern": "LPattern1", "name": "Row"}),
+    );
+    let gone = ok(&mut doc, json!({"op": "delete", "pattern": "Row"}));
+    assert_eq!(gone["deleted"], json!(["Row"]));
+    assert_eq!(doc.model.assembly().unwrap().components().count(), 2);
+    ok(&mut doc, json!({"op": "undo"}));
+    assert_eq!(doc.model.assembly().unwrap().components().count(), 4);
+    ok(&mut doc, json!({"op": "redo"}));
+
+    // Round the hole of the plate (its axis, taken from the part): four pins. The
+    // pin is put 10 to the right of the hole, on the plate.
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "pin-1", "at": [30, 15, 5]}),
+    );
+    let ring = ok(
+        &mut doc,
+        json!({"op": "component_pattern", "components": "pin-1", "type": "circular",
+            "axis": {"component": "plate-1", "face": {"at": [24, 15, 2.5]}}, "count": 4, "name": "Ring"}),
+    );
+    assert_eq!(
+        ring["pattern"]["axis"],
+        json!({"component": "plate-1", "on": "face"})
+    );
+    assert_eq!(ring["pattern"]["angle"], 360.0);
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    let at: Vec<&Value> = listed["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .skip(2)
+        .map(|c| &c["at"])
+        .collect();
+    assert_eq!(
+        at,
+        [
+            &json!([20.0, 25.0, 5.0]),
+            &json!([10.0, 15.0, 5.0]),
+            &json!([20.0, 5.0, 5.0])
+        ]
+    );
+    // An axis of the assembly itself, not through its origin; over half a turn.
+    ok(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": "Ring", "count": 3, "angle": 180,
+            "axis": {"origin": [30, 0, 0], "direction": "z"}}),
+    );
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(listed["components"][3]["at"], json!([30.0, -15.0, 5.0]));
+
+    // Saved and opened: the same pattern, the same places.
+    let file = dir.join("patterned.peet").to_string_lossy().into_owned();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let mut opened = Document::default();
+    ok(&mut opened, json!({"op": "open", "path": file}));
+    assert_eq!(opened.model, doc.model);
+    assert_eq!(ok(&mut opened, json!({"op": "components"})), listed);
+
+    // Deleting the original takes the pattern and its copies with it.
+    let deleted = ok(&mut doc, json!({"op": "delete", "component": "pin-1"}));
+    assert_eq!(deleted["deleted"], json!(["pin-1"]));
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(listed["components"].as_array().unwrap().len(), 1);
+    assert!(listed.get("patterns").is_none());
+    ok(&mut doc, json!({"op": "undo"}));
+
+    // Mistakes.
+    let e = error(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["plate-1"], "type": "linear", "direction": "x", "spacing": 50, "count": 1}),
+    );
+    assert!(e.contains("at least 2"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["plate-1"], "type": "grid", "direction": "x", "spacing": 50, "count": 2}),
+    );
+    assert!(e.contains("linear") && e.contains("circular"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["plate-1"], "type": "linear", "direction": [0, 0, 0], "spacing": 50, "count": 2}),
+    );
+    assert!(e.contains("no length"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["plate-1"], "type": "linear", "direction": {"component": "plate-1"}, "spacing": 50, "count": 2}),
+    );
+    assert!(e.contains("edge or a face"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["plate-1"], "type": "circular", "count": 3}),
+    );
+    assert!(e.contains("axis"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": "Ring", "spacing": 5}),
+    );
+    assert!(e.contains("circular pattern"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": "Ring"}),
+    );
+    assert!(e.contains("something to change"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": "Row", "count": 2}),
+    );
+    assert!(e.contains("Ring"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_component_pattern", "pattern": "Ring", "count": 5000}),
+    );
+    assert!(e.contains("1 to 1000"), "{e}");
+    // A direction that can't be one is not a failed operation: the pattern says so.
+    let flat = ok(
+        &mut doc,
+        json!({"op": "component_pattern", "components": ["plate-1"], "type": "linear",
+            "direction": {"component": "plate-1", "face": {"normal": [0, 0, 1]}}, "spacing": 8, "count": 2}),
+    );
+    assert_eq!(flat["pattern"]["status"], "ok");
+    let listed = ok(&mut doc, json!({"op": "components"}));
+    let last = listed["components"]
+        .as_array()
+        .unwrap()
+        .last()
+        .unwrap()
+        .clone();
+    assert_eq!(last["at"], json!([0.0, 0.0, 8.0]));
+    let mut part = Document::default();
+    let e = error(
+        &mut part,
+        json!({"op": "component_pattern", "components": ["a"], "type": "linear", "direction": "x", "spacing": 5, "count": 2}),
+    );
+    assert!(e.contains("works on an assembly"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn the_applications_patterns_are_made_by_operations() {
+    use peet_model::{PatternKind, PatternLine, PatternStep, Scalar};
+    let mut host = Headless::default();
+    let mut direct = Document::from_model(Model::new_assembly(), None);
+    let mut through = Document::from_model(Model::new_assembly(), None);
+    let bracket = Arc::new(peet_model::samples::bracket().0);
+    let mut key = 200;
+    let mut change = |label: &str, f: &dyn Fn(&mut Model)| {
+        direct.change(label, f);
+        let mut new = through.model.clone();
+        f(&mut new);
+        key += 1;
+        let done = apply_model(&mut host, &mut through, new, label, key);
+        through.seal_history();
+        assert_eq!(done.untranslated, None, "{label}: {:?}", done.ops);
+        assert_eq!(through.model, direct.model, "{label}");
+        assert_eq!(through.bodies.len(), direct.bodies.len(), "{label}");
+        done.ops
+    };
+    let row = |count| PatternKind::Linear {
+        first: PatternStep {
+            direction: PatternLine::Fixed {
+                origin: DVec3::ZERO,
+                direction: DVec3::X,
+            },
+            spacing: Scalar::new(150.0),
+            count,
+            flip: false,
+        },
+        second: None,
+    };
+    let one = peet_model::CompId(1);
+    change("Insert", &|m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.define(bracket.clone());
+        a.insert(d, Frame::WORLD);
+    });
+    // The copies are the pattern's doing: one operation, not an insert for each.
+    let ops = change("Pattern", &|m| {
+        m.assembly_mut().unwrap().add_pattern(&[one], row(4));
+    });
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    let pattern = peet_model::PatternId(1);
+    let ops = change("Fewer, renamed", &|m| {
+        let a = m.assembly_mut().unwrap();
+        a.set_pattern_kind(pattern, row(2));
+        a.pattern_mut(pattern).unwrap().name = "Row".to_owned();
+    });
+    assert_eq!(ops.len(), 2, "{ops:?}");
+    // The original moved: its copy follows by itself.
+    let ops = change("Move", &|m| {
+        let c = m.assembly_mut().unwrap().component_mut(one).unwrap();
+        c.placement.origin.y = 40.0;
+    });
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    let ops = change("Delete pattern", &|m| {
+        m.assembly_mut().unwrap().remove_pattern(pattern);
+    });
+    assert_eq!(ops.len(), 1, "{ops:?}");
+    change("Pattern again", &|m| {
+        m.assembly_mut().unwrap().add_pattern(&[one], row(3));
+    });
+    // The original deleted: the pattern and its copies go with it, in one operation.
+    let ops = change("Delete original", &|m| {
+        m.assembly_mut().unwrap().remove(one);
+    });
+    assert_eq!(ops.len(), 1, "{ops:?}");
+}

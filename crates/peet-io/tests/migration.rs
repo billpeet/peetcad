@@ -44,10 +44,19 @@ fn version_4_samples_open_as_parts_with_one_configuration() {
         let mut model = opened.model;
         assert_eq!(model.configurations().len(), 1, "{name}");
         assert_eq!(model.active_configuration().name, "Default", "{name}");
-        // The same part as the sample is today.
-        assert_eq!(model, now, "{name}");
         let v = volume(&mut model);
         assert!(v > 0.0, "{name}");
+        if name == "chassis" {
+            // The sample has changed since the file was saved: its rim is now sketched
+            // at the left corner of the base, so that the part can be made wider. The
+            // file still has it at the right, and builds the same solid.
+            let mut now = now;
+            let today = volume(&mut now);
+            assert!((v - today).abs() < 1e-6, "{v} / {today}");
+        } else {
+            // The same part as the sample is today.
+            assert_eq!(model, now, "{name}");
+        }
 
         // Saved again it is a current file, and the same part.
         let again = open(&save(&model, &Metadata::default(), None).unwrap()).unwrap();

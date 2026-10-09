@@ -103,6 +103,13 @@ is finished. Queries and application commands are not refused.
 **Replacing the document is guarded.** `new`, `open` and `open_sample` are refused while
 the part has unsaved changes unless told to discard them, as the application asks first.
 
+**Operations go to a document of a session** (added in Phase 7, see
+[ADR 0009](0009-assemblies.md)). The application and the command line hold a `Session`
+of open documents, one current. `apply_session` applies an operation to the current
+document or to one it names, and carries out what only a session can (`documents`,
+`switch`, `close`, opening beside the others with `keep`). `apply` on a `Document` is
+unchanged, and refuses those.
+
 ## Consequences
 
 - `PeetApp::apply_op` is the way in for operations from outside, and is tested against

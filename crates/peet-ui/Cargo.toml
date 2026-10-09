@@ -25,6 +25,9 @@ log.workspace = true
 serde.workspace = true
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# What tells an open assembly that a linked part's file changed. Desktop only: the
+# browser has no files to watch.
+notify = "8"
 # The socket peet reaches a running session through.
 peet-live.workspace = true
 

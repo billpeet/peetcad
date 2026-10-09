@@ -42,19 +42,28 @@
 //! - Sketch contents are drawn with lists of [`Draw`] items: see [`sketch`].
 //! - `{"op": "help"}` lists every operation and its fields.
 
+mod analysis;
 mod args;
+mod assembly;
 mod diff;
+mod explode;
 mod export;
 mod fields;
 mod host;
 mod library;
+mod links;
+mod mate;
 mod op;
+mod pattern;
 mod query;
 pub mod select;
+mod session;
 pub mod sketch;
 mod value;
 
+pub use assembly::{CompSel, ComponentChange, InsertSource, Placing, Point3};
 pub use diff::{Translation, apply_model, apply_model_scoped, diff, diff_scoped};
+pub use explode::{ExplodeChange, ExplodeSel};
 pub use export::export_bytes;
 pub use fields::{
     AngledPlane, BaseFlange, Blend, CircularPattern, ConvertToSheet, CoordinateSystem,
@@ -64,9 +73,15 @@ pub use fields::{
 };
 pub use host::{AppCommand, Headless, Host, SketchTool, Toggle, View, Window};
 pub use library::{CheckRule, Gauge, GaugeBend};
+pub use links::{PartSel, linked_files};
+pub use mate::{MateChange, MateEndSel, MateSel, MateType};
 pub use op::{
     DatumSel, DxfPlacement, DxfTarget, Format, New, Op, Place, Query, RollTo, Sample, Source,
 };
+pub use pattern::{
+    PatternChange, PatternEdit, PatternLineSel, PatternSel, PatternSpec, PatternStepSpec,
+};
+pub use session::{DocSel, SessionCommand, apply_session, apply_session_json};
 pub use sketch::{Draw, DrawItem, Ent, Measure, Relation};
 pub use value::{
     AxisSel, Bend, Configs, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel,
@@ -119,6 +134,16 @@ struct Done {
     feature: Option<FeatureId>,
     /// A sketch whose plane and definition go in the reply.
     sketch: Option<FeatureId>,
+    /// A component the operation was about, reported with where it is and its status.
+    component: Option<peet_model::CompId>,
+    /// A mate the operation was about, reported with its status.
+    mate: Option<peet_model::MateId>,
+    /// A step of the exploded view the operation was about.
+    explode_step: Option<peet_model::ExplodeId>,
+    /// A component pattern the operation was about, reported with its copies.
+    pattern: Option<peet_model::PatternId>,
+    /// A pull on a component to solve the assembly with, and its undo label.
+    drag: Option<(peet_model::Drag, String)>,
     data: Map<String, Value>,
 }
 
@@ -300,6 +325,34 @@ fn help() -> Map<String, Value> {
             }
         }
     }
+    for (form, (name, fields_text, what)) in assembly::ASSEMBLY_OPS
+        .iter()
+        .map(|o| ("component", o))
+        .chain(mate::MATE_OPS.iter().map(|o| ("mate", o)))
+        .chain(links::LINK_OPS.iter().map(|o| ("part", o)))
+        .chain(explode::EXPLODE_OPS.iter().map(|o| ("explode_step", o)))
+        .chain(pattern::PATTERN_OPS.iter().map(|o| ("pattern", o)))
+    {
+        // Words a feature has too (rename, delete): the component's and the mate's
+        // forms beside it.
+        match ops.get_mut(*name) {
+            Some(entry) => {
+                entry[form] = json!({ "does": what, "fields": fields_text });
+            }
+            None => {
+                ops.insert(
+                    (*name).to_owned(),
+                    json!({ "does": what, "fields": fields_text, "in": "an assembly" }),
+                );
+            }
+        }
+    }
+    for (name, fields_text, what) in session::SESSION_OPS {
+        ops.insert(
+            (*name).to_owned(),
+            json!({ "does": what, "fields": fields_text }),
+        );
+    }
     for (name, fields_text, what) in host::app_ops() {
         ops.insert(
             name.to_owned(),
@@ -319,6 +372,10 @@ fn help() -> Map<String, Value> {
             "edge": "{between: [[x,y,z],[x,y,z]], at: [x,y,z], faces: [face, face], body, index}",
             "vertex": "{at: [x,y,z], body, index}",
         }),
+    );
+    out.insert(
+        "document".to_owned(),
+        json!("Any operation can take \"document\": the name or id of an open document (see 'documents'). It is then applied to that document instead of the current one."),
     );
     out.insert(
         "values".to_owned(),
@@ -343,8 +400,14 @@ fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, V
         Query::Edges { body } => object(query::edges(doc, *body)?),
         Query::BendTable { body } => object(query::bend_table(doc, *body)?),
         Query::Checks { body } => object(query::checks(doc, *body, host.check_rules())?),
+        Query::Mass { body } if doc.is_assembly() => analysis::mass(doc, *body)?,
         Query::Mass { body } => object(query::mass(doc, *body)?),
+        Query::Interference { component } => analysis::interference(doc, component.as_ref())?,
+        Query::Bom { top_level } => analysis::bom(doc, *top_level),
         Query::Measure { a, b } => object(query::measure(doc, a, b.as_deref())?),
+        Query::Components => assembly::components(doc)?,
+        Query::Mates => mate::mates(doc)?,
+        Query::ExplodeSteps => explode::steps(doc)?,
     })
 }
 
@@ -372,9 +435,183 @@ fn dxf_unit(unit: peet_sketch::expr::LengthUnit) -> peet_io::dxf_import::Unit {
 }
 
 fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String> {
+    if let Some(why) = assembly::wrong_kind(doc, op) {
+        return Err(why);
+    }
     let mut done = Done::default();
     let mut model = doc.model.clone();
     let label = match op {
+        Op::Insert {
+            from,
+            name,
+            placing,
+            fixed,
+            link,
+            absolute,
+        } => {
+            if *absolute && !*link {
+                return Err("'absolute' is about a link: give it with \"link\": true.".to_owned());
+            }
+            let (id, label) = assembly::insert(
+                doc,
+                &mut model,
+                from,
+                name.as_deref(),
+                placing.as_ref(),
+                *fixed,
+                link.then_some(!*absolute),
+            )?;
+            done.component = Some(id);
+            label
+        }
+        Op::UpdateLinks => {
+            links::unavailable()?;
+            let (updated, problems) = links::refresh(&mut model, links::folder(doc).as_deref(), 0);
+            done.data = links::report(&updated, &problems);
+            if updated.is_empty() {
+                return Ok(done);
+            }
+            "Update Links".to_owned()
+        }
+        Op::Link {
+            part,
+            path,
+            absolute,
+        } => {
+            let id = part.resolve(doc)?;
+            assembly::link(doc, &mut model, id, path, !*absolute)?
+        }
+        Op::Unlink { part } => {
+            let id = part.resolve(doc)?;
+            assembly::unlink(doc, &mut model, id)?
+        }
+        Op::Component { component, change } => {
+            let id = component.resolve(doc)?;
+            let label = assembly::change(doc, &mut model, id, change)?;
+            if *change == ComponentChange::Delete {
+                done.data.insert(
+                    "deleted".to_owned(),
+                    json!([label.trim_start_matches("Delete ")]),
+                );
+            } else {
+                done.component = Some(id);
+            }
+            label
+        }
+        Op::SetPart { part, model: new } => assembly::set_part(&mut model, *part, new)?,
+        Op::Mate {
+            kind,
+            a,
+            b,
+            flip,
+            name,
+        } => {
+            let (id, label) = mate::add(doc, &mut model, kind, a, b, *flip, name.as_deref())?;
+            done.mate = Some(id);
+            label
+        }
+        Op::EditMate { mate, change } => {
+            let id = mate.resolve(doc)?;
+            let label = mate::change(doc, &mut model, id, change)?;
+            if *change == MateChange::Delete {
+                done.data.insert(
+                    "deleted".to_owned(),
+                    json!([label.trim_start_matches("Delete ")]),
+                );
+            } else {
+                done.mate = Some(id);
+            }
+            label
+        }
+        Op::ComponentPattern {
+            components,
+            kind,
+            name,
+        } => {
+            let (id, label) = pattern::add(doc, &mut model, components, kind, name.as_deref())?;
+            done.pattern = Some(id);
+            label
+        }
+        Op::EditComponentPattern { pattern, change } => {
+            let id = pattern.resolve(doc)?;
+            let label = pattern::change(doc, &mut model, id, change)?;
+            if *change == PatternChange::Delete {
+                done.data.insert(
+                    "deleted".to_owned(),
+                    json!([label.trim_start_matches("Delete ")]),
+                );
+            } else {
+                done.pattern = Some(id);
+            }
+            label
+        }
+        Op::ExplodeStep {
+            components,
+            by,
+            name,
+        } => {
+            let (id, label) = explode::add(doc, &mut model, components, by, name.as_deref())?;
+            done.explode_step = Some(id);
+            label
+        }
+        Op::EditExplodeStep { step, change } => {
+            let id = step.resolve(doc)?;
+            let label = explode::change(doc, &mut model, id, change)?;
+            if *change == ExplodeChange::Delete {
+                done.data.insert(
+                    "deleted".to_owned(),
+                    json!([label.trim_start_matches("Delete ")]),
+                );
+            } else {
+                done.explode_step = Some(id);
+            }
+            label
+        }
+        Op::Explode { on } => {
+            let steps = doc
+                .model
+                .assembly()
+                .map_or(0, |a| a.explode_steps().count());
+            if steps == 0 {
+                return Err(
+                    "The assembly has no explode steps to show: add one with explode_step."
+                        .to_owned(),
+                );
+            }
+            let on = on.unwrap_or(doc.explode() == 0.0);
+            doc.set_explode(if on { 1.0 } else { 0.0 });
+            done.data.insert("exploded".to_owned(), json!(on));
+            return Ok(done);
+        }
+        Op::ShowAll => {
+            let (shown, label) = explode::show_all(doc, &mut model)?;
+            done.data.insert("shown".to_owned(), json!(shown));
+            if shown.is_empty() {
+                return Ok(done);
+            }
+            label
+        }
+        Op::Isolate { components } => {
+            let (hidden, label) = explode::isolate(doc, &mut model, components)?;
+            done.data.insert("hidden".to_owned(), json!(hidden));
+            if model == doc.model {
+                return Ok(done);
+            }
+            label
+        }
+        Op::OpenComponent { .. } => return Err(session::needs_session(op.word())),
+        Op::Drag {
+            component,
+            point,
+            to,
+        } => {
+            // Not a change to the model that is then rebuilt: the rebuild itself is
+            // what moves the components (see `apply_with`).
+            let (drag, label) = assembly::drag(doc, component, point.as_ref(), to)?;
+            done.component = Some(drag.component);
+            done.drag = Some((drag, label));
+            return Ok(done);
+        }
         Op::Query(q) => {
             done.data = query(host, doc, q)?;
             return Ok(done);
@@ -383,17 +620,43 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.data = host.app(command)?;
             return Ok(done);
         }
-        Op::New { discard } => {
+        Op::Session(command) => return Err(session::needs_session(command.word())),
+        Op::New { keep: true, .. }
+        | Op::Open { keep: true, .. }
+        | Op::OpenSample { keep: true, .. } => {
+            return Err(format!(
+                "{} (Leave 'keep' out to open it in place of this document.)",
+                session::needs_session(op.word())
+            ));
+        }
+        Op::New {
+            discard, assembly, ..
+        } => {
             guard_unsaved(doc, *discard, "new")?;
-            *doc = Document::default();
+            *doc = if *assembly {
+                Document::from_model(Model::new_assembly(), None)
+            } else {
+                Document::default()
+            };
             done.replaced = true;
             return Ok(done);
         }
-        Op::Open { file, discard } => {
+        Op::Open { file, discard, .. } => {
             guard_unsaved(doc, *discard, "open")?;
             let bytes = file.read()?;
-            let opened = peet_io::document::open(&bytes)
+            let mut opened = peet_io::document::open(&bytes)
                 .map_err(|e| format!("Couldn't open {}: {}", file.shown(), e.message))?;
+            // An assembly's linked parts are read from their files as it is opened (its
+            // links being relative to where it is).
+            if links::unavailable().is_ok() {
+                let beside = file.path.as_ref().and_then(|p| p.parent());
+                opened.model.from_file(beside);
+                let (updated, problems) = links::refresh(&mut opened.model, beside, 0);
+                if !updated.is_empty() {
+                    done.data.insert("updated".to_owned(), json!(updated));
+                }
+                opened.warnings.extend(problems);
+            }
             if !opened.warnings.is_empty() {
                 done.data
                     .insert("warnings".to_owned(), json!(opened.warnings));
@@ -409,15 +672,11 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.replaced = true;
             return Ok(done);
         }
-        Op::OpenSample { sample, discard } => {
+        Op::OpenSample {
+            sample, discard, ..
+        } => {
             guard_unsaved(doc, *discard, "open_sample")?;
-            let (model, _) = match sample {
-                Sample::Bracket => peet_model::samples::bracket(),
-                Sample::Enclosure => peet_model::samples::enclosure(),
-                Sample::Chassis => peet_model::samples::chassis(),
-                Sample::Housing => peet_model::samples::housing(),
-            };
-            *doc = Document::from_model(model, None);
+            *doc = Document::from_model(sample.model(), None);
             done.replaced = true;
             return Ok(done);
         }
@@ -477,6 +736,20 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.feature = Some(id);
             done.data = object(applied);
             label
+        }
+        Op::SetMaterial { material, density } => {
+            let (label, set) =
+                library::set_material(host.materials(), &mut model, material.as_deref(), *density)?;
+            done.data = set;
+            label
+        }
+        Op::SetColor { color } => {
+            model.color = *color;
+            done.data.insert(
+                "color".to_owned(),
+                color.map_or(Value::Null, library::color_out),
+            );
+            "Change Colour".to_owned()
         }
         Op::ShowDatum { datum, on } => {
             use peet_model::{Datum, StdPlane};
@@ -576,6 +849,26 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
         Op::ImportStep { file } => {
             let bytes = file.read()?;
             let text = String::from_utf8_lossy(&bytes);
+            if doc.is_assembly() {
+                // An assembly keeps the file's structure: its parts, each once, placed
+                // as the file places them.
+                let imported = doc.import_step_assembly(&file.name, &text)?;
+                done.changed = true;
+                let names: Vec<&str> = doc
+                    .model
+                    .assembly()
+                    .map(|a| imported.components.iter().map(|c| a.name_of(*c)).collect())
+                    .unwrap_or_default();
+                done.data.insert("components".to_owned(), json!(names));
+                done.data.insert("parts".to_owned(), json!(imported.parts));
+                done.data
+                    .insert("bodies".to_owned(), json!(imported.bodies));
+                if !imported.warnings.is_empty() {
+                    done.data
+                        .insert("warnings".to_owned(), json!(imported.warnings));
+                }
+                return Ok(done);
+            }
             let imported = doc.import_step(&file.name, &text)?;
             done.changed = true;
             done.created.push(imported.feature);
@@ -933,6 +1226,13 @@ pub(crate) fn apply_with(
         Ok(d) => d,
         Err(e) => return failed(name, e),
     };
+    // Where an assembly's components are, to say which of them the change moved.
+    let placements = |doc: &Document| -> Vec<(peet_model::CompId, peet_math::Frame)> {
+        doc.model.assembly().map_or_else(Vec::new, |a| {
+            a.components().map(|c| (c.id, c.placement)).collect()
+        })
+    };
+    let before = placements(doc);
     if let Some((own, model)) = done.commit.take() {
         let label = label.map_or(own, str::to_owned);
         let set = |m: &mut Model| *m = model;
@@ -940,6 +1240,29 @@ pub(crate) fn apply_with(
             Undo::Step => doc.change(&label, set),
             Undo::Group(key) => doc.change_merging(&label, key, set),
         };
+    }
+    if let Some((drag, own)) = done.drag.take() {
+        let label = label.map_or(own, str::to_owned);
+        let key = match undo {
+            Undo::Step => None,
+            Undo::Group(key) => Some(key),
+        };
+        done.changed = doc.drag_component(&label, key, drag);
+        // How far the point still is from where it was pulled to, if its mates held
+        // it back.
+        if let Some(c) = doc
+            .model
+            .assembly()
+            .and_then(|a| a.component(drag.component))
+        {
+            let short = c.placement.to_world(drag.point).distance(drag.to);
+            if short > 1e-3 {
+                done.data.insert(
+                    "short_by".to_owned(),
+                    args::length_out(short, &doc.model.parameters.units),
+                );
+            }
+        }
     }
     if let Some(id) = done.sketch {
         done.data.extend(object(query::sketch_summary(doc, id)));
@@ -957,6 +1280,39 @@ pub(crate) fn apply_with(
     }
     if let Some(id) = done.feature {
         out.insert("feature".to_owned(), query::brief(doc, id));
+    }
+    if let Some(id) = done.component {
+        out.insert("component".to_owned(), assembly::component_out(doc, id));
+    }
+    if let Some(id) = done.mate {
+        out.insert("mate".to_owned(), mate::mate_out(doc, id));
+    }
+    if let Some(id) = done.pattern {
+        out.insert("pattern".to_owned(), pattern::pattern_out(doc, id));
+    }
+    if let Some(id) = done.explode_step {
+        out.insert("explode_step".to_owned(), explode::step_out(doc, id));
+    }
+    if done.changed && !done.replaced && doc.is_assembly() {
+        // The components that are somewhere else now: what a mate, or a placement that
+        // the mates corrected, came to.
+        let moved: Vec<Value> = placements(doc)
+            .into_iter()
+            .filter(|(id, frame)| {
+                // Somewhere else by more than rounding.
+                let elsewhere = |was: &peet_math::Frame| {
+                    was.origin.distance(frame.origin) > 1e-7
+                        || was.rotation.angle_between(frame.rotation) > 1e-9
+                };
+                Some(*id) != done.component
+                    && before.iter().any(|(b, was)| b == id && elsewhere(was))
+            })
+            .map(|(id, _)| assembly::component_out(doc, id))
+            .collect();
+        if !moved.is_empty() {
+            out.insert("moved".to_owned(), json!(moved));
+        }
+        out.insert("freedom".to_owned(), json!(doc.evaluation().freedom));
     }
     out.extend(done.data);
     if done.changed {

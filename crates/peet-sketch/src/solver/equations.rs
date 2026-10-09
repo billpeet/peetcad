@@ -35,11 +35,7 @@ use peet_math::DVec2;
 
 use crate::sketch::{ConstraintKind, EntityId, Geometry, Sketch};
 
-/// Marks "no slot" / "no entry".
-pub(crate) const NONE: u32 = u32::MAX;
-
-/// Most slots one equation can read.
-pub(crate) const MAX_SLOTS: usize = 12;
+use peet_solve::{Equation, MAX_SLOTS, NONE};
 
 /// Below this length (mm) a direction is considered undefined and a fixed fallback is used.
 const TINY: f64 = 1e-12;
@@ -179,13 +175,15 @@ impl Eq {
         self.k0 = k0;
         self
     }
+}
 
-    pub fn slots(&self) -> &[u32] {
+impl Equation for Eq {
+    fn slots(&self) -> &[u32] {
         &self.slots[..self.n as usize]
     }
 
     /// Residual at `v`, writing the gradient with respect to each slot into `g[..n]`.
-    pub fn eval(&self, v: &[f64], g: &mut [f64; MAX_SLOTS]) -> f64 {
+    fn eval(&self, v: &[f64], g: &mut [f64; MAX_SLOTS]) -> f64 {
         let s = &self.slots;
         let mut r = match self.kind {
             EqKind::Zero => 0.0,
@@ -298,12 +296,6 @@ impl Eq {
             }
         }
         r
-    }
-
-    /// Residual only.
-    pub fn residual(&self, v: &[f64]) -> f64 {
-        let mut g = [0.0; MAX_SLOTS];
-        self.eval(v, &mut g)
     }
 }
 

@@ -18,6 +18,9 @@ wgpu = { version = "30", default-features = false, features = ["std", "wgsl"] }
 [dev-dependencies]
 # Validates the WGSL shaders in unit tests, without needing a GPU.
 naga = { version = "30", features = ["wgsl-in", "glsl-out"] }
+# For the tests that draw on a real GPU (they are skipped where there is none).
+wgpu = { version = "30", default-features = false, features = ["std", "wgsl", "dx12", "vulkan", "metal"] }
+pollster = "0.4"
 
 [lints]
 workspace = true

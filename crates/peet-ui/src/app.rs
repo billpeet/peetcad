@@ -17,7 +17,7 @@ use crate::bodies::GeomRef;
 use crate::commands::{CommandId, CommandState};
 use crate::config_table::{self, ConfigTable};
 use crate::configs_ui::{self, ConfigAction, ConfigList};
-use crate::document::{Document, FileLocation, ItemId, Persistent, SketchItem};
+use crate::document::{Document, FileLocation, ItemId, Persistent, Session, SketchItem};
 use crate::features_ui::{self, ERROR, PICKING, Picked, Slot};
 use crate::files::{self, AfterDiscard, FileState};
 use crate::icons::{self, Icon};
@@ -30,6 +30,7 @@ use crate::solid_ui;
 use crate::tree::{TreeAction, TreeView, tree_ui};
 use crate::viewport::{Viewport, ViewportParams};
 
+mod assembly;
 mod convert;
 #[cfg(not(target_arch = "wasm32"))]
 mod live;
@@ -62,6 +63,8 @@ struct OpenWindows {
     sheet_checks: bool,
     gauges: bool,
     mass_properties: bool,
+    interference: bool,
+    bill_of_materials: bool,
 }
 
 /// What dragging an edge flange's length handle asks for this frame.
@@ -87,7 +90,9 @@ struct FlangeDrag {
 pub struct PeetApp {
     settings: Settings,
     applied_theme: Option<ThemeChoice>,
-    doc: Document,
+    /// The open documents. It stands for the current one: `self.doc.model` is the
+    /// current document's model.
+    doc: Session,
     selected: Option<ItemId>,
     /// Item under the cursor in the feature tree this frame (highlighted in the viewport).
     hovered: Option<ItemId>,
@@ -141,6 +146,32 @@ pub struct PeetApp {
     step_import: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
     /// A message to read and dismiss (what an import left out, or why it failed).
     notice: Option<solids::Notice>,
+    /// In an assembly: the selected component, and the one under the cursor this frame.
+    selected_component: Option<peet_model::CompId>,
+    hovered_component: Option<peet_model::CompId>,
+    /// A component's name while it is being typed in its properties.
+    component_name: Option<(peet_model::CompId, String)>,
+    /// In an assembly: the selected mate.
+    selected_mate: Option<peet_model::MateId>,
+    /// In an assembly: the selected step of the exploded view.
+    selected_explode: Option<peet_model::ExplodeId>,
+    /// In an assembly: the selected component pattern.
+    selected_pattern: Option<peet_model::PatternId>,
+    /// How far exploded the assembly is on its way to being shown (0 or 1).
+    explode_target: Option<f64>,
+    /// In an assembly: a component being dragged in the view.
+    component_drag: Option<assembly::ComponentDrag>,
+    /// What the last interference check found, with the revision of the assembly it
+    /// was made on.
+    interference: Option<(u64, peet_document::Interferences)>,
+    /// The bill of materials window lists sub-assemblies as one line each.
+    bom_top_level: bool,
+    /// The files of the open assemblies' linked parts, as they were last seen.
+    link_watch: crate::link_watch::LinkWatch,
+    /// Whether the part being inserted is to be linked to its file.
+    inserting_linked: bool,
+    /// The file dialog of Insert Part, waiting for an answer.
+    inserting: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
     /// This session, as `peet` reaches it (not in the browser).
     #[cfg(not(target_arch = "wasm32"))]
     live: Option<peet_live::Server>,
@@ -208,7 +239,20 @@ impl PeetApp {
         Self {
             settings,
             applied_theme: None,
-            doc: Document::default(),
+            doc: Session::default(),
+            selected_component: None,
+            hovered_component: None,
+            component_name: None,
+            selected_mate: None,
+            selected_explode: None,
+            selected_pattern: None,
+            explode_target: None,
+            component_drag: None,
+            interference: None,
+            bom_top_level: false,
+            link_watch: crate::link_watch::LinkWatch::default(),
+            inserting_linked: false,
+            inserting: None,
             selected: None,
             hovered: None,
             render_state,
@@ -292,9 +336,9 @@ impl PeetApp {
         }
     }
 
-    /// Replaces the document (new, opened, recovered).
+    /// Replaces the current document (new, opened, recovered).
     fn set_document(&mut self, doc: Document) {
-        self.doc = doc;
+        *self.doc = doc;
         self.document_replaced();
     }
 
@@ -309,6 +353,73 @@ impl PeetApp {
         self.picking = None;
         self.picking_sketch_plane = false;
         self.initial_fit_done = false;
+        self.selected_component = None;
+        self.hovered_component = None;
+        self.component_name = None;
+        self.selected_mate = None;
+        self.selected_explode = None;
+        self.selected_pattern = None;
+        self.explode_target = None;
+        self.component_drag = None;
+    }
+
+    /// A tab per open document, shown while more than one is open: click to work on a
+    /// document, × to close it.
+    fn document_tabs(&mut self, ui: &mut Ui) {
+        use peet_ops::SessionCommand;
+        let current = self.doc.current_id();
+        let tabs: Vec<_> = self
+            .doc
+            .documents()
+            .map(|(id, d)| (id, d.title(), d.is_modified()))
+            .collect();
+        let mut switch = None;
+        let mut close = None;
+        ui.horizontal(|ui| {
+            for (id, title, modified) in &tabs {
+                let label = if *modified {
+                    format!("{title} *")
+                } else {
+                    title.clone()
+                };
+                if ui.selectable_label(*id == current, label).clicked() && *id != current {
+                    switch = Some(*id);
+                }
+                if ui
+                    .small_button("×")
+                    .on_hover_text(format!("Close {title}"))
+                    .clicked()
+                {
+                    close = Some((*id, title.clone(), *modified));
+                }
+                ui.separator();
+            }
+        });
+        if switch.is_none() && close.is_none() {
+            return;
+        }
+        // The open sketch is a working copy of the current document's.
+        if self.sketch.is_some() {
+            self.error("Finish the sketch before going to another document.");
+            return;
+        }
+        if let Some(id) = switch {
+            self.perform(Op::Session(SessionCommand::Switch {
+                document: id.into(),
+            }));
+        }
+        if let Some((id, title, modified)) = close {
+            if modified {
+                self.error(format!(
+                    "{title} has unsaved changes: save it before closing it."
+                ));
+            } else {
+                self.perform(Op::Session(SessionCommand::Close {
+                    document: Some(id.into()),
+                    discard: false,
+                }));
+            }
+        }
     }
 
     // ---- Selection helpers ----
@@ -846,7 +957,19 @@ impl PeetApp {
     fn after_discard(&mut self, then: AfterDiscard) {
         match then {
             AfterDiscard::New => {
-                self.perform(Op::New { discard: true });
+                self.perform(Op::New {
+                    discard: true,
+                    keep: false,
+                    assembly: false,
+                });
+            }
+            AfterDiscard::NewAssembly => {
+                self.perform(Op::New {
+                    discard: true,
+                    keep: false,
+                    assembly: true,
+                });
+                self.info("A new assembly. Insert Part (on the File tab) adds a part to it.");
             }
             AfterDiscard::Open => {
                 self.files.opening = Some(peet_platform::open_file(files::FILTER));
@@ -855,6 +978,7 @@ impl PeetApp {
                 self.perform(Op::OpenSample {
                     sample: peet_ops::Sample::Bracket,
                     discard: true,
+                    keep: false,
                 });
                 self.info("Opened the sample bracket. Try changing Sketch1's width (d1), or drag the rollback bar.");
             }
@@ -862,6 +986,7 @@ impl PeetApp {
                 self.perform(Op::OpenSample {
                     sample: peet_ops::Sample::Enclosure,
                     discard: true,
+                    keep: false,
                 });
                 self.info("Opened the sample enclosure panel. Press U for its flat pattern, or change the thickness and flange parameters (Tools > Parameters).");
             }
@@ -869,6 +994,7 @@ impl PeetApp {
                 self.perform(Op::OpenSample {
                     sample: peet_ops::Sample::Chassis,
                     discard: true,
+                    keep: false,
                 });
                 self.info("Opened the sample chassis. Press U for its flat pattern; Sheet Metal > Check runs the manufacturing checks.");
             }
@@ -876,8 +1002,17 @@ impl PeetApp {
                 self.perform(Op::OpenSample {
                     sample: peet_ops::Sample::Housing,
                     discard: true,
+                    keep: false,
                 });
                 self.info("Opened the sample housing: a revolve with a fillet, chamfers and a bolt circle of counterbored holes. Mass on the Model tab weighs it.");
+            }
+            AfterDiscard::SampleAssembly => {
+                self.perform(Op::OpenSample {
+                    sample: peet_ops::Sample::Assembly,
+                    discard: true,
+                    keep: false,
+                });
+                self.info("Opened the sample assembly: a chassis, its cover, a housing bolted to the cover and screws, fully mated. Explode (on the File tab) takes it apart; Bill of Materials lists it.");
             }
             AfterDiscard::Quit => {
                 self.files.discard_autosave();
@@ -889,6 +1024,21 @@ impl PeetApp {
 
     fn save(&mut self, save_as: bool) {
         self.close_sketch();
+        // A part opened from an assembly is saved by storing it back there.
+        if self.doc.embedded.is_some() {
+            let reply = self.perform(Op::Save {
+                path: None,
+                caches: self.settings.save_caches,
+            });
+            if let (Some(part), Some(assembly)) =
+                (reply.json["stored"].as_str(), reply.json["in"].as_str())
+            {
+                self.info(format!(
+                    "Stored {part} in {assembly}. Save the assembly to write it to its file."
+                ));
+            }
+            return;
+        }
         let bytes = match self.doc.save_bytes(self.settings.save_caches) {
             Ok(b) => b,
             Err(e) => return self.error(format!("Couldn't save: {e}")),
@@ -915,6 +1065,25 @@ impl PeetApp {
                     .path
                     .as_ref()
                     .map_or_else(|| location.name.clone(), |p| p.display().to_string());
+                // Saved somewhere new: an assembly's relative links are relative to that
+                // folder, which wasn't known when the file was written.
+                let was = self
+                    .doc
+                    .file
+                    .as_ref()
+                    .and_then(|f| f.path.as_ref()?.parent().map(std::path::Path::to_owned));
+                if let Some(path) = &location.path
+                    && self.doc.is_assembly()
+                    && path.parent() != was.as_deref()
+                {
+                    let written = self
+                        .doc
+                        .save_bytes_in(self.settings.save_caches, path.parent())
+                        .and_then(|bytes| peet_platform::write_file(path, &bytes));
+                    if let Err(e) = written {
+                        return self.error(format!("Couldn't save: {e}"));
+                    }
+                }
                 self.doc.mark_saved(Some(location));
                 self.files.discard_autosave();
                 self.info(format!("Saved {shown} ({} KB)", bytes.len().div_ceil(1024)));
@@ -936,6 +1105,7 @@ impl PeetApp {
                     let reply = self.perform(Op::Open {
                         file: peet_ops::Source::loaded(file.name, file.path, file.bytes),
                         discard: true,
+                        keep: false,
                     });
                     if reply.ok {
                         match reply.json["warnings"][0].as_str() {
@@ -980,7 +1150,94 @@ impl PeetApp {
             };
         }
         let in_sketch = self.sketch.is_some();
+        // A part's commands are off in an assembly, and an assembly's in a part.
+        let is_assembly = self.doc.is_assembly();
+        if (is_assembly && !assembly::works_in_assembly(cmd))
+            || (!is_assembly && assembly::needs_assembly(cmd))
+        {
+            return CommandState {
+                enabled: false,
+                checked: None,
+            };
+        }
+        if is_assembly {
+            match cmd {
+                CommandId::DeleteSelection => {
+                    return enabled(
+                        self.selected_mate().is_some() || self.selected_component().is_some(),
+                    );
+                }
+                CommandId::ToggleSuppress if self.selected_mate().is_some() => {
+                    let suppressed = self
+                        .selected_mate()
+                        .and_then(|id| self.doc.model.assembly()?.mate(id))
+                        .is_some_and(|m| m.suppressed);
+                    return CommandState {
+                        enabled: true,
+                        checked: Some(suppressed),
+                    };
+                }
+                CommandId::ToggleSuppress => {
+                    let selected = self
+                        .selected_component()
+                        .and_then(|id| self.doc.model.assembly()?.component(id));
+                    return CommandState {
+                        enabled: selected.is_some(),
+                        checked: Some(selected.is_some_and(|c| c.suppressed)),
+                    };
+                }
+                _ => {}
+            }
+        }
         match cmd {
+            CommandId::NewAssembly => enabled(true),
+            CommandId::InsertComponent => enabled(self.inserting.is_none()),
+            // Linked parts are files on disk: not in the browser.
+            CommandId::InsertLinkedComponent => {
+                enabled(self.inserting.is_none() && !peet_platform::is_web())
+            }
+            CommandId::InterferenceCheck | CommandId::BillOfMaterials => {
+                enabled(!self.doc.bodies.is_empty())
+            }
+            CommandId::UpdateLinks => enabled(
+                !peet_platform::is_web()
+                    && self
+                        .doc
+                        .model
+                        .assembly()
+                        .is_some_and(|a| a.definitions().any(|d| d.link.is_some())),
+            ),
+            CommandId::EditComponent | CommandId::IsolateComponent | CommandId::AddExplodeStep => {
+                enabled(self.selected_component().is_some())
+            }
+            // A copy a pattern made is not patterned itself.
+            CommandId::LinearComponentPattern => {
+                enabled(self.selected_component().is_some_and(|id| {
+                    let assembly = self.doc.model.assembly();
+                    assembly.is_some_and(|a| a.pattern_of(id).is_none())
+                }))
+            }
+            CommandId::CircularComponentPattern => enabled(self.mate_ends().is_some()),
+            CommandId::ShowAllComponents => enabled(
+                self.doc
+                    .model
+                    .assembly()
+                    .is_some_and(|a| a.components().any(|c| !c.visible)),
+            ),
+            CommandId::ExplodeView => CommandState {
+                enabled: self
+                    .doc
+                    .model
+                    .assembly()
+                    .is_some_and(|a| a.explode_steps().len() > 0),
+                checked: Some(self.explode_target.unwrap_or(self.doc.explode()) > 0.5),
+            },
+            CommandId::MateCoincident
+            | CommandId::MateConcentric
+            | CommandId::MateParallel
+            | CommandId::MateDistance
+            | CommandId::MateAngle
+            | CommandId::MateFasten => enabled(self.mate_ends().is_some()),
             CommandId::Undo => enabled(self.doc.can_undo()),
             CommandId::Redo => enabled(self.doc.can_redo()),
             CommandId::NewSketch => enabled(!in_sketch),
@@ -1053,6 +1310,7 @@ impl PeetApp {
             | CommandId::OpenSampleEnclosure
             | CommandId::OpenSampleChassis
             | CommandId::OpenSampleHousing
+            | CommandId::OpenSampleAssembly
             | CommandId::SaveDocument
             | CommandId::SaveDocumentAs => enabled(true),
             CommandId::ViewIsometric
@@ -1161,6 +1419,8 @@ impl PeetApp {
             CommandId::Draft => self.start_draft(),
             CommandId::Hole => self.start_hole(),
             CommandId::MassProperties => self.windows.mass_properties = true,
+            CommandId::InterferenceCheck => self.windows.interference = true,
+            CommandId::BillOfMaterials => self.windows.bill_of_materials = true,
             CommandId::NewSketch => match self.selected_plane() {
                 Some((plane, placement)) => self.new_sketch(plane, placement),
                 None => {
@@ -1179,6 +1439,59 @@ impl PeetApp {
             }
             CommandId::ExitSketch => self.close_sketch(),
             CommandId::Parameters => self.windows.parameters = true,
+            CommandId::NewAssembly => self.guard_unsaved(AfterDiscard::NewAssembly),
+            CommandId::InsertComponent => self.start_insert_component(false),
+            CommandId::InsertLinkedComponent => self.start_insert_component(true),
+            CommandId::UpdateLinks => self.update_links(),
+            CommandId::EditComponent => self.open_selected_component(),
+            CommandId::ShowAllComponents => {
+                self.perform(peet_ops::Op::ShowAll);
+            }
+            CommandId::IsolateComponent => {
+                if let Some(id) = self.selected_component() {
+                    self.perform(peet_ops::Op::Isolate {
+                        components: vec![id.into()],
+                    });
+                }
+            }
+            CommandId::AddExplodeStep => self.add_explode_step(),
+            CommandId::ExplodeView => self.toggle_explode(),
+            CommandId::MateCoincident
+            | CommandId::MateConcentric
+            | CommandId::MateParallel
+            | CommandId::MateDistance
+            | CommandId::MateAngle
+            | CommandId::MateFasten => self.add_mate(cmd),
+            CommandId::DeleteSelection | CommandId::ToggleSuppress
+                if self.selected_mate().is_some() =>
+            {
+                if let Some(m) = self
+                    .selected_mate()
+                    .and_then(|id| self.doc.model.assembly()?.mate(id))
+                {
+                    let (id, on) = (m.id, !m.suppressed);
+                    let change = if cmd == CommandId::DeleteSelection {
+                        peet_ops::MateChange::Delete
+                    } else {
+                        peet_ops::MateChange::Suppress(on)
+                    };
+                    self.change_mate(id, change);
+                }
+            }
+            CommandId::DeleteSelection if self.doc.is_assembly() => {
+                if let Some(id) = self.selected_component() {
+                    self.change_component(id, peet_ops::ComponentChange::Delete);
+                }
+            }
+            CommandId::ToggleSuppress if self.doc.is_assembly() => {
+                if let Some(c) = self
+                    .selected_component()
+                    .and_then(|id| self.doc.model.assembly()?.component(id))
+                {
+                    let (id, on) = (c.id, !c.suppressed);
+                    self.change_component(id, peet_ops::ComponentChange::Suppress(on));
+                }
+            }
             CommandId::ConfigurationTable => self.windows.configurations = true,
             CommandId::DeleteSelection => {
                 if let Some(id) = self.selected_feature() {
@@ -1207,6 +1520,9 @@ impl PeetApp {
             CommandId::OpenSampleEnclosure => self.guard_unsaved(AfterDiscard::SampleEnclosure),
             CommandId::OpenSampleChassis => self.guard_unsaved(AfterDiscard::SampleChassis),
             CommandId::OpenSampleHousing => self.guard_unsaved(AfterDiscard::SampleHousing),
+            CommandId::OpenSampleAssembly => self.guard_unsaved(AfterDiscard::SampleAssembly),
+            CommandId::LinearComponentPattern => self.add_linear_pattern(),
+            CommandId::CircularComponentPattern => self.add_circular_pattern(),
             CommandId::SaveDocument => self.save(false),
             CommandId::SaveDocumentAs => self.save(true),
             CommandId::CommandPalette => self.palette.toggle(),
@@ -1587,6 +1903,121 @@ impl PeetApp {
                                     tool(ui, pending, CommandId::SaveDocumentAs, "Save As", Small);
                                 });
                             });
+                            ribbon::group(ui, "Assembly", |ui| {
+                                tool(ui, pending, CommandId::NewAssembly, "New", Large);
+                                tool(
+                                    ui,
+                                    pending,
+                                    CommandId::InsertComponent,
+                                    "Insert Part",
+                                    Large,
+                                );
+                                tool(ui, pending, CommandId::EditComponent, "Edit Part", Large);
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::InsertLinkedComponent,
+                                        "Insert Linked",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::UpdateLinks,
+                                        "Update Links",
+                                        Small,
+                                    );
+                                });
+                            });
+                            ribbon::group(ui, "Check", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::InterferenceCheck,
+                                        "Interference",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::BillOfMaterials,
+                                        "Bill of Materials",
+                                        Small,
+                                    );
+                                });
+                            });
+                            ribbon::group(ui, "Mates", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::MateCoincident,
+                                        "Coincident",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::MateConcentric,
+                                        "Concentric",
+                                        Small,
+                                    );
+                                    tool(ui, pending, CommandId::MateParallel, "Parallel", Small);
+                                });
+                                ribbon::stack(ui, |ui| {
+                                    tool(ui, pending, CommandId::MateDistance, "Distance", Small);
+                                    tool(ui, pending, CommandId::MateAngle, "Angle", Small);
+                                    tool(ui, pending, CommandId::MateFasten, "Fasten", Small);
+                                });
+                            });
+                            ribbon::group(ui, "Pattern", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::LinearComponentPattern,
+                                        "Linear",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::CircularComponentPattern,
+                                        "Circular",
+                                        Small,
+                                    );
+                                });
+                            });
+                            ribbon::group(ui, "Show", |ui| {
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::IsolateComponent,
+                                        "Isolate",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::ShowAllComponents,
+                                        "Show All",
+                                        Small,
+                                    );
+                                });
+                                ribbon::stack(ui, |ui| {
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::AddExplodeStep,
+                                        "Explode Step",
+                                        Small,
+                                    );
+                                    tool(ui, pending, CommandId::ExplodeView, "Explode", Small);
+                                });
+                            });
                             ribbon::group(ui, "Samples", |ui| {
                                 ribbon::stack(ui, |ui| {
                                     tool(ui, pending, CommandId::OpenSample, "Bracket", Small);
@@ -1611,6 +2042,13 @@ impl PeetApp {
                                         pending,
                                         CommandId::OpenSampleHousing,
                                         "Housing",
+                                        Small,
+                                    );
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::OpenSampleAssembly,
+                                        "Assembly",
                                         Small,
                                     );
                                 });
@@ -2063,7 +2501,12 @@ impl PeetApp {
                 ui.weak("(modified)");
             }
         });
-        let configs = configs_ui::configs_ui(ui, &self.doc, &mut self.config_list);
+        // (An assembly has no configurations of its own: its parts have theirs.)
+        let configs = if self.doc.is_assembly() {
+            Vec::new()
+        } else {
+            configs_ui::configs_ui(ui, &self.doc, &mut self.config_list)
+        };
         if !configs.is_empty() {
             // Another configuration is another part: sketch editing ends first.
             if self.sketch.is_some() {
@@ -2072,6 +2515,10 @@ impl PeetApp {
             self.apply_configs(configs);
         }
         ui.separator();
+        if self.doc.is_assembly() {
+            egui::ScrollArea::vertical().show(ui, |ui| self.assembly_tree(ui));
+            return;
+        }
         let view = TreeView {
             selected: self.selected,
             editing: self.sketch.as_ref().map(|e| e.item),
@@ -2141,6 +2588,26 @@ impl PeetApp {
         }
         ui.strong("Properties");
         ui.separator();
+        if let Some(id) = self.selected_mate() {
+            egui::ScrollArea::vertical().show(ui, |ui| self.mate_properties(ui, id));
+            return;
+        }
+        if let Some(id) = self.selected_component() {
+            egui::ScrollArea::vertical().show(ui, |ui| self.component_properties(ui, id));
+            return;
+        }
+        if let Some(id) = self.selected_explode() {
+            egui::ScrollArea::vertical().show(ui, |ui| self.explode_properties(ui, id));
+            return;
+        }
+        if let Some(id) = self.selected_pattern() {
+            egui::ScrollArea::vertical().show(ui, |ui| self.pattern_properties(ui, id));
+            return;
+        }
+        if self.doc.is_assembly() {
+            ui.weak("Select a component, in the tree or in the view, to see where it is and to move it. To mate two components, click a face on one, Shift-click a face on the other, and pick a mate on the File tab.");
+            return;
+        }
         if let Some(ItemId::Feature(id)) = self.selected {
             egui::ScrollArea::vertical().show(ui, |ui| self.feature_properties(ui, id, pending));
             return;
@@ -2972,6 +3439,10 @@ impl PeetApp {
                 ui.heading("Files");
                 ui.checkbox(&mut s.save_caches, "Save display data with parts")
                     .on_hover_text("Parts open instantly, but the files are larger. Without it the part is rebuilt when opened.");
+                if !peet_platform::is_web() {
+                    ui.checkbox(&mut s.watch_links, "Update linked parts when their files change")
+                        .on_hover_text("An open assembly watches the files of its linked parts, and reads a part again when its file is changed by another program. Without it, Update Linked Parts reads them.");
+                }
                 ui.add_space(8.0);
                 if ui.button("Reset to defaults").clicked() {
                     *s = Settings::default();
@@ -3302,6 +3773,9 @@ impl eframe::App for PeetApp {
         self.apply_theme(&ctx);
         self.poll_files(&ctx);
         self.poll_imports(&ctx);
+        self.poll_insert();
+        self.watch_links(&ctx);
+        self.animate_explode(&ctx);
         // A part opened with cached bodies was shown last frame; now build it for real.
         if self.doc.finish_loading() {
             ctx.request_repaint();
@@ -3309,7 +3783,7 @@ impl eframe::App for PeetApp {
 
         // Closing the window with unsaved changes asks first.
         if ctx.input(|i| i.viewport().close_requested())
-            && self.doc.is_modified()
+            && self.doc.any_modified()
             && !self.quit_requested
         {
             ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
@@ -3335,6 +3809,9 @@ impl eframe::App for PeetApp {
             ui.add_space(3.0);
         });
         self.ribbon_tab = tab;
+        if self.doc.count() > 1 {
+            egui::Panel::top("documents").show(ui, |ui| self.document_tabs(ui));
+        }
         egui::Panel::bottom("status_bar").show(ui, |ui| self.status_bar(ui));
         if self.settings.show_feature_tree {
             egui::Panel::left("feature_tree")
@@ -3353,6 +3830,7 @@ impl eframe::App for PeetApp {
 
         let dark = ctx.theme() == egui::Theme::Dark;
         let mut pick_click = None;
+        let mut component_drag = None;
         let mut flange_edit = None;
         let mut sketch_plane_click = None;
         egui::CentralPanel::no_frame().show(ui, |ui| {
@@ -3375,9 +3853,34 @@ impl eframe::App for PeetApp {
                     hovered_geom: if self.sketch.is_some() { None } else { self.hovered_geom },
                     selected_geom: &self.selected_geom,
                     show_std_planes: self.picking_sketch_plane,
+                    selected_component: self.selected_component,
+                    hovered_component: self.hovered_component,
                 },
             );
             self.hovered_geom = viewport.hovered_geom;
+            let component_at = |geom: Option<GeomRef>| {
+                geom.and_then(|g| self.doc.placed.get(g.body())?.component())
+            };
+            self.hovered_component = component_at(viewport.hovered_geom);
+            if let Some(response) = &events.response
+                && self.sketch.is_none()
+            {
+                component_drag = assembly::drag_in_view(
+                    ui,
+                    viewport,
+                    &self.doc,
+                    response,
+                    viewport.hovered_geom,
+                    &mut self.component_drag,
+                );
+            }
+            // In an assembly a click picks a face (for a mate) and with it its component.
+            if self.doc.is_assembly() && events.clicked_background {
+                self.selected_component = component_at(events.clicked_geom);
+                self.selected_mate = None;
+                self.selected_explode = None;
+                self.selected_pattern = None;
+            }
             let handles = self.sketch.is_none()
                 && self.picking.is_none()
                 && !self.picking_sketch_plane
@@ -3434,12 +3937,17 @@ impl eframe::App for PeetApp {
                     triangles: viewport.stats.triangles,
                     lines: viewport.stats.lines,
                     draw_calls: viewport.stats.draw_calls,
+                    objects: viewport.stats.objects,
+                    bodies: self.doc.bodies.len(),
                 };
                 let rect = ui.max_rect();
                 self.perf.show(ui, rect, &info);
             }
         });
 
+        if let Some(event) = component_drag {
+            self.apply_drag(event);
+        }
         match flange_edit {
             Some(FlangeEdit::Length { id, length }) => {
                 let label = format!("Drag {} Length", self.doc.model.name_of(id));
@@ -3470,6 +3978,8 @@ impl eframe::App for PeetApp {
         self.sheet_checks_window(&ctx);
         self.gauge_window(&ctx);
         self.mass_properties_window(&ctx);
+        self.interference_window(&ctx);
+        self.bill_of_materials_window(&ctx);
         self.notice_window(&ctx);
         if let Some(cmd) = self.bend_table_window(&ctx) {
             pending.push(cmd);
@@ -3722,8 +4232,7 @@ impl PeetApp {
     }
 
     fn export_step(&mut self) {
-        let bodies = self.doc.evaluation().bodies.clone();
-        if bodies.is_empty() {
+        if self.doc.bodies.is_empty() {
             self.error("There are no bodies to export.");
             return;
         }
@@ -3745,10 +4254,10 @@ impl PeetApp {
         ) {
             Ok(peet_platform::SaveOutcome::Saved(to)) => self.info(format!(
                 "Exported {} as STEP (AP214) to {to}",
-                if bodies.len() == 1 {
+                if self.doc.bodies.len() == 1 {
                     "the body".to_owned()
                 } else {
-                    format!("{} bodies", bodies.len())
+                    format!("{} bodies", self.doc.bodies.len())
                 }
             )),
             Ok(peet_platform::SaveOutcome::Cancelled) => {}
@@ -3974,6 +4483,7 @@ impl PeetApp {
                             name: format!("Material {}", library.tables.len() + 1),
                             material: format!("Material {}", library.tables.len() + 1),
                             entries: Vec::new(),
+                            density: None,
                         });
                         tab = library.tables.len() - 1;
                     }

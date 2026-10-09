@@ -42,10 +42,16 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 ///   models are read as [`peet_model::ModelV5`] and converted.
 /// - Model 7: splines in sketches. Schema 6 models decode unchanged (a new variant at
 ///   the end of the sketch geometry enum).
+/// - Model 8 (Phase 7): the part's material and colour, and assemblies. A model can hold
+///   an assembly: its parts (each a whole model), its components, its mates, its
+///   component patterns and its exploded view. These are new fields of the model itself,
+///   so schema 6 and 7 models are read as [`peet_model::ModelV7`] and converted.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 7;
+pub const MODEL_SCHEMA: u16 = 8;
 /// The last model schema without configurations.
 const MODEL_SCHEMA_BEFORE_CONFIGURATIONS: u16 = 4;
+/// The last model schema without materials and assemblies.
+const MODEL_SCHEMA_BEFORE_ASSEMBLIES: u16 = 7;
 pub const BREP_SCHEMA: u16 = 4;
 pub const MESH_SCHEMA: u16 = 1;
 
@@ -163,6 +169,9 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
             .map(Model::from),
         Some(5) => r
             .read::<peet_model::ModelV5>(SectionKind::MODEL)?
+            .map(Model::from),
+        Some(v) if v <= MODEL_SCHEMA_BEFORE_ASSEMBLIES => r
+            .read::<peet_model::ModelV7>(SectionKind::MODEL)?
             .map(Model::from),
         _ => r.read(SectionKind::MODEL)?,
     };
@@ -337,6 +346,89 @@ mod tests {
             .unwrap();
         let e = open(&w.finish()).unwrap_err();
         assert!(e.message.contains("newer version"), "{e}");
+    }
+
+    #[test]
+    fn models_from_before_materials_still_open() {
+        let (mut model, _) = bracket();
+        // As versions 6 and 7 wrote it: the same fields, without the material, the colour
+        // and the assembly.
+        let mut old = Vec::new();
+        for version in [6, 7] {
+            let mut w = Writer::new();
+            w.section(SectionKind::METADATA, 1, &Metadata::default())
+                .unwrap();
+            w.section(
+                SectionKind::MODEL,
+                version,
+                &peet_model::ModelV7::of(&model),
+            )
+            .unwrap();
+            old = w.finish();
+            assert_eq!(open(&old).unwrap().model, model, "schema {version}");
+        }
+
+        // The new fields are saved, and a file with them is not read as an old one.
+        model.material = Some(peet_model::Material::new("Mild steel", 7850.0).unwrap());
+        model.color = Some([200, 40, 40]);
+        let new = save(&model, &Metadata::default(), None).unwrap();
+        assert_eq!(open(&new).unwrap().model, model);
+        let text = to_text(&new).unwrap();
+        assert!(text.contains("Mild steel"));
+        assert_eq!(open(&from_text(&text).unwrap()).unwrap().model, model);
+        // The text of an older version has neither field.
+        let old_text = to_text(&old).unwrap();
+        let without: String = old_text
+            .lines()
+            .filter(|l| !l.contains("material:") && !l.contains("color:"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            );
+        assert!(without.len() < old_text.len());
+        assert!(from_text(&without).is_ok());
+    }
+
+    #[test]
+    fn an_assembly_is_saved_with_its_parts() {
+        use peet_math::{DVec3, Frame};
+        let mut model = Model::new_assembly();
+        {
+            let a = model.assembly_mut().unwrap();
+            let part = a.define(Arc::new(bracket().0));
+            a.insert(part, Frame::WORLD).unwrap();
+            a.insert(
+                part,
+                Frame {
+                    origin: DVec3::new(150.0, 0.0, 0.0),
+                    ..Frame::WORLD
+                },
+            )
+            .unwrap();
+        }
+        let bytes = save(&model, &Metadata::default(), None).unwrap();
+        let opened = open(&bytes).unwrap().model;
+        assert_eq!(opened, model);
+        let a = opened.assembly().unwrap();
+        assert_eq!((a.definitions().count(), a.components().count()), (1, 2));
+        // The part is in the file once.
+        let one = save(&bracket().0, &Metadata::default(), None).unwrap();
+        assert!(
+            bytes.len() < one.len() + 400,
+            "{} / {}",
+            bytes.len(),
+            one.len()
+        );
+        // And the text form round trips.
+        let text = to_text(&bytes).unwrap();
+        assert!(text.contains("Bracket-2"));
+        assert_eq!(open(&from_text(&text).unwrap()).unwrap().model, model);
+        // A file whose assembly is damaged is refused, not opened half.
+        let broken = text.replacen("definition: (1)", "definition: (7)", 1);
+        assert_ne!(broken, text);
+        let e = from_text(&broken).unwrap_err();
+        assert!(e.message.contains("not in the file"), "{e}");
     }
 
     #[test]

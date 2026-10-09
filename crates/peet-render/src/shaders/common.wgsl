@@ -28,17 +28,23 @@ struct Globals {
 
 @group(0) @binding(0) var<uniform> globals: Globals;
 
-// Per-object data. Must match `ObjectUniform` in renderer.rs exactly.
-// Only used by the pipelines that bind group 1.
-struct Object {
-    model: mat4x4<f32>,
+// Per-instance data: one for each object drawn, so that the objects sharing a mesh are
+// drawn in one call. Must match `Instance` in batch.rs exactly. Only the pipelines that
+// draw meshes (their faces, their edges, and both for picking) take it.
+struct InstanceIn {
+    @location(4) model_0: vec4<f32>,
+    @location(5) model_1: vec4<f32>,
+    @location(6) model_2: vec4<f32>,
+    @location(7) model_3: vec4<f32>,
     // rgb = highlight colour, a = how much to blend it in (0 = none)
-    tint: vec4<f32>,
-    // x = pick object id + 1 (0 = not pickable), yzw unused
-    pick: vec4<u32>,
+    @location(8) tint: vec4<f32>,
+    // pick object id + 1 (0 = not pickable)
+    @location(9) pick: u32,
 };
 
-@group(1) @binding(0) var<uniform> object: Object;
+fn instance_model(i: InstanceIn) -> mat4x4<f32> {
+    return mat4x4<f32>(i.model_0, i.model_1, i.model_2, i.model_3);
+}
 
 fn is_ortho() -> bool {
     return globals.eye.w > 0.5;
@@ -66,8 +72,9 @@ fn linear_to_srgb(c: vec3<f32>) -> vec3<f32> {
 
 // Line vertex position, pulled slightly towards the eye so edges lying on a surface win
 // the depth test. Shared by the visible edges and the pick pass so they agree exactly.
+// `position` is in world coordinates.
 fn biased_line_position(position: vec3<f32>) -> vec4<f32> {
-    var world = (object.model * vec4<f32>(position, 1.0)).xyz;
+    var world = position;
     if is_ortho() {
         world = world - globals.forward.xyz * globals.line_bias.y;
     } else {

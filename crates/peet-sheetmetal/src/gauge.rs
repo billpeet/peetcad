@@ -21,7 +21,9 @@
 //! `radius_mm` may be left empty (the radius is then the thickness). An optional `table`
 //! column names the table when it isn't just the material (two tables of one material,
 //! say from two suppliers); it is written only when needed. Fields with commas, quotes or
-//! line breaks are quoted the usual CSV way; a file saved by a spreadsheet with
+//! line breaks are quoted the usual CSV way. An optional `density_kg_m3` column gives the
+//! material's density (the same on every row of a table; it is what a part made of the
+//! material weighs with), written when any table has one. A file saved by a spreadsheet with
 //! semicolons as separators is read too. [`MaterialLibrary::from_csv`] reports every
 //! problem with its line number and never panics.
 //!
@@ -43,6 +45,8 @@
 //! - K-factors: the widely published air-bending K-factor chart (radius between t and
 //!   3·t): 0.40 for soft materials (aluminium), 0.43 for medium (mild and galvanised
 //!   steel) and 0.45 for hard ones (stainless steel).
+//! - Densities, kg/m³: 7850 for carbon steel (galvanised sheet is taken as its steel),
+//!   8000 for 304 stainless and 2680 for 5052 aluminium, the usual handbook values.
 
 use std::fmt;
 
@@ -95,6 +99,9 @@ pub struct GaugeTable {
     pub name: String,
     pub material: String,
     pub entries: Vec<GaugeEntry>,
+    /// The material's density in kg/m³, if it is known.
+    #[serde(default)]
+    pub density: Option<f64>,
 }
 
 impl GaugeTable {
@@ -135,10 +142,17 @@ fn simplify(s: &str) -> String {
 }
 
 /// A table from `(gauge, thickness)` rows, with the radius as `ratio · t` (to 0.1 mm).
-fn table(material: &str, rows: &[(&str, f64, &str)], ratio: f64, k: f64) -> GaugeTable {
+fn table(
+    material: &str,
+    rows: &[(&str, f64, &str)],
+    ratio: f64,
+    k: f64,
+    density: f64,
+) -> GaugeTable {
     GaugeTable {
         name: material.to_owned(),
         material: material.to_owned(),
+        density: Some(density),
         entries: rows
             .iter()
             .map(|&(gauge, thickness, notes)| GaugeEntry {
@@ -208,10 +222,10 @@ impl MaterialLibrary {
         ];
         Self {
             tables: vec![
-                table("Mild steel", &mild, 1.25, 0.43),
-                table("Galvanised steel", &galvanised, 1.25, 0.43),
-                table("Stainless steel 304", &stainless, 1.7, 0.45),
-                table("Aluminium 5052-H32", &aluminium, 1.1, 0.40),
+                table("Mild steel", &mild, 1.25, 0.43, 7850.0),
+                table("Galvanised steel", &galvanised, 1.25, 0.43, 7850.0),
+                table("Stainless steel 304", &stainless, 1.7, 0.45, 8000.0),
+                table("Aluminium 5052-H32", &aluminium, 1.1, 0.40, 2680.0),
             ],
         }
     }
@@ -252,7 +266,12 @@ impl MaterialLibrary {
     /// The library as CSV (see the module docs).
     pub fn to_csv(&self) -> String {
         let named = self.tables.iter().any(|t| t.name != t.material);
+        let dense = self.tables.iter().any(|t| t.density.is_some());
         let mut s = HEADER.join(",");
+        if dense {
+            s.push(',');
+            s.push_str(DENSITY_COLUMN);
+        }
         if named {
             s.push_str(",table");
         }
@@ -274,6 +293,9 @@ impl MaterialLibrary {
                     bd,
                     quote(&e.notes),
                 ];
+                if dense {
+                    fields.push(t.density.map_or_else(String::new, |d| d.to_string()));
+                }
                 if named {
                     fields.push(quote(&t.name));
                 }
@@ -335,21 +357,36 @@ impl MaterialLibrary {
             bd: col("bend_deduction_mm"),
             notes: col("notes"),
             table: col("table"),
+            density: col(DENSITY_COLUMN),
         };
         let mut lib = Self { tables: Vec::new() };
         for (line, fields) in records {
             match row(&cols, &fields) {
-                Ok((name, material, entry)) => {
+                Ok((name, material, entry, density)) => {
                     let found = lib
                         .tables
                         .iter_mut()
                         .find(|t| t.name == name && t.material == material);
                     match found {
-                        Some(t) => t.entries.push(entry),
+                        Some(t) => {
+                            match (t.density, density) {
+                                (Some(a), Some(b)) if a != b => errors.push(CsvError {
+                                    line,
+                                    message: format!(
+                                        "The density {b} differs from the {a} given earlier for {}: a material has one density.",
+                                        t.name
+                                    ),
+                                }),
+                                (None, Some(_)) => t.density = density,
+                                _ => {}
+                            }
+                            t.entries.push(entry);
+                        }
                         None => lib.tables.push(GaugeTable {
                             name,
                             material,
                             entries: vec![entry],
+                            density,
                         }),
                     }
                 }
@@ -377,6 +414,9 @@ pub const HEADER: [&str; 8] = [
     "notes",
 ];
 
+/// The optional CSV column with a material's density.
+pub const DENSITY_COLUMN: &str = "density_kg_m3";
+
 /// A problem in a CSV file.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CsvError {
@@ -403,10 +443,14 @@ struct Columns {
     bd: Option<usize>,
     notes: Option<usize>,
     table: Option<usize>,
+    density: Option<usize>,
 }
 
-/// One data row: `(table name, material, entry)`, or a message.
-fn row(cols: &Columns, fields: &[String]) -> Result<(String, String, GaugeEntry), String> {
+/// One data row: `(table name, material, entry, density)`, or a message.
+fn row(
+    cols: &Columns,
+    fields: &[String],
+) -> Result<(String, String, GaugeEntry, Option<f64>), String> {
     let get = |c: Option<usize>| {
         c.and_then(|i| fields.get(i))
             .map(|s| s.trim())
@@ -462,9 +506,13 @@ fn row(cols: &Columns, fields: &[String]) -> Result<(String, String, GaugeEntry)
         notes: get(cols.notes).to_owned(),
     };
     entry.check()?;
+    let density = number(cols.density, "density")?;
+    if density.is_some_and(|d| d <= 0.0) {
+        return Err("The density must be more than zero: give it in kg/m³.".to_owned());
+    }
     let table = get(cols.table);
     let name = if table.is_empty() { material } else { table };
-    Ok((name.to_owned(), material.to_owned(), entry))
+    Ok((name.to_owned(), material.to_owned(), entry, density))
 }
 
 /// A field quoted if it has to be.
@@ -562,6 +610,7 @@ mod tests {
                 GaugeTable {
                     name: "Supplier A, \"brake 2\"".to_owned(),
                     material: "Mild steel".to_owned(),
+                    density: Some(7850.0),
                     entries: vec![GaugeEntry {
                         gauge: "2 mm".to_owned(),
                         thickness: 2.0,
@@ -573,6 +622,7 @@ mod tests {
                 GaugeTable {
                     name: "Mild steel".to_owned(),
                     material: "Mild steel".to_owned(),
+                    density: None,
                     entries: vec![GaugeEntry {
                         gauge: "3 mm".to_owned(),
                         thickness: 3.0,
@@ -598,6 +648,24 @@ mod tests {
         assert_eq!(e.thickness, 1.5);
         assert_eq!(e.radius, 1.5);
         assert_eq!(e.model, BendModel::KFactor(0.44));
+        // A file without densities has none, and writes none.
+        assert_eq!(lib.tables[0].density, None);
+        assert!(!lib.to_csv().contains(DENSITY_COLUMN));
+    }
+
+    #[test]
+    fn a_material_has_one_density() {
+        let head = "material,gauge,thickness_mm,k_factor,density_kg_m3\n";
+        let lib =
+            MaterialLibrary::from_csv(&format!("{head}Brass,1 mm,1,0.4,\nBrass,2 mm,2,0.4,8500\n"))
+                .unwrap();
+        assert_eq!(lib.tables[0].density, Some(8500.0));
+        let errs = MaterialLibrary::from_csv(&format!(
+            "{head}Brass,1 mm,1,0.4,8500\nBrass,2 mm,2,0.4,8400\nBrass,3 mm,3,0.4,-1\n"
+        ))
+        .unwrap_err();
+        assert_eq!(errs.iter().map(|e| e.line).collect::<Vec<_>>(), [3, 4]);
+        assert!(errs[0].message.contains("one density"), "{}", errs[0]);
     }
 
     #[test]

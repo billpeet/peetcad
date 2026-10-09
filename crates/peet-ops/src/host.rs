@@ -126,6 +126,8 @@ word_enum! {
         Checks = "checks",
         Materials = "materials",
         MassProperties = "mass",
+        Interference = "interference",
+        Bom = "bom",
     }
 }
 

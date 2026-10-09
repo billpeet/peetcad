@@ -1,6 +1,11 @@
 //! The open document: the parametric model, its rebuild state, the undo history and the
 //! bodies derived from them.
 //!
+//! A document is a part or an assembly ([`Document::is_assembly`]). An assembly's bodies
+//! are those of its components: [`Document::bodies`] has one entry per placed body, with
+//! where it is in [`Document::placed`], and the instances of one part share one view (and
+//! so one tessellation).
+//!
 //! Every change to the model goes through [`Document::change`], which records an undo
 //! step and rebuilds. Rebuilds are incremental (see `peet_model::Engine`), and body
 //! views are kept per body stamp, so only bodies whose geometry changed are tessellated
@@ -10,15 +15,16 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use peet_math::{Aabb, Plane};
+use peet_math::{Aabb, DVec3, Frame, Plane};
 use peet_model::naming::{find_edge, find_face, find_vertex};
 use peet_model::{
-    Datum, EdgeRef, Engine, Evaluation, FaceRef, Feature, FeatureId, FeatureKind, History, Model,
-    Output, Status, VertexRef,
+    CompId, Datum, DefId, EdgeRef, Engine, Evaluation, FaceRef, Feature, FeatureId, FeatureKind,
+    History, Model, Output, Status, VertexRef,
 };
 use peet_sketch::Sketch;
 
 use crate::body::{BodyView, GeomRef};
+use crate::session::DocId;
 pub use peet_model::SketchStatus;
 
 /// Something in the feature tree: the built-in datums, or a feature.
@@ -53,12 +59,68 @@ pub struct FileLocation {
     pub path: Option<PathBuf>,
 }
 
+/// Where a shown body is, and whose it is. One per entry of [`Document::bodies`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Placed {
+    /// Where the body's coordinates are in the document's: the world for a part's own
+    /// bodies, the component's placement in an assembly.
+    pub frame: Frame,
+    /// Where the body is drawn: `frame`, moved by the exploded view while it is on (see
+    /// [`Document::set_explode`]). Only what is seen and picked uses this; what is
+    /// measured, checked and exported uses `frame`.
+    pub shown: Frame,
+    /// In an assembly: the component the body belongs to (and below it, through
+    /// sub-assemblies, the component of the part itself).
+    pub path: Vec<CompId>,
+    /// The colour of the part the body belongs to.
+    pub color: Option<[u8; 3]>,
+}
+
+impl Placed {
+    /// The component of this assembly the body belongs to.
+    pub fn component(&self) -> Option<CompId> {
+        self.path.first().copied()
+    }
+}
+
+/// A part that lives in an assembly's file, opened as a document of its own to be
+/// edited: saving it stores it back in the assembly.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Embedded {
+    /// The assembly's document in the session.
+    pub assembly: DocId,
+    /// Which of the assembly's parts this is.
+    pub definition: DefId,
+}
+
+/// The eight corners of a box, moved, as a box.
+fn placed_bounds(bounds: &Aabb, frame: &Frame) -> Aabb {
+    if *frame == Frame::WORLD || bounds.min.cmpgt(bounds.max).any() {
+        return *bounds;
+    }
+    let mut out = Aabb::EMPTY;
+    for i in 0..8 {
+        let pick = |bit: usize, lo: f64, hi: f64| if i >> bit & 1 == 0 { lo } else { hi };
+        out.extend(frame.to_world(DVec3::new(
+            pick(0, bounds.min.x, bounds.max.x),
+            pick(1, bounds.min.y, bounds.max.y),
+            pick(2, bounds.min.z, bounds.max.z),
+        )));
+    }
+    out
+}
+
 pub struct Document {
     pub model: Model,
     engine: Engine,
     history: History<Model>,
-    /// The bodies of the last rebuild, ready to draw.
+    /// The bodies of the last rebuild, ready to draw. In an assembly: one per body of
+    /// each component, the instances of a part sharing one view.
     pub bodies: Vec<Arc<BodyView>>,
+    /// Where each of `bodies` is.
+    pub placed: Vec<Placed>,
+    /// Set for a part of an assembly that is open for editing.
+    pub embedded: Option<Embedded>,
     /// Changes on every rebuild, so the viewport knows to refresh. Unique across all
     /// documents of the process (see [`next_revision`]), so a newly opened document can
     /// never be mistaken for the one it replaced.
@@ -72,6 +134,12 @@ pub struct Document {
     pending_rebuild: bool,
     /// Sheet metal bodies are shown as flat patterns.
     flat: bool,
+    /// How far an assembly is shown exploded: 0 as it is, 1 with every explode step
+    /// taken in full.
+    explode: f64,
+    /// Display meshes from an assembly's file, by body stamp: each is handed to its
+    /// body's view when the body is first shown, in place of tessellating it.
+    mesh_pool: HashMap<u64, peet_kernel::tessellate::SolidMesh>,
 }
 
 impl Default for Document {
@@ -89,12 +157,16 @@ impl Document {
             engine: Engine::new(),
             history: History::default(),
             bodies: Vec::new(),
+            placed: Vec::new(),
+            embedded: None,
             revision: next_revision(),
             file,
             saved_hash: hash,
             current_hash: hash,
             pending_rebuild: false,
             flat: false,
+            explode: 0.0,
+            mesh_pool: HashMap::new(),
         };
         doc.rebuild();
         doc
@@ -103,7 +175,10 @@ impl Document {
     /// A document for a part read from a file. If the file has caches, its bodies are
     /// shown at once and the model is rebuilt on the next frame (see
     /// [`Document::finish_loading`]); cached meshes save tessellating again.
-    pub fn from_opened(opened: peet_io::document::Opened, file: Option<FileLocation>) -> Self {
+    pub fn from_opened(mut opened: peet_io::document::Opened, file: Option<FileLocation>) -> Self {
+        // An assembly's links are written relative to its file: here they are full paths.
+        let folder = file.as_ref().and_then(|f| f.path.as_ref()?.parent());
+        opened.model.from_file(folder);
         let hash = peet_model::hash::of(&opened.model);
         let mut meshes: HashMap<u64, peet_kernel::tessellate::SolidMesh> = opened
             .meshes
@@ -115,15 +190,30 @@ impl Document {
             engine: Engine::new(),
             history: History::default(),
             bodies: Vec::new(),
+            placed: Vec::new(),
+            embedded: None,
             revision: next_revision(),
             file,
             saved_hash: hash,
             current_hash: hash,
             pending_rebuild: true,
             flat: false,
+            explode: 0.0,
+            mesh_pool: HashMap::new(),
         };
-        match opened.bodies {
+        // The caches are of a part's own bodies: an assembly is rebuilt at once.
+        match opened.bodies.filter(|_| !doc.model.is_assembly()) {
             Some(bodies) => {
+                let color = doc.model.color;
+                doc.placed = bodies
+                    .iter()
+                    .map(|_| Placed {
+                        frame: Frame::WORLD,
+                        shown: Frame::WORLD,
+                        path: Vec::new(),
+                        color,
+                    })
+                    .collect();
                 doc.bodies = bodies
                     .into_iter()
                     .map(|b| {
@@ -133,7 +223,14 @@ impl Document {
                     .collect();
                 doc.revision = next_revision();
             }
-            None => doc.rebuild(),
+            None => {
+                // An assembly's parts are rebuilt; their meshes are taken from the file
+                // as they are needed.
+                if doc.model.is_assembly() {
+                    doc.mesh_pool = std::mem::take(&mut meshes);
+                }
+                doc.rebuild();
+            }
         }
         doc
     }
@@ -185,20 +282,120 @@ impl Document {
     /// Makes the displayed bodies match the last rebuild and the view (folded or flat),
     /// reusing the tessellation of every body that didn't change.
     fn refresh_views(&mut self) {
-        let previous: HashMap<u64, Arc<BodyView>> =
+        // Views are kept by stamp: from the last rebuild, and between the instances of
+        // one part in this one.
+        let mut views: HashMap<u64, Arc<BodyView>> =
             self.bodies.drain(..).map(|b| (b.stamp, b)).collect();
         let flat = self.flat;
-        self.bodies = self
-            .engine
-            .evaluation()
+        let pool = &mut self.mesh_pool;
+        let mut view = |b: &Arc<peet_model::Body>| {
+            views
+                .entry(BodyView::key(b, flat))
+                .or_insert_with(|| {
+                    Arc::new(BodyView::of_cached(b.clone(), flat, pool.remove(&b.stamp)))
+                })
+                .clone()
+        };
+        let built = self.engine.evaluation();
+        let color = self.model.color;
+        self.placed = built
             .bodies
             .iter()
-            .map(|b| match previous.get(&BodyView::key(b, flat)) {
-                Some(view) => view.clone(),
-                None => Arc::new(BodyView::of(b.clone(), flat)),
+            .map(|_| Placed {
+                frame: Frame::WORLD,
+                shown: Frame::WORLD,
+                path: Vec::new(),
+                color,
             })
+            .chain(built.instances.iter().map(|i| Placed {
+                frame: i.frame,
+                shown: i.frame,
+                path: i.path.clone(),
+                color: i.color,
+            }))
             .collect();
+        self.bodies = built
+            .bodies
+            .iter()
+            .chain(built.instances.iter().map(|i| &i.body))
+            .map(&mut view)
+            .collect();
+        self.place_exploded();
         self.revision = next_revision();
+    }
+
+    /// Whether the document is an assembly, and not a part.
+    pub fn is_assembly(&self) -> bool {
+        self.model.is_assembly()
+    }
+
+    /// The shown bodies of a component, as indices into [`Document::bodies`].
+    pub fn bodies_of(&self, component: CompId) -> impl Iterator<Item = usize> + '_ {
+        self.placed
+            .iter()
+            .enumerate()
+            .filter(move |(_, p)| p.component() == Some(component))
+            .map(|(i, _)| i)
+    }
+
+    /// The bounds of a component where it is, or of nothing if it shows no bodies.
+    pub fn component_bounds(&self, component: CompId) -> Aabb {
+        self.bodies_of(component)
+            .map(|i| placed_bounds(&self.bodies[i].bounds(), &self.placed[i].frame))
+            .fold(Aabb::EMPTY, |a, b| a.union(&b))
+    }
+
+    /// How far the assembly is shown exploded: 0 as it is, 1 in full.
+    pub fn explode(&self) -> f64 {
+        self.explode
+    }
+
+    /// Shows the assembly exploded by `amount` of its explode steps (0: as it is, 1: in
+    /// full; in between for moving from one to the other). A view: nothing is rebuilt,
+    /// and nothing but where the bodies are drawn changes.
+    pub fn set_explode(&mut self, amount: f64) {
+        let amount = if amount.is_finite() {
+            amount.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if self.explode != amount {
+            self.explode = amount;
+            if self.place_exploded() {
+                self.revision = next_revision();
+            }
+        }
+    }
+
+    /// Puts each shown body where the exploded view has it. Returns whether any moved.
+    fn place_exploded(&mut self) -> bool {
+        let Some(assembly) = self.model.assembly() else {
+            return false;
+        };
+        let amount = self.explode;
+        let mut moved = false;
+        for placed in &mut self.placed {
+            let offset = match placed.path.first() {
+                Some(c) if amount > 0.0 => assembly.explode_offset(*c) * amount,
+                _ => DVec3::ZERO,
+            };
+            let shown = Frame {
+                origin: placed.frame.origin + offset,
+                ..placed.frame
+            };
+            moved |= shown != placed.shown;
+            placed.shown = shown;
+        }
+        moved
+    }
+
+    /// Whether a shown body is of a component that is hidden.
+    pub fn is_hidden(&self, body: usize) -> bool {
+        let component = self.placed.get(body).and_then(Placed::component);
+        match (self.model.assembly(), component) {
+            (Some(assembly), Some(c)) => assembly.component(c).is_some_and(|c| !c.visible),
+            _ => false,
+        }
     }
 
     /// Whether sheet metal bodies are shown flat.
@@ -263,6 +460,30 @@ impl Document {
         true
     }
 
+    /// Pulls a component of an assembly: the point `point` of it (in the component's
+    /// coordinates) towards `to` (in the assembly's), as far as its mates let it go,
+    /// taking what it is mated to along (see [`peet_model::Drag`]). Returns whether
+    /// anything moved. It is an undo step called `label`; with a `key`, consecutive
+    /// drags with the same key are one step.
+    pub fn drag_component(
+        &mut self,
+        label: &str,
+        key: Option<u64>,
+        drag: peet_model::Drag,
+    ) -> bool {
+        let before = self.model.clone();
+        self.engine.set_drag(Some(drag));
+        self.rebuild();
+        if self.model == before {
+            return false;
+        }
+        match key {
+            Some(k) => self.history.record_merging(label, k, before),
+            None => self.history.record(label, before),
+        }
+        true
+    }
+
     /// Makes another configuration the one that is built and shown. Returns whether that
     /// changed anything.
     ///
@@ -312,7 +533,21 @@ impl Document {
     }
 
     /// The bytes of the document as a `.peet` file.
+    ///
+    /// An assembly's relative links are written relative to the folder its file is in:
+    /// to save it somewhere else, use [`Document::save_bytes_in`].
     pub fn save_bytes(&self, with_caches: bool) -> Result<Vec<u8>, String> {
+        let folder = self.file.as_ref().and_then(|f| f.path.as_ref()?.parent());
+        self.save_bytes_in(with_caches, folder)
+    }
+
+    /// The bytes of the document as a `.peet` file in `folder` (`None`: nowhere yet, so
+    /// an assembly's links are written as full paths).
+    pub fn save_bytes_in(
+        &self,
+        with_caches: bool,
+        folder: Option<&std::path::Path>,
+    ) -> Result<Vec<u8>, String> {
         let metadata = peet_io::document::Metadata {
             saved_at: web_time::SystemTime::now()
                 .duration_since(web_time::UNIX_EPOCH)
@@ -320,8 +555,12 @@ impl Document {
                 .map(|d| d.as_secs()),
             ..Default::default()
         };
-        // Caches only describe a fully built model.
-        let caches = (with_caches && !self.pending_rebuild).then(|| peet_io::document::Caches {
+        // The body cache is of a fully built part's own bodies. An assembly's parts are
+        // rebuilt when it is opened, so it has only the meshes: those of the bodies that
+        // have been drawn (nothing is tessellated just to be saved), and those it was
+        // opened with that are still waiting to be used.
+        let cached = with_caches && !self.pending_rebuild && !self.is_assembly();
+        let caches = cached.then(|| peet_io::document::Caches {
             bodies: &self.evaluation().bodies,
             meshes: self
                 .bodies
@@ -332,6 +571,39 @@ impl Document {
                 })
                 .collect(),
         });
+        if self.is_assembly() {
+            let written = self.model.for_file(folder);
+            let mut stamps = std::collections::HashSet::new();
+            let mut meshes = Vec::new();
+            if with_caches && !self.pending_rebuild {
+                for b in &self.bodies {
+                    if !b.flat
+                        && b.is_tessellated()
+                        && b.error().is_none()
+                        && stamps.insert(b.stamp)
+                    {
+                        meshes.push(peet_io::document::CachedMesh {
+                            stamp: b.stamp,
+                            mesh: b.tess().clone(),
+                        });
+                    }
+                }
+                for (stamp, mesh) in &self.mesh_pool {
+                    if stamps.insert(*stamp) {
+                        meshes.push(peet_io::document::CachedMesh {
+                            stamp: *stamp,
+                            mesh: mesh.clone(),
+                        });
+                    }
+                }
+                meshes.sort_by_key(|m| m.stamp);
+            }
+            let caches = (!meshes.is_empty()).then_some(peet_io::document::Caches {
+                bodies: &[],
+                meshes,
+            });
+            return peet_io::document::save(&written, &metadata, caches).map_err(|e| e.message);
+        }
         peet_io::document::save(&self.model, &metadata, caches).map_err(|e| e.message)
     }
 
@@ -407,6 +679,10 @@ impl Document {
 
     /// Converts a selection into references that survive a rebuild.
     pub fn persist(&self, g: GeomRef) -> Option<Persistent> {
+        // In an assembly a face belongs to a component, which these references don't say.
+        if self.is_assembly() {
+            return None;
+        }
         let body = &self.bodies.get(g.body())?.source;
         Some(match g {
             GeomRef::Face { face, .. } => Persistent::Face(body.face_ref(face)),
@@ -446,9 +722,22 @@ impl Document {
     /// Bounds of all bodies (reference geometry is excluded, as in other CAD tools'
     /// "zoom to fit").
     pub fn visible_body_bounds(&self) -> Aabb {
+        // (Looked up once: an assembly can have a thousand bodies.)
+        let hidden: std::collections::HashSet<CompId> = self
+            .model
+            .assembly()
+            .map(|a| {
+                a.components()
+                    .filter(|c| !c.visible)
+                    .map(|c| c.id)
+                    .collect()
+            })
+            .unwrap_or_default();
         self.bodies
             .iter()
-            .map(|b| b.solid.bounds())
+            .zip(&self.placed)
+            .filter(|(_, p)| !p.component().is_some_and(|c| hidden.contains(&c)))
+            .map(|(b, p)| placed_bounds(&b.bounds(), &p.shown))
             .fold(Aabb::EMPTY, |a, b| a.union(&b))
     }
 
@@ -567,6 +856,60 @@ mod tests {
         // A change that changes nothing is not a step.
         assert!(!doc.change("Nothing", |_| {}));
         assert_eq!(doc.undo_label(), Some("Delete"));
+    }
+
+    #[test]
+    fn an_assembly_shows_its_components_bodies_where_they_are() {
+        let part = Arc::new(peet_model::samples::bracket().0);
+        let mut model = Model::new_assembly();
+        let (c1, c2) = {
+            let a = model.assembly_mut().unwrap();
+            let d = a.define(part);
+            let far = Frame {
+                origin: DVec3::new(1000.0, 0.0, 0.0),
+                ..Frame::WORLD
+            };
+            (
+                a.insert(d, Frame::WORLD).unwrap(),
+                a.insert(d, far).unwrap(),
+            )
+        };
+        let mut doc = Document::from_model(model, None);
+        assert!(doc.is_assembly());
+        assert_eq!((doc.bodies.len(), doc.placed.len()), (2, 2));
+        // One view for both instances: tessellated once.
+        assert!(Arc::ptr_eq(&doc.bodies[0], &doc.bodies[1]));
+        assert_eq!(doc.placed[1].component(), Some(c2));
+        assert_eq!(doc.bodies_of(c2).collect::<Vec<_>>(), [1]);
+        let one = doc.component_bounds(c1).size();
+        let all = doc.visible_body_bounds().size();
+        assert!((all.x - (one.x + 1000.0)).abs() < 1e-9 && (all.y - one.y).abs() < 1e-9);
+        assert!(
+            doc.persist(GeomRef::Face {
+                body: 0,
+                face: peet_kernel::FaceId(0)
+            })
+            .is_none()
+        );
+
+        // Moving a component keeps the view; it is a step that can be undone.
+        let view = doc.bodies[0].clone();
+        assert!(doc.change("Move", |m| {
+            let c = m.assembly_mut().unwrap().component_mut(c2).unwrap();
+            c.placement.origin.x = 500.0;
+        }));
+        assert!(Arc::ptr_eq(&doc.bodies[1], &view));
+        assert_eq!(doc.placed[1].frame.origin.x, 500.0);
+        assert_eq!(doc.undo().as_deref(), Some("Move"));
+        assert_eq!(doc.placed[1].frame.origin.x, 1000.0);
+
+        // Saved and opened again, it is the same assembly.
+        let bytes = doc.save_bytes(true).unwrap();
+        let mut again = Document::from_opened(peet_io::document::open(&bytes).unwrap(), None);
+        again.finish_loading();
+        assert_eq!(again.model, doc.model);
+        assert_eq!(again.bodies.len(), 2);
+        assert!(!again.is_modified());
     }
 
     #[test]

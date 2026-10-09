@@ -150,8 +150,29 @@ pattern becomes a grid with `direction2`, `spacing2`, `count2`.
 between `a` and `b`), `axis`, `point`, `coordinate_system`. Use a reference plane to
 sketch where there is no face.
 
+## Material and colour
+
+A part has one material: a name and a density. `mass` gives `mass_kg` only once it has
+one.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 100]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 10}
+{"op": "set_material", "material": "Mild steel"}
+{"op": "set_color", "color": "#3366cc"}
+{"op": "mass"}
+```
+
+- A material of the tables (`peet materials` lists them, with `density_kg_m3`) needs
+  only its name. Any other needs its density in kg/m³:
+  `{"op": "set_material", "material": "Brass", "density": 8500}`. Without one the
+  operation fails and lists the materials that have a density.
+- On a sheet metal part use `apply_material` instead (`peet skills sheet-metal`): it sets
+  the thickness and bends from a gauge and the part's material in one step.
+- `"material": null` and `"color": null` clear them.
+
 ## Checking
 
-`bodies` (size, volume), `mass` (centre of gravity), `measure` (one face, edge or
-vertex, or the distance and angle between two). Features are built in tree order, each
+`bodies` (size, volume), `mass` (centre of gravity, and the mass once the part has a
+material), `measure` (one face, edge or vertex, or the distance and angle between two). Features are built in tree order, each
 on the result of those above it: `move` and `rollback` change that order.

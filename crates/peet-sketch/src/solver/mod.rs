@@ -5,7 +5,7 @@
 //! driving constraint becomes one or more residual equations (see `equations.rs` for the
 //! formulation); driven dimensions only measure. Coincident points share
 //! variables (aliasing), and the system is split into independent clusters that are solved
-//! separately by damped least squares (`problem.rs`): Levenberg–Marquardt with minimum norm
+//! separately by damped least squares (the `peet-solve` crate): Levenberg–Marquardt with minimum norm
 //! steps, falling back to dogleg if it stalls. Clusters that are already satisfied are
 //! skipped, and during a drag only clusters touching dragged geometry (or left unsatisfied
 //! by an edit) are solved.
@@ -28,16 +28,15 @@
 
 mod analysis;
 mod equations;
-mod problem;
-mod sparse;
 mod structure;
 #[cfg(test)]
 mod tests;
 
 use peet_math::DVec2;
 
-use self::equations::{Eq, NONE, Owner};
-use self::problem::{CONVERGED, Options, Problem, SKIP, Space};
+use peet_solve::{CONVERGED, Equation, NONE, Options, Problem, SKIP, Space};
+
+use self::equations::{Eq, Owner};
 use self::structure::{Structure, curve_points, fingerprint};
 use crate::sketch::{ConstraintId, EntityId, Geometry, Sketch};
 
@@ -360,7 +359,7 @@ impl Solver {
                 .all(|&e| eqs[e as usize].residual(vals).abs() <= SKIP);
             let soft_ok = soft
                 .iter()
-                .all(|&e| eqs[e as usize].residual(vals).abs() <= problem::TARGET * SOFT_WEIGHT);
+                .all(|&e| eqs[e as usize].residual(vals).abs() <= peet_solve::TARGET * SOFT_WEIGHT);
             if hard_ok && soft_ok {
                 continue;
             }
@@ -467,7 +466,7 @@ fn drag_cluster(
     let mut x0 = Vec::new();
     let mut best_x = Vec::new();
     // Targets met to within TARGET (in mm, before weighting): done.
-    let done = (problem::TARGET * SOFT_WEIGHT).powi(2) * soft.len() as f64;
+    let done = (peet_solve::TARGET * SOFT_WEIGHT).powi(2) * soft.len() as f64;
     for _ in 0..MAX_DRAG_STEPS {
         if iterations > DRAG_BUDGET || (feasible && cost <= done) {
             break;
@@ -481,7 +480,7 @@ fn drag_cluster(
             .iter()
             .map(|&v| vals[v as usize].abs())
             .fold(1.0, f64::max);
-        let step = problem::max_abs(&dx);
+        let step = peet_solve::max_abs(&dx);
         if step <= 1e-13 * scale {
             break;
         }

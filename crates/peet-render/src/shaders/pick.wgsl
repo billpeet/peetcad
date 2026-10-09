@@ -11,6 +11,7 @@ struct PickIn {
 struct PickOut {
     @builtin(position) clip: vec4<f32>,
     @location(0) @interpolate(flat, either) id: u32,
+    @location(1) @interpolate(flat, either) object: u32,
 };
 
 struct PickTargets {
@@ -20,19 +21,22 @@ struct PickTargets {
 };
 
 @vertex
-fn vs_pick_face(v: PickIn) -> PickOut {
+fn vs_pick_face(v: PickIn, instance: InstanceIn) -> PickOut {
     var out: PickOut;
-    out.clip = globals.view_proj * (object.model * vec4<f32>(v.position, 1.0));
+    out.clip = globals.view_proj * (instance_model(instance) * vec4<f32>(v.position, 1.0));
     out.id = v.id;
+    out.object = instance.pick;
     return out;
 }
 
 // Same depth bias as the visible edges, so exactly the visible edges are pickable.
 @vertex
-fn vs_pick_edge(v: PickIn) -> PickOut {
+fn vs_pick_edge(v: PickIn, instance: InstanceIn) -> PickOut {
     var out: PickOut;
-    out.clip = biased_line_position(v.position);
+    let world = instance_model(instance) * vec4<f32>(v.position, 1.0);
+    out.clip = biased_line_position(world.xyz);
     out.id = v.id;
+    out.object = instance.pick;
     return out;
 }
 
@@ -45,7 +49,7 @@ fn pack_u32(v: u32) -> vec4<f32> {
 @fragment
 fn fs_pick(in: PickOut) -> PickTargets {
     var out: PickTargets;
-    out.object = pack_u32(object.pick.x);
+    out.object = pack_u32(in.object);
     out.element = pack_u32(in.id);
     // Window depth, the value the depth test used (reversed-Z).
     out.depth = pack_u32(bitcast<u32>(in.clip.z));

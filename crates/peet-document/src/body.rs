@@ -5,7 +5,7 @@ use std::ops::Deref;
 use std::sync::{Arc, OnceLock};
 
 use peet_kernel::query::{MassProperties, mass_properties};
-use peet_kernel::tessellate::{Silhouettes, SolidMesh, tessellate};
+use peet_kernel::tessellate::{Silhouettes, SolidMesh, tessellate, tessellate_with};
 use peet_kernel::{EdgeId, FaceId, VertexId};
 
 /// A face, edge or vertex of a body, for picking and selection. Only valid for the
@@ -44,6 +44,11 @@ pub struct BodyView {
     /// Showing the flat pattern.
     pub flat: bool,
     display: OnceLock<Display>,
+    /// A coarser mesh for when the body is small on screen, made the first time one is
+    /// asked for. `None` if it couldn't be made (the fine one is used then).
+    coarse: OnceLock<Option<SolidMesh>>,
+    /// The box around what is shown, worked out the first time it is asked for.
+    bounds: OnceLock<peet_math::Aabb>,
     /// The mass properties of `source`, worked out the first time they are asked for.
     mass: OnceLock<Result<MassProperties, String>>,
 }
@@ -62,6 +67,16 @@ pub fn tolerance(solid: &peet_kernel::Solid) -> f64 {
     (size * 5e-4).clamp(0.005, 0.1)
 }
 
+/// The largest arc a facet of the coarse mesh spans: three times the usual.
+const COARSE_ANGLE: f64 = 30.0 * std::f64::consts::PI / 180.0;
+
+/// The tolerance of the coarse mesh: a hundredth of the body's size, which is under a
+/// pixel while the body is drawn smaller than a hundred pixels.
+pub fn coarse_tolerance(solid: &peet_kernel::Solid) -> f64 {
+    let size = solid.bounds().size().length();
+    (size * 0.01).max(tolerance(solid) * 4.0)
+}
+
 /// Distinguishes a flat pattern's display stamp from its body's.
 const FLAT_STAMP: u64 = 0x9e37_79b9_7f4a_7c15;
 
@@ -69,6 +84,12 @@ impl BodyView {
     /// The view of a model body: its flat pattern if `flat` is set and it is sheet metal,
     /// else the body itself.
     pub fn of(source: Arc<peet_model::Body>, flat: bool) -> Self {
+        Self::of_cached(source, flat, None)
+    }
+
+    /// [`BodyView::of`], with a mesh of the model body from a file to use in place of
+    /// tessellating it (not for a flat pattern, which the file has no mesh of).
+    pub fn of_cached(source: Arc<peet_model::Body>, flat: bool, cached: Option<SolidMesh>) -> Self {
         match (&source.sheet, flat) {
             (Some(sheet), true) => {
                 let shown = Arc::new(peet_model::Body {
@@ -83,7 +104,7 @@ impl BodyView {
                 v.flat = true;
                 v
             }
-            _ => Self::new(source, None),
+            _ => Self::new(source, cached),
         }
     }
 
@@ -112,6 +133,8 @@ impl BodyView {
             flat: false,
             body,
             display,
+            coarse: OnceLock::new(),
+            bounds: OnceLock::new(),
             mass: OnceLock::new(),
         }
     }
@@ -135,6 +158,24 @@ impl BodyView {
     /// kept; empty if tessellation failed (see [`BodyView::error`]).
     pub fn tess(&self) -> &SolidMesh {
         &self.display().tess
+    }
+
+    /// The box around what is shown, in the body's own coordinates. Kept: an assembly
+    /// asks for the boxes of all its bodies every frame.
+    pub fn bounds(&self) -> peet_math::Aabb {
+        *self.bounds.get_or_init(|| self.body.solid.bounds())
+    }
+
+    /// A coarser mesh of the body, with the same faces and edges, for drawing it small:
+    /// made on first use and kept. The fine mesh if a coarser one can't be made.
+    pub fn coarse(&self) -> &SolidMesh {
+        self.coarse
+            .get_or_init(|| {
+                let solid = &self.body.solid;
+                tessellate_with(solid, coarse_tolerance(solid), COARSE_ANGLE).ok()
+            })
+            .as_ref()
+            .unwrap_or_else(|| self.tess())
     }
 
     /// Precomputed data for the view-dependent silhouette lines of curved faces.

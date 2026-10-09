@@ -108,8 +108,11 @@
 //! handing the rest of the program a broken solid.
 //!
 //! **Assemblies.** Parts placed in assemblies (`ITEM_DEFINED_TRANSFORMATION` under a
-//! `REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION`, or `MAPPED_ITEM`) are imported in
-//! place: one body per occurrence, moved by the chain of placements above it. A placement
+//! `REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION`, or `MAPPED_ITEM`) are given two
+//! ways. [`StepImport::bodies`] has them in place: one body per occurrence, moved by the
+//! chain of placements above it (what a part that imports the file wants).
+//! [`StepImport::nodes`] keeps the structure: each part and assembly once, with what is
+//! placed in what and where (what an assembly that imports the file wants). A placement
 //! that is not a rigid motion is ignored with a warning.
 
 use std::collections::{HashMap, HashSet};
@@ -212,8 +215,26 @@ pub struct StepImport {
     pub bodies: Vec<ImportedBody>,
     /// Plain-English notes for the user: assumptions made and what was left out.
     pub warnings: Vec<String>,
-    /// The name of the file's (first) product; empty when it has none.
+    /// The name of the file's product (of an assembly: its top level; of several parts:
+    /// the first); empty when it has none.
     pub product_name: String,
+    /// The file's product structure: its parts and assemblies, each once, with what is
+    /// placed in what. A file with no assemblies has one node for each shape.
+    pub nodes: Vec<StepNode>,
+    /// The nodes that are placed in no other: the file's top level.
+    pub roots: Vec<usize>,
+}
+
+/// A part or an assembly of a STEP file, once (however often it is used).
+#[derive(Clone, Debug, PartialEq)]
+pub struct StepNode {
+    /// Its product's name.
+    pub name: String,
+    /// Its own solids, in its own coordinates.
+    pub bodies: Vec<ImportedBody>,
+    /// What is placed in it: the node (its index), the name the file gives this use of
+    /// it (empty if it gives none), and where.
+    pub children: Vec<(usize, String, Frame)>,
 }
 
 /// Why a file could not be imported.
@@ -285,6 +306,8 @@ pub fn read(text: &str) -> Result<StepImport> {
     }
 
     let mut bodies = Vec::new();
+    // Each solid once, with the shape (the group of representations) it belongs to.
+    let mut shapes: Vec<(Option<u32>, ImportedBody)> = Vec::new();
     let mut assumed_units = false;
     let mut merged_vertices = 0;
     let mut turned_shells = 0;
@@ -341,6 +364,13 @@ pub fn read(text: &str) -> Result<StepImport> {
             )));
         }
 
+        shapes.push((
+            reps.first().map(|r| structure.group_of(*r)),
+            ImportedBody {
+                name: name.clone(),
+                solid: built.solid.clone(),
+            },
+        ));
         // Where the body goes: once per occurrence in the assemblies above it.
         let mut frames = Vec::new();
         for &rep in &reps {
@@ -404,10 +434,18 @@ pub fn read(text: &str) -> Result<StepImport> {
                 .to_owned(),
         );
     }
+    let (nodes, roots) = structure.nodes(&file, shapes);
+    // An assembly is called what its top level is, not what its first part is.
+    let product_name = match roots.as_slice() {
+        [root] if !nodes[*root].children.is_empty() => nodes[*root].name.clone(),
+        _ => structure.product_name,
+    };
     Ok(StepImport {
         bodies,
         warnings,
-        product_name: structure.product_name,
+        product_name,
+        nodes,
+        roots,
     })
 }
 
@@ -1176,6 +1214,8 @@ struct Rep {
 struct Link {
     child: u32,
     parent: u32,
+    /// The relationship that places it, if it is one: see [`Structure::occurrences`].
+    relationship: Option<u32>,
     /// `None` when the transformation is not given by two axis placements.
     items: Option<(u32, u32)>,
 }
@@ -1198,6 +1238,9 @@ struct Structure {
     /// Placements of a group (by representative) in parent representations.
     links: HashMap<u32, Vec<Link>>,
     names: HashMap<u32, String>,
+    /// What the file calls a use of a part in an assembly, by the relationship that
+    /// places it.
+    occurrences: HashMap<u32, String>,
     product_name: String,
 }
 
@@ -1211,6 +1254,7 @@ impl Structure {
             group: HashMap::new(),
             links: HashMap::new(),
             names: HashMap::new(),
+            occurrences: HashMap::new(),
             product_name: String::new(),
         };
         // Representations: any `..REPRESENTATION(name, (items), #context)`.
@@ -1306,6 +1350,18 @@ impl Structure {
                 {
                     return None;
                 }
+                // What the use is called. Some systems only number them ('NAUO12'),
+                // which says nothing.
+                if let Some(Value::Str(name)) = occurrence.params.get(1) {
+                    let name = name.trim();
+                    let numbered = name
+                        .to_ascii_uppercase()
+                        .strip_prefix("NAUO")
+                        .is_some_and(|rest| rest.chars().all(|c| c.is_ascii_digit()));
+                    if !name.is_empty() && !numbered {
+                        s.occurrences.insert(relationship, name.to_owned());
+                    }
+                }
                 match (occurrence.params.get(3), occurrence.params.get(4)) {
                     (Some(Value::Ref(parent)), Some(Value::Ref(child))) => Some((
                         relationship,
@@ -1394,6 +1450,7 @@ impl Structure {
             s.links.entry(g).or_default().push(Link {
                 child,
                 parent,
+                relationship: Some(id),
                 items,
             });
         }
@@ -1423,6 +1480,7 @@ impl Structure {
                 s.links.entry(g).or_default().push(Link {
                     child,
                     parent,
+                    relationship: None,
                     items: target.map(|t| (origin, t)),
                 });
             }
@@ -1468,6 +1526,102 @@ impl Structure {
 
     fn name_of(&self, rep: u32) -> Option<&str> {
         self.names.get(&self.group_of(rep)).map(String::as_str)
+    }
+
+    /// The product structure: a node for each shape that has solids or has shapes placed
+    /// in it, and the nodes that are placed in no other.
+    fn nodes(
+        &self,
+        file: &File,
+        shapes: Vec<(Option<u32>, ImportedBody)>,
+    ) -> (Vec<StepNode>, Vec<usize>) {
+        let mut nodes: Vec<StepNode> = Vec::new();
+        let mut of_group: HashMap<u32, usize> = HashMap::new();
+        let mut node_of = |group: u32, nodes: &mut Vec<StepNode>| {
+            *of_group.entry(group).or_insert_with(|| {
+                nodes.push(StepNode {
+                    name: self.names.get(&group).cloned().unwrap_or_default(),
+                    bodies: Vec::new(),
+                    children: Vec::new(),
+                });
+                nodes.len() - 1
+            })
+        };
+        for (group, body) in shapes {
+            match group {
+                Some(group) => {
+                    let node = node_of(group, &mut nodes);
+                    nodes[node].bodies.push(body);
+                }
+                // A solid in no representation: a part of its own.
+                None => nodes.push(StepNode {
+                    name: body.name.clone(),
+                    bodies: vec![body],
+                    children: Vec::new(),
+                }),
+            }
+        }
+        // What is placed in what, in the file's order.
+        let mut groups: Vec<&u32> = self.links.keys().collect();
+        groups.sort_unstable();
+        let mut placed: Vec<(usize, usize, String, Frame, u32)> = Vec::new();
+        for group in groups {
+            // A shape with no solids anywhere below it is not worth a node; one that is
+            // only ever a parent gets its node when a child names it.
+            for link in &self.links[group] {
+                let child = node_of(*group, &mut nodes);
+                let parent = node_of(self.group_of(link.parent), &mut nodes);
+                let frame = self.link_frame(file, link).unwrap_or(Frame::WORLD);
+                // In the order of their placements in the parent: the order the
+                // components were written in.
+                let order = link.items.map_or(u32::MAX, |(_, to)| to);
+                let name = link
+                    .relationship
+                    .and_then(|r| self.occurrences.get(&r))
+                    .cloned()
+                    .unwrap_or_default();
+                placed.push((parent, child, name, frame, order));
+            }
+        }
+        placed.sort_by_key(|(.., order)| *order);
+        // A node is never placed in itself or below itself.
+        let below = |nodes: &[StepNode], top: usize, find: usize| {
+            let mut stack = vec![top];
+            let mut seen = HashSet::new();
+            while let Some(at) = stack.pop() {
+                if at == find {
+                    return true;
+                }
+                if seen.insert(at) {
+                    stack.extend(nodes[at].children.iter().map(|(c, ..)| *c));
+                }
+            }
+            false
+        };
+        for (parent, child, name, frame, _) in placed {
+            if !below(&nodes, child, parent) {
+                nodes[parent].children.push((child, name, frame));
+            }
+        }
+        for node in &mut nodes {
+            if node.name.is_empty() {
+                node.name = match node.bodies.first() {
+                    Some(body) => body.name.clone(),
+                    None if !self.product_name.is_empty() => self.product_name.clone(),
+                    None => "Assembly".to_owned(),
+                };
+            }
+        }
+        let children: HashSet<usize> = nodes
+            .iter()
+            .flat_map(|n| n.children.iter().map(|(c, ..)| *c))
+            .collect();
+        // Nodes with nothing in them (an empty shape) are not a top level of anything.
+        let roots = (0..nodes.len())
+            .filter(|i| !children.contains(i))
+            .filter(|i| !nodes[*i].bodies.is_empty() || !nodes[*i].children.is_empty())
+            .collect();
+        (nodes, roots)
     }
 
     /// Where the geometry of `rep` goes: one frame per occurrence in the assemblies above

@@ -64,7 +64,7 @@ pub(crate) trait Field {
     fn arg(target: &Self::Target, doc: &Document) -> Option<Self::Arg>;
 }
 
-fn scalar_out(s: &Scalar, kind: ScalarKind, doc: &Document) -> Value {
+pub(crate) fn scalar_out(s: &Scalar, kind: ScalarKind, doc: &Document) -> Value {
     let params = &doc.model.parameters;
     let value = s.evaluate(kind, params).unwrap_or(s.value);
     let value = match kind {
@@ -78,7 +78,7 @@ fn scalar_out(s: &Scalar, kind: ScalarKind, doc: &Document) -> Value {
 }
 
 /// A stored value as an operation's input, exactly.
-fn input_of(s: &Scalar) -> Input {
+pub(crate) fn input_of(s: &Scalar) -> Input {
     match &s.expression {
         Some(e) => Input::Expr(e.clone()),
         None => Input::Base(s.value),

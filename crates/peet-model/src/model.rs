@@ -9,11 +9,13 @@ use peet_sketch::Sketch;
 use peet_sketch::expr::Parameters;
 use serde::{Deserialize, Serialize};
 
+use crate::assembly::Assembly;
 use crate::config::{Configurations, ConfigurationsV5};
 use crate::extrude::{Extrude, Operation};
 use crate::feature::{
     ExtrudeFeature, Feature, FeatureId, FeatureKind, PlaneRef, SketchFeature, StdPlane,
 };
+use crate::material::Material;
 use crate::naming::{FaceName, FaceRole};
 
 /// The built-in reference geometry every part has.
@@ -65,6 +67,68 @@ pub struct Model {
     /// The part's configurations, and what differs between them.
     #[serde(default)]
     pub(crate) configurations: Configurations,
+    /// What the part is made of: its name in a bill of materials and the density its
+    /// mass is worked out with. `None` until one is chosen.
+    #[serde(default)]
+    pub material: Option<Material>,
+    /// The colour the part is drawn in (sRGB). `None` is the application's colour for
+    /// parts.
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+    /// For an assembly: its parts and where they are. A model with an assembly has no
+    /// features of its own (see [`crate::Assembly`]).
+    #[serde(default)]
+    assembly: Option<Arc<Assembly>>,
+}
+
+/// A model as files of model schemas 6 and 7 hold it: before a part had a material and
+/// a colour, and before there were assemblies. The file format is not self-describing,
+/// so an older model is read as this and converted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelV7 {
+    name: String,
+    features: Vec<Arc<Feature>>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+    configurations: Configurations,
+}
+
+impl From<ModelV7> for Model {
+    fn from(m: ModelV7) -> Self {
+        Self {
+            name: m.name,
+            features: m.features,
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            configurations: m.configurations,
+            material: None,
+            color: None,
+            assembly: None,
+        }
+    }
+}
+
+impl ModelV7 {
+    /// `model` as it would have been saved before: a part, without its material and
+    /// colour.
+    pub fn of(model: &Model) -> Self {
+        Self {
+            name: model.name.clone(),
+            features: model.features.clone(),
+            parameters: model.parameters.clone(),
+            rollback: model.rollback,
+            datums_visible: model.datums_visible,
+            next_id: model.next_id,
+            name_counters: model.name_counters.clone(),
+            configurations: model.configurations.clone(),
+        }
+    }
 }
 
 /// A model as files of model schema 4 and earlier hold it: before configurations.
@@ -91,6 +155,9 @@ impl From<ModelV4> for Model {
             next_id: m.next_id,
             name_counters: m.name_counters,
             configurations: Configurations::default(),
+            material: None,
+            color: None,
+            assembly: None,
         }
     }
 }
@@ -120,6 +187,9 @@ impl From<ModelV5> for Model {
             next_id: m.next_id,
             name_counters: m.name_counters,
             configurations: m.configurations.into(),
+            material: None,
+            color: None,
+            assembly: None,
         }
     }
 }
@@ -135,6 +205,9 @@ impl Default for Model {
             next_id: 1,
             name_counters: BTreeMap::new(),
             configurations: Configurations::default(),
+            material: None,
+            color: None,
+            assembly: None,
         }
     }
 }
@@ -144,7 +217,31 @@ impl Model {
         Self::default()
     }
 
+    /// A new, empty assembly.
+    pub fn new_assembly() -> Self {
+        Self {
+            name: "Assembly1".to_owned(),
+            assembly: Some(Arc::new(Assembly::new())),
+            ..Self::default()
+        }
+    }
+
     // ---- Reading ----
+
+    /// Whether the model is an assembly (parts placed together) and not a part.
+    pub fn is_assembly(&self) -> bool {
+        self.assembly.is_some()
+    }
+
+    /// The parts and where they are, if the model is an assembly.
+    pub fn assembly(&self) -> Option<&Assembly> {
+        self.assembly.as_deref()
+    }
+
+    /// The assembly, for changing it. Other snapshots of the model are not affected.
+    pub fn assembly_mut(&mut self) -> Option<&mut Assembly> {
+        self.assembly.as_mut().map(Arc::make_mut)
+    }
 
     pub fn features(&self) -> impl DoubleEndedIterator<Item = &Feature> + ExactSizeIterator {
         self.features.iter().map(|f| &**f)
@@ -573,7 +670,16 @@ impl Model {
         self.next_id = self.next_id.max(max.saturating_add(1));
         self.rollback = self.rollback.filter(|&b| b < self.features.len());
         self.parameters.evaluate();
-        self.validate_configurations()
+        self.validate_configurations()?;
+        if self.assembly.is_some() && !self.features.is_empty() {
+            return Err(
+                "The model is damaged: it is an assembly, and has features of its own.".to_owned(),
+            );
+        }
+        if let Some(assembly) = self.assembly_mut() {
+            assembly.validate()?;
+        }
+        Ok(())
     }
 }
 

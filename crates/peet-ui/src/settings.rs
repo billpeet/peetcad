@@ -206,11 +206,15 @@ pub struct Settings {
     pub show_properties: bool,
     /// Save parts with their display caches: larger files that open instantly.
     pub save_caches: bool,
+    /// Watch the files of an assembly's linked parts, and read a part again when its
+    /// file changes.
+    pub watch_links: bool,
     /// The sheet stock tables (material, gauge, thickness, radius, K-factor).
     pub materials: peet_sheetmetal::MaterialLibrary,
     /// The limits the manufacturing checks use.
     pub check_rules: peet_sheetmetal::CheckRules,
-    /// The density mass properties are worked out with, in kg/m³.
+    /// The density last used, in kg/m³: what a part that has no material yet is weighed
+    /// with in the mass properties window. A part's own material is saved with the part.
     pub density: f64,
 }
 
@@ -229,6 +233,7 @@ impl Default for Settings {
             show_feature_tree: true,
             show_properties: true,
             save_caches: true,
+            watch_links: true,
             materials: peet_sheetmetal::MaterialLibrary::builtin(),
             check_rules: peet_sheetmetal::CheckRules::default(),
             density: STEEL_DENSITY,

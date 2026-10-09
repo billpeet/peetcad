@@ -1,4 +1,5 @@
 // Flat coloured geometry: edge lines, overlay lines and translucent overlay triangles.
+// Overlays are given in world coordinates; mesh edges are placed by their instance.
 
 struct ColorIn {
     @location(0) position: vec3<f32>,
@@ -12,9 +13,8 @@ struct ColorOut {
 
 @vertex
 fn vs_color(v: ColorIn) -> ColorOut {
-    let world = object.model * vec4<f32>(v.position, 1.0);
     var out: ColorOut;
-    out.clip = globals.view_proj * world;
+    out.clip = globals.view_proj * vec4<f32>(v.position, 1.0);
     out.color = v.color;
     return out;
 }
@@ -30,10 +30,11 @@ fn vs_line(v: ColorIn) -> ColorOut {
 
 // Mesh edges: coloured by the view style, and tinted along with a highlighted object.
 @vertex
-fn vs_edge(v: ColorIn) -> ColorOut {
+fn vs_edge(v: ColorIn, instance: InstanceIn) -> ColorOut {
     var out: ColorOut;
-    out.clip = biased_line_position(v.position);
-    let rgb = mix(globals.edge_color.rgb, object.tint.rgb, min(object.tint.a * 1.6, 1.0));
+    let world = instance_model(instance) * vec4<f32>(v.position, 1.0);
+    out.clip = biased_line_position(world.xyz);
+    let rgb = mix(globals.edge_color.rgb, instance.tint.rgb, min(instance.tint.a * 1.6, 1.0));
     out.color = vec4<f32>(rgb, globals.edge_color.a);
     return out;
 }

@@ -75,7 +75,7 @@ impl MassTotal {
 
 /// Eigenvalues of a symmetric 3×3 matrix, ascending (the trigonometric solution of its
 /// characteristic cubic).
-fn symmetric_eigenvalues(m: &DMat3) -> [f64; 3] {
+pub(crate) fn symmetric_eigenvalues(m: &DMat3) -> [f64; 3] {
     let a = m.to_cols_array_2d();
     let off = a[0][1] * a[0][1] + a[0][2] * a[0][2] + a[1][2] * a[1][2];
     let trace = a[0][0] + a[1][1] + a[2][2];
@@ -108,7 +108,7 @@ fn unique_name(model: &peet_model::Model, stem: &str) -> String {
 }
 
 /// A file's name without its folder and extension: "bracket" for "C:\parts\bracket.step".
-fn file_stem(file_name: &str) -> &str {
+pub(crate) fn file_stem(file_name: &str) -> &str {
     let name = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name);
     match name.rsplit_once('.') {
         Some((stem, _)) if !stem.is_empty() => stem,

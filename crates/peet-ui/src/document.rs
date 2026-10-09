@@ -5,7 +5,9 @@
 use peet_math::Plane;
 use peet_sketch::Sketch;
 
-pub use peet_document::{Document, FileLocation, ItemId, Persistent, SketchStatus, sketch_bounds};
+pub use peet_document::{
+    Document, FileLocation, ItemId, Persistent, Session, SketchStatus, sketch_bounds,
+};
 
 /// The sketch being edited: a working copy, written back to the model (as one undo step)
 /// when editing ends.

@@ -14,10 +14,11 @@ use bytemuck::{Pod, Zeroable};
 use peet_math::{Aabb, DMat4, DVec3};
 use wgpu::util::DeviceExt as _;
 
+use crate::batch::{Instance, batch};
 use crate::camera::{Camera, Projection};
 use crate::mesh::{ColorVertex, MeshData, MeshVertex, Overlay};
 use crate::pick::{
-    PICK_FORMAT, PICK_SIZE, PickFrame, PickRequest, PickResult, Picker, encode_object, pick_matrix,
+    PICK_FORMAT, PICK_SIZE, PickFrame, PickRequest, PickResult, Picker, pick_matrix,
 };
 
 /// Colour format of the viewport image. The shaders write sRGB-encoded values into it,
@@ -75,10 +76,18 @@ impl ViewStyle {
 }
 
 /// Handle to a mesh uploaded to the GPU.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct MeshId(u64);
 
-/// One mesh to draw this frame.
+impl MeshId {
+    #[cfg(test)]
+    pub(crate) fn test(id: u64) -> Self {
+        Self(id)
+    }
+}
+
+/// One object to draw this frame: a mesh, somewhere. Objects that share a mesh are drawn
+/// together (instanced), and the ones outside the view are not drawn at all.
 #[derive(Clone, Copy, Debug)]
 pub struct ObjectDraw {
     pub mesh: MeshId,
@@ -129,6 +138,9 @@ pub struct RenderStats {
     pub triangles: usize,
     pub lines: usize,
     pub draw_calls: usize,
+    /// Objects drawn, and objects left out because they are outside the view.
+    pub objects: usize,
+    pub culled: usize,
 }
 
 /// Result of rendering a frame.
@@ -143,10 +155,6 @@ pub struct RenderOutput<'a> {
 /// Size of the globals uniform block; checked against the WGSL declaration in tests.
 #[cfg(test)]
 pub(crate) const GLOBALS_SIZE: usize = std::mem::size_of::<Globals>();
-/// Size of the per-object uniform block; checked against the WGSL declaration in tests.
-#[cfg(test)]
-pub(crate) const OBJECT_SIZE: usize = std::mem::size_of::<ObjectUniform>();
-
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
@@ -167,43 +175,6 @@ struct Globals {
     edge_color: [f32; 4],
 }
 
-#[repr(C)]
-#[derive(Clone, Copy, Pod, Zeroable)]
-struct ObjectUniform {
-    model: [[f32; 4]; 4],
-    tint: [f32; 4],
-    /// x = pick object id + 1 (0 = not pickable).
-    pick: [u32; 4],
-}
-
-struct ObjectBinding {
-    buffer: wgpu::Buffer,
-    bind_group: wgpu::BindGroup,
-}
-
-impl ObjectBinding {
-    fn new(device: &wgpu::Device, layout: &wgpu::BindGroupLayout, label: &str) -> Self {
-        let buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some(label),
-            contents: bytemuck::bytes_of(&ObjectUniform {
-                model: glam::Mat4::IDENTITY.to_cols_array_2d(),
-                tint: [0.0; 4],
-                pick: [0; 4],
-            }),
-            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
-        });
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some(label),
-            layout,
-            entries: &[wgpu::BindGroupEntry {
-                binding: 0,
-                resource: buffer.as_entire_binding(),
-            }],
-        });
-        Self { buffer, bind_group }
-    }
-}
-
 struct GpuMesh {
     vertices: wgpu::Buffer,
     indices: wgpu::Buffer,
@@ -214,7 +185,8 @@ struct GpuMesh {
     pick_ids: wgpu::Buffer,
     /// Per-edge-vertex pick ids (`u32`), parallel to `edges`.
     edge_pick_ids: Option<wgpu::Buffer>,
-    object: ObjectBinding,
+    /// The box around its vertices, for leaving out what is outside the view.
+    bounds: Aabb,
 }
 
 /// A vertex buffer that grows as needed and is rewritten every frame.
@@ -314,8 +286,6 @@ pub struct ViewportRenderer {
     samples: u32,
     globals_buffer: wgpu::Buffer,
     globals_bind_group: wgpu::BindGroup,
-    object_layout: wgpu::BindGroupLayout,
-    identity_object: ObjectBinding,
     background_pipeline: wgpu::RenderPipeline,
     grid_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
@@ -333,6 +303,9 @@ pub struct ViewportRenderer {
     next_mesh_id: u64,
     overlay_lines: DynamicBuffer,
     overlay_tris: DynamicBuffer,
+    /// This frame's objects, grouped by mesh; and the pickable ones near the cursor.
+    instances: DynamicBuffer,
+    pick_instances: DynamicBuffer,
 }
 
 impl ViewportRenderer {
@@ -354,7 +327,6 @@ impl ViewportRenderer {
             })
         };
         let globals_layout = uniform_layout("globals_layout");
-        let object_layout = uniform_layout("object_layout");
 
         let globals_buffer = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("globals"),
@@ -384,19 +356,12 @@ impl ViewportRenderer {
                 resource: pick_globals_buffer.as_entire_binding(),
             }],
         });
-        let identity_object = ObjectBinding::new(device, &object_layout, "identity_object");
 
         let layout_globals_only = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("globals_only"),
             bind_group_layouts: &[Some(&globals_layout)],
             immediate_size: 0,
         });
-        let layout_with_object = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("globals_and_object"),
-            bind_group_layouts: &[Some(&globals_layout), Some(&object_layout)],
-            immediate_size: 0,
-        });
-
         let shader = |label, source: &str| {
             device.create_shader_module(wgpu::ShaderModuleDescriptor {
                 label: Some(label),
@@ -422,14 +387,28 @@ impl ViewportRenderer {
             attributes: &wgpu::vertex_attr_array![0 => Float32x3, 1 => Unorm8x4],
         };
 
+        // What differs from object to object, one entry per instance drawn.
+        let instance_layout = wgpu::VertexBufferLayout {
+            array_stride: std::mem::size_of::<Instance>() as u64,
+            step_mode: wgpu::VertexStepMode::Instance,
+            attributes: &wgpu::vertex_attr_array![
+                4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4,
+                8 => Float32x4, 9 => Uint32
+            ],
+        };
+
         let pipeline = |desc: PipelineDesc<'_>| {
+            let mut buffers = vec![desc.vertex_layout.clone()];
+            if desc.instanced {
+                buffers.push(Some(instance_layout.clone()));
+            }
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(desc.label),
                 layout: Some(desc.layout),
                 vertex: wgpu::VertexState {
                     module: desc.shader,
                     entry_point: Some(desc.vs),
-                    buffers: std::slice::from_ref(&desc.vertex_layout),
+                    buffers: &buffers,
                     compilation_options: wgpu::PipelineCompilationOptions::default(),
                 },
                 primitive: wgpu::PrimitiveState {
@@ -471,6 +450,7 @@ impl ViewportRenderer {
             vs: "vs_background",
             fs: "fs_background",
             vertex_layout: None,
+            instanced: false,
             topology: wgpu::PrimitiveTopology::TriangleList,
             depth_write: false,
             depth_compare: wgpu::CompareFunction::Always,
@@ -483,6 +463,7 @@ impl ViewportRenderer {
             vs: "vs_grid",
             fs: "fs_grid",
             vertex_layout: None,
+            instanced: false,
             topology: wgpu::PrimitiveTopology::TriangleList,
             depth_write: false,
             depth_compare: wgpu::CompareFunction::GreaterEqual,
@@ -490,11 +471,12 @@ impl ViewportRenderer {
         });
         let mesh_pipeline = pipeline(PipelineDesc {
             label: "mesh",
-            layout: &layout_with_object,
+            layout: &layout_globals_only,
             shader: &mesh_shader,
             vs: "vs_mesh",
             fs: "fs_mesh",
             vertex_layout: Some(mesh_vertex_layout),
+            instanced: true,
             topology: wgpu::PrimitiveTopology::TriangleList,
             depth_write: true,
             depth_compare: wgpu::CompareFunction::GreaterEqual,
@@ -502,11 +484,12 @@ impl ViewportRenderer {
         });
         let line_pipeline = pipeline(PipelineDesc {
             label: "lines",
-            layout: &layout_with_object,
+            layout: &layout_globals_only,
             shader: &color_shader,
             vs: "vs_line",
             fs: "fs_color",
             vertex_layout: Some(color_vertex_layout.clone()),
+            instanced: false,
             topology: wgpu::PrimitiveTopology::LineList,
             depth_write: false,
             depth_compare: wgpu::CompareFunction::GreaterEqual,
@@ -514,11 +497,12 @@ impl ViewportRenderer {
         });
         let edge_pipeline = pipeline(PipelineDesc {
             label: "edges",
-            layout: &layout_with_object,
+            layout: &layout_globals_only,
             shader: &color_shader,
             vs: "vs_edge",
             fs: "fs_color",
             vertex_layout: Some(color_vertex_layout.clone()),
+            instanced: true,
             topology: wgpu::PrimitiveTopology::LineList,
             depth_write: false,
             depth_compare: wgpu::CompareFunction::GreaterEqual,
@@ -526,11 +510,12 @@ impl ViewportRenderer {
         });
         let overlay_tri_pipeline = pipeline(PipelineDesc {
             label: "overlay_triangles",
-            layout: &layout_with_object,
+            layout: &layout_globals_only,
             shader: &color_shader,
             vs: "vs_color",
             fs: "fs_color",
             vertex_layout: Some(color_vertex_layout),
+            instanced: false,
             topology: wgpu::PrimitiveTopology::TriangleList,
             depth_write: false,
             depth_compare: wgpu::CompareFunction::GreaterEqual,
@@ -538,7 +523,7 @@ impl ViewportRenderer {
         });
 
         // Pick pipelines: positions from the regular vertex buffers (slot 0), ids from a
-        // parallel `u32` buffer (slot 1); no MSAA and no blending.
+        // parallel `u32` buffer (slot 1), the instances (slot 2); no MSAA and no blending.
         let pick_pipeline = |label, vs, stride: usize, topology, depth_write| {
             let buffers = [
                 Some(wgpu::VertexBufferLayout {
@@ -551,6 +536,7 @@ impl ViewportRenderer {
                     step_mode: wgpu::VertexStepMode::Vertex,
                     attributes: &wgpu::vertex_attr_array![1 => Uint32],
                 }),
+                Some(instance_layout.clone()),
             ];
             let target = Some(wgpu::ColorTargetState {
                 format: PICK_FORMAT,
@@ -559,7 +545,7 @@ impl ViewportRenderer {
             });
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
-                layout: Some(&layout_with_object),
+                layout: Some(&layout_globals_only),
                 vertex: wgpu::VertexState {
                     module: &pick_shader,
                     entry_point: Some(vs),
@@ -608,8 +594,6 @@ impl ViewportRenderer {
             samples,
             globals_buffer,
             globals_bind_group,
-            object_layout,
-            identity_object,
             background_pipeline,
             grid_pipeline,
             mesh_pipeline,
@@ -626,6 +610,8 @@ impl ViewportRenderer {
             next_mesh_id: 0,
             overlay_lines: DynamicBuffer::new("overlay_lines"),
             overlay_tris: DynamicBuffer::new("overlay_triangles"),
+            instances: DynamicBuffer::new("instances"),
+            pick_instances: DynamicBuffer::new("pick_instances"),
         }
     }
 
@@ -671,7 +657,6 @@ impl ViewportRenderer {
                 usage: wgpu::BufferUsages::VERTEX,
             })
         });
-        let object = ObjectBinding::new(device, &self.object_layout, "mesh_object");
         self.meshes.insert(
             id,
             GpuMesh {
@@ -682,7 +667,7 @@ impl ViewportRenderer {
                 edge_vertex_count: edge_vertices.len() as u32,
                 pick_ids,
                 edge_pick_ids,
-                object,
+                bounds: mesh.bounds(),
             },
         );
         id
@@ -779,17 +764,16 @@ impl ViewportRenderer {
         };
         queue.write_buffer(&self.globals_buffer, 0, bytemuck::bytes_of(&globals));
 
-        // Per-object uniforms: transform and highlight tint.
-        for draw in frame.objects {
-            if let Some(mesh) = self.meshes.get(&draw.mesh) {
-                let uniform = ObjectUniform {
-                    model: draw.transform.as_mat4().to_cols_array_2d(),
-                    tint: rgb_a(style.highlight, draw.highlight.clamp(0.0, 1.0) * 0.55),
-                    pick: [draw.pick_object.map_or(0, encode_object), 0, 0, 0],
-                };
-                queue.write_buffer(&mesh.object.buffer, 0, bytemuck::bytes_of(&uniform));
-            }
-        }
+        // The objects in view, grouped by mesh: each group is one instanced draw.
+        let batches = batch(
+            frame.objects,
+            |mesh| self.meshes.get(&mesh).map(|m| m.bounds),
+            &view_proj,
+            style.highlight,
+            false,
+        );
+        self.instances
+            .write(device, queue, bytemuck::cast_slice(&batches.instances));
         self.overlay_lines
             .write(device, queue, bytemuck::cast_slice(&frame.overlay.lines));
         self.overlay_tris.write(
@@ -804,7 +788,11 @@ impl ViewportRenderer {
             None => (&targets.resolved, None),
         };
 
-        let mut stats = RenderStats::default();
+        let mut stats = RenderStats {
+            objects: batches.instances.len(),
+            culled: batches.culled,
+            ..RenderStats::default()
+        };
         let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
             label: Some("viewport"),
         });
@@ -845,31 +833,38 @@ impl ViewportRenderer {
             stats.draw_calls += 1;
 
             // Opaque shaded meshes.
-            pass.set_pipeline(&self.mesh_pipeline);
-            for draw in frame.objects {
-                let Some(mesh) = self.meshes.get(&draw.mesh) else {
-                    continue;
-                };
-                pass.set_bind_group(1, &mesh.object.bind_group, &[]);
-                pass.set_vertex_buffer(0, mesh.vertices.slice(..));
-                pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..mesh.index_count, 0, 0..1);
-                stats.draw_calls += 1;
-                stats.triangles += mesh.index_count as usize / 3;
-            }
-
-            // Mesh edges.
-            pass.set_pipeline(&self.edge_pipeline);
-            for draw in frame.objects.iter().filter(|d| d.show_edges) {
-                let Some(mesh) = self.meshes.get(&draw.mesh) else {
-                    continue;
-                };
-                if let Some(edges) = &mesh.edges {
-                    pass.set_bind_group(1, &mesh.object.bind_group, &[]);
-                    pass.set_vertex_buffer(0, edges.slice(..));
-                    pass.draw(0..mesh.edge_vertex_count, 0..1);
+            if let Some(instances) = &self
+                .instances
+                .buffer
+                .as_ref()
+                .filter(|_| !batches.instances.is_empty())
+            {
+                pass.set_pipeline(&self.mesh_pipeline);
+                pass.set_vertex_buffer(1, instances.slice(..));
+                for b in &batches.batches {
+                    let Some(mesh) = self.meshes.get(&b.mesh).filter(|m| m.index_count > 0) else {
+                        continue;
+                    };
+                    pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                    pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                    pass.draw_indexed(0..mesh.index_count, 0, b.all.clone());
                     stats.draw_calls += 1;
-                    stats.lines += mesh.edge_vertex_count as usize / 2;
+                    stats.triangles += mesh.index_count as usize / 3 * b.all.len();
+                }
+
+                // Mesh edges.
+                pass.set_pipeline(&self.edge_pipeline);
+                pass.set_vertex_buffer(1, instances.slice(..));
+                for b in batches.batches.iter().filter(|b| !b.edges.is_empty()) {
+                    let Some(mesh) = self.meshes.get(&b.mesh) else {
+                        continue;
+                    };
+                    if let Some(edges) = &mesh.edges {
+                        pass.set_vertex_buffer(0, edges.slice(..));
+                        pass.draw(0..mesh.edge_vertex_count, b.edges.clone());
+                        stats.draw_calls += 1;
+                        stats.lines += mesh.edge_vertex_count as usize / 2 * b.edges.len();
+                    }
                 }
             }
 
@@ -879,7 +874,6 @@ impl ViewportRenderer {
                 pass.draw(0..6, 0..1);
                 stats.draw_calls += 1;
             }
-            pass.set_bind_group(1, &self.identity_object.bind_group, &[]);
             if let (Some(buffer), false) = (
                 &self.overlay_tris.buffer,
                 frame.overlay.triangles.is_empty(),
@@ -909,6 +903,7 @@ impl ViewportRenderer {
             .map(|(request, slot)| {
                 let pick_frame = PickFrame::new(request, size, &view_proj);
                 self.encode_pick(
+                    device,
                     queue,
                     &mut encoder,
                     frame,
@@ -939,7 +934,8 @@ impl ViewportRenderer {
     /// Records the pick passes (faces, then edges) and the readback copies.
     #[allow(clippy::too_many_arguments)]
     fn encode_pick(
-        &self,
+        &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         encoder: &mut wgpu::CommandEncoder,
         frame: &FrameInput<'_>,
@@ -959,13 +955,22 @@ impl ViewportRenderer {
             bytemuck::bytes_of(&pick_globals),
         );
 
-        let pickable = || {
-            frame
-                .objects
-                .iter()
-                .filter(|d| d.pick_object.is_some())
-                .filter_map(|d| Some((d, self.meshes.get(&d.mesh)?)))
-        };
+        // Only what is in the small window around the cursor is drawn: nearly
+        // everything else is left out before it reaches the GPU.
+        let batches = batch(
+            frame.objects,
+            |mesh| self.meshes.get(&mesh).map(|m| m.bounds),
+            &pick_view_proj,
+            [0.0; 3],
+            true,
+        );
+        self.pick_instances
+            .write(device, queue, bytemuck::cast_slice(&batches.instances));
+        let instances = self
+            .pick_instances
+            .buffer
+            .as_ref()
+            .filter(|_| !batches.instances.is_empty());
         for edges in [false, true] {
             let color_attachments: Vec<_> = self
                 .picker
@@ -1008,25 +1013,33 @@ impl ViewportRenderer {
                 multiview_mask: None,
             });
             pass.set_bind_group(0, &self.pick_globals_bind_group, &[]);
+            let Some(instances) = instances else {
+                continue;
+            };
+            pass.set_vertex_buffer(2, instances.slice(..));
             if edges {
                 pass.set_pipeline(&self.pick_edge_pipeline);
-                for (_, mesh) in pickable().filter(|(d, _)| d.show_edges) {
+                for b in batches.batches.iter().filter(|b| !b.edges.is_empty()) {
+                    let Some(mesh) = self.meshes.get(&b.mesh) else {
+                        continue;
+                    };
                     let (Some(lines), Some(ids)) = (&mesh.edges, &mesh.edge_pick_ids) else {
                         continue;
                     };
-                    pass.set_bind_group(1, &mesh.object.bind_group, &[]);
                     pass.set_vertex_buffer(0, lines.slice(..));
                     pass.set_vertex_buffer(1, ids.slice(..));
-                    pass.draw(0..mesh.edge_vertex_count, 0..1);
+                    pass.draw(0..mesh.edge_vertex_count, b.edges.clone());
                 }
             } else {
                 pass.set_pipeline(&self.pick_face_pipeline);
-                for (_, mesh) in pickable().filter(|(_, m)| m.index_count > 0) {
-                    pass.set_bind_group(1, &mesh.object.bind_group, &[]);
+                for b in &batches.batches {
+                    let Some(mesh) = self.meshes.get(&b.mesh).filter(|m| m.index_count > 0) else {
+                        continue;
+                    };
                     pass.set_vertex_buffer(0, mesh.vertices.slice(..));
                     pass.set_vertex_buffer(1, mesh.pick_ids.slice(..));
                     pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
-                    pass.draw_indexed(0..mesh.index_count, 0, 0..1);
+                    pass.draw_indexed(0..mesh.index_count, 0, b.all.clone());
                 }
             }
         }
@@ -1041,6 +1054,8 @@ struct PipelineDesc<'a> {
     vs: &'a str,
     fs: &'a str,
     vertex_layout: Option<wgpu::VertexBufferLayout<'a>>,
+    /// Drawn once per object, with the instance buffer in the next slot.
+    instanced: bool,
     topology: wgpu::PrimitiveTopology,
     depth_write: bool,
     depth_compare: wgpu::CompareFunction,
