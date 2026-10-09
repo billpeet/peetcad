@@ -216,14 +216,20 @@ fn find_face_query(doc: &Document, q: &FaceQuery) -> Result<(usize, FaceId), Str
     let at = q.at.map(|p| mm3(p, units));
     let normal = q.normal.map(direction).transpose()?;
     let feature = q.feature.as_ref().map(|f| f.resolve(doc)).transpose()?;
-    if at.is_none()
+    let named = q
+        .name
+        .as_ref()
+        .map(|name| named_face(doc, name))
+        .transpose()?;
+    if named.is_none()
+        && at.is_none()
         && normal.is_none()
         && feature.is_none()
         && q.side.is_none()
         && q.index.is_none()
     {
         return Err(
-            "A face selector needs more than a body: add at, normal, feature, side or index."
+            "A face selector needs more than a body: add name, at, normal, feature, side or index."
                 .to_owned(),
         );
     }
@@ -235,6 +241,9 @@ fn find_face_query(doc: &Document, q: &FaceQuery) -> Result<(usize, FaceId), Str
         }
         let mut tess = None;
         for f in body.solid.face_ids() {
+            if named.is_some_and(|target| target != (bi, f)) {
+                continue;
+            }
             if q.index.is_some_and(|i| i != f.0) {
                 continue;
             }
@@ -327,9 +336,16 @@ fn find_edge_query(doc: &Document, q: &EdgeQuery) -> Result<(usize, EdgeId), Str
         None => None,
         Some(f) => Some((face(doc, &f[0])?, face(doc, &f[1])?)),
     };
-    if between.is_none() && at.is_none() && faces.is_none() && q.index.is_none() {
+    let named = q
+        .name
+        .as_ref()
+        .map(|name| named_edge(doc, name))
+        .transpose()?;
+    if named.is_none() && between.is_none() && at.is_none() && faces.is_none() && q.index.is_none()
+    {
         return Err(
-            "An edge selector needs more than a body: add between, at, faces or index.".to_owned(),
+            "An edge selector needs more than a body: add name, between, at, faces or index."
+                .to_owned(),
         );
     }
 
@@ -340,6 +356,9 @@ fn find_edge_query(doc: &Document, q: &EdgeQuery) -> Result<(usize, EdgeId), Str
         }
         let mut tess = None;
         for e in body.solid.edge_ids() {
+            if named.is_some_and(|target| target != (bi, e)) {
+                continue;
+            }
             if q.index.is_some_and(|i| i != e.0) {
                 continue;
             }
@@ -551,4 +570,40 @@ pub(crate) fn point(doc: &Document, sel: &PointSel) -> Result<PointRef, String> 
             }
         }
     }
+}
+
+fn named_face(doc: &Document, name: &str) -> Result<(usize, FaceId), String> {
+    match doc.model.geometry_names.get(name) {
+        Some(peet_model::naming::NamedGeometry::Face(r)) => find_face(bodies(doc), r)
+            .map(|f| (f.body, f.id)).ok_or_else(|| format!("The face named '{name}' no longer exists in this configuration or rollback state. Inspect faces and reassign the name if needed.")),
+        Some(_) => Err(format!("'{name}' names an edge, not a face.")),
+        None => Err(format!("No geometry is named '{name}'. Use name_face to assign it.")),
+    }
+}
+
+fn named_edge(doc: &Document, name: &str) -> Result<(usize, EdgeId), String> {
+    match doc.model.geometry_names.get(name) {
+        Some(peet_model::naming::NamedGeometry::Edge(r)) => find_edge(bodies(doc), r)
+            .map(|e| (e.body, e.id)).ok_or_else(|| format!("The edge named '{name}' no longer exists in this configuration or rollback state. Inspect edges and reassign the name if needed.")),
+        Some(_) => Err(format!("'{name}' names a face, not an edge.")),
+        None => Err(format!("No geometry is named '{name}'. Use name_edge to assign it.")),
+    }
+}
+
+pub(crate) fn face_names(doc: &Document, body: usize, face: FaceId) -> Vec<&str> {
+    doc.model
+        .geometry_names
+        .keys()
+        .filter(|name| named_face(doc, name).ok() == Some((body, face)))
+        .map(String::as_str)
+        .collect()
+}
+
+pub(crate) fn edge_names(doc: &Document, body: usize, edge: EdgeId) -> Vec<&str> {
+    doc.model
+        .geometry_names
+        .keys()
+        .filter(|name| named_edge(doc, name).ok() == Some((body, edge)))
+        .map(String::as_str)
+        .collect()
 }

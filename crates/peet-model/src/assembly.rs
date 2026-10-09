@@ -324,7 +324,7 @@ pub struct Assembly {
     next_pattern: u32,
 }
 
-/// The assembly layout in schemas 8 and 9, with their feature layouts in definitions.
+/// The assembly layout in schemas 8 through 10, with their feature layouts in definitions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AssemblyLegacy<F> {
     definitions: Vec<DefinitionLegacy<F>>,

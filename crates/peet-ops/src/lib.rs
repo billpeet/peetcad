@@ -1000,6 +1000,22 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.sketch = Some(id);
             format!("Edit {}", model.name_of(id))
         }
+        Op::NameFace { face, name } => {
+            let target = select::face_ref(doc, face)?;
+            model.name_geometry(name, peet_model::naming::NamedGeometry::Face(target))?;
+            format!("Name face {name}")
+        }
+        Op::NameEdge { edge, name } => {
+            let target = select::edge_ref(doc, edge)?;
+            model.name_geometry(name, peet_model::naming::NamedGeometry::Edge(target))?;
+            format!("Name edge {name}")
+        }
+        Op::DeleteName { name } => {
+            if model.geometry_names.remove(name).is_none() {
+                return Err(format!("No geometry is named '{name}'."));
+            }
+            format!("Remove geometry name {name}")
+        }
         Op::Rename { feature, name } => {
             let id = feature.resolve(doc)?;
             rename(&mut model, id, name)?;

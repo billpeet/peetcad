@@ -74,3 +74,38 @@ given must match.
 A selector is resolved once, when the operation is applied, and stored as a reference
 that follows the geometry: changing a size later moves the sketch or the flange with its
 face or edge.
+
+## User names
+
+In the UI, select one face or edge in a part's viewport and use Properties > Names to
+add or remove names. With nothing selected, Properties lists all names so unavailable
+bindings can be removed too. These actions run the operations below.
+
+Assign names when later scripts need a particular face or edge, such as a mating face
+or a hinge hole. First build the geometry and select it with the usual selectors.
+`name_face` accepts flat and curved faces; `name_edge` accepts edges. Use
+`{"name": "Front"}` wherever a face selector is accepted, including sketch planes
+and mate ends. A named curved face still cannot be a sketch plane. Names are
+case-sensitive and unique across faces and edges in a part. Several names can point
+to the same geometry. `faces` and `edges` report the names in their `names` arrays.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [80, 50]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 8}
+{"op": "name_face", "face": {"feature": "Extrude1", "side": "end"}, "name": "Front"}
+{"op": "name_edge", "edge": {"between": [[0, 0, 0], [0, 0, 8]]}, "name": "Corner"}
+{"op": "edit", "feature": "Extrude1", "depth": 12}
+{"op": "sketch", "on": {"name": "Front"}, "draw": [{"type": "circle", "center": [40, 25], "radius": 5}]}
+{"op": "measure", "a": {"edge": {"name": "Corner"}}}
+{"op": "faces"}
+{"op": "delete_name", "name": "Corner"}
+```
+
+Names are saved with the part, shared by all configurations, and support undo and
+redo. They use the existing persistent references: feature origins, neighbouring
+faces and a position hint. After a split, the reference chooses the best matching
+remaining face or edge. A name does not label every fragment or pattern copy.
+If the target disappears, is suppressed or lies below rollback, selection fails.
+Restore the geometry, or inspect `faces` and `edges`, remove the binding with
+`delete_name`, and assign it again. Removing a name leaves geometry and references
+already made by sketches or mates intact.

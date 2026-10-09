@@ -70,7 +70,9 @@ pub use import::{ImportFeature, ImportedSolid};
 pub use loft::{LoftFeature, LoftInput, apply_loft};
 pub use mate::{Drag, Mate, MateEnd, MateGeom, MateId, MateKind};
 pub use material::{Material, STEEL_DENSITY};
-pub use model::{Datum, DependencyGraph, Model, ModelV4, ModelV5, ModelV7, ModelV8, ModelV9};
+pub use model::{
+    Datum, DependencyGraph, Model, ModelV4, ModelV5, ModelV7, ModelV8, ModelV9, ModelV10,
+};
 pub use naming::{Body, EdgeRef, FaceName, FaceOrigin, FaceRef, FaceRole, Found, VertexRef};
 pub use placement::face_sketch_plane;
 pub use regen::{Engine, Evaluation, FeatureState, Instance, Output, SketchStatus, Stats, Status};

@@ -453,6 +453,7 @@ pub fn faces(doc: &Document, body: Option<usize>) -> Result<Value, String> {
             let mut m = Map::new();
             m.insert("body".to_owned(), json!(bi));
             m.insert("index".to_owned(), json!(f.0));
+            m.insert("names".to_owned(), json!(select::face_names(doc, bi, f)));
             m.insert("what".to_owned(), json!(select::describe_face(doc, bi, f)));
             // The same, as the `feature` and `side` of a selector.
             let made_by: Vec<Value> = b
@@ -515,6 +516,7 @@ pub fn edges(doc: &Document, body: Option<usize>) -> Result<Value, String> {
             let mut m = Map::new();
             m.insert("body".to_owned(), json!(bi));
             m.insert("index".to_owned(), json!(e.0));
+            m.insert("names".to_owned(), json!(select::edge_names(doc, bi, e)));
             m.insert(
                 "curve".to_owned(),
                 json!(match &edge.curve {
