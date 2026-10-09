@@ -122,8 +122,48 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
   (`peet edges`). The edges of one `edges` list are all found before any flange is
   added, so original corners always work there.
 - `miter_flange` runs a sketched profile along several edges of one face;
-  `sketched_bend` and `jog` bend a flat face along sketched lines; `corner` sets how
-  flanges meet.
+  `sketched_bend` and `jog` bend a flat face along sketched lines.
+
+## Corners
+
+Where two flanges run to the same corner of a face, one of them has to give way and
+the two bends can't both have the corner of the flat pattern. Left alone, the earlier
+flange runs to the corner, the later one stops 0.1 short of it (a butt corner), and a
+rectangle is cut out of the blank where the bends meet. `corner` changes that: add it
+after the flanges it is about.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [120, 80]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
+{"op": "edge_flange", "name": "Wall", "length": 25, "edges": [{"between": [[0, 0, 2], [120, 0, 2]]}, {"between": [[120, 0, 2], [120, 80, 2]]}, {"between": [[120, 80, 2], [0, 80, 2]]}, {"between": [[0, 80, 2], [0, 0, 2]]}]}
+{"op": "corner", "kind": "open", "gap": 0.7, "relief": "flush"}
+{"op": "bend_table"}
+```
+
+- `kind`: `butt` (the earlier flange runs to the corner), `overlap` (the later one does),
+  `open` (neither does: both stop short of the other's inside face) or `plain` (nothing
+  is made longer to close the corner: the earlier flange ends where its own edge does
+  and the later one stops short of it). `plain` differs from `butt` when the later
+  flange stands outside its edge (`material_outside`, `bend_outside`): a butt corner
+  runs the earlier flange on to meet it, a plain one doesn't.
+- `gap` is how far a flange that stops short stays from the other's inside face.
+- `relief` is what is cut from the blank where the two bends meet: `rectangular` (a
+  rectangle reaching `relief_size` past the bends), `tear` (only what the bends would
+  share) or `flush` (back to where the flanges end, so each bend ends in line with its
+  flange and the blank has one inside corner there, with no notch).
+- **To match a part made in SolidWorks:** for the corners of one of its flange features
+  on several edges, `open` with `flush` and its gap divided by 1.414 (SolidWorks
+  measures the gap between the two flanges corner to corner, and both stop short); for
+  a corner between two of its flange features, `plain` with the bend radius as the gap.
+  The blank is then the same, edge for edge.
+- `flush` is never less than a tear, so with a gap smaller than the bend radius the
+  bends still end before their flanges do.
+- Without `faces` it is every corner the part has when it is applied; corners made by
+  flanges added later keep the default. `faces` picks corners: the end face of a flange
+  at a corner picks that corner, a flange's top or bottom face picks the corners at both
+  its ends.
+- "The part has no corners where two flanges meet": the flanges are set back from the
+  corner (an `offset_start` or `offset_end`), or are on different faces. Nothing to do.
 
 ## Cuts and forms
 

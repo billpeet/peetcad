@@ -288,6 +288,10 @@ with their defaults' types):
 - `axis`: `edge`, `face` (a round face) or `a` + `b` (two planes). `point`: `x`, `y`, `z`
   or `vertex`.
 - `edge_flange` and `hem` take `edges` to make one feature per edge.
+- `corner` sets how flanges that run to one corner meet: `kind` (`butt`, `overlap`,
+  `open`, `plain`), `gap`, and `relief`, what is cut from the blank where their bends meet
+  (`rectangular` with `relief_size`, `tear`, or `flush`: back to where the flanges end).
+  It applies to the corners of `faces`, or to every corner there is when it is added.
 - `linear_pattern` becomes a grid with `direction2`, `spacing2`, `count2`; `"direction2":
   null` makes it a row again.
 - `count` for linear and circular part patterns, and a grid's `count2`, accept a number

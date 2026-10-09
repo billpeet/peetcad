@@ -12,14 +12,20 @@
 //! from the flanges). Its two edges are square to each bend line, so the bends end
 //! cleanly and fold exactly: a line across a bend must be square or parallel to it. The
 //! region reaches past both bend zones and the strips the face gave up to them, plus a
-//! margin (`relief_size`, none for a tear relief).
+//! margin (`relief_size`, none for a tear relief). A *flush* relief reaches to where the
+//! two flanges end instead, so the bends end in line with their flanges and the corner
+//! of the flat pattern is one notch with one inside corner.
 //!
 //! **Flange ends.** Each flange's end at the corner is extended a little and then cut
 //! back against a plane of the other flange, in the folded part:
 //! - *butt*: the earlier flange runs to the later one's outer face, and the later one
 //!   stops `gap` short of the earlier one's inner face;
 //! - *overlap*: the other way round;
-//! - *open*: both stop `gap` short of the other's inner face, leaving the corner open.
+//! - *open*: both stop `gap` short of the other's inner face, leaving the corner open;
+//! - *plain*: nothing is made longer to close the corner. The earlier flange ends where
+//!   its own edge does, at the corner of the face, and the later one stops `gap` short of
+//!   the earlier one's inner face. With the later flange inside the edge that is a butt
+//!   corner; with it outside, the earlier flange is not run on to meet it.
 //!
 //! Walls through the sheet are square to it, so a cut is the line where the plane meets
 //! the flange, at whichever face of the sheet is the stricter. For the usual square
@@ -39,16 +45,20 @@ pub enum CornerKind {
     Overlap,
     /// Neither reaches the corner: both stop short of the other's inner face.
     Open,
+    /// The earlier flange ends where its own edge does and the later one stops short of
+    /// its inner face: nothing is run on to close the corner.
+    Plain,
 }
 
 impl CornerKind {
-    pub const ALL: [Self; 3] = [Self::Butt, Self::Overlap, Self::Open];
+    pub const ALL: [Self; 4] = [Self::Butt, Self::Overlap, Self::Open, Self::Plain];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Butt => "Butt",
             Self::Overlap => "Overlap",
             Self::Open => "Open",
+            Self::Plain => "Plain",
         }
     }
 }
@@ -60,15 +70,19 @@ pub enum CornerRelief {
     Rectangular,
     /// Only what the bends would otherwise share: the corner tears there.
     Tear,
+    /// Back to where the two flanges end (and never less than a tear), so each bend ends
+    /// in line with its flange.
+    Flush,
 }
 
 impl CornerRelief {
-    pub const ALL: [Self; 2] = [Self::Rectangular, Self::Tear];
+    pub const ALL: [Self; 3] = [Self::Rectangular, Self::Tear, Self::Flush];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Rectangular => "Rectangular",
             Self::Tear => "Tear",
+            Self::Flush => "Flush",
         }
     }
 }
@@ -212,10 +226,22 @@ impl Layout {
                         Some(p) => p,
                         None => break,
                     }
+                } else if k == 0 && c.spec.kind == CornerKind::Plain {
+                    // The earlier flange keeps to its own edge: it ends square at the face's
+                    // corner, wherever the later flange stands.
+                    let away = if c.ends[0] == 0 {
+                        a.along()
+                    } else {
+                        -a.along()
+                    };
+                    [
+                        vec![(away, away.dot(c.at))],
+                        self.keep_clear(fb, fa, false, gap),
+                    ]
                 } else {
                     // (keep beyond the other's outer face (true) or inner face, gap)
                     let rules = match c.spec.kind {
-                        CornerKind::Butt => [(true, 0.0), (false, gap)],
+                        CornerKind::Butt | CornerKind::Plain => [(true, 0.0), (false, gap)],
                         CornerKind::Overlap => [(false, gap), (true, 0.0)],
                         CornerKind::Open => [(false, gap), (false, gap)],
                     };
@@ -274,7 +300,14 @@ impl Layout {
 
             // The relief, cut from the face and both first bends.
             let (sa, sb) = (a.pieces[0], b.pieces[0]);
-            if let Some(area) = self.corner_relief(c, ci, size) {
+            let flush = match (c.spec.relief, planes_of.first()) {
+                (CornerRelief::Flush, Some(planes)) => Some([
+                    self.end_reach(a, c.ends[0], &planes[0], c.at),
+                    self.end_reach(b, c.ends[1], &planes[1], c.at),
+                ]),
+                _ => None,
+            };
+            if let Some(area) = self.corner_relief(c, ci, size, flush) {
                 out.cuts.push(Cut {
                     area,
                     pieces: vec![a.parent, sa, sb],
@@ -476,13 +509,57 @@ impl Layout {
         out
     }
 
-    /// The relief region of corner `c`, or `None` if it has no area.
-    fn corner_relief(&self, c: &Corner, index: usize, size: f64) -> Option<Area> {
+    /// How far from the corner, along its edge, a flange's first flat ends once it is cut
+    /// to the half-planes `planes` at its end `end`: the stricter of its fold line and its
+    /// tip line. `None` if nothing cuts it.
+    fn end_reach(
+        &self,
+        att: &crate::flange::Attachment,
+        end: usize,
+        planes: &[(DVec2, f64)],
+        at: DVec2,
+    ) -> Option<f64> {
+        let piece = &self.pieces[*att.pieces.get(1)?];
+        let (d, o) = (att.along(), att.out());
+        let (lo, hi) = rect_extent(&piece.outline, att.a, d, o);
+        let mut u = if end == 0 {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        for y in [lo.y, hi.y] {
+            let line = att.a + o * y;
+            for &(n, k) in planes {
+                // n·(line + d·x) ≥ k.
+                let slope = n.dot(d);
+                if slope.abs() < 1e-12 {
+                    continue;
+                }
+                let x = (k - n.dot(line)) / slope;
+                u = if end == 0 { u.max(x) } else { u.min(x) };
+            }
+        }
+        if !u.is_finite() {
+            return None;
+        }
+        let away = if end == 0 { d } else { -d };
+        Some((att.a + d * u - at).dot(away))
+    }
+
+    /// The relief region of corner `c`, or `None` if it has no area. `flush` is how far
+    /// from the corner each flange ends, for a relief that reaches there.
+    fn corner_relief(
+        &self,
+        c: &Corner,
+        index: usize,
+        size: f64,
+        flush: Option<[Option<f64>; 2]>,
+    ) -> Option<Area> {
         let [ia, ib] = c.attachments;
         let (a, b) = (&self.attachments[ia], &self.attachments[ib]);
         let margin = match c.spec.relief {
             CornerRelief::Rectangular => c.spec.relief_size.max(0.0),
-            CornerRelief::Tear => 0.0,
+            CornerRelief::Tear | CornerRelief::Flush => 0.0,
         };
         // Each edge's band: the trim and the bend strip, as distances into the face.
         let band = |att: &crate::flange::Attachment| -> [f64; 2] {
@@ -524,7 +601,12 @@ impl Layout {
                 reach_b = reach_b.max((p - c.at).dot(db));
             }
         }
-        let (ea, eb) = (reach_a + margin, reach_b + margin);
+        let (mut ea, mut eb) = (reach_a + margin, reach_b + margin);
+        if let Some([fa, fb]) = flush {
+            // Never less than a tear: the bends must not share any of the corner.
+            ea = ea.max(fa.unwrap_or(ea));
+            eb = eb.max(fb.unwrap_or(eb));
+        }
         if ea <= MIN_LENGTH && eb <= MIN_LENGTH {
             return None;
         }

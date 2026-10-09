@@ -1552,6 +1552,9 @@ pub fn corner_panel(
                             CornerKind::Overlap => {
                                 "The earlier flange butts against the later one (a closed corner, the other way round)."
                             }
+                            CornerKind::Plain => {
+                                "The earlier flange ends where its own edge does; the later one stops short of it. Nothing is run on to close the corner."
+                            }
                             CornerKind::Open => {
                                 "Both flanges stop short of the corner."
                             }
@@ -1582,6 +1585,9 @@ pub fn corner_panel(
                             }
                             CornerRelief::Tear => {
                                 "Only what the two bends would share is removed."
+                            }
+                            CornerRelief::Flush => {
+                                "Cut back to where the two flanges end, so each bend ends in line with its flange."
                             }
                         };
                         ui.selectable_value(&mut c.relief, r, r.label())

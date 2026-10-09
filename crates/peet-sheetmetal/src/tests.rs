@@ -1160,9 +1160,69 @@ fn corner_kinds() {
                     assert_close(bottom.max.x, W - T - gap, 1e-9);
                     assert_close(right.min.y, T + gap, 1e-9);
                 }
+                // With the flanges inside the edges a plain corner is a butt corner.
+                CornerKind::Plain => {
+                    assert_close(bottom.max.x, W, 1e-9);
+                    assert_close(right.min.y, T + gap, 1e-9);
+                }
             }
         }
     }
+}
+
+#[test]
+fn flush_corner_relief_ends_with_the_flanges() {
+    // Open corners with a flush relief: each bend ends in line with its flange, so the
+    // blank is a plain cross, twelve straight edges, with one inside corner at each corner
+    // of the plate. A rectangular relief notches each corner further in. The gap is wider
+    // than the bend radius: a flush relief is never less than a tear, which reaches past
+    // the bends, so with a narrower gap the bends would end before their flanges do.
+    let gap = R + 0.5;
+    let blank = |relief: CornerRelief| {
+        let mut layout = closed_box(settings(0.44), FlangePosition::MaterialInside, 20.0);
+        for c in &mut layout.corners {
+            c.spec = CornerSpec {
+                kind: CornerKind::Open,
+                gap,
+                relief,
+                relief_size: 1.0,
+            };
+        }
+        let (solid, body) = built(layout);
+        let flanges = box_flanges(&body);
+        let bottom = piece_bounds(&solid, &body, flanges[0]);
+        let right = piece_bounds(&solid, &body, flanges[1]);
+        // The flanges are where an open corner puts them, whatever the relief.
+        assert_close(bottom.max.x, W - T - gap, 1e-9);
+        assert_close(right.min.y, T + gap, 1e-9);
+        let outer: Vec<_> = body.outline.iter().filter(|l| l.outer).collect();
+        assert_eq!(outer.len(), 1);
+        (outer[0].edges.len(), flat_area(&body))
+    };
+    let (flush_edges, flush_area) = blank(CornerRelief::Flush);
+    let (square_edges, square_area) = blank(CornerRelief::Rectangular);
+    assert_eq!(flush_edges, 12);
+    assert!(square_edges > flush_edges);
+    // A flush relief keeps what a rectangular one cuts from the plate and the bends.
+    assert!(flush_area > square_area);
+}
+
+#[test]
+fn a_plain_corner_runs_nothing_on() {
+    // Bend outside: the flanges stand R + t outside the plate. A butt corner runs the
+    // earlier flange on to the later one's outer face; a plain corner leaves it ending
+    // where its own edge does, at the plate's corner.
+    let mut layout = closed_box(settings(0.44), FlangePosition::BendOutside, 20.0);
+    for c in &mut layout.corners {
+        c.spec.kind = CornerKind::Plain;
+    }
+    let (solid, body) = built(layout);
+    let flanges = box_flanges(&body);
+    let bottom = piece_bounds(&solid, &body, flanges[0]);
+    let right = piece_bounds(&solid, &body, flanges[1]);
+    assert_close(bottom.max.x, W, 1e-9);
+    assert_close(bottom.min.x, 0.0, 1e-9);
+    assert!(overlap(&bottom, &right) < 1e-9);
 }
 
 #[test]
