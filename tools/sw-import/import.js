@@ -765,12 +765,19 @@ function importPart(doc, dir) {
     return { k_factor: (c && c.kFactor) || v.KFactor || 0.5 };
   }
 
+  const LATER = "left for the configuration it is live in";
+  const elsewhere = doc.configurations.filter(c => c !== config && !c.flatPattern).map(flatten);
+  const liveElsewhere = name => elsewhere.some(m => m.has(name) && !m.get(name).suppressed);
+
   /**
    * A feature as SolidWorks has it: one that is suppressed is built like any other and then suppressed, in
    * every configuration. It can't be compared with anything, since SolidWorks' body does not have it.
    */
   function handle(f) {
     if (!f.suppressed || STRUCTURE.test(f.type) || f.type === "SheetMetal" || f.type === "RefPlane") return handleLive(f);
+    // One that is live in another configuration is left for that configuration: there SolidWorks' body has
+    // it, so the side a flange bends to and the like can be checked, and the part is the size it is drawn for.
+    if (cur === config && !SKETCH.test(f.type) && liveElsewhere(f.name)) return record(f, LATER);
     const before = report.features.length, had = made.has(f.name);
     handleLive({ ...f, suppressed: false });
     const names = made.get(f.name);
@@ -1329,7 +1336,7 @@ function importPart(doc, dir) {
         const before = report.features.length;
         for (const f of other.features) {
           if (f.suppressed || STRUCTURE.test(f.type) || f.type === "SheetMetal" || f.type === "RefPlane" || made.has(f.name) || sketches.has(f.name)) continue;
-          if (report.features.some(x => x.name === f.name && x.result !== "suppressed")) continue;   // tried already, where it was live
+          if (report.features.some(x => x.name === f.name && x.result !== "suppressed" && x.result !== LATER)) continue;   // tried already, where it was live
           handle(f);
         }
         entry.added = report.features.slice(before).filter(x => /^imported/.test(x.result) && !SKETCH.test(x.type)).length;

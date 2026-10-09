@@ -76,8 +76,10 @@ Besides the features, it brings over:
   refers to outside the sketch (an edge, a vertex, a reference plane) is projected in
   first. Segments are matched by where they are: the ids a relation gives are not the
   ids the sketch lists its segments under.
-- **Suppressed features**: built, then suppressed in every configuration, so that a
-  configuration, an equation or FabSys can bring them back. One that can't be built is
+- **Suppressed features.** One that is live in another configuration is left for that
+  configuration and built there, where SolidWorks' body has it to check against. One
+  that is live nowhere is built and then suppressed in every configuration, so that an
+  equation or FabSys can bring it back; it can't be checked. One that can't be built is
   recorded as suppressed, with the reason.
 - **The names of faces and edges**, with `name_face` and `name_edge`.
 - **Equations in force.** A global variable becomes a parameter, a dimension set by a

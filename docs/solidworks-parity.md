@@ -96,21 +96,22 @@ flanges. They are the right shape and do not follow the part (P8, P25, P9 still 
 |---|---|---|
 | Sketch relations and dimensions | 5,829 | 7,272 (80%); every one kept in 257 of 747 sketches |
 | Names of faces and edges | 293 | 319 |
-| Suppressed features, built and then suppressed | 228 | 414 |
+| Suppressed features: built and then suppressed, or built in the configuration they are live in | 249 | 414 |
 | Equations in force | 45 | 90 |
-| Other configurations that match SolidWorks | 35 | 85, in 50 parts; 12 more are the right size with the volume within 5% |
+| Other configurations that match SolidWorks | 36 | 85, in 50 parts; 16 more are the right size with the volume within 5% |
 
-In 15 of the 50 parts with more than one configuration, every configuration matches.
-Importing more suppressed features (228 where it was 167) did not help the other
-configurations: one fewer matches and five more differ outright, because a feature
-brought back in a configuration is built unchecked and some come back wrong.
+In 16 of the 50 parts with more than one configuration, every configuration matches.
+Of the 49 configurations that do not, 43 are of parts whose active configuration does
+not match either: what holds them back is the same features, not configurations.
 
 - **Relations that were dropped.** Coincident relations PeetCAD refused (most join
   points the importer had already joined); redundant ones, which SolidWorks accepts and
   PeetCAD calls over-defined (P27); ones to something outside the sketch that could not
   be projected; sketch patterns and at-intersection, which have no match.
-- **Suppressed features** are built and then suppressed in every configuration, and
-  brought back in the configurations where SolidWorks has them live. 243 could not be
+- **Suppressed features.** One that is live in another configuration is built there,
+  where SolidWorks' body has it and it can be checked (a flange built where it is
+  suppressed came out on the wrong side as often as not), and suppressed elsewhere.
+  One that is live nowhere is built and then suppressed in every configuration. 243 could not be
   built: there is nothing to compare a suppressed feature with, so the side of a flange
   or the direction of a pattern is not checked, and many are old leftovers.
 - **Equations.** A global variable becomes a parameter; a dimension set by a formula
