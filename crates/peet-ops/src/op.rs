@@ -17,7 +17,7 @@ use crate::library::{CheckRule, Gauge};
 use crate::mate::{MateChange, MateEndSel, MateSel, MateType};
 use crate::session::SessionCommand;
 use crate::sketch::{self, DrawItem};
-use crate::value::{Configs, EdgeSel, FeatureSel, GeomSel, Input, PlaneSel};
+use crate::value::{Configs, EdgeSel, FaceSel, FeatureSel, GeomSel, Input, PlaneSel};
 
 word_enum! {
     /// A sample part that comes with PeetCAD.
@@ -301,6 +301,20 @@ pub enum Op {
         name: String,
         value: Input,
         configurations: Option<Configs>,
+    },
+    /// Bind a user name to a persistent face reference.
+    NameFace {
+        face: FaceSel,
+        name: String,
+    },
+    /// Bind a user name to a persistent edge reference.
+    NameEdge {
+        edge: EdgeSel,
+        name: String,
+    },
+    /// Remove a user geometry name without changing the geometry.
+    DeleteName {
+        name: String,
     },
     Rename {
         feature: FeatureSel,
@@ -612,6 +626,9 @@ impl Op {
             Self::Sketch { .. } => "sketch",
             Self::Draw { .. } => "draw",
             Self::SetDimension { .. } => "set_dimension",
+            Self::NameFace { .. } => "name_face",
+            Self::NameEdge { .. } => "name_edge",
+            Self::DeleteName { .. } => "delete_name",
             Self::Rename { .. } => "rename",
             Self::Suppress { .. } => "suppress",
             Self::SetSuppressionExpression { .. } => "set_suppression_expression",
@@ -793,6 +810,9 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
         "feature, then any of the feature's fields ('on' for a sketch: its plane), configurations (\"this\", \"all\", a name or a list of names: for numeric fields only; left out: this one for a value that already differs between configurations, else all)",
         "Change fields of a feature. Its numeric values can differ between configurations.",
     ),
+    ("name_face", "face, name", "Assign a user name to a face, including a curved face."),
+    ("name_edge", "edge, name", "Assign a user name to an edge."),
+    ("delete_name", "name", "Remove a user geometry name."),
     ("rename", "feature, name", "Rename a feature."),
     (
         "set_suppression_expression",
@@ -1215,6 +1235,17 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
                 configurations,
             }
         }
+        "name_face" => Op::NameFace {
+            face: a.required("face", FaceSel::parse)?,
+            name: a.required("name", |v| text(v).map(str::to_owned))?,
+        },
+        "name_edge" => Op::NameEdge {
+            edge: a.required("edge", EdgeSel::parse)?,
+            name: a.required("name", |v| text(v).map(str::to_owned))?,
+        },
+        "delete_name" => Op::DeleteName {
+            name: a.required("name", |v| text(v).map(str::to_owned))?,
+        },
         "rename" => Op::Rename {
             feature: feature(a, "feature")?,
             name: a.required("name", |v| text(v).map(str::to_owned))?,

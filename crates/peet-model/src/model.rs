@@ -80,9 +80,12 @@ pub struct Model {
     /// features of its own (see [`crate::Assembly`]).
     #[serde(default)]
     assembly: Option<Arc<Assembly>>,
+    /// User names bound to persistent geometry, shared by all configurations.
+    #[serde(default)]
+    pub geometry_names: BTreeMap<String, crate::naming::NamedGeometry>,
 }
 
-/// The model layout shared by schemas 8 and 9, parameterized by their feature layout.
+/// The model layout shared by schemas 8 through 10, parameterized by their feature layout.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelLegacy<F> {
     name: String,
@@ -102,6 +105,8 @@ pub struct ModelLegacy<F> {
 pub type ModelV8 = ModelLegacy<FeatureV8>;
 /// A schema 9 model: sketch projections, with literal pattern counts and no suppression rules.
 pub type ModelV9 = ModelLegacy<FeatureV9>;
+/// A schema 10 model: projections and suppression rules, before user geometry names.
+pub type ModelV10 = ModelLegacy<Feature>;
 
 impl<F: From<Feature>> ModelLegacy<F> {
     /// The old layout, used to verify migration of parts and nested assemblies.
@@ -136,6 +141,7 @@ impl<F: Into<Feature>> From<ModelLegacy<F>> for Model {
             material: m.material,
             color: m.color,
             assembly: m.assembly.map(|a| Arc::new(a.into())),
+            geometry_names: BTreeMap::new(),
         }
     }
 }
@@ -169,6 +175,7 @@ impl From<ModelV7> for Model {
             material: None,
             color: None,
             assembly: None,
+            geometry_names: BTreeMap::new(),
         }
     }
 }
@@ -217,6 +224,7 @@ impl From<ModelV4> for Model {
             material: None,
             color: None,
             assembly: None,
+            geometry_names: BTreeMap::new(),
         }
     }
 }
@@ -249,6 +257,7 @@ impl From<ModelV5> for Model {
             material: None,
             color: None,
             assembly: None,
+            geometry_names: BTreeMap::new(),
         }
     }
 }
@@ -267,6 +276,7 @@ impl Default for Model {
             material: None,
             color: None,
             assembly: None,
+            geometry_names: BTreeMap::new(),
         }
     }
 }
@@ -718,6 +728,16 @@ impl Model {
     /// Restores invariants after loading a model from a file: ids are unique and
     /// `next_id` is beyond all of them. Returns an error for a model that can't be used.
     pub fn validate(&mut self) -> Result<(), String> {
+        if self
+            .geometry_names
+            .keys()
+            .any(|name| name.trim().is_empty() || name != name.trim())
+        {
+            return Err(
+                "The model is damaged: a geometry name is empty or has surrounding whitespace."
+                    .to_owned(),
+            );
+        }
         let mut seen = std::collections::HashSet::new();
         for f in &self.features {
             if !seen.insert(f.id) {

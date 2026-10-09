@@ -248,6 +248,8 @@ fn index(v: &Value) -> Result<usize, String> {
 /// A description of a face. Every field given must match, and exactly one face must.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct FaceQuery {
+    /// A user geometry name assigned with name_face or name_edge.
+    pub name: Option<String>,
     /// A point on the face.
     pub at: Option<[f64; 3]>,
     /// Its outward normal (at `at` for a curved face).
@@ -266,9 +268,10 @@ impl FaceQuery {
         let map = fields(
             v,
             "A face",
-            &["at", "normal", "feature", "side", "body", "index"],
+            &["name", "at", "normal", "feature", "side", "body", "index"],
         )?;
         Ok(Self {
+            name: field(map, "name", |v| text(v).map(str::to_owned))?,
             at: field(map, "at", coordinates::<3>)?,
             normal: field(map, "normal", coordinates::<3>)?,
             feature: field(map, "feature", FeatureSel::parse)?,
@@ -280,6 +283,9 @@ impl FaceQuery {
 
     pub(crate) fn json(&self) -> Value {
         let mut m = Map::new();
+        if let Some(n) = &self.name {
+            m.insert("name".to_owned(), json!(n));
+        }
         if let Some(p) = self.at {
             m.insert("at".to_owned(), json!(p));
         }
@@ -346,6 +352,8 @@ impl FaceSel {
 /// A description of an edge. Every field given must match, and exactly one edge must.
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct EdgeQuery {
+    /// A user geometry name assigned with name_face or name_edge.
+    pub name: Option<String>,
     /// Its two ends, in either order.
     pub between: Option<[[f64; 3]; 2]>,
     /// A point on it.
@@ -359,8 +367,13 @@ pub struct EdgeQuery {
 
 impl EdgeQuery {
     fn parse(v: &Value) -> Result<Self, String> {
-        let map = fields(v, "An edge", &["between", "at", "faces", "body", "index"])?;
+        let map = fields(
+            v,
+            "An edge",
+            &["name", "between", "at", "faces", "body", "index"],
+        )?;
         Ok(Self {
+            name: field(map, "name", |v| text(v).map(str::to_owned))?,
             between: field(map, "between", |b| match list(b)? {
                 [p, q] => Ok([coordinates::<3>(p)?, coordinates::<3>(q)?]),
                 _ => Err(format!("expected two points, not {b}")),
@@ -377,6 +390,9 @@ impl EdgeQuery {
 
     pub(crate) fn json(&self) -> Value {
         let mut m = Map::new();
+        if let Some(n) = &self.name {
+            m.insert("name".to_owned(), json!(n));
+        }
         if let Some(p) = self.between {
             m.insert("between".to_owned(), json!(p));
         }

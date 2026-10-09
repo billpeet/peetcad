@@ -34,6 +34,7 @@ mod assembly;
 mod convert;
 #[cfg(not(target_arch = "wasm32"))]
 mod live;
+mod names;
 pub mod scripting;
 mod solids;
 
@@ -122,6 +123,7 @@ pub struct PeetApp {
     hovered_geom: Option<GeomRef>,
     /// Selected body faces, edges and vertices.
     selected_geom: Vec<GeomRef>,
+    geometry_name_editor: names::NameEditor,
     /// A feature reference waiting to be clicked in the viewport.
     picking: Option<(FeatureId, Slot)>,
     /// New Sketch is waiting for a face or plane to be clicked.
@@ -272,6 +274,7 @@ impl PeetApp {
             values_this_only: false,
             hovered_geom: None,
             selected_geom: Vec::new(),
+            geometry_name_editor: names::NameEditor::default(),
             picking: None,
             picking_sketch_plane: false,
             status_message: None,
@@ -356,6 +359,7 @@ impl PeetApp {
         self.selected_component = None;
         self.hovered_component = None;
         self.component_name = None;
+        self.geometry_name_editor = names::NameEditor::default();
         self.selected_mate = None;
         self.selected_explode = None;
         self.selected_pattern = None;
@@ -2619,7 +2623,7 @@ impl PeetApp {
             return;
         }
         if !self.selected_geom.is_empty() {
-            self.geometry_properties(ui);
+            egui::ScrollArea::vertical().show(ui, |ui| self.geometry_properties(ui));
             return;
         }
         match self.selected {
@@ -2651,6 +2655,7 @@ impl PeetApp {
             }
             _ => {
                 ui.weak("Select an item in the feature tree, or a face, edge or vertex in the view, to see its properties.");
+                egui::ScrollArea::vertical().show(ui, |ui| self.existing_geometry_names_ui(ui));
             }
         }
     }
@@ -2892,7 +2897,7 @@ impl PeetApp {
         }
     }
 
-    fn geometry_properties(&self, ui: &mut Ui) {
+    fn geometry_properties(&mut self, ui: &mut Ui) {
         let units = self.doc.model.parameters.units;
         for (index, g) in self.selected_geom.iter().enumerate() {
             let Some(body) = self.doc.bodies.get(g.body()) else {
@@ -2943,6 +2948,7 @@ impl PeetApp {
             ui.add_space(4.0);
         }
         self.between_rows(ui);
+        self.geometry_names_ui(ui);
         ui.add_space(6.0);
         if self.selected_geom.len() == 1 {
             ui.weak(

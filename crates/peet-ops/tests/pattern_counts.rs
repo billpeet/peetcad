@@ -229,17 +229,17 @@ fn model_diff_replays_expression_counts() {
         .unwrap()
         .id;
     let mut wanted = doc.model.clone();
-    if let peet_model::FeatureKind::Pattern(p) = &mut wanted.feature_mut(id).unwrap().kind {
-        if let peet_model::PatternDef::Linear { first, .. } = &mut p.def {
-            first
-                .count
-                .set_input(
-                    "if(width > 299mm, 3, 2)",
-                    peet_model::ScalarKind::Number,
-                    &doc.model.parameters,
-                )
-                .unwrap();
-        }
+    if let peet_model::FeatureKind::Pattern(p) = &mut wanted.feature_mut(id).unwrap().kind
+        && let peet_model::PatternDef::Linear { first, .. } = &mut p.def
+    {
+        first
+            .count
+            .set_input(
+                "if(width > 299mm, 3, 2)",
+                peet_model::ScalarKind::Number,
+                &doc.model.parameters,
+            )
+            .unwrap();
     }
     let ops = peet_ops::diff(&doc, &wanted).unwrap();
     assert_eq!(ops.len(), 1);

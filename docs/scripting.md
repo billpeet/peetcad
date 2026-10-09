@@ -171,6 +171,23 @@ rounding down in document units. Part pattern counts also accept expressions.
 
 ## Selectors
 
+In the UI, select a face or edge in a part's viewport and use **Properties > Names** to
+add a name or remove an existing binding. With nothing selected, Properties lists
+all names, including unavailable targets, so you can remove stale bindings. The same
+actions are operations.
+
+Use `name_face` with `face` and `name`, or `name_edge` with `edge` and `name`, to
+bind a user name to geometry already built. `delete_name` with `name` removes the
+binding. Names are case-sensitive, unique across faces and edges in each part, saved
+with the model and shared by all configurations. Select them with `{"name": "Front"}`;
+other selector fields can still restrict the match. `faces` and `edges` include a
+`names` array for each item. Curved faces, including hole walls, can be named and
+used in mates; sketch planes still require flat faces. Names follow the existing
+persistent references through rebuilds, selecting one best match after a split.
+Suppression, rollback or deletion can leave a name unresolved. Restore its geometry
+or remove and reassign the name. Existing sketch and mate references survive removal
+of the user name.
+
 A selector must match exactly one thing. If it matches none or several, the error lists
 the candidates. All the fields given must match.
 
@@ -179,8 +196,8 @@ the candidates. All the fields given must match.
 | plane | `"top"`, `"front"`, `"right"`, a reference plane's name, or a face selector (a flat face) |
 | axis | `"x"`, `"y"`, `"z"`, a reference axis's name, or an edge selector |
 | point | `"origin"`, a reference point's name, or a vertex selector |
-| face | `{"at": [x,y,z]}` a point on it · `{"normal": [x,y,z]}` its outward normal · `{"feature": "Extrude1", "side": "end"}` what made it · `{"body": 0, "index": 5}` from `faces` |
-| edge | `{"between": [[x,y,z],[x,y,z]]}` its ends · `{"at": [x,y,z]}` a point on it · `{"faces": [face, face]}` where two faces meet · `{"body": 0, "index": 7}` from `edges` |
+| face | `{"name": "Front"}` a user name · `{"at": [x,y,z]}` a point on it · `{"normal": [x,y,z]}` its outward normal · `{"feature": "Extrude1", "side": "end"}` what made it · `{"body": 0, "index": 5}` from `faces` |
+| edge | `{"name": "HingeEdge"}` a user name · `{"between": [[x,y,z],[x,y,z]]}` its ends · `{"at": [x,y,z]}` a point on it · `{"faces": [face, face]}` where two faces meet · `{"body": 0, "index": 7}` from `edges` |
 | vertex | `{"at": [x,y,z]}` · `{"body": 0, "index": 2}` |
 
 Sides: `start`, `end`, `side` for extrusions, revolves, sweeps and holes; `blend` for a

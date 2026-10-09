@@ -437,3 +437,32 @@ pub fn find_vertex(bodies: &[Arc<Body>], r: &VertexRef) -> Option<Found<VertexId
     }
     best(&scored)
 }
+
+/// A user name targets geometry through the same reference used by sketches and mates.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum NamedGeometry {
+    Face(FaceRef),
+    Edge(EdgeRef),
+}
+
+impl crate::Model {
+    /// Assign a unique, case-sensitive name. Remove an existing binding before reusing it.
+    pub fn name_geometry(&mut self, name: &str, target: NamedGeometry) -> Result<(), String> {
+        if name.trim().is_empty() || name != name.trim() {
+            return Err(
+                "A geometry name must be nonempty and have no surrounding whitespace.".to_owned(),
+            );
+        }
+        if self
+            .geometry_names
+            .get(name)
+            .is_some_and(|old| old != &target)
+        {
+            return Err(format!(
+                "Geometry is already named '{name}'. Remove that name before reusing it."
+            ));
+        }
+        self.geometry_names.insert(name.to_owned(), target);
+        Ok(())
+    }
+}

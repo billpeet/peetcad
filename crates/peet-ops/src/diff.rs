@@ -612,6 +612,27 @@ pub fn diff_scoped(
             });
         }
     }
+    // User geometry names follow persistent references, as do sketches and mates.
+    for (name, target) in &old.geometry_names {
+        if new.geometry_names.get(name) != Some(target) {
+            ops.push(Op::DeleteName { name: name.clone() });
+        }
+    }
+    for (name, target) in &new.geometry_names {
+        if old.geometry_names.get(name) != Some(target) {
+            ops.push(match target {
+                peet_model::naming::NamedGeometry::Face(r) => Op::NameFace {
+                    face: r.clone().into(),
+                    name: name.clone(),
+                },
+                peet_model::naming::NamedGeometry::Edge(r) => Op::NameEdge {
+                    edge: r.clone().into(),
+                    name: name.clone(),
+                },
+            });
+        }
+    }
+
     Ok(ops)
 }
 

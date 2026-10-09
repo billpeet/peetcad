@@ -51,8 +51,10 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 /// - Model 10: feature suppression expressions and scalar pattern counts. Earlier
 ///   features have no rule and literal counts migrate to numeric scalars, including
 ///   inside nested assembly definitions.
+/// - Model 11: user names for faces and edges. Schema 10 models, including nested
+///   assembly definitions, are read as [`peet_model::ModelV10`] and converted.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 10;
+pub const MODEL_SCHEMA: u16 = 11;
 /// The last model schema without configurations.
 const MODEL_SCHEMA_BEFORE_CONFIGURATIONS: u16 = 4;
 /// The last model schema without materials and assemblies.
@@ -183,6 +185,9 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
             .map(Model::from),
         Some(9) => r
             .read::<peet_model::ModelV9>(SectionKind::MODEL)?
+            .map(Model::from),
+        Some(10) => r
+            .read::<peet_model::ModelV10>(SectionKind::MODEL)?
             .map(Model::from),
         _ => r.read(SectionKind::MODEL)?,
     };
@@ -378,6 +383,28 @@ mod tests {
     }
 
     #[test]
+    fn schema_10_nested_assemblies_still_open() {
+        let (mut part, _) = bracket();
+        let feature = part.features().next().unwrap().id;
+        part.feature_mut(feature).unwrap().suppression_expression = Some("1 < 0".to_owned());
+        let mut sub = Model::new_assembly();
+        let def = sub.assembly_mut().unwrap().define(Arc::new(part));
+        sub.assembly_mut()
+            .unwrap()
+            .insert(def, peet_math::Frame::WORLD);
+        let mut outer = Model::new_assembly();
+        let def = outer.assembly_mut().unwrap().define(Arc::new(sub));
+        outer
+            .assembly_mut()
+            .unwrap()
+            .insert(def, peet_math::Frame::WORLD);
+        let mut w = Writer::new();
+        w.section(SectionKind::MODEL, 10, &peet_model::ModelV10::of(&outer))
+            .unwrap();
+        assert_eq!(open(&w.finish()).unwrap().model, outer);
+    }
+
+    #[test]
     fn models_from_before_materials_still_open() {
         let (mut model, _) = bracket();
         // As versions 6 and 7 wrote it: the same fields, without the material, the colour
@@ -510,16 +537,16 @@ mod tests {
             .id;
         // Use the evaluated table when assigning the stored expression.
         let params = model.parameters.clone();
-        if let peet_model::FeatureKind::Pattern(p) = &mut model.feature_mut(id).unwrap().kind {
-            if let peet_model::PatternDef::Circular { count, .. } = &mut p.def {
-                count
-                    .set_input(
-                        "if(copies > 5, copies, 4)",
-                        peet_model::ScalarKind::Number,
-                        &params,
-                    )
-                    .unwrap();
-            }
+        if let peet_model::FeatureKind::Pattern(p) = &mut model.feature_mut(id).unwrap().kind
+            && let peet_model::PatternDef::Circular { count, .. } = &mut p.def
+        {
+            count
+                .set_input(
+                    "if(copies > 5, copies, 4)",
+                    peet_model::ScalarKind::Number,
+                    &params,
+                )
+                .unwrap();
         }
         let bytes = save(&model, &Metadata::default(), None).unwrap();
         assert_eq!(
