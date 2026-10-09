@@ -71,22 +71,22 @@ From four parts, so these are sightings, not counts for the library.
 
 ## What the importer found
 
-All 201 parts were run through `tools/sw-import` on 9 October 2026, from the second
-export (which says whether an extrude is a boss or a cut, and where each relation's
-entities are). The parts, the operations that made them and a report each are in
-`C:\Users\marti\source\peetcad-imports\library`.
+All 201 parts were run through `tools/sw-import` on 10 October 2026, from the third
+export (which adds what is inside sketch blocks, the way each dimension measures and
+the selections of most suppressed features). The parts, the operations that made them
+and a report each are in `C:\Users\marti\source\peetcad-imports\library`.
 
 **Shape, in the active configuration:**
 
 | Result | Parts |
 |---|---|
-| Matches SolidWorks: volume, bounding box and flat size | 89 |
-| Same size and flat pattern, volume within 5% | 25 (10 within 0.01%, 19 within 0.1%) |
+| Matches SolidWorks: volume, bounding box and flat size | 93 |
+| Same size and flat pattern, volume within 5% | 27 |
 | Everything imported, but it differs | 16 |
-| A feature could not be imported | 65 |
+| A feature could not be imported | 59 |
 | Nothing built | 6 |
 
-Of the 89, the ones with break corners, hole wizard slots or mirrored flanges match
+Of the 93, the ones with break corners, hole wizard slots or mirrored flanges match
 because the importer stands in for those features with sheet metal cuts and separate
 flanges. They are the right shape and do not follow the part (P8, P25, P9 still stand).
 
@@ -94,13 +94,16 @@ flanges. They are the right shape and do not follow the part (P8, P25, P9 still 
 
 | | Imported | Of |
 |---|---|---|
-| Sketch relations and dimensions | 5,895 | 7,319 (81%); every one kept in 254 of 737 sketches |
+| Sketch relations and dimensions | 5,829 | 7,272 (80%); every one kept in 257 of 747 sketches |
 | Names of faces and edges | 293 | 319 |
-| Suppressed features, built and then suppressed | 170 | 413 |
+| Suppressed features, built and then suppressed | 228 | 414 |
 | Equations in force | 45 | 90 |
-| Other configurations that match SolidWorks | 36 | 85, in 50 parts; 16 more are the right size with the volume within 5% |
+| Other configurations that match SolidWorks | 35 | 85, in 50 parts; 12 more are the right size with the volume within 5% |
 
-In 14 of the 50 parts with more than one configuration, every configuration matches.
+In 15 of the 50 parts with more than one configuration, every configuration matches.
+Importing more suppressed features (228 where it was 167) did not help the other
+configurations: one fewer matches and five more differ outright, because a feature
+brought back in a configuration is built unchecked and some come back wrong.
 
 - **Relations that were dropped.** Coincident relations PeetCAD refused (most join
   points the importer had already joined); redundant ones, which SolidWorks accepts and
@@ -145,8 +148,8 @@ flange's set-back read wrongly when its outline is drawn from the other face of 
 sheet, and a hole wizard feature's slots all cut on one face when they are on several.
 The rest are P28, P35 and:
 
-- **Sketch blocks** (P14): Castor Heavy Duty's holes are in a block, which the exporter
-  does not read, so they are missing.
+- **Sketch blocks** (P14): Castor Heavy Duty's holes are in a block. The third export
+  reads blocks and the importer draws them as plain geometry, so it now matches.
 - **Back Wall and Wall Middle** lack a pattern's holes on a flange. Not yet looked into.
 
 **Still the importer's to do**, not PeetCAD's: 12 parts where a cut's sketch found no
