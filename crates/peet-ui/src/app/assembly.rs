@@ -8,11 +8,12 @@ use egui::{RichText, Ui};
 use peet_math::{DQuat, DVec3};
 use peet_model::{
     CompId, ExplodeId, MateEnd, MateGeom, MateId, MateKind, PatternId, PatternKind, PatternLine,
-    PatternStep, Scalar, ScalarKind, Status,
+    PatternStep, Scalar, ScalarKind, Status, WidthMode,
 };
 use peet_ops::{
     CompSel, ComponentChange, ExplodeChange, Input, InsertSource, MateChange, MateEndSel, MateType,
     Op, PatternChange, PatternLineSel, PatternSpec, PatternStepSpec, Placing, Point3, Source,
+    WidthModeSel,
 };
 
 use crate::bodies::GeomRef;
@@ -1458,14 +1459,16 @@ impl PeetApp {
                         ui.close();
                     }
                 };
-                pick(
-                    ui,
-                    "Flip",
-                    MateChange::Edit {
-                        value: None,
-                        flip: Some(!m.flip),
-                    },
-                );
+                if !matches!(m.kind, MateKind::Width { .. }) {
+                    pick(
+                        ui,
+                        "Flip",
+                        MateChange::Edit {
+                            value: None,
+                            flip: Some(!m.flip),
+                        },
+                    );
+                }
                 pick(
                     ui,
                     if m.suppressed {
@@ -1600,7 +1603,14 @@ impl PeetApp {
                 end.component().map_or("?", |c| assembly.name_of(c))
             )
         };
-        let (first, second) = (end(&mate.a), end(&mate.b));
+        let (first, second) = match &mate.kind {
+            MateKind::Width { a2, b2, .. } => (
+                format!("{}; {}", end(&mate.a), end(a2)),
+                b2.as_ref()
+                    .map_or_else(|| end(&mate.b), |e| format!("{}; {}", end(&mate.b), end(e))),
+            ),
+            _ => (end(&mate.a), end(&mate.b)),
+        };
         // The value in what the user sees: document units, or degrees.
         let params = &self.doc.model.parameters;
         let mut value = match &mate.kind {
@@ -1612,8 +1622,27 @@ impl PeetApp {
                 .evaluate(ScalarKind::Angle, params)
                 .ok()
                 .map(|deg| (deg, "°".to_owned())),
+            MateKind::Width {
+                mode: WidthMode::Dimension(s),
+                ..
+            } => s
+                .evaluate(ScalarKind::Length, params)
+                .ok()
+                .map(|mm| (units.from_mm(mm), format!(" {}", units.length.suffix()))),
+            MateKind::Width {
+                mode: WidthMode::Percent(s),
+                ..
+            } => s
+                .evaluate(ScalarKind::Number, params)
+                .ok()
+                .map(|v| (v, "%".to_owned())),
             _ => None,
         };
+        let mut width_mode = match &mate.kind {
+            MateKind::Width { mode, .. } => Some(mode.word().to_owned()),
+            _ => None,
+        };
+        let was_mode = width_mode.clone();
         let was = value.as_ref().map(|v| v.0);
         let mut flip = mate.flip;
         ui.strong(&mate.name);
@@ -1630,8 +1659,28 @@ impl PeetApp {
                     ui.label(&second);
                 });
                 ui.end_row();
+                if let Some(mode) = &mut width_mode {
+                    ui.label("Mode");
+                    egui::ComboBox::from_id_salt("width_mode")
+                        .selected_text(mode.as_str())
+                        .show_ui(ui, |ui| {
+                            for name in ["centered", "free", "dimension", "percent"] {
+                                ui.selectable_value(mode, name.to_owned(), name);
+                            }
+                        });
+                    ui.end_row();
+                    if Some(&*mode) != was_mode.as_ref() {
+                        value = match mode.as_str() {
+                            "dimension" => Some((0.0, format!(" {}", units.length.suffix()))),
+                            "percent" => Some((50.0, "%".to_owned())),
+                            _ => None,
+                        };
+                    }
+                }
                 if let Some((v, suffix)) = &mut value {
-                    ui.label(if matches!(mate.kind, MateKind::Angle(_)) {
+                    ui.label(if width_mode.as_deref() == Some("percent") {
+                        "Percent"
+                    } else if matches!(mate.kind, MateKind::Angle(_)) {
                         "Angle"
                     } else {
                         "Distance"
@@ -1644,11 +1693,13 @@ impl PeetApp {
                     );
                     ui.end_row();
                 }
-                ui.label("Flip").on_hover_text(
-                    "Two flat faces are put against each other. Flipped, they look the same way: two side faces flush.",
-                );
-                ui.checkbox(&mut flip, "");
-                ui.end_row();
+                if width_mode.is_none() {
+                    ui.label("Flip").on_hover_text(
+                        "Two flat faces are put against each other. Flipped, they look the same way: two side faces flush.",
+                    );
+                    ui.checkbox(&mut flip, "");
+                    ui.end_row();
+                }
             });
         if let Some(message) = status.as_ref().and_then(Status::message) {
             ui.add_space(6.0);
@@ -1658,6 +1709,20 @@ impl PeetApp {
             });
         }
         let new = value.map(|v| v.0).filter(|v| Some(*v) != was);
+        if let Some(mode) = width_mode {
+            if Some(&mode) != was_mode.as_ref() || new.is_some() {
+                let mode = match mode.as_str() {
+                    "free" => WidthModeSel::Free,
+                    "dimension" => {
+                        WidthModeSel::Dimension(Input::Number(new.or(was).unwrap_or(0.0)))
+                    }
+                    "percent" => WidthModeSel::Percent(Input::Number(new.or(was).unwrap_or(50.0))),
+                    _ => WidthModeSel::Centered,
+                };
+                self.change_mate(id, MateChange::Width(mode));
+            }
+            return;
+        }
         if new.is_some() || flip != mate.flip {
             self.change_mate(
                 id,

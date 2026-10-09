@@ -476,6 +476,8 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `open_component` | `component`: opens its part as a document of its own and makes it current. `save` without a `path` on that document stores it back, as one undo step of the assembly, for every component of the part. Needs a session |
 | `components` | every component (`id`, `name`, `part`, `at`, `rotate`, `fixed`, `freedom`, `mates`, `status`, `message`, `min`, `max`) and every part (`id`, `name`, `kind`, how many `components`, `material`); how many `mates`, and the `freedom` left |
 | `mate` | `type` (`coincident`, `concentric`, `parallel`, `distance`, `angle`, `fasten`), `a`, `b`, `distance` or `angle` for those types, `flip`, `name`. An end is `{"component": …, "face": selector}` (or `"edge"`, `"vertex"`, `"plane"`), the selector in the part's own coordinates. `component` is a name, id or nonempty path array from the top-level component down through sub-assemblies. `plane` takes `"top"`, `"front"`, `"right"`, a reference plane or coordinate system by name or id, or a planar face selector; for `fasten` the component alone |
+| `mate`, `type: "width"` | `a`: two planar ends, the width pair. `b`: two planar ends, the tab pair, or one cylindrical face / edge used as an axis. `mode`: `centered` by default, `free`, `dimension` with `distance`, or `percent` with `percent`. Values accept numbers or expressions. Each pair is parallel, distinct and within one top-level component; the width pair and tab are on different components. No `flip`. `name` |
+| `edit_mate` for width | `mate`, `mode`, and `distance` for Dimension or `percent` for Percent. `distance` alone edits a Dimension mate; `percent` alone selects/edits Percent. Rename, suppress and delete use the ordinary mate operations |
 | `edit_mate` | `mate`, and `distance` or `angle`, `flip` |
 | `rename`, `suppress`, `delete` | `mate` in place of `feature` |
 | `mates` | every mate (`id`, `name`, `type`, `a`, `b`, `distance` or `angle`, `flip`, `status`, `message`) and the `freedom` left |
@@ -535,6 +537,22 @@ they are. A missing or suppressed nested plane/component makes its mate fail unt
 restored. `mates` reports nested ends' full `path` and plane ends' current `plane` name.
 Component pattern directions also accept plane normals and nested paths through the
 same end selectors.
+
+**Width mates** align the tab pair's midplane with the width pair's midplane. The
+available clearance is the width span minus the tab span; for a cylindrical tab the
+span is its diameter, and an edge selected as an axis has zero thickness. Centered
+divides the clearance equally. Free lets the tab slide within it, including during
+`place` and `drag`. Dimension sets the nearest surface gap from the first width end;
+Percent sets its share of the available clearance, from 0 at the first width end to
+100 at the second. Pair ordering therefore selects the side used by Dimension and
+Percent, without changing centering. Values follow assembly parameters. Parallel
+planar pairs are supported; drafted/nonparallel and coincident pairs fail explicitly.
+A tab wider than the gap or a value beyond the available clearance also fails and
+recovers when corrected. Geometry edits recompute midpoint and clearance, and all
+ends remain persistent references. Query replies give `a` and paired `b` as arrays,
+plus `mode`, and `distance` or `percent` when applicable. A single-axis `b` stays an
+object. Width mates keep the nearest orientation. Their properties show the pairs
+and allow mode/value editing.
 
 **Linked parts** (desktop only: they are files on disk, and are refused in the browser).
 A linked part is read from its file when the assembly is opened, by `update_links`, and

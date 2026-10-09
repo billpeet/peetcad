@@ -11,6 +11,7 @@ use peet_document::Document;
 use peet_math::Frame;
 use peet_model::{
     Assembly, CompId, Mate, MateEnd, MateGeom, MateId, MateKind, Model, ScalarKind, Status,
+    WidthMode,
 };
 use serde_json::{Map, Value, json};
 
@@ -220,18 +221,88 @@ pub enum MateType {
     /// Hold the second component where it is relative to the first, or (what the
     /// application passes) at this placement in the first's coordinates.
     Fasten(Option<Frame>),
+    Width {
+        a2: Box<MateEndSel>,
+        b2: Option<Box<MateEndSel>>,
+        mode: WidthModeSel,
+    },
 }
 
-const TYPES: &str = "coincident, concentric, parallel, distance, angle, fasten";
+#[derive(Clone, Debug, PartialEq)]
+pub enum WidthModeSel {
+    Centered,
+    Free,
+    Dimension(Input),
+    Percent(Input),
+}
+
+impl WidthModeSel {
+    fn parse(a: &mut Args) -> Result<Self, String> {
+        let mode = a.string("mode")?.unwrap_or_else(|| {
+            if a.has("percent") {
+                "percent"
+            } else if a.has("distance") {
+                "dimension"
+            } else {
+                "centered"
+            }
+            .to_owned()
+        });
+        Ok(match mode.as_str() {
+            "centered" => Self::Centered,
+            "free" => Self::Free,
+            "dimension" => Self::Dimension(a.required("distance", Input::parse)?),
+            "percent" => Self::Percent(a.required("percent", Input::parse)?),
+            _ => return Err("Width mode must be centered, free, dimension or percent.".to_owned()),
+        })
+    }
+
+    fn resolve(&self, doc: &Document) -> Result<WidthMode, String> {
+        Ok(match self {
+            Self::Centered => WidthMode::Centered,
+            Self::Free => WidthMode::Free,
+            Self::Dimension(v) => WidthMode::Dimension(v.scalar(ScalarKind::Length, doc)?),
+            Self::Percent(v) => WidthMode::Percent(v.scalar(ScalarKind::Number, doc)?),
+        })
+    }
+}
+
+const TYPES: &str = "coincident, concentric, parallel, distance, angle, fasten, width";
 
 impl MateType {
-    fn parse(a: &mut Args) -> Result<Self, String> {
+    fn parse(a: &mut Args) -> Result<(Self, MateEndSel, MateEndSel), String> {
         let word = a.required("type", |v| text(v).map(str::to_owned))?;
+        if word == "width" {
+            let pair = |v: &Value| -> Result<(MateEndSel, MateEndSel), String> {
+                let ends = v.as_array().filter(|v| v.len() == 2).ok_or_else(|| {
+                    "A width mate pair needs an array of exactly two mate ends.".to_owned()
+                })?;
+                Ok((MateEndSel::parse(&ends[0])?, MateEndSel::parse(&ends[1])?))
+            };
+            let (first, a2) = a.required("a", pair)?;
+            let (second, b2) = a.required("b", |v| {
+                if v.is_array() {
+                    pair(v).map(|(b, b2)| (b, Some(Box::new(b2))))
+                } else {
+                    MateEndSel::parse(v).map(|b| (b, None))
+                }
+            })?;
+            let mode = WidthModeSel::parse(a)?;
+            return Ok((
+                Self::Width {
+                    a2: Box::new(a2),
+                    b2,
+                    mode,
+                },
+                first,
+                second,
+            ));
+        }
         let value = |a: &mut Args, key: &str| {
             a.parsed(key, Input::parse)?
                 .ok_or_else(|| format!("A {word} mate needs a '{key}' field."))
         };
-        Ok(match word.as_str() {
+        let kind = match word.as_str() {
             "coincident" => Self::Coincident,
             "concentric" => Self::Concentric,
             "parallel" => Self::Parallel,
@@ -239,7 +310,12 @@ impl MateType {
             "angle" => Self::Angle(value(a, "angle")?),
             "fasten" => Self::Fasten(None),
             other => return Err(format!("type: '{other}' is not a mate: use {TYPES}.")),
-        })
+        };
+        Ok((
+            kind,
+            a.required("a", MateEndSel::parse)?,
+            a.required("b", MateEndSel::parse)?,
+        ))
     }
 }
 
@@ -255,12 +331,13 @@ pub enum MateChange {
     /// Leave it out of the solve without deleting it, or put it back.
     Suppress(bool),
     Delete,
+    Width(WidthModeSel),
 }
 
 impl MateChange {
     pub(crate) fn word(&self) -> &'static str {
         match self {
-            Self::Edit { .. } => "edit_mate",
+            Self::Edit { .. } | Self::Width(_) => "edit_mate",
             Self::Rename(_) => "rename",
             Self::Suppress(_) => "suppress",
             Self::Delete => "delete",
@@ -272,13 +349,13 @@ impl MateChange {
 pub(crate) const MATE_OPS: &[(&str, &str, &str)] = &[
     (
         "mate",
-        "type (coincident, concentric, parallel, distance, angle, fasten), a, b (each {component: name, id or nonempty path array, and face, edge, vertex or plane: a selector in the part's own coordinates}; plane: top, front, right or a reference plane's name or id; for fasten the component alone), distance, angle, flip, name",
+        "type (coincident, concentric, parallel, distance, angle, fasten, width), a, b (each {component: name, id or nonempty path array, and face, edge, vertex or plane: a selector in the part's own coordinates}; plane: top, front, right or a reference plane's name or id; for fasten the component alone). Width: a is a pair of planar ends, b is a pair of planar ends or one axis end; each pair belongs to one top-level component; mode (centered, free, dimension, percent; default centered), distance for dimension, percent for percent (number or expression). Other mates: distance, angle, flip. All: name",
         "Hold two components together by geometry of their parts. The components move to where the mates hold, as little as they can.",
     ),
     (
         "edit_mate",
-        "mate, distance or angle, flip",
-        "Change a mate's distance or angle, or which way round two flat faces are.",
+        "mate, distance or angle, flip; width mates: mode (centered, free, dimension, percent), distance for dimension, percent for percent",
+        "Change a mate's value or orientation, or a width mate's mode and position.",
     ),
     ("rename", "mate, name", "Rename a mate."),
     (
@@ -304,16 +381,21 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
     };
     Some(match op {
         "mate" => (|| {
+            let (kind, first, second) = MateType::parse(a)?;
             Ok(Op::Mate {
-                kind: MateType::parse(a)?,
-                a: a.required("a", MateEndSel::parse)?,
-                b: a.required("b", MateEndSel::parse)?,
+                kind,
+                a: first,
+                b: second,
                 flip: a.parsed("flip", boolean)?,
                 name: a.string("name")?,
             })
         })(),
         "mates" => Ok(Op::Query(crate::op::Query::Mates)),
         "edit_mate" => {
+            if a.has("mode") || a.has("percent") {
+                let mode = WidthModeSel::parse(a).map(MateChange::Width);
+                return Some(change(a, mode));
+            }
             let edit = (|| {
                 let distance = a.parsed("distance", Input::parse)?;
                 let angle = a.parsed("angle", Input::parse)?;
@@ -413,9 +495,34 @@ pub(crate) fn mate_out(doc: &Document, id: MateId) -> Value {
     m.insert("id".to_owned(), json!(id.0));
     m.insert("name".to_owned(), json!(mate.name));
     m.insert("type".to_owned(), json!(mate.kind.word()));
-    m.insert("a".to_owned(), end_out(assembly, &mate.a));
-    m.insert("b".to_owned(), end_out(assembly, &mate.b));
+    let (a, b) = match &mate.kind {
+        MateKind::Width { a2, b2, .. } => (
+            json!([end_out(assembly, &mate.a), end_out(assembly, a2)]),
+            b2.as_ref().map_or_else(
+                || end_out(assembly, &mate.b),
+                |b2| json!([end_out(assembly, &mate.b), end_out(assembly, b2)]),
+            ),
+        ),
+        _ => (end_out(assembly, &mate.a), end_out(assembly, &mate.b)),
+    };
+    m.insert("a".to_owned(), a);
+    m.insert("b".to_owned(), b);
     match &mate.kind {
+        MateKind::Width { mode, .. } => {
+            m.insert("mode".to_owned(), json!(mode.word()));
+            match mode {
+                WidthMode::Dimension(s) => {
+                    m.insert(
+                        "distance".to_owned(),
+                        scalar_out(s, ScalarKind::Length, doc),
+                    );
+                }
+                WidthMode::Percent(s) => {
+                    m.insert("percent".to_owned(), scalar_out(s, ScalarKind::Number, doc));
+                }
+                _ => {}
+            }
+        }
         MateKind::Distance(s) => {
             m.insert(
                 "distance".to_owned(),
@@ -514,6 +621,29 @@ pub(crate) fn add(
         }
     };
     let kind = match kind {
+        MateType::Width { a2, b2, mode } => {
+            if flip == Some(true) {
+                return Err(
+                    "A width mate keeps the nearest orientation and does not take flip.".to_owned(),
+                );
+            }
+            let a2 = a2.resolve(doc)?;
+            let b2 = b2.as_ref().map(|b| b.resolve(doc)).transpose()?;
+            for (first, second) in [(&a, Some(&a2)), (&b, b2.as_ref())] {
+                needs_geometry(first, "width/tab")?;
+                if let Some(second) = second {
+                    needs_geometry(second, "width/tab")?;
+                    if first.component() != second.component() {
+                        return Err("Each width mate pair must belong to one top-level component. The width pair and tab must belong to different components.".to_owned());
+                    }
+                }
+            }
+            MateKind::Width {
+                a2,
+                b2,
+                mode: mode.resolve(doc)?,
+            }
+        }
         MateType::Fasten(relative) => {
             // The components as wholes, where they are now.
             a.geom = None;
@@ -543,7 +673,7 @@ pub(crate) fn add(
                     v.scalar(ScalarKind::Angle, doc)
                         .map_err(|e| format!("angle: {e}"))?,
                 ),
-                MateType::Fasten(_) => unreachable!("handled above"),
+                MateType::Fasten(_) | MateType::Width { .. } => unreachable!("handled above"),
             }
         }
     };
@@ -571,6 +701,15 @@ pub(crate) fn change(
     id: MateId,
     change: &MateChange,
 ) -> Result<String, String> {
+    if matches!(
+        the_assembly(doc)?.mate(id).map(|m| &m.kind),
+        Some(MateKind::Width { .. })
+    ) && matches!(change, MateChange::Edit { flip: Some(_), .. })
+    {
+        return Err(
+            "A width mate keeps the nearest orientation and does not take flip.".to_owned(),
+        );
+    }
     let was = the_assembly(doc)?
         .mate(id)
         .map(|m| m.name.clone())
@@ -583,6 +722,10 @@ pub(crate) fn change(
             let kind = match the_assembly(doc)?.mate(id).map(|m| &m.kind) {
                 Some(MateKind::Distance(_)) => ScalarKind::Length,
                 Some(MateKind::Angle(_)) => ScalarKind::Angle,
+                Some(MateKind::Width {
+                    mode: WidthMode::Dimension(_),
+                    ..
+                }) => ScalarKind::Length,
                 Some(other) => {
                     return Err(format!(
                         "{was} is a {} mate: it has no distance or angle to set.",
@@ -595,6 +738,10 @@ pub(crate) fn change(
         }
         _ => None,
     };
+    let width_mode = match change {
+        MateChange::Width(mode) => Some(mode.resolve(doc)?),
+        _ => None,
+    };
     let assembly = model
         .assembly_mut()
         .ok_or_else(|| "The document is not an assembly.".to_owned())?;
@@ -603,7 +750,13 @@ pub(crate) fn change(
         MateChange::Edit { flip, .. } => {
             let mate = assembly.mate_mut(id).ok_or_else(gone)?;
             match value {
-                Some((ScalarKind::Length, s)) => mate.kind = MateKind::Distance(s),
+                Some((ScalarKind::Length, s)) => {
+                    if let MateKind::Width { mode, .. } = &mut mate.kind {
+                        *mode = WidthMode::Dimension(s);
+                    } else {
+                        mate.kind = MateKind::Distance(s);
+                    }
+                }
                 Some((_, s)) => mate.kind = MateKind::Angle(s),
                 None => {}
             }
@@ -623,6 +776,14 @@ pub(crate) fn change(
         MateChange::Delete => {
             assembly.remove_mate(id).ok_or_else(gone)?;
             format!("Delete {was}")
+        }
+        MateChange::Width(_) => {
+            let mate = assembly.mate_mut(id).ok_or_else(gone)?;
+            let MateKind::Width { mode, .. } = &mut mate.kind else {
+                return Err("Only a width mate takes mode or percent.".to_owned());
+            };
+            *mode = width_mode.expect("resolved above");
+            format!("Edit {was}")
         }
     })
 }

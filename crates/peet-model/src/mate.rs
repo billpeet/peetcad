@@ -112,6 +112,33 @@ pub enum MateKind {
     /// The second component held where it is relative to the first: its placement in
     /// the first's coordinates.
     Fasten(Frame),
+    /// Center the tab on the width pair's midplane. `Mate::a` and `a2` bound the
+    /// width; `Mate::b` and `b2` bound the tab, or `b` alone is an axis.
+    Width {
+        a2: MateEnd,
+        b2: Option<MateEnd>,
+        mode: WidthMode,
+    },
+}
+
+/// Position a tab within the available clearance, measured from the first width end.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum WidthMode {
+    Centered,
+    Free,
+    Dimension(Scalar),
+    Percent(Scalar),
+}
+
+impl WidthMode {
+    pub fn word(&self) -> &'static str {
+        match self {
+            Self::Centered => "centered",
+            Self::Free => "free",
+            Self::Dimension(_) => "dimension",
+            Self::Percent(_) => "percent",
+        }
+    }
 }
 
 impl MateKind {
@@ -124,6 +151,7 @@ impl MateKind {
             Self::Distance(_) => "distance",
             Self::Angle(_) => "angle",
             Self::Fasten(_) => "fasten",
+            Self::Width { .. } => "width",
         }
     }
 
@@ -136,6 +164,7 @@ impl MateKind {
             Self::Distance(_) => "Distance",
             Self::Angle(_) => "Angle",
             Self::Fasten(_) => "Fasten",
+            Self::Width { .. } => "Width",
         }
     }
 }
@@ -151,6 +180,17 @@ pub struct Mate {
     /// For two planes: their normals the same way, instead of against each other.
     pub flip: bool,
     pub suppressed: bool,
+}
+
+impl Mate {
+    /// Every persistent end, including the additional ends of a width mate.
+    pub fn ends(&self) -> impl Iterator<Item = &MateEnd> {
+        let (a2, b2) = match &self.kind {
+            MateKind::Width { a2, b2, .. } => (Some(a2), b2.as_ref()),
+            _ => (None, None),
+        };
+        [&self.a, &self.b].into_iter().chain(a2).chain(b2)
+    }
 }
 
 // ---- Geometry of an end ----
@@ -322,6 +362,7 @@ enum EqKind {
     Offset,
     Distance,
     LineDistance,
+    OffsetRange { min: f64, max: f64 },
 }
 
 /// One residual before it is tied to components: `first` says which end carries the
@@ -402,6 +443,14 @@ impl Equation for Eq {
         let (f, gp1, gd1, gp2, gd2) = match self.kind {
             EqKind::Dot => (d1.dot(d2), DVec3::ZERO, d2, DVec3::ZERO, d1),
             EqKind::Offset => (d1.dot(r), -d1, r, d1, DVec3::ZERO),
+            EqKind::OffsetRange { min, max } => {
+                let offset = d1.dot(r);
+                if offset >= min && offset <= max {
+                    (0.0, DVec3::ZERO, DVec3::ZERO, DVec3::ZERO, DVec3::ZERO)
+                } else {
+                    (offset - offset.clamp(min, max), -d1, r, d1, DVec3::ZERO)
+                }
+            }
             EqKind::Distance => {
                 let e = r.try_normalize().unwrap_or(DVec3::X);
                 (r.length(), -e, DVec3::ZERO, e, DVec3::ZERO)
@@ -495,6 +544,9 @@ fn equations(
         )
     };
     match kind {
+        MateKind::Width { .. } => {
+            unreachable!("width pairs reduced to their midplanes before equations")
+        }
         MateKind::Fasten(relative) => {
             // B's origin stays where it is in A, and B's axes stay along the same
             // directions of A.
@@ -642,6 +694,104 @@ fn equations(
         }
     }
     Ok(out)
+}
+
+/// A pair is rigid in one top-level component. Its midpoint is recomputed from
+/// current geometry, so centering follows changes to either face or plane.
+fn width_middle(first: Element, second: Element, which: &str) -> Result<(Element, f64), String> {
+    let (Element::Plane(p1, n1), Element::Plane(p2, n2)) = (first, second) else {
+        return Err(format!(
+            "A width mate's {which} pair needs two planar faces or reference planes."
+        ));
+    };
+    if n1.dot(n2).abs() < 1.0 - 1e-8 {
+        return Err(format!(
+            "A width mate's {which} planes must be parallel. Select two parallel faces or reference planes."
+        ));
+    }
+    if n1.dot(p2 - p1).abs() < 1e-8 {
+        return Err(format!(
+            "A width mate's {which} planes coincide. Select two distinct planes."
+        ));
+    }
+    let span = n1.dot(p2 - p1);
+    Ok((
+        Element::Plane((p1 + p2) * 0.5, n1 * span.signum()),
+        span.abs(),
+    ))
+}
+
+fn width_equations(
+    mode: &WidthMode,
+    a: Element,
+    b: Element,
+    clearance: f64,
+    params: &Parameters,
+) -> Result<Vec<Proto>, String> {
+    if clearance < -1e-8 {
+        return Err(
+            "The tab is wider than the width pair. Widen the gap or narrow the tab.".to_owned(),
+        );
+    }
+    let clearance = clearance.max(0.0);
+    let mut out = equations(&MateKind::Coincident, a, b, params)?;
+    let offset = match mode {
+        WidthMode::Centered => 0.0,
+        WidthMode::Free => {
+            let e = out
+                .iter_mut()
+                .find(|e| e.kind == EqKind::Offset)
+                .expect("plane-to-plane or plane-to-axis offset");
+            e.kind = EqKind::OffsetRange {
+                min: -clearance * 0.5,
+                max: clearance * 0.5,
+            };
+            if clearance < 1e-8 {
+                e.kind = EqKind::Offset;
+            }
+            return Ok(out);
+        }
+        WidthMode::Dimension(s) => {
+            let gap = s.evaluate(ScalarKind::Length, params)?;
+            if gap < -1e-8 || gap > clearance + 1e-8 || !gap.is_finite() {
+                return Err(format!(
+                    "The width mate's distance must be between 0 and {clearance} mm, the available clearance."
+                ));
+            }
+            gap.clamp(0.0, clearance) - clearance * 0.5
+        }
+        WidthMode::Percent(s) => {
+            let percent = s.evaluate(ScalarKind::Number, params)?;
+            if !(0.0..=100.0).contains(&percent) {
+                return Err("The width mate's percent must be between 0 and 100.".to_owned());
+            }
+            clearance * (percent / 100.0 - 0.5)
+        }
+    };
+    out.iter_mut()
+        .find(|e| e.kind == EqKind::Offset)
+        .expect("plane-to-plane or plane-to-axis offset")
+        .target = offset;
+    Ok(out)
+}
+
+/// A cylindrical tab has its diameter; an edge selected as an axis has no thickness.
+fn width_axis_radius(end: &MateEnd, component: &Placed) -> Result<f64, String> {
+    let Some(MateGeom::Face(reference)) = &end.geom else {
+        return Ok(0.0);
+    };
+    let bodies: Vec<_> = component
+        .bodies
+        .iter()
+        .filter(|(path, ..)| path == &end.path[1..])
+        .map(|(_, body, _)| body.clone())
+        .collect();
+    let found = find_face(&bodies, reference)
+        .ok_or_else(|| "The width mate's cylindrical tab face is gone.".to_owned())?;
+    match bodies[found.body].solid.face(found.id).surface {
+        Surface::Cylinder(c) => Ok(c.radius),
+        _ => Err("A single width mate tab face must be cylindrical. Select two tab planes for other shapes.".to_owned()),
+    }
 }
 
 // ---- Solving ----
@@ -1002,6 +1152,11 @@ fn freedoms(
     // The equations of each group, by the group of a free component they read.
     let mut buckets: Vec<(usize, Vec<u32>)> = Vec::new();
     for e in held {
+        // A one-sided travel limit bounds a freedom rather than removing it. Exact
+        // zero-clearance width mates use an equality instead and do remove it.
+        if matches!(system.eqs[*e as usize].kind, EqKind::OffsetRange { .. }) {
+            continue;
+        }
         let slots = system.eqs[*e as usize].slots;
         let free = [slots[0], slots[6]]
             .into_iter()
@@ -1122,9 +1277,37 @@ pub(crate) fn solve(
                     components[ia].name
                 ));
             }
-            let a = element(&mate.a, &components[ia])?;
-            let b = element(&mate.b, &components[ib])?;
-            let protos = equations(&mate.kind, a, b, params)?;
+            let mut a = element(&mate.a, &components[ia])?;
+            let mut b = element(&mate.b, &components[ib])?;
+            let protos = if let MateKind::Width { a2, b2, mode } = &mate.kind {
+                if a2.component() != mate.a.component()
+                    || b2
+                        .as_ref()
+                        .is_some_and(|e| e.component() != mate.b.component())
+                {
+                    return Err(
+                        "Each width mate pair must belong to one top-level component.".to_owned(),
+                    );
+                }
+                if a2.geom.is_none() || b2.as_ref().is_some_and(|e| e.geom.is_none()) {
+                    return Err("A width mate needs geometry at every end.".to_owned());
+                }
+                let (middle, width) = width_middle(a, element(a2, &components[ia])?, "width")?;
+                a = middle;
+                let tab_width;
+                if let Some(b2) = b2 {
+                    let (middle, span) = width_middle(b, element(b2, &components[ib])?, "tab")?;
+                    b = middle;
+                    tab_width = span;
+                } else if !matches!(b, Element::Line(..)) {
+                    return Err("A width mate's single tab end must be an axis: select a cylindrical face, a round edge or a straight edge, or give two tab planes.".to_owned());
+                } else {
+                    tab_width = 2.0 * width_axis_radius(&mate.b, &components[ib])?;
+                }
+                width_equations(mode, a, b, width - tab_width, params)?
+            } else {
+                equations(&mate.kind, a, b, params)?
+            };
             Ok((a, b, protos))
         })();
         let (a, b, protos) = match built {
@@ -1134,6 +1317,40 @@ pub(crate) fn solve(
                 continue;
             }
         };
+        // At exactly perpendicular planes (or an axis exactly normal to its plane),
+        // a dot residual has zero rotational derivative. Seed a small turn so the
+        // solver can reach either of the nearest equivalent width orientations.
+        if matches!(mate.kind, MateKind::Width { .. }) {
+            if let (Element::Plane(_, na), Element::Plane(_, nb) | Element::Line(_, nb)) = (a, b) {
+                let (wa, wb) = (
+                    components[ia].frame.vector_to_world(na),
+                    components[ib].frame.vector_to_world(nb),
+                );
+                let singular = if matches!(b, Element::Plane(..)) {
+                    wa.dot(wb).abs() < 1e-8
+                } else {
+                    wa.dot(wb).abs() > 1.0 - 1e-8
+                };
+                if singular {
+                    let axis = wa
+                        .cross(wb)
+                        .try_normalize()
+                        .unwrap_or_else(|| wa.any_orthonormal_vector());
+                    let q = DQuat::from_axis_angle(axis, 1e-3);
+                    let target = if !components[ib].fixed {
+                        Some(ib)
+                    } else if !components[ia].fixed {
+                        Some(ia)
+                    } else {
+                        None
+                    };
+                    if let Some(i) = target {
+                        components[i].frame.rotation =
+                            (q * components[i].frame.rotation).normalize();
+                    }
+                }
+            }
+        }
         // Two planes the wrong way round: turn one over first (see the module docs).
         if let (Element::Plane(pa, na), Element::Plane(pb, nb)) = (a, b)
             && matches!(
@@ -1410,6 +1627,18 @@ mod tests {
             EqKind::Offset,
             EqKind::Distance,
             EqKind::LineDistance,
+            EqKind::OffsetRange {
+                min: -1000.0,
+                max: 1000.0,
+            },
+            EqKind::OffsetRange {
+                min: 1000.0,
+                max: 2000.0,
+            },
+            EqKind::OffsetRange {
+                min: -2000.0,
+                max: -1000.0,
+            },
         ] {
             let mut slots = [0; MAX_SLOTS];
             for (i, s) in slots.iter_mut().enumerate() {

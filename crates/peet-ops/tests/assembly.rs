@@ -328,6 +328,356 @@ fn standard_planes_mate_components_without_bodies() {
     assert!(stand_x(&doc).abs() < 1e-7);
 }
 
+fn width_fixture() -> Document {
+    let make = |length| {
+        let mut part = Document::default();
+        ok(
+            &mut part,
+            json!({"op": "sketch", "on": "top", "draw": [
+                {"type": "rectangle", "from": [0, 0], "to": [length, 30]}
+            ]}),
+        );
+        ok(
+            &mut part,
+            json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+        );
+        part.model
+    };
+    let mut model = Model::new_assembly();
+    let a = model.assembly_mut().unwrap();
+    let width = a.define(Arc::new(make(40)));
+    let tab = a.define(Arc::new(make(20)));
+    let c = a.insert(width, Frame::WORLD).unwrap();
+    a.component_mut(c).unwrap().name = "Width".to_owned();
+    let c = a
+        .insert(
+            tab,
+            Frame {
+                origin: DVec3::new(60.0, 13.0, 17.0),
+                ..Frame::WORLD
+            },
+        )
+        .unwrap();
+    a.component_mut(c).unwrap().name = "Tab".to_owned();
+    Document::from_model(model, None)
+}
+
+fn width_op() -> Value {
+    json!({"op": "mate", "type": "width", "name": "Center",
+        "a": [{"component": "Width", "face": {"normal": [-1, 0, 0]}},
+              {"component": "Width", "face": {"normal": [1, 0, 0]}}],
+        "b": [{"component": "Tab", "face": {"normal": [-1, 0, 0]}},
+              {"component": "Tab", "face": {"normal": [1, 0, 0]}}]
+    })
+}
+
+#[test]
+fn a_width_mate_centers_and_follows_both_faces_and_survives_files() {
+    let mut doc = width_fixture();
+    let result = ok(&mut doc, width_op());
+    assert_eq!(result["mate"]["status"], "ok", "{result}");
+    assert_eq!(result["mate"]["a"].as_array().unwrap().len(), 2);
+    assert_eq!(result["mate"]["b"].as_array().unwrap().len(), 2);
+    assert!((stand_x(&doc) - 10.0).abs() < 1e-7);
+    assert_eq!(doc.evaluation().freedom, 3);
+    let initial = doc
+        .model
+        .assembly()
+        .unwrap()
+        .component(peet_model::CompId(2))
+        .unwrap()
+        .placement;
+    assert_eq!(initial.origin.y, 13.0);
+    assert_eq!(initial.origin.z, 17.0);
+    assert!(initial.rotation.to_scaled_axis().length() < 1e-8);
+    doc.change("Widen the fixed part", |model| {
+        let a = model.assembly_mut().unwrap();
+        let id = a.component(peet_model::CompId(1)).unwrap().definition;
+        let mut part = Document::from_model((*a.definition(id).unwrap().model).clone(), None);
+        // Rectangle entity coordinates are edited through the same model API as the UI.
+        let sketch = part
+            .model
+            .features()
+            .find(|f| f.sketch().is_some())
+            .unwrap()
+            .id;
+        let s = part
+            .model
+            .feature_mut(sketch)
+            .unwrap()
+            .sketch_mut()
+            .unwrap();
+        let points: Vec<_> = s
+            .sketch
+            .entities()
+            .filter(|(_, e)| matches!(e.geometry, peet_sketch::sketch::Geometry::Point { .. }))
+            .map(|(id, _)| id)
+            .collect();
+        for point in points {
+            let mut position = s.sketch.point(point);
+            if position.x > 30.0 {
+                position.x = 60.0;
+                s.sketch.set_point(point, position);
+            }
+        }
+        a.set_model(id, Arc::new(part.model));
+    });
+    assert!((stand_x(&doc) - 20.0).abs() < 1e-7);
+    let dir = temp("width-mate");
+    let file = dir.join("width.peet");
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let loaded = peet_io::document::open(&std::fs::read(file).unwrap()).unwrap();
+    let mut loaded = Document::from_model(loaded.model, None);
+    let mates = ok(&mut loaded, json!({"op": "mates"}));
+    assert_eq!(mates["mates"][0]["type"], "width");
+    assert_eq!(mates["mates"][0]["status"], "ok");
+    assert!((stand_x(&loaded) - 20.0).abs() < 1e-7);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn all_width_modes_position_the_tab_and_free_mode_limits_dragging() {
+    let mut doc = width_fixture();
+    let mut op = width_op();
+    op["mode"] = json!("free");
+    let r = ok(&mut doc, op);
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    assert!((stand_x(&doc) - 20.0).abs() < 1e-6);
+    assert_eq!(doc.evaluation().freedom, 4);
+    for x in [8.0_f64, -100.0, 100.0] {
+        let r = ok(
+            &mut doc,
+            json!({"op": "place", "component": "Tab", "at": [x, 13, 17]}),
+        );
+        assert!((stand_x(&doc) - x.clamp(0.0, 20.0)).abs() < 1e-6, "{r}");
+    }
+    let r = ok(
+        &mut doc,
+        json!({"op": "drag", "component": "Tab", "point": [0, 0, 0], "to": [-40, 13, 17]}),
+    );
+    assert!(stand_x(&doc).abs() < 1e-5, "{r}");
+    assert!((r["short_by"].as_f64().unwrap() - 40.0).abs() < 1e-4, "{r}");
+    ok(
+        &mut doc,
+        json!({"op": "set_parameter", "name": "gap", "value": "4mm"}),
+    );
+    let r = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "dimension", "distance": "gap"}),
+    );
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    assert!((stand_x(&doc) - 4.0).abs() < 1e-6);
+    ok(
+        &mut doc,
+        json!({"op": "set_parameter", "name": "gap", "value": "7mm"}),
+    );
+    assert!((stand_x(&doc) - 7.0).abs() < 1e-6);
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "distance": 3}),
+    );
+    assert!((stand_x(&doc) - 3.0).abs() < 1e-6);
+    for (percent, x) in [(0, 0.0), (25, 5.0), (50, 10.0), (100, 20.0)] {
+        let r = ok(
+            &mut doc,
+            json!({"op": "edit_mate", "mate": "Center", "mode": "percent", "percent": percent}),
+        );
+        assert_eq!(r["mate"]["status"], "ok", "{r}");
+        assert!((stand_x(&doc) - x).abs() < 1e-6, "{r}");
+    }
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "centered"}),
+    );
+    assert!((stand_x(&doc) - 10.0).abs() < 1e-6);
+    assert_eq!(doc.evaluation().freedom, 3);
+}
+
+#[test]
+fn invalid_width_selections_values_and_modes_are_explained_and_recover() {
+    let mut doc = width_fixture();
+    let mut malformed = width_op();
+    malformed["a"] = json!([]);
+    assert!(error(&mut doc, malformed).contains("exactly two"));
+    let mut mixed = width_op();
+    mixed["a"][1]["component"] = json!("Tab");
+    assert!(error(&mut doc, mixed).contains("one top-level"));
+    let mut wrong = width_op();
+    wrong["mode"] = json!("unknown");
+    assert!(error(&mut doc, wrong).contains("Width mode"));
+    let mut wrong = width_op();
+    wrong["a"][1]["face"] = json!({"normal": [0, 1, 0]});
+    let r = ok(&mut doc, wrong);
+    assert_eq!(r["mate"]["status"], "failed");
+    assert!(r["mate"]["message"].as_str().unwrap().contains("parallel"));
+    ok(&mut doc, json!({"op": "delete", "mate": "Center"}));
+    ok(&mut doc, width_op());
+    for mode in [
+        json!({"mode": "percent", "percent": 101}),
+        json!({"mode": "dimension", "distance": 21}),
+    ] {
+        let mut op = mode;
+        op["op"] = json!("edit_mate");
+        op["mate"] = json!("Center");
+        let r = ok(&mut doc, op);
+        assert_eq!(r["mate"]["status"], "failed", "{r}");
+    }
+    let r = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "free"}),
+    );
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    assert!(
+        error(
+            &mut doc,
+            json!({"op": "edit_mate", "mate": "Center", "flip": true})
+        )
+        .contains("does not take flip")
+    );
+    ok(&mut doc, json!({"op": "delete", "component": "Tab"}));
+    assert_eq!(doc.model.assembly().unwrap().mates().count(), 0);
+}
+
+#[test]
+fn cylindrical_width_tabs_use_their_diameter_for_clearance() {
+    let mut doc = width_fixture();
+    let mut cylinder = Document::default();
+    ok(
+        &mut cylinder,
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 5}]}),
+    );
+    ok(
+        &mut cylinder,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 20}),
+    );
+    doc.change("Replace tab", |m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.define(Arc::new(cylinder.model.clone()));
+        a.replace(peet_model::CompId(2), d);
+    });
+    let mut op = width_op();
+    op["b"] = json!({"component": "Tab", "face": {"at": [5, 0, 10]}});
+    let r = ok(&mut doc, op);
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    assert!((stand_x(&doc) - 20.0).abs() < 1e-6);
+    assert_eq!(doc.evaluation().freedom, 4);
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "free"}),
+    );
+    for (x, expected) in [(-100.0, 5.0), (100.0, 35.0)] {
+        ok(
+            &mut doc,
+            json!({"op": "place", "component": "Tab", "at": [x, 13, 17]}),
+        );
+        assert!((stand_x(&doc) - expected).abs() < 1e-6);
+    }
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "dimension", "distance": 4}),
+    );
+    assert!((stand_x(&doc) - 9.0).abs() < 1e-6);
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "percent", "percent": 25}),
+    );
+    assert!((stand_x(&doc) - 12.5).abs() < 1e-6);
+}
+
+#[test]
+fn width_mates_resolve_nested_plane_pairs_and_preserve_their_rigid_placements() {
+    let mut doc = nested_mate_fixture();
+    doc.change("Width reference", |m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.component(peet_model::CompId(1)).unwrap().definition;
+        let mut part = Document::from_model((*a.definition(d).unwrap().model).clone(), None);
+        ok(
+            &mut part,
+            json!({"op": "plane", "from": "right", "distance": 40, "name": "Far"}),
+        );
+        a.set_model(d, Arc::new(part.model));
+    });
+    let r = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "width",
+            "a": [{"component": "Base", "plane": "right"}, {"component": "Base", "plane": "Far"}],
+            "b": [{"component": ["Stand", "Shelf", "Plate"], "plane": "top"}, {"component": ["Stand", "Shelf", "Plate"], "plane": "MatePlane"}]
+        }),
+    );
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    assert_eq!(
+        r["mate"]["b"][1]["path"],
+        json!(["Stand", "Shelf", "Plate"])
+    );
+    assert!((stand_x(&doc) + 3.5).abs() < 1e-6);
+}
+
+#[test]
+fn width_mate_creation_and_mode_changes_translate_to_operations() {
+    let mut doc = width_fixture();
+    let mut replay = Document::from_model(doc.model.clone(), None);
+    let mut host = Headless::default();
+    for (index, op) in [
+        width_op(),
+        json!({"op": "edit_mate", "mate": "Center", "mode": "percent", "percent": 25}),
+        json!({"op": "edit_mate", "mate": "Center", "mode": "free"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        ok(&mut doc, op);
+        let result = apply_model(
+            &mut host,
+            &mut replay,
+            doc.model.clone(),
+            "Width edit",
+            index as u64 + 1,
+        );
+        assert_eq!(result.untranslated, None, "{:?}", result.ops);
+        assert_eq!(replay.model, doc.model);
+    }
+}
+
+#[test]
+fn width_mates_solve_from_perpendicular_plane_or_axis_orientations() {
+    let mut doc = width_fixture();
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Tab", "rotate": {"axis": "z", "angle": 90}}),
+    );
+    let r = ok(&mut doc, width_op());
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    let frame = doc
+        .model
+        .assembly()
+        .unwrap()
+        .component(peet_model::CompId(2))
+        .unwrap()
+        .placement;
+    assert!((frame.to_world(DVec3::new(10.0, 15.0, 2.5)).x - 20.0).abs() < 1e-6);
+    assert!(frame.vector_to_world(DVec3::X).cross(DVec3::X).length() < 1e-6);
+}
+
+#[test]
+fn free_width_limits_conflict_with_a_mate_that_pushes_the_tab_outside() {
+    let mut doc = width_fixture();
+    let mut op = width_op();
+    op["mode"] = json!("free");
+    ok(&mut doc, op);
+    let r = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident",
+            "a": {"component": "Width", "face": {"normal": [1, 0, 0]}},
+            "b": {"component": "Tab", "face": {"normal": [-1, 0, 0]}}
+        }),
+    );
+    assert_eq!(r["mate"]["status"], "failed", "{r}");
+    let r = ok(&mut doc, json!({"op": "mates"}));
+    assert_eq!(r["mates"][0]["status"], "ok", "{r}");
+    assert_eq!(r["mates"][1]["status"], "failed", "{r}");
+    assert!(stand_x(&doc) <= 20.0 + 1e-6);
+}
+
 fn temp(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("peet-asm-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

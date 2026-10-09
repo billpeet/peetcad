@@ -833,6 +833,40 @@ fn what_the_assemblies_skill_says_about_nested_plane_mates_is_true() {
 }
 
 #[test]
+fn what_the_assemblies_skill_says_about_width_modes_is_true() {
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "assemblies")
+        .map(|(_, text)| *text)
+        .unwrap();
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"type\": \"width\""))
+        .expect("the script using all width modes");
+    let ran = peet_with(&["run", "--strict", "-q"], &script);
+    assert_eq!(ran.code, OK, "{}{}", ran.out, ran.err);
+    let positions: Vec<_> = ran
+        .replies
+        .iter()
+        .filter_map(|r| r["components"][1]["at"][0].as_f64())
+        .collect();
+    assert_eq!(positions, vec![10.0, 0.0, 4.0, 5.0, 15.0, 10.0]);
+    let modes: Vec<_> = ran
+        .replies
+        .iter()
+        .filter_map(|r| r.get("mate"))
+        .map(|m| {
+            assert_eq!(m["status"], "ok");
+            m["mode"].as_str().unwrap()
+        })
+        .collect();
+    assert_eq!(
+        modes,
+        vec!["centered", "free", "dimension", "percent", "centered"]
+    );
+}
+
+#[test]
 fn what_the_assemblies_skill_says_about_checking_is_true() {
     let skill = peet_cli::SKILLS
         .iter()

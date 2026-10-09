@@ -156,6 +156,62 @@ name. An invalid path fails before adding a mate and names the level that could 
 be found. A stored mate fails if its plane or nested component is deleted or suppressed.
 Restore it, or delete the mate and select another end.
 
+### Width mates
+
+Use `width` to locate a tab between two faces without creating midpoint planes in
+each part. Select parallel, distinct planar faces or reference planes for each pair.
+The width pair is `a`, the tab is `b`. Each pair must belong to one top-level component;
+the ends may use different nested paths within that rigid component. A single tab end
+can be a cylindrical face or an edge used as an axis. A cylinder uses its diameter for
+clearance; an edge used as an axis has zero thickness.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 30]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [20, 30]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Width"}
+{"op": "insert", "part": 2, "name": "Tab", "at": [60, 0, 0]}
+{"op": "mate", "type": "width", "name": "Locate tab", "a": [{"component": "Width", "face": {"normal": [-1, 0, 0]}}, {"component": "Width", "face": {"normal": [1, 0, 0]}}], "b": [{"component": "Tab", "face": {"normal": [-1, 0, 0]}}, {"component": "Tab", "face": {"normal": [1, 0, 0]}}]}
+{"op": "components"}
+{"op": "edit_mate", "mate": "Locate tab", "mode": "free"}
+{"op": "place", "component": "Tab", "at": [-30, 0, 0]}
+{"op": "components"}
+{"op": "edit_mate", "mate": "Locate tab", "mode": "dimension", "distance": 4}
+{"op": "components"}
+{"op": "set_parameter", "name": "ratio", "value": 25}
+{"op": "edit_mate", "mate": "Locate tab", "mode": "percent", "percent": "ratio"}
+{"op": "components"}
+{"op": "set_parameter", "name": "ratio", "value": 75}
+{"op": "components"}
+{"op": "edit_mate", "mate": "Locate tab", "mode": "centered"}
+{"op": "components"}
+{"op": "mates"}
+```
+
+The tab's X positions in the example are 10, 0, 4, 5, 15, then 10. The available
+clearance is the width span minus the tab span, here 20. `centered` divides it equally.
+`free` leaves sliding across the gap available; `place` and `drag` stop at either end.
+`dimension` sets the surface gap from the first width end to the nearest tab surface.
+`percent` divides the available clearance: 0 touches the first width end, 100 touches
+the second, and 50 centers the tab. Reversing the width pair reverses the side used by
+Dimension and Percent. Values can be expressions over the assembly's parameters.
+
+A planar tab keeps three freedoms in Centered, Dimension and Percent, or four in
+Free when clearance is positive. It can slide along the mating planes and rotate
+about their normal. A cylindrical tab keeps its axis in the midplane and its spin
+free. Width mates keep the nearest orientation and do not take `flip`.
+
+Nonparallel or coincident pairs, a tab wider than the gap, an out-of-range distance or
+a percent outside 0 to 100 fail the mate with a message. Correct the geometry or value;
+the stored mate recovers on rebuild. Drafted and angular width pairs are not supported.
+Changing either selected face or plane recomputes the midpoint and clearance. If an
+end is gone, restore it or delete the mate and select new ends. `mates` lists both ends
+of each pair and the current mode and value. The properties panel can edit the mode
+and value too.
+
 ## Posing what the mates leave free
 
 When `freedom` is not 0, something can still turn or slide. `drag` moves it there as the

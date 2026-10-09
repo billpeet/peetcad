@@ -445,7 +445,7 @@ impl Assembly {
     /// The mates with an end on the component.
     pub fn mates_of(&self, id: CompId) -> impl Iterator<Item = &Mate> {
         self.mates()
-            .filter(move |m| m.a.component() == Some(id) || m.b.component() == Some(id))
+            .filter(move |m| m.ends().any(|e| e.component() == Some(id)))
     }
 
     pub fn patterns(&self) -> impl ExactSizeIterator<Item = &ComponentPattern> {
@@ -739,7 +739,7 @@ impl Assembly {
         let index = self.components.iter().position(|c| c.id == id)?;
         let removed = self.components.remove(index);
         self.mates
-            .retain(|m| m.a.component() != Some(id) && m.b.component() != Some(id));
+            .retain(|m| !m.ends().any(|e| e.component() == Some(id)));
         Some(Arc::unwrap_or_clone(removed))
     }
 
@@ -908,7 +908,7 @@ impl Assembly {
                     m.id.0
                 ));
             }
-            if m.a.path.is_empty() || m.b.path.is_empty() {
+            if m.ends().any(|e| e.path.is_empty()) {
                 return Err(format!(
                     "The assembly is damaged: {} is not on two components.",
                     m.name

@@ -74,7 +74,7 @@ pub use fields::{
 pub use host::{AppCommand, Headless, Host, SketchTool, Toggle, View, Window};
 pub use library::{CheckRule, Gauge, GaugeBend};
 pub use links::{PartSel, linked_files};
-pub use mate::{MateChange, MateEndSel, MateSel, MateType};
+pub use mate::{MateChange, MateEndSel, MateSel, MateType, WidthModeSel};
 pub use op::{
     DatumSel, DxfPlacement, DxfTarget, Format, New, Op, Place, Query, RollTo, Sample, Source,
 };

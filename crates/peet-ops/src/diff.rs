@@ -16,7 +16,7 @@ use peet_sketch::Sketch;
 use crate::assembly::{ComponentChange, InsertSource, Placing};
 use crate::fields::{FeatureArgs, SketchPlane, input_of};
 use crate::host::Host;
-use crate::mate::{MateChange, MateEndSel, MateType};
+use crate::mate::{MateChange, MateEndSel, MateType, WidthModeSel};
 use crate::op::{DatumSel, New, Op, Place, RollTo};
 use crate::value::{Configs, FeatureSel, Input};
 use crate::{Undo, apply_with};
@@ -282,14 +282,20 @@ pub fn diff_scoped(
     }
     if let (Some(before), Some(after)) = (old.assembly(), new.assembly()) {
         use peet_model::MateKind;
+        let width_mode = |mode: &peet_model::WidthMode| match mode {
+            peet_model::WidthMode::Centered => WidthModeSel::Centered,
+            peet_model::WidthMode::Free => WidthModeSel::Free,
+            peet_model::WidthMode::Dimension(s) => WidthModeSel::Dimension(input_of(s)),
+            peet_model::WidthMode::Percent(s) => WidthModeSel::Percent(input_of(s)),
+        };
         let edit = |m: &peet_model::Mate, change| Op::EditMate {
             mate: m.id.into(),
             change,
         };
         for m in before.mates() {
             // A deleted component's mates went with it.
-            let with_component = [&m.a, &m.b]
-                .iter()
+            let with_component = m
+                .ends()
                 .any(|e| e.component().is_some_and(|c| after.component(c).is_none()));
             if after.mate(m.id).is_none() && !with_component {
                 ops.push(edit(m, MateChange::Delete));
@@ -309,6 +315,11 @@ pub fn diff_scoped(
                     MateKind::Distance(s) => MateType::Distance(input_of(s)),
                     MateKind::Angle(s) => MateType::Angle(input_of(s)),
                     MateKind::Fasten(relative) => MateType::Fasten(Some(*relative)),
+                    MateKind::Width { a2, b2, mode } => MateType::Width {
+                        a2: Box::new(MateEndSel::Ref(a2.clone())),
+                        b2: b2.as_ref().map(|e| Box::new(MateEndSel::Ref(e.clone()))),
+                        mode: width_mode(mode),
+                    },
                 },
                 a: MateEndSel::Ref(m.a.clone()),
                 b: MateEndSel::Ref(m.b.clone()),
@@ -336,6 +347,17 @@ pub fn diff_scoped(
                 (a, b) if a == b => None,
                 (MateKind::Distance(_), MateKind::Distance(s))
                 | (MateKind::Angle(_), MateKind::Angle(s)) => Some(input_of(s)),
+                (
+                    MateKind::Width {
+                        a2: old_a2,
+                        b2: old_b2,
+                        ..
+                    },
+                    MateKind::Width { a2, b2, mode },
+                ) if old_a2 == a2 && old_b2 == b2 => {
+                    ops.push(edit(m, MateChange::Width(width_mode(mode))));
+                    None
+                }
                 _ => {
                     return Err(format!(
                         "{} was made another kind of mate, which no operation does",
@@ -633,6 +655,22 @@ pub fn diff_scoped(
         }
     }
 
+    // A solved placement belongs to the new mates. Applying it while the old mates
+    // still hold pulls the component back and changes the next solve's starting pose.
+    if ops
+        .iter()
+        .any(|op| matches!(op, Op::Mate { .. } | Op::EditMate { .. }))
+    {
+        ops.sort_by_key(|op| {
+            matches!(
+                op,
+                Op::Component {
+                    change: ComponentChange::Place(_),
+                    ..
+                }
+            )
+        });
+    }
     Ok(ops)
 }
 

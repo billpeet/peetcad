@@ -68,7 +68,7 @@ pub use history::History;
 pub use hole::{HoleEnd, HoleFeature, HoleFit, HoleKind, HoleSizes, METRIC, MetricSize};
 pub use import::{ImportFeature, ImportedSolid};
 pub use loft::{LoftFeature, LoftInput, apply_loft};
-pub use mate::{Drag, Mate, MateEnd, MateGeom, MateId, MateKind};
+pub use mate::{Drag, Mate, MateEnd, MateGeom, MateId, MateKind, WidthMode};
 pub use material::{Material, STEEL_DENSITY};
 pub use model::{
     Datum, DependencyGraph, Model, ModelV4, ModelV5, ModelV7, ModelV8, ModelV9, ModelV10,

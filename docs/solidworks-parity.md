@@ -27,9 +27,11 @@ settle. **Decide** is a choice to make, not just work to do.
 - [x] **I1. Run the exporter.** `tools/sw-export` ran on SolidWorks-PC on the pilot
   (Pipe, b Tophat side, Battery Bracket, Door): all four complete, with STEP and flat
   DXF per configuration. See "What the pilot showed" below.
-- [ ] **I1b. Export the library.** All 201 parts, then the 29 assemblies (the exporter
-  has not been run on an assembly). About two minutes for a large part, so two to
-  three hours for the parts.
+- [x] **I1b. Export the library.** Done on 9 October 2026: all 201 parts and 29 assemblies
+  complete, in 76 minutes (18 seconds a file on average). 415 configurations, 3,466 sketches,
+  287 STEP files and a flat DXF for every sheet metal configuration (249). The one thing not
+  read: the definitions of 33 composite curves in `Laptop Shelf Assembly`. The output is on
+  SolidWorks-PC in `C:\Users\will\AppData\Local\PeetSwExport\out-all` (82 MB).
 - [ ] **I2. Tally the export.** Feature definition values and sketch relation types
   across the corpus, against what `peet` operations accept. This settles most of the
   **Check** entries below.
@@ -170,7 +172,7 @@ suppression and linear patterns all have equivalents.
 |---|---|---|---|
 | A1 | **Mate ends on reference planes.** | Every assembly has reference planes (99); templates carry mating planes by name (`MatePlane`, `MidPlane`, `LockMatePlane`); more than half of the scripts' mates name a plane | Done: `plane` selects standard or named reference planes in mate ends. References follow plane edits and renames, including inside sub-assemblies. Tested through save/reopen; not yet tried on a template assembly |
 | A2 | **Scripted mates to parts inside sub-assemblies.** | About 30% of the scripts' mates | Done: `component` accepts a path array of names or ids, resolved at each level. Tested with named faces and planes through two rotated nesting levels. The top-level component moves rigidly; not yet tried on a template assembly |
-| A3 | **Width mate.** | 31 mates in 16 assemblies | Gap |
+| A3 | **Width mate.** | 31 mates in 16 assemblies | Done for parallel pairs: `mate` with `type: "width"`, Centered, Free, Dimension and Percent, paired planar faces/reference planes or a cylindrical/axis tab, nested paths, expressions and mode editing. Tested with geometry changes, bounded dragging and save/reopen. Drafted/nonparallel pairs remain a gap; template assemblies not yet tried |
 | A4 | **Other mates:** slot, limit angle, symmetric, path, coordinate. | 7, 2, 2, 1 and 1 mates | Gap |
 | A5 | **Assemblies have no configurations**, and a component can't choose one of its part's. | 10 assemblies have two (9 are left and right hinge), swapping component configurations and suppressing a different 40 to 50 mates; 24 of 202 instances use a part configuration other than the default | Gap |
 | A6 | **A part can't read another part's or the assembly's values.** | 25 of 50 assembly equations set one part's dimension from another's: `Weather Shield width = Door width - 50` | Decide |
@@ -179,7 +181,7 @@ suppression and linear patterns all have equivalents.
 | A9 | **Flexible sub-assemblies.** Sub-assemblies are rigid, by decision (ADR 0009). | The scripts mark sub-assemblies flexible (hinges, door stays) | Decide |
 | A10 | **In-context features.** Ruled out by decision (ADR 0009): each becomes an ordinary part feature driven by shared values. | 24 in 9 assemblies; one assembly-level cut; three layout sketches | Decide |
 | A11 | **Alignment and flip.** FabSys sets an alignment and a flip on a mate; PeetCAD has one `flip`. Whether it says which side a distance is measured to is not known. | Over half the scripts' mates set a distance; about a quarter flip | Check |
-| A12 | **What the templates' own mates join** (planes, faces, edges), and so how much of A1 an import hits. | From the export's mate entities | Check |
+| A12 | **What the templates' own mates join.** Of 1,117 mate ends: 639 flat faces, 165 round faces, 82 round edges, 23 reference planes, 12 sketch lines, 6 straight edges, 3 sketch points; 188 came back empty (half of them on suppressed mates). So the templates' mates are nearly all on faces, which PeetCAD takes; reference planes (A1) matter for the mates FabSys adds, not for importing these. | The full export | Answered; the 93 empty ends on live mates need a look |
 
 ## FabSys as the driver
 
@@ -225,8 +227,8 @@ Where they meet: 3 and 4 both add kinds of selector (a named face should work as
 end), 1 and 3 both extend references to model geometry, and all five add to
 `docs/scripting.md` and the skills, so those files will need merging.
 
-Next in line: the width mate (A3, 16 assemblies; left out because it is in the same
-files as 4) and break corner (P8, 55 parts; first needs a check of whether `fillet` or
+Next in line: the remaining width-mate limits (A3, parallel pairs and all four modes
+are done) and break corner (P8, 55 parts; first needs a check of whether `fillet` or
 `chamfer` on a sheet body already does it).
 
 ## A working order
