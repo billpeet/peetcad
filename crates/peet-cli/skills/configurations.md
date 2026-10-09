@@ -7,7 +7,7 @@ description: Configurations in peet - several versions of one part in one file (
 
 A part has one or more **configurations**: versions of it that differ in which features
 are suppressed and in its numbers: parameters, the numeric values of features (a depth, an
-angle, a hole's diameter) and the dimensions of sketches. A new part has one, `Default`.
+angle, a hole's diameter, a pattern's count) and the dimensions of sketches. A new part has one, `Default`.
 Exactly one is **active**, and every other operation reads, builds, measures and exports
 the active one.
 
@@ -34,7 +34,7 @@ the active one.
   numeric values, and a sketch's dimensions.
 - Everything else is the part's, in every configuration: a new feature, what is drawn in
   a sketch, a new parameter, and the fields of a feature that aren't numbers (a
-  direction, an end condition, a count, the edges of a fillet).
+  direction, an end condition, the edges of a fillet).
 
 ## Which configurations a change applies to
 
@@ -80,6 +80,38 @@ thickness that features and sketches use); set the value itself when it is one n
 Everything built on a suppressed feature is suppressed with it (the sketch on its face,
 the cut from that sketch) and comes back when it is unsuppressed. `features` shows those
 with `suppressed_by`. They are not failures.
+
+## Suppression driven by a size
+
+Use `set_suppression_expression` when a feature should appear or disappear as a
+parameter changes. The rule belongs to the part and reads the active configuration's
+parameters on every rebuild. Zero builds the feature; a finite nonzero plain number
+suppresses it and its dependents. This rule controls suppression while it is set.
+Manual flags, including changes made with `suppress`, stay saved for use after clearing
+it with `value: null`. `suppressed_in` lists those saved manual flags.
+
+```jsonl
+{"op": "set_parameter", "name": "width", "value": "300mm"}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [20, 10]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 4}
+{"op": "sketch", "name": "Vent", "on": {"feature": "Extrude1", "side": "end"}, "draw": [{"type": "circle", "center": [5, 5], "radius": 1}]}
+{"op": "cut", "sketch": "Vent", "end": "through_all"}
+{"op": "set_suppression_expression", "feature": "Vent", "value": "iif(width > 300mm, 0, 1)"}
+{"op": "add_configuration", "name": "Wide"}
+{"op": "set_parameter", "name": "width", "value": "400mm"}
+{"op": "features"}
+{"op": "configuration", "configuration": "Default"}
+{"op": "features"}
+{"op": "set_suppression_expression", "feature": "Vent", "value": null}
+```
+
+Inspect the rule and effective state with `feature`; `manual_suppressed` is the saved
+flag. A malformed expression is refused. An unknown name, invalid unit or evaluation
+error makes the feature fail at rebuild, and appears in `failures`. Fix the rule or
+its parameter, or clear it. Check each configuration, since their parameter values
+can select different branches. Translate SolidWorks suppression strings to numeric
+results: `"suppressed"` becomes 1 and `"unsuppressed"` becomes 0. Use a named parameter
+for a sketch size that a suppression rule needs to read.
 
 ## Checking and exporting each
 

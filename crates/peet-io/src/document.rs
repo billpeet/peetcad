@@ -48,8 +48,11 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 ///   so schema 6 and 7 models are read as [`peet_model::ModelV7`] and converted.
 /// - Model 9: persistent sketch projections and doubled centreline dimensions. Earlier
 ///   sketch layouts are read through the version 8 feature types, including nested parts.
+/// - Model 10: feature suppression expressions and scalar pattern counts. Earlier
+///   features have no rule and literal counts migrate to numeric scalars, including
+///   inside nested assembly definitions.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 9;
+pub const MODEL_SCHEMA: u16 = 10;
 /// The last model schema without configurations.
 const MODEL_SCHEMA_BEFORE_CONFIGURATIONS: u16 = 4;
 /// The last model schema without materials and assemblies.
@@ -177,6 +180,9 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
             .map(Model::from),
         Some(8) => r
             .read::<peet_model::ModelV8>(SectionKind::MODEL)?
+            .map(Model::from),
+        Some(9) => r
+            .read::<peet_model::ModelV9>(SectionKind::MODEL)?
             .map(Model::from),
         _ => r.read(SectionKind::MODEL)?,
     };
@@ -411,6 +417,130 @@ mod tests {
             );
         assert!(without.len() < old_text.len());
         assert!(from_text(&without).is_ok());
+    }
+
+    #[test]
+    fn schema_eight_parts_and_nested_assemblies_migrate_without_rules() {
+        let (mut part, _) = peet_model::samples::housing();
+        part.material = Some(peet_model::Material::new("Steel", 7850.0).unwrap());
+        let first = part.features().next().unwrap().id;
+        part.set_suppressed(first, true, &peet_model::Scope::This)
+            .unwrap();
+        let mut sub = Model::new_assembly();
+        let def = sub.assembly_mut().unwrap().define(Arc::new(part.clone()));
+        sub.assembly_mut()
+            .unwrap()
+            .insert(def, peet_math::Frame::WORLD)
+            .unwrap();
+        let mut assembly = Model::new_assembly();
+        let def = assembly.assembly_mut().unwrap().define(Arc::new(sub));
+        assembly
+            .assembly_mut()
+            .unwrap()
+            .insert(def, peet_math::Frame::WORLD)
+            .unwrap();
+        for model in [part, assembly] {
+            let mut w = Writer::new();
+            w.section(SectionKind::MODEL, 8, &peet_model::ModelV8::of(&model))
+                .unwrap();
+            let opened = open(&w.finish()).unwrap();
+            assert_eq!(opened.model, model);
+            let bytes = save(&opened.model, &Metadata::default(), None).unwrap();
+            assert_eq!(open(&bytes).unwrap().model, model);
+        }
+    }
+
+    #[test]
+    fn schema_nine_projections_and_pattern_counts_migrate_in_parts_and_nested_assemblies() {
+        let (mut part, _) = peet_model::samples::housing();
+        let id = part.add_sketch(
+            peet_model::PlaneRef::Standard(peet_model::StdPlane::Front),
+            peet_model::StdPlane::Front.plane(),
+        );
+        let sketch = part.feature_mut(id).unwrap().sketch_mut().unwrap();
+        let entity = peet_model::projection::Shape::Point(peet_math::DVec2::ZERO)
+            .add(&mut sketch.sketch, true);
+        sketch.projections.push(peet_model::projection::Projection {
+            entity,
+            source: peet_model::projection::Source::Point(peet_model::PointRef::Origin),
+        });
+        let mut sub = Model::new_assembly();
+        let def = sub.assembly_mut().unwrap().define(Arc::new(part.clone()));
+        sub.assembly_mut()
+            .unwrap()
+            .insert(def, peet_math::Frame::WORLD)
+            .unwrap();
+        let mut assembly = Model::new_assembly();
+        let def = assembly.assembly_mut().unwrap().define(Arc::new(sub));
+        assembly
+            .assembly_mut()
+            .unwrap()
+            .insert(def, peet_math::Frame::WORLD)
+            .unwrap();
+        for model in [part, assembly] {
+            let mut w = Writer::new();
+            w.section(SectionKind::MODEL, 9, &peet_model::ModelV9::of(&model))
+                .unwrap();
+            let opened = open(&w.finish()).unwrap();
+            assert_eq!(opened.model, model);
+            let bytes = save(&opened.model, &Metadata::default(), None).unwrap();
+            assert_eq!(open(&bytes).unwrap().model, model);
+        }
+    }
+
+    #[test]
+    fn old_text_with_integer_counts_still_packs_and_expression_counts_round_trip() {
+        #[derive(Serialize)]
+        struct OldText {
+            metadata: Metadata,
+            model: peet_model::ModelV9,
+        }
+        let (mut model, _) = peet_model::samples::housing();
+        let old = ron::ser::to_string(&OldText {
+            metadata: Metadata::default(),
+            model: peet_model::ModelV9::of(&model),
+        })
+        .unwrap();
+        assert_eq!(open(&from_text(&old).unwrap()).unwrap().model, model);
+        model.parameters.set("copies", "6").unwrap();
+        let id = model
+            .features()
+            .find(|f| matches!(f.kind, peet_model::FeatureKind::Pattern(_)))
+            .unwrap()
+            .id;
+        // Use the evaluated table when assigning the stored expression.
+        let params = model.parameters.clone();
+        if let peet_model::FeatureKind::Pattern(p) = &mut model.feature_mut(id).unwrap().kind {
+            if let peet_model::PatternDef::Circular { count, .. } = &mut p.def {
+                count
+                    .set_input(
+                        "if(copies > 5, copies, 4)",
+                        peet_model::ScalarKind::Number,
+                        &params,
+                    )
+                    .unwrap();
+            }
+        }
+        let bytes = save(&model, &Metadata::default(), None).unwrap();
+        assert_eq!(
+            open(&from_text(&to_text(&bytes).unwrap()).unwrap())
+                .unwrap()
+                .model,
+            model
+        );
+    }
+
+    #[test]
+    fn suppression_rules_survive_binary_and_text_round_trips() {
+        let (mut model, _) = bracket();
+        model.parameters.set("width", "300mm").unwrap();
+        let first = model.features().next().unwrap().id;
+        model.feature_mut(first).unwrap().suppression_expression = Some("width < 300mm".into());
+        let bytes = save(&model, &Metadata::default(), None).unwrap();
+        assert_eq!(open(&bytes).unwrap().model, model);
+        let text = to_text(&bytes).unwrap();
+        assert!(text.contains("width < 300mm"));
+        assert_eq!(open(&from_text(&text).unwrap()).unwrap().model, model);
     }
 
     #[test]

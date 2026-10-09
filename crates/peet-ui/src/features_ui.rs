@@ -1746,13 +1746,6 @@ fn seeds_row(ui: &mut Ui, doc: &Document, own: FeatureId, seeds: &mut Vec<Featur
     ui.end_row();
 }
 
-fn count_row(ui: &mut Ui, label: &str, count: &mut u32) {
-    ui.label(label)
-        .on_hover_text("How many in all, the original included.");
-    ui.add(egui::DragValue::new(count).range(2..=1000).speed(0.1));
-    ui.end_row();
-}
-
 /// Pattern: what it copies, and where the copies go.
 pub fn pattern_panel(
     ui: &mut Ui,
@@ -1790,7 +1783,7 @@ pub fn pattern_panel(
                         params,
                         &mut out,
                     );
-                    count_row(ui, "Count", &mut first.count);
+                    value_row(ui, "Count", "A whole number from 2 to 10000, the original included, or an expression returning one.", "pattern_count1", &mut first.count, ScalarKind::Number, params, &mut out);
                     ui.label("");
                     ui.checkbox(&mut first.flip, "Reverse");
                     ui.end_row();
@@ -1803,7 +1796,7 @@ pub fn pattern_panel(
                                 _ => AxisRef::Standard(StdAxis::Y),
                             },
                             spacing: first.spacing.clone(),
-                            count: 2,
+                            count: Scalar::new(2.0),
                             flip: false,
                         });
                     }
@@ -1829,7 +1822,7 @@ pub fn pattern_panel(
                             params,
                             &mut out,
                         );
-                        count_row(ui, "Count 2", &mut s.count);
+                        value_row(ui, "Count 2", "A whole number from 2 to 10000, the original included, or an expression returning one.", "pattern_count2", &mut s.count, ScalarKind::Number, params, &mut out);
                         ui.label("");
                         ui.checkbox(&mut s.flip, "Reverse");
                         ui.end_row();
@@ -1851,7 +1844,7 @@ pub fn pattern_panel(
                         picking,
                         &mut out,
                     );
-                    count_row(ui, "Count", count);
+                    value_row(ui, "Count", "A whole number from 2 to 10000, the original included, or an expression returning one.", "pattern_count_circular", count, ScalarKind::Number, params, &mut out);
                     value_row(
                         ui,
                         "Angle",

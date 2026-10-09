@@ -296,6 +296,9 @@ fn feature_row(ui: &mut Ui, cx: &mut RowContext<'_>, feature: &Feature, index: u
         } else {
             r = r.on_hover_text(feature.kind.type_name());
         }
+        if let Some(source) = &feature.suppression_expression {
+            r = r.on_hover_text(format!("Suppression expression: {source}"));
+        }
         if r.drag_started() {
             r.dnd_set_drag_payload(Drag::Feature(feature.id));
         }
@@ -329,6 +332,11 @@ fn feature_row(ui: &mut Ui, cx: &mut RowContext<'_>, feature: &Feature, index: u
                 suppress = suppress.on_hover_text(format!(
                     "In this configuration ({}).",
                     doc.model.active_configuration().name
+                ));
+            }
+            if let Some(source) = &feature.suppression_expression {
+                suppress = suppress.on_hover_text(format!(
+                    "Suppression follows {source}. This changes the saved manual flag, used after the rule is cleared."
                 ));
             }
             if suppress.clicked() {

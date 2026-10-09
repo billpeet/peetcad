@@ -577,13 +577,32 @@ impl FormFeature {
     }
 }
 
+/// Text dumps from older versions stored counts as integers. The binary layout uses
+/// the schema-specific migrations; current text also accepts the scalar representation.
+fn deserialize_pattern_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Scalar, D::Error> {
+    if !d.is_human_readable() {
+        return Scalar::deserialize(d);
+    }
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum CountInput {
+        Scalar(Scalar),
+        Number(f64),
+    }
+    CountInput::deserialize(d).map(|input| match input {
+        CountInput::Scalar(s) => s,
+        CountInput::Number(n) => Scalar::new(n),
+    })
+}
+
 /// One direction of a linear pattern.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct LinearDirection {
     pub direction: AxisRef,
     pub spacing: Scalar,
     /// How many, the original included.
-    pub count: u32,
+    #[serde(deserialize_with = "deserialize_pattern_count")]
+    pub count: Scalar,
     pub flip: bool,
 }
 
@@ -599,7 +618,8 @@ pub enum PatternDef {
     /// spaces them evenly all the way round.
     Circular {
         axis: AxisRef,
-        count: u32,
+        #[serde(deserialize_with = "deserialize_pattern_count")]
+        count: Scalar,
         angle: Scalar,
         flip: bool,
     },
@@ -989,11 +1009,13 @@ impl FeatureKind {
             Self::Form(f) => vec![&f.height],
             Self::Pattern(p) => match &p.def {
                 PatternDef::Linear { first, second } => {
-                    let mut v = vec![&first.spacing];
-                    v.extend(second.as_ref().map(|s| &s.spacing));
+                    let mut v = vec![&first.spacing, &first.count];
+                    if let Some(s) = second {
+                        v.extend([&s.spacing, &s.count]);
+                    }
                     v
                 }
-                PatternDef::Circular { angle, .. } => vec![angle],
+                PatternDef::Circular { angle, count, .. } => vec![angle, count],
             },
             Self::Revolve(r) => vec![&r.angle],
             Self::Blend(b) => vec![&b.size],
@@ -1111,13 +1133,14 @@ macro_rules! slots {
                 Self::Form(f) => vec![("height", Length, & $($m)? f.height)],
                 Self::Pattern(p) => match & $($m)? p.def {
                     PatternDef::Linear { first, second } => {
-                        let mut v = vec![("spacing", Length, & $($m)? first.spacing)];
+                        let mut v = vec![("spacing", Length, & $($m)? first.spacing), ("count", Number, & $($m)? first.count)];
                         if let Some(s) = second {
                             v.push(("spacing2", Length, & $($m)? s.spacing));
+                            v.push(("count2", Number, & $($m)? s.count));
                         }
                         v
                     }
-                    PatternDef::Circular { angle, .. } => vec![("angle", Angle, angle)],
+                    PatternDef::Circular { angle, count, .. } => vec![("angle", Angle, angle), ("count", Number, count)],
                 },
                 Self::Revolve(r) => vec![("angle", Angle, & $($m)? r.angle)],
                 Self::Blend(b) => vec![("size", Length, & $($m)? b.size)],
@@ -1195,6 +1218,240 @@ fn point_deps(r: &PointRef, out: &mut Vec<FeatureId>) {
     }
 }
 
+/// Frozen layouts used when migrating model schemas through 9.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct LinearDirectionV9 {
+    direction: AxisRef,
+    spacing: Scalar,
+    count: u32,
+    flip: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum PatternDefV9 {
+    Linear {
+        first: LinearDirectionV9,
+        second: Option<LinearDirectionV9>,
+    },
+    Circular {
+        axis: AxisRef,
+        count: u32,
+        angle: Scalar,
+        flip: bool,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PatternFeatureV9 {
+    seeds: Vec<FeatureId>,
+    def: PatternDefV9,
+}
+
+impl From<LinearDirectionV9> for LinearDirection {
+    fn from(d: LinearDirectionV9) -> Self {
+        Self {
+            direction: d.direction,
+            spacing: d.spacing,
+            count: Scalar::new(f64::from(d.count)),
+            flip: d.flip,
+        }
+    }
+}
+
+impl From<LinearDirection> for LinearDirectionV9 {
+    fn from(d: LinearDirection) -> Self {
+        Self {
+            direction: d.direction,
+            spacing: d.spacing,
+            count: d.count.value as u32,
+            flip: d.flip,
+        }
+    }
+}
+
+impl From<PatternFeatureV9> for PatternFeature {
+    fn from(p: PatternFeatureV9) -> Self {
+        let def = match p.def {
+            PatternDefV9::Linear { first, second } => PatternDef::Linear {
+                first: first.into(),
+                second: second.map(Into::into),
+            },
+            PatternDefV9::Circular {
+                axis,
+                count,
+                angle,
+                flip,
+            } => PatternDef::Circular {
+                axis,
+                count: Scalar::new(f64::from(count)),
+                angle,
+                flip,
+            },
+        };
+        Self {
+            seeds: p.seeds,
+            def,
+        }
+    }
+}
+
+impl From<PatternFeature> for PatternFeatureV9 {
+    fn from(p: PatternFeature) -> Self {
+        let def = match p.def {
+            PatternDef::Linear { first, second } => PatternDefV9::Linear {
+                first: first.into(),
+                second: second.map(Into::into),
+            },
+            PatternDef::Circular {
+                axis,
+                count,
+                angle,
+                flip,
+            } => PatternDefV9::Circular {
+                axis,
+                count: count.value as u32,
+                angle,
+                flip,
+            },
+        };
+        Self {
+            seeds: p.seeds,
+            def,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum FeatureKindV9 {
+    Sketch(Box<SketchFeature>),
+    Extrude(Box<ExtrudeFeature>),
+    Plane(PlaneDef),
+    Axis(AxisDef),
+    Point(PointDef),
+    CoordSystem(CoordSystemDef),
+    BaseFlange(Box<BaseFlangeFeature>),
+    EdgeFlange(Box<EdgeFlangeFeature>),
+    SheetCut(Box<SheetCutFeature>),
+    Hem(Box<HemFeature>),
+    SketchedBend(Box<SketchedBendFeature>),
+    Jog(Box<JogFeature>),
+    MiterFlange(Box<MiterFlangeFeature>),
+    Corner(Box<CornerFeature>),
+    Form(Box<FormFeature>),
+    Pattern(Box<PatternFeatureV9>),
+    Mirror(Box<MirrorFeature>),
+    // The variant order and the pattern layout are frozen for schemas through 9.
+    Revolve(Box<RevolveFeature>),
+    Blend(Box<BlendFeature>),
+    Shell(Box<ShellFeature>),
+    Draft(Box<DraftFeature>),
+    Hole(Box<HoleFeature>),
+    Import(Box<ImportFeature>),
+    Sweep(Box<SweepFeature>),
+    Loft(Box<LoftFeature>),
+    ConvertToSheet(Box<ConvertToSheetFeature>),
+}
+impl From<FeatureKindV9> for FeatureKind {
+    fn from(k: FeatureKindV9) -> Self {
+        match k {
+            FeatureKindV9::Sketch(v) => Self::Sketch(v),
+            FeatureKindV9::Extrude(v) => Self::Extrude(v),
+            FeatureKindV9::Plane(v) => Self::Plane(v),
+            FeatureKindV9::Axis(v) => Self::Axis(v),
+            FeatureKindV9::Point(v) => Self::Point(v),
+            FeatureKindV9::CoordSystem(v) => Self::CoordSystem(v),
+            FeatureKindV9::BaseFlange(v) => Self::BaseFlange(v),
+            FeatureKindV9::EdgeFlange(v) => Self::EdgeFlange(v),
+            FeatureKindV9::SheetCut(v) => Self::SheetCut(v),
+            FeatureKindV9::Hem(v) => Self::Hem(v),
+            FeatureKindV9::SketchedBend(v) => Self::SketchedBend(v),
+            FeatureKindV9::Jog(v) => Self::Jog(v),
+            FeatureKindV9::MiterFlange(v) => Self::MiterFlange(v),
+            FeatureKindV9::Corner(v) => Self::Corner(v),
+            FeatureKindV9::Form(v) => Self::Form(v),
+            FeatureKindV9::Pattern(v) => Self::Pattern(Box::new((*v).into())),
+            FeatureKindV9::Mirror(v) => Self::Mirror(v),
+            FeatureKindV9::Revolve(v) => Self::Revolve(v),
+            FeatureKindV9::Blend(v) => Self::Blend(v),
+            FeatureKindV9::Shell(v) => Self::Shell(v),
+            FeatureKindV9::Draft(v) => Self::Draft(v),
+            FeatureKindV9::Hole(v) => Self::Hole(v),
+            FeatureKindV9::Import(v) => Self::Import(v),
+            FeatureKindV9::Sweep(v) => Self::Sweep(v),
+            FeatureKindV9::Loft(v) => Self::Loft(v),
+            FeatureKindV9::ConvertToSheet(v) => Self::ConvertToSheet(v),
+        }
+    }
+}
+
+impl From<FeatureKind> for FeatureKindV9 {
+    fn from(k: FeatureKind) -> Self {
+        match k {
+            FeatureKind::Sketch(v) => Self::Sketch(v),
+            FeatureKind::Extrude(v) => Self::Extrude(v),
+            FeatureKind::Plane(v) => Self::Plane(v),
+            FeatureKind::Axis(v) => Self::Axis(v),
+            FeatureKind::Point(v) => Self::Point(v),
+            FeatureKind::CoordSystem(v) => Self::CoordSystem(v),
+            FeatureKind::BaseFlange(v) => Self::BaseFlange(v),
+            FeatureKind::EdgeFlange(v) => Self::EdgeFlange(v),
+            FeatureKind::SheetCut(v) => Self::SheetCut(v),
+            FeatureKind::Hem(v) => Self::Hem(v),
+            FeatureKind::SketchedBend(v) => Self::SketchedBend(v),
+            FeatureKind::Jog(v) => Self::Jog(v),
+            FeatureKind::MiterFlange(v) => Self::MiterFlange(v),
+            FeatureKind::Corner(v) => Self::Corner(v),
+            FeatureKind::Form(v) => Self::Form(v),
+            FeatureKind::Pattern(v) => Self::Pattern(Box::new((*v).into())),
+            FeatureKind::Mirror(v) => Self::Mirror(v),
+            FeatureKind::Revolve(v) => Self::Revolve(v),
+            FeatureKind::Blend(v) => Self::Blend(v),
+            FeatureKind::Shell(v) => Self::Shell(v),
+            FeatureKind::Draft(v) => Self::Draft(v),
+            FeatureKind::Hole(v) => Self::Hole(v),
+            FeatureKind::Import(v) => Self::Import(v),
+            FeatureKind::Sweep(v) => Self::Sweep(v),
+            FeatureKind::Loft(v) => Self::Loft(v),
+            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(v),
+        }
+    }
+}
+
+/// A feature as schema 9 stored it: sketch projections, with literal pattern counts.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeatureV9 {
+    id: FeatureId,
+    name: String,
+    suppressed: bool,
+    visible: bool,
+    kind: FeatureKindV9,
+}
+
+impl From<Feature> for FeatureV9 {
+    fn from(f: Feature) -> Self {
+        Self {
+            id: f.id,
+            name: f.name,
+            suppressed: f.suppressed,
+            visible: f.visible,
+            kind: f.kind.into(),
+        }
+    }
+}
+
+impl From<FeatureV9> for Feature {
+    fn from(f: FeatureV9) -> Self {
+        Self {
+            suppression_expression: None,
+            id: f.id,
+            name: f.name,
+            suppressed: f.suppressed,
+            visible: f.visible,
+            kind: f.kind.into(),
+        }
+    }
+}
+
 /// One step of the part's history.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Feature {
@@ -1202,12 +1459,34 @@ pub struct Feature {
     pub name: String,
     /// Suppressed features are skipped when rebuilding, as if they were not there.
     pub suppressed: bool,
+    /// Part-wide rule evaluated with the active configuration's parameters. While set,
+    /// this controls suppression instead of the saved manual flag. Zero builds the
+    /// feature; a finite nonzero plain number suppresses it.
+    #[serde(default)]
+    pub suppression_expression: Option<String>,
     /// Whether the feature's own geometry (a sketch, a reference plane) is drawn.
     pub visible: bool,
     pub kind: FeatureKind,
 }
 
 impl Feature {
+    /// Effective suppression, without changing the saved per-configuration flag.
+    pub fn effective_suppression(
+        &self,
+        parameters: &peet_sketch::expr::Parameters,
+    ) -> Result<bool, String> {
+        let Some(source) = &self.suppression_expression else {
+            return Ok(self.suppressed);
+        };
+        let q = parameters
+            .evaluate_expression(source)
+            .map_err(|e| format!("Suppression expression: {e}"))?;
+        if !q.dim.is_none() || !q.value.is_finite() {
+            return Err("Suppression expression must return a finite plain number: zero builds, nonzero suppresses.".to_owned());
+        }
+        Ok(q.value != 0.0)
+    }
+
     pub fn sketch(&self) -> Option<&SketchFeature> {
         match &self.kind {
             FeatureKind::Sketch(s) => Some(s),
@@ -1239,13 +1518,13 @@ impl Feature {
 
 // Binary layouts of sketch features before model schema 9.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct SketchFeatureV8 {
+pub(crate) struct SketchFeatureV8 {
     plane: PlaneRef,
     placement: Plane,
     sketch: Sketch,
 }
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub enum FeatureKindV8 {
+pub(crate) enum FeatureKindV8 {
     Sketch(Box<SketchFeatureV8>),
     Extrude(Box<ExtrudeFeature>),
     Plane(PlaneDef),
@@ -1261,7 +1540,7 @@ pub enum FeatureKindV8 {
     MiterFlange(Box<MiterFlangeFeature>),
     Corner(Box<CornerFeature>),
     Form(Box<FormFeature>),
-    Pattern(Box<PatternFeature>),
+    Pattern(Box<PatternFeatureV9>),
     Mirror(Box<MirrorFeature>),
     Revolve(Box<RevolveFeature>),
     Blend(Box<BlendFeature>),
@@ -1296,7 +1575,7 @@ impl From<FeatureKindV8> for FeatureKind {
             FeatureKindV8::MiterFlange(v) => Self::MiterFlange(v),
             FeatureKindV8::Corner(v) => Self::Corner(v),
             FeatureKindV8::Form(v) => Self::Form(v),
-            FeatureKindV8::Pattern(v) => Self::Pattern(v),
+            FeatureKindV8::Pattern(v) => Self::Pattern(Box::new((*v).into())),
             FeatureKindV8::Mirror(v) => Self::Mirror(v),
             FeatureKindV8::Revolve(v) => Self::Revolve(v),
             FeatureKindV8::Blend(v) => Self::Blend(v),
@@ -1332,7 +1611,7 @@ impl From<&FeatureKind> for FeatureKindV8 {
             FeatureKind::MiterFlange(v) => Self::MiterFlange(v.clone()),
             FeatureKind::Corner(v) => Self::Corner(v.clone()),
             FeatureKind::Form(v) => Self::Form(v.clone()),
-            FeatureKind::Pattern(v) => Self::Pattern(v.clone()),
+            FeatureKind::Pattern(v) => Self::Pattern(Box::new((**v).clone().into())),
             FeatureKind::Mirror(v) => Self::Mirror(v.clone()),
             FeatureKind::Revolve(v) => Self::Revolve(v.clone()),
             FeatureKind::Blend(v) => Self::Blend(v.clone()),
@@ -1357,6 +1636,7 @@ pub struct FeatureV8 {
 impl From<FeatureV8> for Feature {
     fn from(f: FeatureV8) -> Self {
         Self {
+            suppression_expression: None,
             id: f.id,
             name: f.name,
             suppressed: f.suppressed,
@@ -1374,5 +1654,16 @@ impl From<&Feature> for FeatureV8 {
             visible: f.visible,
             kind: (&f.kind).into(),
         }
+    }
+}
+
+impl FeatureV8 {
+    pub(crate) fn of(f: &Feature) -> Self {
+        Self::from(f)
+    }
+}
+impl From<Feature> for FeatureV8 {
+    fn from(f: Feature) -> Self {
+        Self::from(&f)
     }
 }

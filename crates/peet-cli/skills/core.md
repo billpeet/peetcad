@@ -71,6 +71,33 @@ Done when `status` shows `"failures": []` and `bodies` has the sizes that were a
 - **Exit code:** 0 applied, 1 an operation was not applied, 2 the command line or a file
   was wrong.
 
+## Conditional sizes
+
+Use `if(condition, yes, no)` or `iif` when a size changes at a threshold. Comparisons
+`<`, `<=`, `>`, `>=`, `==` or `=`, and `!=` or `<>` return 1 for true and 0 for false.
+Zero chooses `no`; any nonzero plain number chooses `yes`. Only the selected branch
+is evaluated, so it can guard a division by zero. Names in both branches must exist,
+and dependencies in both branches must be free of cycles.
+
+Compare like units. A bare number adopts the other operand's kind in document units;
+write `300mm` to keep a threshold fixed when the document units change. The selected
+branch must suit the consuming field. `int` rounds down like `floor`, including for
+negative numbers. Part pattern counts accept expressions too; read `peet skills solids`
+for their limits and an example.
+
+```jsonl
+{"op": "set_parameter", "name": "width", "value": "300mm"}
+{"op": "set_parameter", "name": "depth", "value": "iif(width > 299mm, 8mm, 4mm)"}
+{"op": "set_parameter", "name": "bands", "value": "int(width / 100mm)"}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [20, 10]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": "depth"}
+{"op": "set_parameter", "name": "width", "value": "200mm"}
+{"op": "bodies"}
+```
+
+For features that appear only at certain sizes, read `peet skills configurations`
+for `set_suppression_expression`.
+
 ## Several documents in one run
 
 Use this to read from one part while building another, or to make several parts in one

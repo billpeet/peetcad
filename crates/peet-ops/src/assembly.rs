@@ -459,6 +459,7 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
         | Op::SetDimension { .. }
         | Op::Rename { .. }
         | Op::Suppress { .. }
+        | Op::SetSuppressionExpression { .. }
         | Op::Show { .. }
         | Op::Delete { .. }
         | Op::Move { .. }

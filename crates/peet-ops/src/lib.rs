@@ -1017,6 +1017,18 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             let word = if *on { "Suppress" } else { "Unsuppress" };
             format!("{word} {}", model.name_of(id))
         }
+        Op::SetSuppressionExpression { feature, value } => {
+            let id = feature.resolve(doc)?;
+            if let Some(source) = value {
+                peet_sketch::expr::Expr::parse(source).map_err(|e| e.to_string())?;
+            }
+            model
+                .feature_mut(id)
+                .expect("resolved feature")
+                .suppression_expression = value.clone();
+            done.feature = Some(id);
+            format!("Set suppression expression {}", model.name_of(id))
+        }
         Op::Show { feature, on } => {
             let id = feature.resolve(doc)?;
             if let Some(f) = model.feature_mut(id) {

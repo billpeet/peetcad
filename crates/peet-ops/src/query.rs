@@ -45,6 +45,9 @@ pub fn brief(doc: &Document, id: FeatureId) -> Value {
             json!(doc.model.name_of(*parent)),
         );
     }
+    if let Some(source) = &f.suppression_expression {
+        out.insert("suppression_expression".to_owned(), json!(source));
+    }
     if doc.model.suppression_differs(id) {
         out.insert("suppressed_in".to_owned(), json!(suppressed_in(doc, id)));
     }
@@ -161,7 +164,7 @@ pub fn features(doc: &Document) -> Value {
         .map(|f| {
             let mut v = brief(doc, f.id);
             if let Value::Object(m) = &mut v {
-                if f.suppressed {
+                if f.effective_suppression(&doc.model.parameters) == Ok(true) {
                     m.insert("suppressed".to_owned(), json!(true));
                 }
                 if !f.visible {
@@ -312,7 +315,15 @@ pub fn feature(doc: &Document, id: FeatureId) -> Value {
         Value::Object(m) => m,
         _ => Map::new(),
     };
-    out.insert("suppressed".to_owned(), json!(f.suppressed));
+    out.insert(
+        "suppressed".to_owned(),
+        json!(f.effective_suppression(&doc.model.parameters).ok()),
+    );
+    out.insert("manual_suppressed".to_owned(), json!(f.suppressed));
+    out.insert(
+        "suppression_expression".to_owned(),
+        json!(f.suppression_expression),
+    );
     out.insert("visible".to_owned(), json!(f.visible));
     out.insert(
         "fields".to_owned(),
