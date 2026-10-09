@@ -406,9 +406,54 @@ impl Engine {
         &self.evaluation
     }
 
-    /// Rebuilds the parts of an assembly (those whose model changed), solves its mates
-    /// and places the parts' bodies. A part's solved sketches are written back into its
-    /// definition, and the placements the mates come to into the components.
+    /// Reference planes of this definition and its active descendants, including
+    /// definitions with no solid bodies. Inner placements are already solved.
+    fn mate_planes(&self, model: &Model) -> Vec<mate::ComponentPlane> {
+        let mut planes: Vec<_> = crate::StdPlane::ALL
+            .into_iter()
+            .map(|p| (Vec::new(), PlaneRef::Standard(p), p.plane()))
+            .collect();
+        for feature in model.features() {
+            let Some(state) = self.evaluation.states.get(&feature.id) else {
+                continue;
+            };
+            if !matches!(state.status, Status::Ok | Status::Warning(_)) {
+                continue;
+            }
+            let plane = match state.output {
+                Output::Plane(p) => p,
+                Output::Frame(frame) => Plane { frame },
+                _ => continue,
+            };
+            planes.push((Vec::new(), PlaneRef::Feature(feature.id), plane));
+        }
+        if let Some(assembly) = model.assembly() {
+            for c in assembly.components().filter(|c| {
+                !c.suppressed
+                    && !matches!(
+                        self.evaluation.component_status(c.id),
+                        Some(Status::Suppressed)
+                    )
+            }) {
+                let Some(part) = self.parts.get(&c.definition) else {
+                    continue;
+                };
+                for (mut path, reference, plane) in part.engine.mate_planes(&part.model) {
+                    path.insert(0, c.id);
+                    planes.push((
+                        path,
+                        reference,
+                        Plane {
+                            frame: c.placement.compose(&plane.frame),
+                        },
+                    ));
+                }
+            }
+        }
+        planes
+    }
+
+    /// Rebuilds definitions, solves mates and writes back solved placements.
     fn assemble(&mut self, model: &mut Model, stats: &mut Stats) -> Assembled {
         let Some(assembly) = model.assembly() else {
             self.parts.clear();
@@ -447,7 +492,8 @@ impl Engine {
         // a sub-assembly, of the parts in it) to find the mates' faces in.
         let parts = &self.parts;
         let place = |c: &crate::Component, frame: Frame| -> Option<mate::Placed> {
-            let built = parts.get(&c.definition)?.engine.evaluation();
+            let part = parts.get(&c.definition)?;
+            let built = part.engine.evaluation();
             let bodies = built
                 .bodies
                 .iter()
@@ -466,6 +512,7 @@ impl Engine {
                 // A pattern's copy is where its pattern puts it: the mates don't move it.
                 fixed: c.fixed || c.pattern.is_some(),
                 bodies,
+                planes: part.engine.mate_planes(&part.model),
             })
         };
         let placed: Vec<mate::Placed> = assembly
@@ -485,7 +532,8 @@ impl Engine {
                 )
             })
             .collect();
-        let key = hash::of(&(&mates, structure, &model.parameters));
+        let planes: Vec<_> = placed.iter().map(|c| (c.id, &c.planes)).collect();
+        let key = hash::of(&(&mates, structure, &model.parameters, planes));
         let drag = self.drag.take();
         let solved = mate::solve(
             &mates,

@@ -26,6 +26,308 @@ fn error(doc: &mut Document, op: Value) -> String {
     reply.json["error"].as_str().unwrap().to_owned()
 }
 
+fn nested_mate_fixture() -> Document {
+    let mut part = Document::default();
+    ok(
+        &mut part,
+        json!({"op": "sketch", "on": "top", "draw": [
+            {"type": "rectangle", "from": [0, 0], "to": [40, 30]}
+        ]}),
+    );
+    ok(
+        &mut part,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+    );
+    ok(
+        &mut part,
+        json!({"op": "plane", "from": "top", "distance": 7, "name": "MatePlane"}),
+    );
+    ok(
+        &mut part,
+        json!({"op": "name_face", "face": {"normal": [0, 0, 1]}, "name": "TopFace"}),
+    );
+    let mut shelf = Model::new_assembly();
+    let a = shelf.assembly_mut().unwrap();
+    let d = a.define(Arc::new(part.model.clone()));
+    let c = a
+        .insert(
+            d,
+            Frame {
+                origin: DVec3::new(0.0, 0.0, 100.0),
+                rotation: peet_math::DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2),
+            },
+        )
+        .unwrap();
+    a.component_mut(c).unwrap().name = "Plate".to_owned();
+    let mut stand = Model::new_assembly();
+    let a = stand.assembly_mut().unwrap();
+    let d = a.define(Arc::new(shelf));
+    let c = a
+        .insert(
+            d,
+            Frame {
+                origin: DVec3::new(20.0, 30.0, 40.0),
+                rotation: peet_math::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
+            },
+        )
+        .unwrap();
+    a.component_mut(c).unwrap().name = "Shelf".to_owned();
+    let mut model = Model::new_assembly();
+    let a = model.assembly_mut().unwrap();
+    let d = a.define(Arc::new(part.model));
+    let c = a.insert(d, Frame::WORLD).unwrap();
+    a.component_mut(c).unwrap().name = "Base".to_owned();
+    let d = a.define(Arc::new(stand));
+    let c = a
+        .insert(
+            d,
+            Frame {
+                origin: DVec3::new(60.0, 0.0, 0.0),
+                ..Frame::WORLD
+            },
+        )
+        .unwrap();
+    a.component_mut(c).unwrap().name = "Stand".to_owned();
+    Document::from_model(model, None)
+}
+
+fn stand_x(doc: &Document) -> f64 {
+    doc.model
+        .assembly()
+        .unwrap()
+        .component(peet_model::CompId(2))
+        .unwrap()
+        .placement
+        .origin
+        .x
+}
+
+#[test]
+fn nested_reference_planes_follow_edits_and_survive_files() {
+    let mut doc = nested_mate_fixture();
+    let result = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 12, "flip": true,
+            "a": {"component": "Base", "plane": "right"},
+            "b": {"component": ["Stand", "Shelf", "Plate"], "plane": "MatePlane"}
+        }),
+    );
+    assert_eq!(result["mate"]["status"], "ok", "{result}");
+    assert_eq!(result["mate"]["b"]["on"], "plane");
+    assert_eq!(
+        result["mate"]["b"]["path"],
+        json!(["Stand", "Shelf", "Plate"])
+    );
+    assert!((stand_x(&doc) + 15.0).abs() < 1e-7);
+
+    // Edit the leaf definition. The root mate follows the same plane id through a rename.
+    doc.change("Edit nested plane", |model| {
+        let root = model.assembly_mut().unwrap();
+        let stand_id = root.component(peet_model::CompId(2)).unwrap().definition;
+        let mut stand = (*root.definition(stand_id).unwrap().model).clone();
+        let shelf_id = stand
+            .assembly()
+            .unwrap()
+            .component(peet_model::CompId(1))
+            .unwrap()
+            .definition;
+        let mut shelf = (*stand
+            .assembly()
+            .unwrap()
+            .definition(shelf_id)
+            .unwrap()
+            .model)
+            .clone();
+        let plate_id = shelf
+            .assembly()
+            .unwrap()
+            .component(peet_model::CompId(1))
+            .unwrap()
+            .definition;
+        let mut plate = Document::from_model(
+            (*shelf
+                .assembly()
+                .unwrap()
+                .definition(plate_id)
+                .unwrap()
+                .model)
+                .clone(),
+            None,
+        );
+        ok(
+            &mut plate,
+            json!({"op": "edit", "feature": "MatePlane", "distance": 17}),
+        );
+        ok(
+            &mut plate,
+            json!({"op": "rename", "feature": "MatePlane", "name": "RenamedPlane"}),
+        );
+        shelf
+            .assembly_mut()
+            .unwrap()
+            .set_model(plate_id, Arc::new(plate.model));
+        stand
+            .assembly_mut()
+            .unwrap()
+            .set_model(shelf_id, Arc::new(shelf));
+        root.set_model(stand_id, Arc::new(stand));
+    });
+    assert!((stand_x(&doc) + 25.0).abs() < 1e-7);
+    let dir = temp("nested-plane");
+    let path = dir.join("nested.peet");
+    ok(&mut doc, json!({"op": "save", "path": path}));
+    let reopened = peet_io::document::open(&std::fs::read(path).unwrap()).unwrap();
+    let mut doc = Document::from_model(reopened.model, None);
+    let mates = ok(&mut doc, json!({"op": "mates"}));
+    assert_eq!(mates["mates"][0]["status"], "ok");
+    assert!((stand_x(&doc) + 25.0).abs() < 1e-7);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn nested_named_faces_and_mixed_name_id_paths_are_scriptable() {
+    let mut doc = nested_mate_fixture();
+    let result = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident", "flip": true,
+            "a": {"component": "Base", "plane": "right"},
+            "b": {"component": [2, "Shelf", 1], "face": {"name": "TopFace"}}
+        }),
+    );
+    assert_eq!(result["mate"]["status"], "ok", "{result}");
+    assert!((stand_x(&doc) + 25.0).abs() < 1e-7);
+    let root = doc.model.assembly().unwrap();
+    let stand = root
+        .definition_of(peet_model::CompId(2))
+        .unwrap()
+        .model
+        .assembly()
+        .unwrap();
+    // The inner components remain rigid in their original local placements.
+    assert_eq!(
+        stand
+            .component(peet_model::CompId(1))
+            .unwrap()
+            .placement
+            .origin,
+        DVec3::new(20.0, 30.0, 40.0)
+    );
+}
+
+#[test]
+fn a_missing_nested_component_fails_its_plane_mate_and_restoring_it_recovers() {
+    let mut doc = nested_mate_fixture();
+    ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 12, "flip": true,
+            "a": {"component": "Base", "plane": "right"},
+            "b": {"component": ["Stand", "Shelf", "Plate"], "plane": "MatePlane"}
+        }),
+    );
+    for suppressed in [true, false] {
+        doc.change("Suppress inner component", |model| {
+            let root = model.assembly_mut().unwrap();
+            let id = root.component(peet_model::CompId(2)).unwrap().definition;
+            let mut stand = (*root.definition(id).unwrap().model).clone();
+            stand
+                .assembly_mut()
+                .unwrap()
+                .component_mut(peet_model::CompId(1))
+                .unwrap()
+                .suppressed = suppressed;
+            root.set_model(id, Arc::new(stand));
+        });
+        let mates = ok(&mut doc, json!({"op": "mates"}));
+        assert_eq!(
+            mates["mates"][0]["status"],
+            if suppressed { "failed" } else { "ok" }
+        );
+        assert_eq!(doc.evaluation().freedom, if suppressed { 6 } else { 3 });
+    }
+}
+
+#[test]
+fn mate_paths_and_planes_explain_invalid_selections() {
+    let mut doc = nested_mate_fixture();
+    for (end, message) in [
+        (json!({"component": [], "plane": "top"}), "empty"),
+        (
+            json!({"component": ["Base", "Child"], "plane": "top"}),
+            "not a sub-assembly",
+        ),
+        (
+            json!({"component": ["Stand", "Missing"], "plane": "top"}),
+            "Shelf",
+        ),
+        (
+            json!({"component": ["Stand", "Shelf", "Plate"], "plane": "Missing"}),
+            "MatePlane",
+        ),
+        (
+            json!({"component": "Base", "plane": "Extrude1"}),
+            "not a plane",
+        ),
+        (
+            json!({"component": "Base", "plane": "top", "face": {"normal": [0, 0, 1]}}),
+            "expected",
+        ),
+    ] {
+        let e = error(
+            &mut doc,
+            json!({"op": "mate", "type": "coincident",
+                "a": {"component": "Base", "plane": "top"}, "b": end
+            }),
+        );
+        assert!(e.contains(message), "{e}");
+    }
+}
+
+#[test]
+fn planar_face_selectors_are_also_plane_ends() {
+    let mut doc = nested_mate_fixture();
+    let result = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident", "flip": true,
+            "a": {"component": "Base", "plane": "right"},
+            "b": {"component": ["Stand", "Shelf", "Plate"], "plane": {"name": "TopFace"}}
+        }),
+    );
+    assert_eq!(result["mate"]["status"], "ok", "{result}");
+    assert!(matches!(
+        doc.model.assembly().unwrap().mates().next().unwrap().b.geom,
+        Some(peet_model::MateGeom::Plane(peet_model::PlaneRef::Face(_)))
+    ));
+    assert!((stand_x(&doc) + 25.0).abs() < 1e-7);
+}
+
+#[test]
+fn standard_planes_mate_components_without_bodies() {
+    let mut model = Model::new_assembly();
+    let a = model.assembly_mut().unwrap();
+    let d = a.define(Arc::new(Model::new()));
+    a.insert(d, Frame::WORLD).unwrap();
+    a.insert(
+        d,
+        Frame {
+            origin: DVec3::splat(30.0),
+            ..Frame::WORLD
+        },
+    )
+    .unwrap();
+    let mut doc = Document::from_model(model, None);
+    for plane in ["top", "front", "right"] {
+        let r = ok(
+            &mut doc,
+            json!({"op": "mate", "type": "coincident", "flip": true,
+                "a": {"component": 1, "plane": plane}, "b": {"component": 2, "plane": plane}
+            }),
+        );
+        assert_eq!(r["mate"]["status"], "ok", "{r}");
+    }
+    assert_eq!(doc.evaluation().freedom, 0);
+    assert!(stand_x(&doc).abs() < 1e-7);
+}
+
 fn temp(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("peet-asm-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();

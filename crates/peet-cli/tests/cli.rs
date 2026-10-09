@@ -738,7 +738,7 @@ fn what_the_assemblies_skill_says_about_patterns_is_true() {
         .unwrap();
     let script = scripts(skill)
         .into_iter()
-        .find(|s| s.contains("\"component_pattern\""))
+        .find(|s| s.contains("\"name\": \"Screws\""))
         .expect("the script that patterns a component");
     // "place ... on a copy fails and says which pattern made it and its original."
     let script = format!(
@@ -803,6 +803,33 @@ fn what_the_assemblies_skill_says_about_patterns_is_true() {
     assert_eq!(made.replies[1]["components"].as_array().unwrap().len(), 13);
     let again = peet(&["interference", "-f", &file]);
     assert_eq!(again.replies[0]["clear"], true);
+}
+
+#[test]
+fn what_the_assemblies_skill_says_about_nested_plane_mates_is_true() {
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "assemblies")
+        .map(|(_, text)| *text)
+        .unwrap();
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"name\": \"MatePlane\""))
+        .expect("the script that mates nested reference planes");
+    let ran = peet_with(&["run", "--strict", "-q"], &script);
+    assert_eq!(ran.code, OK, "{}{}", ran.out, ran.err);
+    let mate = ran.replies.iter().find_map(|r| r.get("mate")).unwrap();
+    assert_eq!(mate["status"], "ok");
+    assert_eq!(mate["b"]["path"], json!(["Stand", "Plate"]));
+    assert_eq!(mate["b"]["plane"], "MatePlane");
+    let listed = ran.replies.last().unwrap();
+    assert_eq!(listed["components"][1]["at"], json!([80.0, 0.0, -90.0]));
+    assert_eq!(listed["components"][2]["at"], json!([80.0, 0.0, -40.0]));
+    assert_eq!(
+        listed["patterns"][0]["direction"]["path"],
+        json!(["Stand", "Plate"])
+    );
+    assert_eq!(listed["patterns"][0]["status"], "ok");
 }
 
 #[test]

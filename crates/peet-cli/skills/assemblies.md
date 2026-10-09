@@ -80,7 +80,7 @@ rough placement decides which of several possible positions is taken.
 {"op": "mates"}
 ```
 
-- **An end** is `{"component": NAME, "face": SELECTOR}` (or `"edge"`, or `"vertex"`).
+- **An end** is `{"component": NAME, "face": SELECTOR}` (or `"edge"`, `"vertex"`, or `"plane"`).
   The selector is in the **part's own coordinates**, as if the part were open by itself,
   not where the component is in the assembly (`peet skills selectors`). To see a part's
   faces, `open_component` it and run `faces`.
@@ -118,6 +118,43 @@ rough placement decides which of several possible positions is taken.
   `delete` take `mate`. Deleting a component deletes its mates.
 - A mate's `distance` or `angle` can be an expression over the assembly's parameters
   (`set_parameter`): the components follow when the parameter changes.
+
+### Reference planes and parts inside sub-assemblies
+
+Use a plane when the mate locates a part by its datum rather than a solid face.
+`plane` takes the same selector as a sketch's `on`. Create named reference planes in
+the part before inserting it. A plane mate follows edits to that plane and keeps its
+reference when the plane is renamed. Standard planes work even in a part with no bodies.
+
+To reach a part inside a sub-assembly, give `component` a nonempty array from the
+assembly's own component down to the part. Each entry is a name or id in that level's
+assembly. Geometry selectors still use the final part's own coordinates.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 30]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "plane", "from": "top", "distance": 7, "name": "MatePlane"}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Plate", "at": [0, 0, 100]}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Base"}
+{"op": "insert", "part": 2, "name": "Stand", "at": [80, 0, 50]}
+{"op": "mate", "type": "distance", "distance": 10, "flip": true, "a": {"component": "Base", "plane": "MatePlane"}, "b": {"component": ["Stand", "Plate"], "plane": "MatePlane"}}
+{"op": "component_pattern", "components": ["Stand"], "type": "linear", "direction": {"component": ["Stand", "Plate"], "plane": "top"}, "spacing": 50, "count": 2}
+{"op": "mates"}
+{"op": "components"}
+```
+
+The example moves `Stand` to Z = -90. Its plate stays 100 above the sub-assembly's
+origin, leaving 10 between the two mating planes. The sub-assembly moves as one rigid
+component. Two ends inside the same top-level component cannot be joined here. Add
+that mate inside the sub-assembly instead. `fasten` holds the top-level components
+as wholes even when its ends name nested paths.
+
+`mates` reports a nested end's full `path` as names and a plane end's current `plane`
+name. An invalid path fails before adding a mate and names the level that could not
+be found. A stored mate fails if its plane or nested component is deleted or suppressed.
+Restore it, or delete the mate and select another end.
 
 ## Posing what the mates leave free
 
@@ -181,6 +218,8 @@ else that repeats: **mate the original once, and the copies are in place**.
   coordinates as for a mate. Take it from a component when the pattern should follow
   that component: bolts round a housing use the housing's bore, so they stay on its
   bolt circle wherever the housing goes.
+- A component pattern's direction also accepts `plane` for its normal and a nested
+  component path, using the same selectors as a mate end.
 - **The copies are components** of the original's part: `components` lists them (with
   `"pattern": name`), the bill of materials counts them, and they are weighed,
   checked for interference and exported. A copy can be hidden, coloured, renamed or

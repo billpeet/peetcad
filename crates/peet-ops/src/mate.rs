@@ -1,6 +1,7 @@
 //! Operations on the mates of an assembly.
 //!
-//! A mate's end is a component and geometry of its part: a face, an edge or a vertex,
+//! A mate's end is a component path and geometry of its part: a face, an edge, a vertex
+//! or a reference plane,
 //! described by the same selectors a part's operations take, in the part's own
 //! coordinates (not where the component is in the assembly). A description is resolved
 //! against the part as it is now and stored as a persistent reference, so the mate
@@ -18,7 +19,7 @@ use crate::assembly::CompSel;
 use crate::fields::scalar_out;
 use crate::op::Op;
 use crate::select;
-use crate::value::{GeomSel, Input};
+use crate::value::{GeomSel, Input, PlaneSel};
 
 /// A mate, by name (`"Coincident1"`) or id.
 #[derive(Clone, Debug, PartialEq)]
@@ -82,11 +83,12 @@ impl MateSel {
 /// One end of a mate.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MateEndSel {
-    /// As a script writes it: a component, and a face, an edge or a vertex of its part
+    /// As a script writes it: a component path, and geometry or a plane of its part
     /// (none for a fasten mate, which holds the component as a whole).
     Find {
-        component: CompSel,
+        component: Vec<CompSel>,
         geom: Option<GeomSel>,
+        plane: Option<PlaneSel>,
     },
     /// Already resolved: what the application passes after a click.
     Ref(MateEnd),
@@ -96,7 +98,7 @@ impl MateEndSel {
     pub(crate) fn parse(v: &Value) -> Result<Self, String> {
         let wrong = || {
             format!(
-                "expected {{\"component\": name, \"face\": selector}} (or \"edge\", or \"vertex\"; or the component alone, for fasten), not {v}"
+                "expected {{\"component\": name or [names or ids along a path], \"face\": selector}} (or \"edge\", \"vertex\", \"plane\"; or the component alone, for fasten), not {v}"
             )
         };
         let mut map = match v {
@@ -104,44 +106,95 @@ impl MateEndSel {
             // The component alone.
             Value::String(_) | Value::Number(_) => {
                 return Ok(Self::Find {
-                    component: CompSel::parse(v)?,
+                    component: vec![CompSel::parse(v)?],
                     geom: None,
+                    plane: None,
                 });
             }
             _ => return Err(wrong()),
         };
-        let component = CompSel::parse(&map.remove("component").ok_or_else(wrong)?)?;
+        let value = map.remove("component").ok_or_else(wrong)?;
+        let component = match &value {
+            Value::Array(path) if !path.is_empty() => path
+                .iter()
+                .map(CompSel::parse)
+                .collect::<Result<Vec<_>, _>>()?,
+            Value::Array(_) => return Err("A component path can't be empty.".to_owned()),
+            _ => vec![CompSel::parse(&value)?],
+        };
+        let plane = map
+            .remove("plane")
+            .map(|v| PlaneSel::parse(&v))
+            .transpose()?;
+        if plane.is_some() && !map.is_empty() {
+            return Err(wrong());
+        }
         let geom = match map.len() {
             0 => None,
             1 => Some(GeomSel::parse(&Value::Object(map))?),
             _ => return Err(wrong()),
         };
-        Ok(Self::Find { component, geom })
+        Ok(Self::Find {
+            component,
+            geom,
+            plane,
+        })
     }
 
     /// The end as a mate stores it, with the component it is on.
     pub(crate) fn resolve(&self, doc: &Document) -> Result<MateEnd, String> {
-        let (component, geom) = match self {
+        let (component, geom, plane) = match self {
             Self::Ref(end) => return Ok(end.clone()),
-            Self::Find { component, geom } => (component, geom),
+            Self::Find {
+                component,
+                geom,
+                plane,
+            } => (component, geom, plane),
         };
-        let assembly = the_assembly(doc)?;
-        let id = component.resolve(doc)?;
+        let mut assembly = the_assembly(doc)?;
+        let mut path = Vec::new();
+        let mut names = Vec::new();
+        let mut definition = None;
+        for (index, sel) in component.iter().enumerate() {
+            let id = sel
+                .resolve_in(assembly)
+                .map_err(|e| format!("In component path {}: {e}", names.join(" / ")))?;
+            names.push(assembly.name_of(id));
+            path.push(id);
+            let def = assembly
+                .definition_of(id)
+                .ok_or_else(|| "The component's part is missing.".to_owned())?;
+            definition = Some(def);
+            if index + 1 < component.len() {
+                assembly = def.model.assembly().ok_or_else(|| format!("{} is a part, not a sub-assembly: the component path cannot continue inside it.", names.join(" / ")))?;
+            }
+        }
+        let definition = definition.ok_or_else(|| "A component path can't be empty.".to_owned())?;
+        if geom.is_some() && plane.is_some() {
+            return Err("A mate end takes one geometry selector or one plane selector.".to_owned());
+        }
+        if geom.is_none() && plane.is_none() {
+            return Ok(MateEnd { path, geom: None });
+        }
+        let name = names.join(" / ");
+        let part = Document::from_model((*definition.model).clone(), None);
+        let on = |e: String| format!("In {name} (its part, {}): {e}", definition.name());
         let geom = match geom {
-            None => None,
+            None => plane
+                .as_ref()
+                .map(|sel| {
+                    select::plane(&part, sel)
+                        .map(|(r, _)| MateGeom::Plane(r))
+                        .map_err(on)
+                })
+                .transpose()?,
             Some(sel) => {
-                let definition = assembly
-                    .definition_of(id)
-                    .ok_or_else(|| "The component's part is missing.".to_owned())?;
-                let name = assembly.name_of(id);
                 if definition.model.is_assembly() {
                     return Err(format!(
-                        "{name} is a sub-assembly: a script can't describe a face of a part inside it yet. Mate the sub-assembly's parts in the sub-assembly, or fasten it as a whole."
+                        "{name} is a sub-assembly: extend the component path to a part inside it to select its geometry, or select a standard plane."
                     ));
                 }
                 // The description is of the part, in the part's own coordinates.
-                let part = Document::from_model((*definition.model).clone(), None);
-                let on = |e: String| format!("In {name} (its part, {}): {e}", definition.name());
                 Some(match sel {
                     GeomSel::Face(f) => MateGeom::Face(select::face_ref(&part, f).map_err(on)?),
                     GeomSel::Edge(e) => MateGeom::Edge(select::edge_ref(&part, e).map_err(on)?),
@@ -151,10 +204,7 @@ impl MateEndSel {
                 })
             }
         };
-        Ok(MateEnd {
-            path: vec![id],
-            geom,
-        })
+        Ok(MateEnd { path, geom })
     }
 }
 
@@ -222,7 +272,7 @@ impl MateChange {
 pub(crate) const MATE_OPS: &[(&str, &str, &str)] = &[
     (
         "mate",
-        "type (coincident, concentric, parallel, distance, angle, fasten), a, b (each {component, and face, edge or vertex: a selector in the part's own coordinates}; for fasten the component alone), distance, angle, flip, name",
+        "type (coincident, concentric, parallel, distance, angle, fasten), a, b (each {component: name, id or nonempty path array, and face, edge, vertex or plane: a selector in the part's own coordinates}; plane: top, front, right or a reference plane's name or id; for fasten the component alone), distance, angle, flip, name",
         "Hold two components together by geometry of their parts. The components move to where the mates hold, as little as they can.",
     ),
     (
@@ -307,16 +357,35 @@ fn status_word(status: Option<&Status>) -> &'static str {
     }
 }
 
-fn end_out(assembly: &Assembly, end: &MateEnd) -> Value {
+pub(crate) fn end_out(assembly: &Assembly, end: &MateEnd) -> Value {
     let mut m = Map::new();
-    let names: Vec<&str> = end
-        .component()
-        .map(|c| assembly.name_of(c))
-        .into_iter()
-        .collect();
+    let mut current = Some(assembly);
+    let mut names = Vec::new();
+    let mut model = None;
+    for id in &end.path {
+        names.push(current.map_or("?", |a| a.name_of(*id)));
+        model = current
+            .and_then(|a| a.definition_of(*id))
+            .map(|d| &*d.model);
+        current = model.and_then(Model::assembly);
+    }
     m.insert("component".to_owned(), json!(names.first().copied()));
     if end.path.len() > 1 {
         m.insert("inside".to_owned(), json!(end.path.len() - 1));
+        m.insert("path".to_owned(), json!(names));
+    }
+    if let Some(MateGeom::Plane(
+        plane @ (peet_model::PlaneRef::Standard(_) | peet_model::PlaneRef::Feature(_)),
+    )) = &end.geom
+    {
+        let value = match plane {
+            peet_model::PlaneRef::Standard(p) => json!(p.label()),
+            peet_model::PlaneRef::Feature(id) => {
+                model.map_or_else(|| json!(id.0), |m| json!(m.name_of(*id)))
+            }
+            peet_model::PlaneRef::Face(_) => Value::Null,
+        };
+        m.insert("plane".to_owned(), value);
     }
     m.insert(
         "on".to_owned(),
@@ -324,6 +393,7 @@ fn end_out(assembly: &Assembly, end: &MateEnd) -> Value {
             Some(MateGeom::Face(_)) => "face",
             Some(MateGeom::Edge(_)) => "edge",
             Some(MateGeom::Vertex(_)) => "vertex",
+            Some(MateGeom::Plane(_)) => "plane",
             None => "component",
         }),
     );
@@ -436,7 +506,7 @@ pub(crate) fn add(
     let needs_geometry = |end: &MateEnd, which: &str| {
         if end.geom.is_none() {
             Err(format!(
-                "'{which}' names {} alone: this mate needs a face, an edge or a vertex of it (only fasten takes a component as a whole).",
+                "'{which}' names {} alone: this mate needs a face, an edge, a vertex or a plane of it (only fasten takes a component as a whole).",
                 assembly.name_of(end.component().unwrap_or(ca))
             ))
         } else {
@@ -448,6 +518,8 @@ pub(crate) fn add(
             // The components as wholes, where they are now.
             a.geom = None;
             b.geom = None;
+            a.path.truncate(1);
+            b.path.truncate(1);
             let frame = |c: CompId| assembly.component(c).map(|c| c.placement);
             let relative = match (relative, frame(ca), frame(cb)) {
                 (Some(r), ..) => *r,

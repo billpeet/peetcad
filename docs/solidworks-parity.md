@@ -45,7 +45,7 @@ settle. **Decide** is a choice to make, not just work to do.
 
 From four parts, so these are sightings, not counts for the library.
 
-- **Sketches lean on the model (P16, now a gap).** Dimensions and relations go to model
+- **Sketches lean on the model (P16, since done).** Dimensions and relations go to model
   edges, vertices and reference planes, not only to sketch geometry: in the Door, 25
   distances to edges, 6 to vertices and 4 relations to named planes (`Mid Plane`,
   `MidVerticalPlane`); converted edges in the Battery Bracket.
@@ -64,6 +64,41 @@ From four parts, so these are sightings, not counts for the library.
 - **Library features** in the Door (3), on top of the 7 parts the manifests showed (P6).
 - **Equations can be disabled**: two of the three in `b Tophat side` are.
 
+## What converting four parts by hand showed
+
+Pipe, A3 CT Cover Center, Baffle Duct B (two configurations) and Access Plate 1 were
+rebuilt as `peet` scripts from their exports. Each matches SolidWorks in volume, surface
+area, bounding box and flat size, to the digits the export gives. The scripts and parts
+are in `C:\Users\marti\source\peetcad-imports`.
+
+- **Worked as they are:** base flange with a bend deduction, edge flange (length,
+  position, flat size 755.2 against SolidWorks' 755.2), sheet cuts, configurations by
+  sketch dimension, sketch relations to projected edges (P16), a pattern whose count is
+  an `iif` and whose spacing is an expression (P1). Changing the Access Plate's length
+  to 450 moved the holes, the corners and the count correctly.
+- **Break corner is a gap (P8).** `fillet` on the sheet's corners gives the right solid
+  but it stops being sheet metal. The conversion cuts the corners with a sheet cut tied
+  to projected edges: right shape, but four relations per corner where SolidWorks has
+  one feature.
+- **A value outside a sketch can't read a sketch dimension, and a dimension can't have a
+  parameter's name (P4).** `"D3@LPattern2" = ("Length@Sketch1" - 25) / ...` needs
+  `Length` as a parameter that the dimension follows, so FabSys has to set the
+  parameter, not the dimension.
+- **Which plane is which (new, P26).** SolidWorks' Front Plane is the XY plane, which is
+  PeetCAD's `top`; its Top Plane is PeetCAD's `front`, facing the other way. The
+  conversions keep SolidWorks' coordinates and use the plane that matches them, so a
+  feature that names "Front Plane" needs translating.
+- **Redundant relations (new, P27).** The cover's first sketch has an equal-length
+  relation that the others already imply. SolidWorks accepts it; PeetCAD reports the
+  sketch `over_defined` (and builds it).
+- **Sketch text confirmed (P5):** Baffle Duct B has a sketch text "B", left out.
+- **Face counts differ.** A hole is one round face in SolidWorks and two in PeetCAD, so
+  verification (I4) compares volume, area, box and flat size, not face counts.
+- **For the exporter:** it doesn't say whether a distance dimension is horizontal,
+  vertical or aligned; a relation's outside entity is listed with an id that can match
+  a sketch segment's (use `defined` instead); and a break corner's type (round or
+  chamfer) isn't among its values. All three had to be worked out from the geometry.
+
 ## Parts
 
 168 of the 201 parts are sheet metal; 198 have one body. They average 34 features
@@ -73,9 +108,9 @@ From four parts, so these are sightings, not counts for the library.
 
 | | Gap | Evidence | Mark |
 |---|---|---|---|
-| P1 | **No conditionals in expressions.** There is `min`, `max`, `round` and trigonometry, but no comparison and no `if`. | 89 parts have 386 equations; many are `iif(...)`: `"D1@LPattern2" = iif("D2@Sketch1" > 299, 3, 2)` | Gap |
-| P2 | **Suppression can't follow an expression.** It is a flag per configuration. | `"Vent hole" = iif("D2@Sketch1" > 300, "unsuppressed", "suppressed")` | Gap |
-| P3 | **No user names for faces and edges.** Faces are named by the feature that made them. FabSys mates and sketches by name. | 97 parts carry 324 named faces and edges | Gap |
+| P1 | **No conditionals in expressions.** There is `min`, `max`, `round` and trigonometry, but no comparison and no `if`. | 89 parts have 386 equations; many are `iif(...)`: `"D1@LPattern2" = iif("D2@Sketch1" > 299, 3, 2)` | Done (`689ab7c`): `if`, `iif`, comparisons, `int`; checked on Access Plate 1 |
+| P2 | **Suppression can't follow an expression.** It is a flag per configuration. | `"Vent hole" = iif("D2@Sketch1" > 300, "unsuppressed", "suppressed")` | Done (`689ab7c`): `set_suppression_expression`; not yet tried on a template |
+| P3 | **No user names for faces and edges.** Faces are named by the feature that made them. FabSys mates and sketches by name. | 97 parts carry 324 named faces and edges | Done (PR #13): `name_face`, `name_edge`, `{"name": ...}` as a selector. Checked on Access Plate 1 with its five SolidWorks names: they survive a change of length and a cut through the named face, and work as a sketch plane and as mate ends. Not yet tried: a named hole (the Door's hinge holes) or a named edge |
 | P4 | **Addressing by SolidWorks names.** FabSys sets `Width@Sketch1` and `D1@LPattern2`. A sketch dimension maps to `set_dimension`, a feature dimension to a field of `edit`; the importer has to keep a map from one to the other, or name things so none is needed. | About 5,100 dimensions | Decide |
 | P5 | **Sketch text.** No text entity in a sketch. FabSys sets text for etched labels. | `SetSketchText`; features `Etch L`, `Etch R`, `EtchRodGL` | Gap |
 | P6 | **Smart components and library features.** No equivalent. FabSys applies a smart feature about once per inserted component. | 43 parts hold smart components, 7 hold library features | Decide |
@@ -85,7 +120,7 @@ From four parts, so these are sightings, not counts for the library.
 | | Gap | Evidence | Mark |
 |---|---|---|---|
 | P7 | **Fold and unfold.** No feature pair to unfold, cut, and fold again. A sheet cut crosses a bend only parallel or square to it, and a round hole across a bend is refused. | 10 parts | Gap |
-| P8 | **Break corner.** `corner` is about where flanges meet; whether it or `fillet`/`chamfer` can round or clip a sheet's outline corner without losing the sheet body is not known. | 55 parts (68 features) | Check |
+| P8 | **Break corner.** `corner` is about where flanges meet; whether it or `fillet`/`chamfer` can round or clip a sheet's outline corner without losing the sheet body is not known. | 55 parts (68 features) | Gap: `fillet` turns the sheet into a plain solid |
 | P9 | **Patterns and mirrors of flanges.** Patterns copy extrusions, cuts, sheet cuts, forms, revolves and holes, not flanges, and a sheet metal copy must stay on its original's face. | 44 parts have linear patterns, 26 have mirrors; what they copy comes from the export | Check |
 | P10 | **Edge flange options.** One edge per flange; profile from a sketch exists. Whether every position, offset and relief the templates use has a match is not known. | 142 parts (309 flanges) | Check |
 | P11 | **Holes, fillets and cuts on a sheet body.** Extrude and cut-extrude on a sheet body turn it into a plain solid; whether `hole` and `fillet` do too is not known. | Hole wizard in 80 parts, fillets in 35, cuts in over 140 | Check |
@@ -101,7 +136,7 @@ and bend deduction per part have equivalents. No template uses a hem or a jog.
 |---|---|---|---|
 | P14 | **Sketch blocks.** None. An importer can explode them into plain geometry, losing the grouping. | 21 parts (52 instances) | Decide |
 | P15 | **3D sketches.** Sketches are flat. | 3 parts | Gap |
-| P16 | **Relations and dimensions to the model.** A sketch can't be dimensioned or constrained to a model edge, a vertex or a reference plane, and a face's edges aren't projected into a sketch on it. Collinear, coradial and the other relations listed under the pilot need a match each. | 2,306 sketches; in the pilot, most sketches after the first | Gap |
+| P16 | **Relations and dimensions to the model.** Done in `1c5c8f9`: `project` brings a model edge, vertex, reference plane or a face's boundary into a sketch, and `collinear`, `coradial` and `doubled_distance` were added. Every model reference in the four pilot parts is of a kind it takes (68 in all: straight edges, vertices, reference planes). Left to check on the full export: edges it refuses (circles tilted to the sketch, ellipses, freeform) and planes parallel to the sketch. | 2,306 sketches | Done; check limits |
 | P25 | **Slots from the hole wizard.** `hole` drills round holes only. | Seen in the pilot; count from the full export | Gap |
 | P17 | **Splines** have no tangent handles and take no tangent relation. Whether any template sketch has a spline is not known. | | Check |
 
@@ -133,8 +168,8 @@ suppression and linear patterns all have equivalents.
 
 | | Gap | Evidence | Mark |
 |---|---|---|---|
-| A1 | **A mate can't end on a reference plane.** An end is a face, an edge or a vertex. | Every assembly has reference planes (99); templates carry mating planes by name (`MatePlane`, `MidPlane`, `LockMatePlane`); more than half of the scripts' mates name a plane | Gap |
-| A2 | **A script can't mate to a part inside a sub-assembly.** The model and the solve handle it; an operation can't describe it. | About 30% of the scripts' mates | Gap |
+| A1 | **Mate ends on reference planes.** | Every assembly has reference planes (99); templates carry mating planes by name (`MatePlane`, `MidPlane`, `LockMatePlane`); more than half of the scripts' mates name a plane | Done: `plane` selects standard or named reference planes in mate ends. References follow plane edits and renames, including inside sub-assemblies. Tested through save/reopen; not yet tried on a template assembly |
+| A2 | **Scripted mates to parts inside sub-assemblies.** | About 30% of the scripts' mates | Done: `component` accepts a path array of names or ids, resolved at each level. Tested with named faces and planes through two rotated nesting levels. The top-level component moves rigidly; not yet tried on a template assembly |
 | A3 | **Width mate.** | 31 mates in 16 assemblies | Gap |
 | A4 | **Other mates:** slot, limit angle, symmetric, path, coordinate. | 7, 2, 2, 1 and 1 mates | Gap |
 | A5 | **Assemblies have no configurations**, and a component can't choose one of its part's. | 10 assemblies have two (9 are left and right hinge), swapping component configurations and suppressing a different 40 to 50 mates; 24 of 202 instances use a part configuration other than the default | Gap |
@@ -156,7 +191,7 @@ Not yet examined in detail: `ISolidWorksManager` has about 40 methods, and each 
 | F1 | `ApplySmartFeatures` (see P6) | Decide |
 | F2 | `SetSketchText` (see P5) | Gap |
 | F3 | `MarkSubAssemblyFlexible` (see A9) | Decide |
-| F4 | `AddMate` with planes and sub-assembly parts (see A1, A2) | Gap |
+| F4 | `AddMate` with planes and sub-assembly parts (see A1, A2) | Done in `peet`; FabSys integration still to do |
 | F5 | `CreateSketch`, `CreateLine`, `CreateDimension`, `AddConstraint`, `InsertPlane` in an assembly: sketching against a component's named face from the assembly | Check |
 | F6 | `RunMacro` | Decide |
 | F7 | The rest of the interface, method by method | Check |
@@ -180,10 +215,10 @@ is in a different part of the code, so they can be worked on at once.
 
 | | Gap | Why now | Mostly in |
 |---|---|---|---|
-| 1 | **P16** Sketch relations and dimensions to model edges, vertices and reference planes | Most sketches after a part's first use them, so almost no template sketch can be rebuilt without it | `peet-sketch`, the sketch feature in `peet-model` |
-| 2 | **P1, P2** Conditionals in expressions (`if`, comparisons, `int`), and suppression that follows an expression | 63 `iif` equations in 23 parts, 41 of them suppressing a feature; 7 more in assemblies (A7) | `peet-sketch/src/expr.rs`, regeneration in `peet-model` |
-| 3 | **P3** User names for faces and edges, usable as selectors | 324 names in 97 parts; FabSys mates and sketches by them | naming in `peet-model`, `peet-ops/src/select.rs` |
-| 4 | **A1, A2** Mate ends on reference planes, and on parts inside sub-assemblies from a script | Over half of FabSys's mates name a plane and about 30% reach into a sub-assembly; 64 parts carry 142 planes of their own | `peet-model/src/mate.rs`, `peet-ops/src/mate.rs` |
+| 1 | **P16** (done, `1c5c8f9`) Sketch relations and dimensions to model edges, vertices and reference planes | Most sketches after a part's first use them, so almost no template sketch can be rebuilt without it | `peet-sketch`, the sketch feature in `peet-model` |
+| 2 | **P1, P2** (done, `689ab7c`) Conditionals in expressions (`if`, comparisons, `int`), and suppression that follows an expression | 63 `iif` equations in 23 parts, 41 of them suppressing a feature; 7 more in assemblies (A7) | `peet-sketch/src/expr.rs`, regeneration in `peet-model` |
+| 3 | **P3** (done, PR #13) User names for faces and edges, usable as selectors | 324 names in 97 parts; FabSys mates and sketches by them | naming in `peet-model`, `peet-ops/src/select.rs` |
+| 4 | **A1, A2** (done) Mate ends on reference planes, and on parts inside sub-assemblies from a script | Over half of FabSys's mates name a plane and about 30% reach into a sub-assembly; 64 parts carry 142 planes of their own | `peet-model/src/mate.rs`, `peet-ops/src/mate.rs` |
 | 5 | **P25** Slots in `hole` | 32 slots in 28 parts | `peet-model/src/hole.rs` |
 
 Where they meet: 3 and 4 both add kinds of selector (a named face should work as a mate

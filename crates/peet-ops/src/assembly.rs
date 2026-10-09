@@ -56,6 +56,10 @@ impl CompSel {
     /// The component this means in `doc`, or why there is none.
     pub fn resolve(&self, doc: &Document) -> Result<CompId, String> {
         let assembly = the_assembly(doc)?;
+        self.resolve_in(assembly)
+    }
+
+    pub(crate) fn resolve_in(&self, assembly: &Assembly) -> Result<CompId, String> {
         let names = || {
             let names: Vec<&str> = assembly.components().map(|c| c.name.as_str()).collect();
             if names.is_empty() {

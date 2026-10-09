@@ -475,7 +475,7 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `explode_steps` | every step (`id`, `name`, `components`, `by`), whether the assembly is shown `exploded`, and under `moved` each component the steps move with its total `by` and where it is drawn exploded (`at`) |
 | `open_component` | `component`: opens its part as a document of its own and makes it current. `save` without a `path` on that document stores it back, as one undo step of the assembly, for every component of the part. Needs a session |
 | `components` | every component (`id`, `name`, `part`, `at`, `rotate`, `fixed`, `freedom`, `mates`, `status`, `message`, `min`, `max`) and every part (`id`, `name`, `kind`, how many `components`, `material`); how many `mates`, and the `freedom` left |
-| `mate` | `type` (`coincident`, `concentric`, `parallel`, `distance`, `angle`, `fasten`), `a`, `b`, `distance` or `angle` for those types, `flip`, `name`. An end is `{"component": …, "face": selector}` (or `"edge"`, `"vertex"`), the selector in the part's own coordinates; for `fasten` it is the component alone |
+| `mate` | `type` (`coincident`, `concentric`, `parallel`, `distance`, `angle`, `fasten`), `a`, `b`, `distance` or `angle` for those types, `flip`, `name`. An end is `{"component": …, "face": selector}` (or `"edge"`, `"vertex"`, `"plane"`), the selector in the part's own coordinates. `component` is a name, id or nonempty path array from the top-level component down through sub-assemblies. `plane` takes `"top"`, `"front"`, `"right"`, a reference plane or coordinate system by name or id, or a planar face selector; for `fasten` the component alone |
 | `edit_mate` | `mate`, and `distance` or `angle`, `flip` |
 | `rename`, `suppress`, `delete` | `mate` in place of `feature` |
 | `mates` | every mate (`id`, `name`, `type`, `a`, `b`, `distance` or `angle`, `flip`, `status`, `message`) and the `freedom` left |
@@ -508,7 +508,7 @@ by intersecting them: what they share is the interference. Bodies that only touc
 nothing. **Mass** weighs each part with its own material; if a part has none, the whole
 has no mass, and the centre of gravity given is that of the volume.
 
-**Mates.** A flat face stands for its plane, a round face or a round edge for its axis,
+**Mates.** A flat face or a reference plane stands for its plane, a round face or a round edge for its axis,
 a straight edge for a line, a vertex for a point. Two planes are put against each other
 unless `flip` is true. The mates are solved whenever the assembly is rebuilt, and the
 components move as little as they can from where they are: so `place` on a mated
@@ -523,6 +523,18 @@ the reason, as a feature that can't be built is. `drag` moves what the mates lea
 the component slides to the place if it can, turns only if sliding can't get it nearer,
 and takes what it is mated to along. When mates contradict each other, the
 earlier ones hold and the later one is flagged.
+
+Reference-plane ends store persistent references and resolve the plane again at each
+rebuild, including planes in definitions with no bodies. Nested ends use paths such as
+`{"component": ["Stand", "Plate"], "plane": "MatePlane"}` or
+`{"component": ["Stand", "Plate"], "face": {"name": "TopFace"}}`.
+Names and ids can be mixed in a path; each belongs to the assembly at that level.
+The mate moves the top-level component as a rigid whole and cannot join two ends
+within the same top-level component. `fasten` holds those top-level components where
+they are. A missing or suppressed nested plane/component makes its mate fail until
+restored. `mates` reports nested ends' full `path` and plane ends' current `plane` name.
+Component pattern directions also accept plane normals and nested paths through the
+same end selectors.
 
 **Linked parts** (desktop only: they are files on disk, and are refused in the browser).
 A linked part is read from its file when the assembly is opened, by `update_links`, and

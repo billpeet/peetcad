@@ -1594,6 +1594,7 @@ impl PeetApp {
                     Some(MateGeom::Face(_)) => "A face",
                     Some(MateGeom::Edge(_)) => "An edge",
                     Some(MateGeom::Vertex(_)) => "A corner",
+                    Some(MateGeom::Plane(_)) => "A reference plane",
                     None => "The whole",
                 },
                 end.component().map_or("?", |c| assembly.name_of(c))

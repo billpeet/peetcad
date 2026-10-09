@@ -10,15 +10,15 @@
 use peet_document::Document;
 use peet_math::DVec3;
 use peet_model::{
-    Assembly, ComponentPattern, MAX_PATTERN, MateEnd, MateGeom, Model, PatternId, PatternKind,
-    PatternLine, PatternStep, ScalarKind, Status,
+    Assembly, ComponentPattern, MAX_PATTERN, MateGeom, Model, PatternId, PatternKind, PatternLine,
+    PatternStep, ScalarKind, Status,
 };
 use serde_json::{Map, Value, json};
 
 use crate::args::{Args, boolean, coordinates, direction_out, integer, point3_out, text};
 use crate::assembly::{CompSel, Point3};
 use crate::fields::scalar_out;
-use crate::mate::MateEndSel;
+use crate::mate::{MateEndSel, end_out};
 use crate::op::Op;
 use crate::value::Input;
 
@@ -96,7 +96,7 @@ impl PatternLineSel {
     fn parse(v: &Value) -> Result<Self, String> {
         let wrong = || {
             format!(
-                "expected \"x\", \"y\" or \"z\", a direction [x, y, z], {{\"origin\": [x, y, z], \"direction\": ...}}, or {{\"component\": name, \"edge\" or \"face\": selector}}, not {v}"
+                "expected \"x\", \"y\" or \"z\", a direction [x, y, z], {{\"origin\": [x, y, z], \"direction\": ...}}, or {{\"component\": name or path, \"edge\", \"face\" or \"plane\": selector}}, not {v}"
             )
         };
         let direction = |v: &Value| -> Result<DVec3, String> {
@@ -150,7 +150,9 @@ impl PatternLineSel {
             Self::Geom(end) => {
                 let end = end.resolve(doc)?;
                 match &end.geom {
-                    Some(MateGeom::Face(_) | MateGeom::Edge(_)) => Ok(PatternLine::Geom(end)),
+                    Some(MateGeom::Face(_) | MateGeom::Edge(_) | MateGeom::Plane(_)) => {
+                        Ok(PatternLine::Geom(end))
+                    }
                     Some(MateGeom::Vertex(_)) => Err(format!(
                         "'{what}' is a corner, which has no direction: give a straight edge, a round face or edge (its axis), or a flat face (its normal)."
                     )),
@@ -304,7 +306,7 @@ impl PatternChange {
 pub(crate) const PATTERN_OPS: &[(&str, &str, &str)] = &[
     (
         "component_pattern",
-        "components (names or ids: the originals), type (linear, circular), name. Linear: direction (\"x\", \"y\", \"z\", [x, y, z], or {component, edge or face: a selector in the part's own coordinates}), spacing, count (the original included), flip, second ({direction, spacing, count, flip}). Circular: axis (as a direction; or {origin, direction} for an axis of the assembly not through its origin; or {component, face or edge} for a round face's axis), angle (default 360: evenly all the way round), count, flip",
+        "components (names or ids: the originals), type (linear, circular), name. Linear: direction (\"x\", \"y\", \"z\", [x, y, z], or {component: name, id or path array, edge, face or plane: a selector in the part's own coordinates}), spacing, count (the original included), flip, second ({direction, spacing, count, flip}). Circular: axis (as a direction; or {origin, direction} for an axis of the assembly not through its origin; or {component, face, edge or plane} for geometry's axis or normal), angle (default 360: evenly all the way round), count, flip",
         "Copy components in rows or round an axis. The copies are components of the same part, placed by the pattern: they follow the original, so mate the original and the copies are where they should be.",
     ),
     (
@@ -423,18 +425,6 @@ fn line_out(doc: &Document, assembly: &Assembly, line: &PatternLine, axis: bool)
         }
         PatternLine::Geom(end) => end_out(assembly, end),
     }
-}
-
-fn end_out(assembly: &Assembly, end: &MateEnd) -> Value {
-    json!({
-        "component": end.component().map(|c| assembly.name_of(c)),
-        "on": match &end.geom {
-            Some(MateGeom::Face(_)) => "face",
-            Some(MateGeom::Edge(_)) => "edge",
-            Some(MateGeom::Vertex(_)) => "vertex",
-            None => "component",
-        },
-    })
 }
 
 /// A pattern in a few fields: what replies and `components` give.

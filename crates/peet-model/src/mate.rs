@@ -1,7 +1,7 @@
 //! Mates: what holds the components of an assembly together.
 //!
 //! A [`Mate`] relates two components through geometry of their parts: a flat face (a
-//! plane), a round face or a round edge (its axis), a straight edge (a line) or a corner
+//! plane), a reference plane, a round face or a round edge (its axis), a straight edge (a line) or a corner
 //! (a point). Its ends are persistent references ([`crate::naming`]) with the component
 //! they are on, so a mate follows its faces through edits to the part.
 //!
@@ -60,6 +60,7 @@ use peet_sketch::expr::Parameters;
 use peet_solve::{Equation, MAX_SLOTS, Options, Problem, SKIP, Space};
 use serde::{Deserialize, Serialize};
 
+use crate::PlaneRef;
 use crate::assembly::CompId;
 use crate::feature::{Scalar, ScalarKind};
 use crate::naming::{Body, EdgeRef, FaceRef, VertexRef, find_edge, find_face, find_vertex};
@@ -75,6 +76,7 @@ pub enum MateGeom {
     Face(FaceRef),
     Edge(EdgeRef),
     Vertex(VertexRef),
+    Plane(PlaneRef),
 }
 
 /// One end of a mate.
@@ -166,7 +168,7 @@ enum Element {
 impl Element {
     fn word(&self) -> &'static str {
         match self {
-            Self::Plane(..) => "a flat face",
+            Self::Plane(..) => "a plane or a flat face",
             Self::Line(..) => "an axis or a straight edge",
             Self::Point(_) => "a point",
         }
@@ -177,6 +179,9 @@ impl Element {
 /// placed directly), the body, and where the part is in the component's coordinates.
 pub(crate) type ComponentBody = (Vec<CompId>, Arc<Body>, Frame);
 
+/// A reference plane below a component, resolved into that component's coordinates.
+pub(crate) type ComponentPlane = (Vec<CompId>, PlaneRef, peet_math::Plane);
+
 /// A component as the solve sees it.
 pub(crate) struct Placed {
     pub id: CompId,
@@ -184,6 +189,7 @@ pub(crate) struct Placed {
     pub frame: Frame,
     pub fixed: bool,
     pub bodies: Vec<ComponentBody>,
+    pub planes: Vec<ComponentPlane>,
 }
 
 impl Placed {
@@ -211,6 +217,12 @@ fn element(end: &MateEnd, component: &Placed) -> Result<Element, String> {
         return Ok(Element::Point(DVec3::ZERO));
     };
     let inner = &end.path[1..];
+    if let MateGeom::Plane(reference @ (PlaneRef::Standard(_) | PlaneRef::Feature(_))) = geom {
+        let (_, _, plane) = component.planes.iter()
+            .find(|(path, r, _)| path == inner && r == reference)
+            .ok_or_else(|| format!("The reference plane of {name} is missing or not built. Restore the plane or its component, or delete the mate and select another plane."))?;
+        return Ok(Element::Plane(plane.frame.origin, plane.normal()));
+    }
     let (bodies, frames): (Vec<Arc<Body>>, Vec<Frame>) = component
         .bodies
         .iter()
@@ -223,10 +235,15 @@ fn element(end: &MateEnd, component: &Placed) -> Result<Element, String> {
         )
     };
     let (found, local) = match geom {
-        MateGeom::Face(r) => {
+        MateGeom::Face(r) | MateGeom::Plane(PlaneRef::Face(r)) => {
             let f = find_face(&bodies, r).ok_or_else(|| gone("face"))?;
             let body = &bodies[f.body];
             let face = body.solid.face(f.id);
+            if matches!(geom, MateGeom::Plane(_)) && !matches!(face.surface, Surface::Plane(_)) {
+                return Err(format!(
+                    "The plane's face of {name} is no longer flat. Delete the mate and select another plane."
+                ));
+            }
             let e = match &face.surface {
                 Surface::Plane(plane) => {
                     let n = if face.reversed {
@@ -267,6 +284,7 @@ fn element(end: &MateEnd, component: &Placed) -> Result<Element, String> {
                 Element::Point(bodies[f.body].solid.vertex(f.id).point),
             )
         }
+        MateGeom::Plane(_) => unreachable!("reference planes resolved above"),
     };
     let rel = frames[found];
     Ok(match local {
