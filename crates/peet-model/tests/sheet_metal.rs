@@ -196,24 +196,26 @@ fn flange_on_a_flange_and_a_cut_across_the_bend() {
 }
 
 #[test]
-fn round_hole_across_a_bend_fails_with_a_message() {
+fn round_hole_across_a_bend() {
     let (mut p, _, _) = plate(100.0, 60.0);
     let (_, e) = edge(&p, DVec3::new(0.0, 60.0, T), DVec3::new(100.0, 60.0, T));
     let flange = edge_flange(&mut p, e, |f| f.length = Scalar::new(30.0));
     p.rebuild();
     let top = p.on_face(DVec3::Z, DVec3::new(10.0, 10.0, T));
+    // Drawn on the plate, reaching past its edge: in the flat pattern that is over the
+    // bend and into the flange.
     let hole = p.sketch(top, |s| {
         s.add_circle(DVec2::new(30.0, 56.0), 5.0);
     });
     let cut = p.model.add_sheet_cut(hole);
     p.rebuild();
-    let Status::Failed(m) = p.status(cut) else {
-        panic!("{:?}", p.status(cut));
-    };
-    let name = p.model.feature(flange).unwrap().name.clone();
-    assert!(m.contains("curved") && m.contains(&name), "{m}");
-    // The rest of the part still builds.
+    p.assert_ok();
+    assert!(matches!(p.status(cut), Status::Ok));
     assert!(matches!(p.status(flange), Status::Ok));
+    // The body is still sheet metal, with the hole whole in its blank.
+    let body = &p.bodies()[0];
+    let sheet = body.sheet.as_ref().expect("still sheet metal");
+    assert_eq!(sheet.outline.iter().filter(|l| !l.outer).count(), 1);
 }
 
 #[test]

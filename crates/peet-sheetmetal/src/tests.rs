@@ -373,9 +373,9 @@ fn cut_across_a_bend() {
     before.cuts.clear();
 }
 
-#[test]
-fn round_hole_across_a_bend_is_refused() {
-    let mut layout = plate_layout(settings(0.44));
+/// A plate with a flange on its top edge and `cut` made after it, at K = 0.5.
+fn cut_across_the_bend(cut: Area) -> (Solid, SheetBody) {
+    let mut layout = plate_layout(settings(0.5));
     layout
         .add_edge_flange(
             2,
@@ -383,7 +383,16 @@ fn round_hole_across_a_bend_is_refused() {
             &flange(25.0, FlangePosition::MaterialInside),
         )
         .unwrap();
-    layout.add_cut(Area {
+    layout.add_cut(cut);
+    built(layout)
+}
+
+#[test]
+fn round_hole_across_a_bend() {
+    // A hole that straddles the bend line: part of its rim is on the plate, part on the
+    // bend and part on the flange. On the bend the rim is neither a line nor a circle
+    // once folded, and its wall is not flat.
+    let hole = Area {
         loops: vec![vec![Edge2 {
             curve: Curve::Circle {
                 center: DVec2::new(30.0, H - 3.0),
@@ -395,14 +404,45 @@ fn round_hole_across_a_bend_is_refused() {
                 entity: 1,
             },
         }]],
-    });
-    let err = build(layout).unwrap_err();
+    };
+    let (solid, body) = cut_across_the_bend(hole);
+    // With K = 0.5 the neutral axis is the mid-surface, so folding keeps the volume: the
+    // folded part has what the blank has, hole and all.
+    let flat = measure::volume(&body.flat);
+    assert_close(measure::volume(&solid), flat, flat * 2e-5);
+    // The blank has the hole whole.
+    let holes: Vec<_> = body.outline.iter().filter(|l| !l.outer).collect();
+    assert_eq!(holes.len(), 1);
+    // And some of the folded part's edges are freeform now.
     assert!(
-        matches!(err, SheetError::AcrossBend { curved: true, tag, .. } if tag.owner() == 9),
-        "{err:?}"
+        solid
+            .edges
+            .iter()
+            .any(|e| matches!(e.curve, peet_kernel::geom::Curve3::Nurbs(_)))
     );
-    let msg = err.message(|o| format!("F{o}"));
-    assert!(msg.contains("F9") && msg.contains("F2"), "{msg}");
+}
+
+#[test]
+fn slanted_cut_across_a_bend() {
+    // A triangle with one corner on the plate and a side on the flange: two of its sides
+    // cross the bend on a slant.
+    let tag = |entity| CurveTag::Sketch { owner: 9, entity };
+    let (a, b, c) = (
+        DVec2::new(30.0, H - 8.0),
+        DVec2::new(44.0, H + 12.0),
+        DVec2::new(20.0, H + 12.0),
+    );
+    let triangle = Area {
+        loops: vec![vec![
+            Edge2::line(a, b, tag(1)),
+            Edge2::line(b, c, tag(2)),
+            Edge2::line(c, a, tag(3)),
+        ]],
+    };
+    let (solid, body) = cut_across_the_bend(triangle);
+    let flat = measure::volume(&body.flat);
+    assert_close(measure::volume(&solid), flat, flat * 2e-5);
+    assert_eq!(body.outline.iter().filter(|l| !l.outer).count(), 1);
 }
 
 #[test]

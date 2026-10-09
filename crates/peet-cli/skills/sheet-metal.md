@@ -169,6 +169,12 @@ after the flanges it is about.
 
 - Use **`sheet_cut`**, with the sketch on a flat face of the sheet. It cuts in the flat
   pattern, so it can run across bends, and the body stays sheet metal.
+- **A cut across a bend:** draw it on the flat face as it lies in the blank, running
+  past the face's edge. Past that edge the sketch is over the bend and then the flange,
+  laid flat: a point `d` beyond the bend line in the sketch is `d` along the sheet in the
+  folded part. Any shape can cross: a round hole on a bend comes out as a hole whose rim
+  winds round the bend. `bend_table` and `flat_pattern` show the blank, where the cut is
+  as drawn.
 - `cut` and `extrude` on a sheet metal body turn it into a plain solid with no flat
   pattern: the feature's status is `warning` and says so. If that happened, `delete` it
   and use `sheet_cut`.

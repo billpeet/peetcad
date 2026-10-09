@@ -10,7 +10,7 @@
 //!
 //! **Relief.** A region around the corner is cut from the face and from both bends (not
 //! from the flanges). Its two edges are square to each bend line, so the bends end
-//! cleanly and fold exactly: a line across a bend must be square or parallel to it. The
+//! cleanly, in arcs (a slanted line across a bend folds too, but to a freeform curve). The
 //! region reaches past both bend zones and the strips the face gave up to them, plus a
 //! margin (`relief_size`, none for a tear relief). A *flush* relief reaches to where the
 //! two flanges end instead, so the bends end in line with their flanges and the corner

@@ -114,7 +114,7 @@ allowance or bend deduction) and relief type.
 | Action | How |
 |---|---|
 | Add a flange | Select one or more edges along the top or bottom face, then **Edge Flange** (or click it first and pick an edge). Set the length (measured on the outside), angle, position (material inside or outside, bend outside), offsets from the ends of the edge, and a custom radius. Drag the orange arrow on the selected flange to change its length |
-| Cut through the sheet | Sketch on a flat face of the sheet, then **Cut**. The cut is made in the flat pattern, so straight edges can run across bends |
+| Cut through the sheet | Sketch on a flat face of the sheet, then **Cut**. The cut is made in the flat pattern, so it can run across bends, whatever its shape |
 | Hem an edge | Select edges, then **Hem**: closed, open (with a gap), teardrop or rolled |
 | Flange round several edges | Sketch a profile (connected lines) square to one of the edges, starting at its top or bottom corner: the face at the end of the edge is a handy place. Select the edges, then **Miter Flange**. Where the edges meet, walls butt and lips in one plane are mitred, with a gap |
 | Bend along a line | Sketch lines across a flat face, then **Sketched Bend** (one bend per line) or **Jog** (a step: two bends that offset the far side) |

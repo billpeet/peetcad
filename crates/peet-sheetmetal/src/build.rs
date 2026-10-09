@@ -33,8 +33,10 @@
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 use peet_kernel::geom::{Circle3, Curve3, Cylinder, Surface};
+use peet_kernel::nurbs::{NurbsCurve, NurbsSurface};
 use peet_kernel::topo::{EdgeId, FaceId, ShellId, VertexId};
 use peet_kernel::{Solid, transform, validate};
 use peet_math::{DVec2, DVec3, Frame, Plane, tolerance};
@@ -1447,28 +1449,16 @@ fn fold(layout: &Layout, flat: &Flat, local: &Solid, info: &Info) -> Result<Soli
                         Curve::Line { .. } => line_between(vs, ve)?,
                         _ => (transform::curve(&edge.curve, &frame), edge.t0, edge.t1),
                     },
-                    Map::Bend { parent, bend } => {
-                        let Curve::Line { a, b } = fedge.curve else {
-                            return Err(SheetError::AcrossBend {
-                                tag: fedge.tag,
-                                bend: layout.pieces[p].origin,
-                                curved: true,
-                            });
-                        };
-                        let dir = (b - a).normalize_or_zero();
-                        if dir.perp_dot(bend.along).abs() <= PARALLEL {
-                            line_between(vs, ve)?
-                        } else if dir.perp_dot(bend.across).abs() <= PARALLEL {
+                    Map::Bend { parent, bend } => match straight_across(&fedge.curve, bend) {
+                        Some(Across::Along) => line_between(vs, ve)?,
+                        Some(Across::Square(a, b)) => {
                             let z = if top { t } else { 0.0 };
                             arc_across(parent, bend, a, b, z, vs)
-                        } else {
-                            return Err(SheetError::AcrossBend {
-                                tag: fedge.tag,
-                                bend: layout.pieces[p].origin,
-                                curved: false,
-                            });
                         }
-                    }
+                        // A slanted line winds round the bend, and a curve does what it does:
+                        // neither is a line or a circle once folded.
+                        None => curve_across(parent, bend, &edge.curve, edge.t0, edge.t1)?,
+                    },
                 }
             }
         };
@@ -1508,33 +1498,23 @@ fn fold(layout: &Layout, flat: &Flat, local: &Solid, info: &Info) -> Result<Soli
                 match piece_map(layout, p) {
                     Map::Rigid(frame) => (transform::surface(&face.surface, &frame), face.reversed),
                     Map::Bend { parent, bend } => {
-                        let Curve::Line { .. } = fedge.curve else {
-                            return Err(SheetError::AcrossBend {
-                                tag: fedge.tag,
-                                bend: layout.pieces[p].origin,
-                                curved: true,
-                            });
-                        };
-                        let (a, b) = fedge.ends();
-                        let dir = (b - a).normalize_or_zero();
-                        let normal = DVec2::new(dir.y, -dir.x);
-                        let (s, _) = bend.strip_coords(a);
-                        let n3 = if dir.perp_dot(bend.along).abs() <= PARALLEL
-                            || dir.perp_dot(bend.across).abs() <= PARALLEL
-                        {
-                            parent.vector_to_world(bend.fold_vector(s, normal.extend(0.0)))
+                        if straight_across(&fedge.curve, bend).is_some() {
+                            let (a, b) = fedge.ends();
+                            let dir = (b - a).normalize_or_zero();
+                            let normal = DVec2::new(dir.y, -dir.x);
+                            let (s, _) = bend.strip_coords(a);
+                            let n3 =
+                                parent.vector_to_world(bend.fold_vector(s, normal.extend(0.0)));
+                            let at = parent.to_world(bend.fold_point(a.extend(0.0)));
+                            let x = parent.vector_to_world(bend.fold_vector(s, dir.extend(0.0)));
+                            let plane =
+                                Plane::from_origin_normal_x(at, n3, x).ok_or_else(|| {
+                                    SheetError::Invalid("a degenerate wall".to_owned())
+                                })?;
+                            (Surface::Plane(plane), false)
                         } else {
-                            return Err(SheetError::AcrossBend {
-                                tag: fedge.tag,
-                                bend: layout.pieces[p].origin,
-                                curved: false,
-                            });
-                        };
-                        let at = parent.to_world(bend.fold_point(a.extend(0.0)));
-                        let x = parent.vector_to_world(bend.fold_vector(s, dir.extend(0.0)));
-                        let plane = Plane::from_origin_normal_x(at, n3, x)
-                            .ok_or_else(|| SheetError::Invalid("a degenerate wall".to_owned()))?;
-                        (Surface::Plane(plane), false)
+                            wall_across(parent, bend, fedge, t)?
+                        }
                     }
                 }
             }
@@ -1583,6 +1563,92 @@ fn arc_across(
         0.0,
         turn.abs(),
     )
+}
+
+/// How a flat edge that folds to a line or a circle crosses a bend.
+enum Across {
+    /// Along the bend line: it stays a line.
+    Along,
+    /// Square to the bend line, from the first point to the second: it folds to an arc.
+    Square(DVec2, DVec2),
+}
+
+/// How a flat edge in a bend folds, if it folds to a line or a circle: a line along the
+/// bend or square to it. `None` for a slanted line and for anything curved.
+fn straight_across(curve: &Curve, bend: &Bend) -> Option<Across> {
+    let Curve::Line { a, b } = *curve else {
+        return None;
+    };
+    let dir = (b - a).normalize_or_zero();
+    if dir.perp_dot(bend.along).abs() <= PARALLEL {
+        Some(Across::Along)
+    } else if dir.perp_dot(bend.across).abs() <= PARALLEL {
+        Some(Across::Square(a, b))
+    } else {
+        None
+    }
+}
+
+/// The degree of the freeform curves and walls of edges that cross a bend on a slant.
+const ACROSS_DEGREE: usize = 5;
+
+/// A fitted curve or surface that could not be made, as a build error.
+fn unfitted(e: peet_kernel::nurbs::NurbsError) -> SheetError {
+    SheetError::Invalid(format!(
+        "an edge across a bend could not be folded: {}",
+        e.0
+    ))
+}
+
+/// The curve an edge of the flat solid folds into across a bend, when that is neither a
+/// line nor a circle: the flat edge taken point by point round the bend, and a smooth
+/// curve fitted through it to a fifth of the modelling tolerance. It keeps the flat
+/// edge's parameters.
+fn curve_across(
+    parent: Frame,
+    bend: &Bend,
+    flat: &Curve3,
+    t0: f64,
+    t1: f64,
+) -> Result<(Curve3, f64, f64), SheetError> {
+    let shape = |t: f64| Some(parent.to_world(bend.fold_point(flat.point(t))));
+    let curve = NurbsCurve::fitted(
+        &shape,
+        &[t0.min(t1), t0.max(t1)],
+        ACROSS_DEGREE,
+        tolerance::LINEAR / 5.0,
+    )
+    .map_err(unfitted)?;
+    Ok((Curve3::Nurbs(Arc::new(curve)), t0, t1))
+}
+
+/// The wall through the sheet along such an edge. Folding turns each line through the
+/// thickness into a line along a radius of the bend, so the wall is ruled: straight
+/// from the edge's fold at the bottom of the sheet to its fold at the top.
+fn wall_across(
+    parent: Frame,
+    bend: &Bend,
+    edge: &FEdge,
+    thickness: f64,
+) -> Result<(Surface, bool), SheetError> {
+    let side = |z: f64| {
+        let shape =
+            |u: f64| Some(parent.to_world(bend.fold_point(edge.curve.point_at(u).extend(z))));
+        NurbsCurve::fitted(&shape, &[0.0, 1.0], ACROSS_DEGREE, tolerance::LINEAR / 5.0)
+    };
+    let surface = NurbsSurface::skin(&[
+        side(0.0).map_err(unfitted)?,
+        side(thickness).map_err(unfitted)?,
+    ])
+    .map_err(unfitted)?;
+    // Out of the material is to the right of the edge, as for every wall.
+    let middle = edge.curve.point_at(0.5);
+    let (s, _) = bend.strip_coords(middle);
+    let out = right_normal(&edge.curve, edge.reversed, middle);
+    let out = parent.vector_to_world(bend.fold_vector(s, out.extend(0.0)));
+    let (lo, hi) = surface.domain();
+    let reversed = surface.normal((lo + hi) / 2.0).dot(out) < 0.0;
+    Ok((Surface::Nurbs(Arc::new(surface)), reversed))
 }
 
 /// The cylinder a bend's top or bottom side (at height `z`) folds onto.
