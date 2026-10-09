@@ -148,6 +148,7 @@ function importPart(doc, dir) {
   const promoted = new Map();    // "D1@Sketch1" -> the parameter that sketch dimension now follows
   const formulas = new Set();    // the sketch dimensions (full names) whose value is a formula
   const asleep = new Set();      // SolidWorks features imported and then suppressed in every configuration
+  let unfolded = null;           // between an Unfold and its Fold: the face that stays where it is
   let sheet = null;             // the sheet metal settings in force
   let thickness = null;
 
@@ -192,6 +193,7 @@ function importPart(doc, dir) {
       at.push(...points.slice(0, 12));
       for (const p of at) list.push({ at: p.map(tidy), normal: normal.map(tidy) });
     };
+    if (unfolded && unfolded.point && unfolded.normal) list.push({ at: mm(unfolded.point).map(tidy), normal: unfolded.normal.map(tidy) });
     const onFace = s.on && s.on.kind === "face" && s.on.surface === "plane";
     if (onFace) faces(s.on.normal);
     if (!onFace || !needFace) {
@@ -995,6 +997,16 @@ function importPart(doc, dir) {
         }
         return finish(f, built);
       }
+
+      // SolidWorks unfolds the part, cuts it flat and folds it again. PeetCAD's sheet metal cut is made in
+      // the flat pattern to begin with, so there is nothing to unfold: the cuts in between are drawn on
+      // the face that stays put, where SolidWorks has them once the part is laid flat.
+      case "UnFold":
+        unfolded = v.FixedFace || {};
+        return record(f, "imported", "nothing to do: a sheet metal cut is made in the flat pattern");
+      case "Fold":
+        unfolded = null;
+        return record(f, "imported", "nothing to do: a sheet metal cut is made in the flat pattern");
 
       case "Revolution": {
         const sk = useSketch(f);
