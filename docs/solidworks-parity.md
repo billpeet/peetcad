@@ -32,11 +32,14 @@ settle. **Decide** is a choice to make, not just work to do.
   287 STEP files and a flat DXF for every sheet metal configuration (249). The one thing not
   read: the definitions of 33 composite curves in `Laptop Shelf Assembly`. The output is on
   SolidWorks-PC in `C:\Users\will\AppData\Local\PeetSwExport\out-all` (82 MB).
-- [ ] **I2. Tally the export.** Feature definition values and sketch relation types
-  across the corpus, against what `peet` operations accept. This settles most of the
-  **Check** entries below.
-- [ ] **I3. Importer.** Replay an export as `peet` operations: sketches, features,
-  configurations, equations.
+- [x] **I2. Tally the export.** In [solidworks-library-tally.md](solidworks-library-tally.md):
+  every feature, definition value, sketch relation and mate the library uses, with counts,
+  against what PeetCAD takes. `node tools/sw-export/tally.js` makes the numbers.
+- [ ] **I3. Importer.** `tools/sw-import` rebuilds a part from its export and compares it
+  with SolidWorks: geometry, sketch relations and dimensions, face names, suppressed
+  features, equations and the other configurations. What is left is in "What the
+  importer found" below: mostly features it can't build yet, which every other number
+  depends on.
 - [ ] **I4. Verification.** Compare each imported part with SolidWorks' own numbers from
   the export: volume, bounding box, face count, flat size, positions of named faces.
 - [ ] **I5. Fallback.** Parts the importer can't rebuild come in as STEP
@@ -65,6 +68,91 @@ From four parts, so these are sightings, not counts for the library.
 - **Edge flanges with their own profile sketch**, not fully defined (P10).
 - **Library features** in the Door (3), on top of the 7 parts the manifests showed (P6).
 - **Equations can be disabled**: two of the three in `b Tophat side` are.
+
+## What the importer found
+
+All 201 parts were run through `tools/sw-import` on 9 October 2026, from the second
+export (which says whether an extrude is a boss or a cut, and where each relation's
+entities are). The parts, the operations that made them and a report each are in
+`C:\Users\marti\source\peetcad-imports\library`.
+
+**Shape, in the active configuration:**
+
+| Result | Parts |
+|---|---|
+| Matches SolidWorks: volume, bounding box and flat size | 89 |
+| Same size and flat pattern, volume within 5% | 25 (10 within 0.01%, 19 within 0.1%) |
+| Everything imported, but it differs | 16 |
+| A feature could not be imported | 65 |
+| Nothing built | 6 |
+
+Of the 89, the ones with break corners, hole wizard slots or mirrored flanges match
+because the importer stands in for those features with sheet metal cuts and separate
+flanges. They are the right shape and do not follow the part (P8, P25, P9 still stand).
+
+**Beyond shape:**
+
+| | Imported | Of |
+|---|---|---|
+| Sketch relations and dimensions | 5,895 | 7,319 (81%); every one kept in 254 of 737 sketches |
+| Names of faces and edges | 293 | 319 |
+| Suppressed features, built and then suppressed | 170 | 413 |
+| Equations in force | 45 | 90 |
+| Other configurations that match SolidWorks | 36 | 85, in 50 parts; 16 more are the right size with the volume within 5% |
+
+In 14 of the 50 parts with more than one configuration, every configuration matches.
+
+- **Relations that were dropped.** Coincident relations PeetCAD refused (most join
+  points the importer had already joined); redundant ones, which SolidWorks accepts and
+  PeetCAD calls over-defined (P27); ones to something outside the sketch that could not
+  be projected; sketch patterns and at-intersection, which have no match.
+- **Suppressed features** are built and then suppressed in every configuration, and
+  brought back in the configurations where SolidWorks has them live. 243 could not be
+  built: there is nothing to compare a suppressed feature with, so the side of a flange
+  or the direction of a pattern is not checked, and many are old leftovers.
+- **Equations.** A global variable becomes a parameter; a dimension set by a formula
+  gets the formula; a feature suppressed by a condition gets a suppression rule; and a
+  sketch dimension or a pattern's count that a formula reads is made to follow a
+  parameter (`Sketch1_Length`), which is the way round P4. `"Thickness"` becomes a
+  parameter the base flange follows. Each is kept only if the part is the same
+  afterwards. Of the 46 not imported, 18 set a size of a feature that was not imported,
+  13 read or suppress something that was not imported, 9 were refused, and 3 set a
+  size with no match.
+- **Equation-set dimensions are not reference dimensions.** SolidWorks reports a
+  dimension as driven both when it is for reference and when an equation sets it. The
+  second kind drives the sketch and is imported so.
+- **Configurations.** What still differs is mostly what differs in the active
+  configuration (the corners of P28, features left out), and sizes of features
+  themselves (a flange's length, a pattern's count), which are not carried over yet.
+
+**New gaps it turned up:**
+
+| | Gap | Evidence | Mark |
+|---|---|---|---|
+| P28 | **Corners where edge flanges meet.** Done, in two parts. (1) Between the pieces of one flange feature on several edges SolidWorks stops both short and ends each bend in line with its flange: `corner` with `open`, its gap over 1.414 and the new relief `flush` gives the same blank, edge for edge (a tray with four 23 mm flanges: 12 lines, the same vertices). (2) Between two flange features SolidWorks runs nothing on: the earlier flange ends where its own edge does. That is the new kind `plain` (PeetCAD's butt corner runs the earlier flange on to the later one's outer face when the later one stands outside its edge); with it Double Door Seal's volume and area are SolidWorks' to the last digit given. **Left:** SolidWorks trims the ends of the bends at a corner of kind (1) on a slant in the folded solid and writes its flat pattern with square ends, so its solid and its blank do not agree; PeetCAD's do, and the volume stays a few hundredths of a percent out. And `plain` is not what SolidWorks does where flanges are at an angle (the vent hoods): the importer keeps it only where it brings the flanges nearer. | The tray: volume 0.06% out where it was 2.5%. Double Door Seal: 0 where it was 4.3% | Done; angled flanges' corners to look into |
+| P29 | **A cut sketched on the sheet's edge face**, or on a plane that is not a face of the sheet. `sheet_cut` wants the sketch on a flange's top or bottom. | 4 parts (Cableway Cover Bracket LH and RH, Door, Louvre Filter Bracket) | Gap |
+| P30 | **A cut across a bend at an angle or with a curve.** Refused: only straight edges parallel or square to the bend cross it. | 11 parts (Wall Left, Wall Right, Gear tray, Mullion H and V, four Esc Surrounds, Meter Surround, Weather Shield Door) | Gap (the limit in the roadmap, now counted) |
+| P31 | **An edge flange at an angle other than 90°** comes out about 0.1 mm from where SolidWorks has it. | Box Roof Top (0.105 mm), the vent hoods (0.131 mm); 35 flanges in the library are not square | Check: whose length convention |
+| P32 | **A bend deduction that makes the allowance negative** is refused. SolidWorks builds these. | 3 parts: Baffle (VSD), SS2 Vent Hood 250mm and 300mm | Gap |
+| P33 | **A base flange outline with two lines in line** is refused ("join them into one line"). | Peaked Angled Roof | Gap |
+| P34 | **"The sheet metal body came out invalid. This is a bug."** from a sheet metal cut. | Meter Bracket (Hinge Holes Left), skinny door Stay Slide and Laptop Bracket (corner cuts) | Bug |
+| P35 | **A flange whose length runs up to a vertex, one with its own outline that is not a rectangle, and one wider than its edge.** An edge flange can be set back from the ends of its edge, not run past them. | 12 up to a vertex; at least 3 with another outline (the Flow Meter brackets); the Floor parts' Edge-Flange5 runs 12 mm past its edge | Gap |
+
+**What looking into the near-misses found.** `tools/sw-import/diagnose.js` sets the area
+of an imported part's faces against SolidWorks', feature by feature. Of the 31 parts
+that were the right size with the wrong volume, most were the importer's mistakes: a
+flange's set-back read wrongly when its outline is drawn from the other face of the
+sheet, and a hole wizard feature's slots all cut on one face when they are on several.
+The rest are P28, P35 and:
+
+- **Sketch blocks** (P14): Castor Heavy Duty's holes are in a block, which the exporter
+  does not read, so they are missing.
+- **Back Wall and Wall Middle** lack a pattern's holes on a flange. Not yet looked into.
+
+**Still the importer's to do**, not PeetCAD's: 12 parts where a cut's sketch found no
+face to go on and 7 where a flange's edge was not found; mitre flanges, sketched bends
+and corner reliefs, which PeetCAD has and the importer does not map yet; sizes of
+features in configurations and equations; and the two parts above.
 
 ## What converting four parts by hand showed
 
@@ -170,9 +258,9 @@ suppression and linear patterns all have equivalents.
 
 | | Gap | Evidence | Mark |
 |---|---|---|---|
-| A1 | **Mate ends on reference planes.** | Every assembly has reference planes (99); templates carry mating planes by name (`MatePlane`, `MidPlane`, `LockMatePlane`); more than half of the scripts' mates name a plane | Done: `plane` selects standard or named reference planes in mate ends. References follow plane edits and renames, including inside sub-assemblies. Tested through save/reopen; not yet tried on a template assembly |
-| A2 | **Scripted mates to parts inside sub-assemblies.** | About 30% of the scripts' mates | Done: `component` accepts a path array of names or ids, resolved at each level. Tested with named faces and planes through two rotated nesting levels. The top-level component moves rigidly; not yet tried on a template assembly |
-| A3 | **Width mate.** | 31 mates in 16 assemblies | Done for parallel pairs: `mate` with `type: "width"`, Centered, Free, Dimension and Percent, paired planar faces/reference planes or a cylindrical/axis tab, nested paths, expressions and mode editing. Tested with geometry changes, bounded dragging and save/reopen. Drafted/nonparallel pairs remain a gap; template assemblies not yet tried |
+| A1 | **Mate ends on reference planes.** | Every assembly has reference planes (99); templates carry mating planes by name (`MatePlane`, `MidPlane`, `LockMatePlane`); more than half of the scripts' mates name a plane | Done: `plane` selects standard or named reference planes in mate ends. References follow plane edits and renames, including inside sub-assemblies. Tested through save/reopen; tried on two converted template parts (Baffle Duct B and Access Plate 1 in a sub-assembly): plane-to-plane distance and plane-to-named-face coincident put the component where the arithmetic says |
+| A2 | **Scripted mates to parts inside sub-assemblies.** | About 30% of the scripts' mates | Done: `component` accepts a path array of names or ids, resolved at each level. Tested with named faces and planes through two rotated nesting levels. The top-level component moves rigidly; tried on the same two converted parts, with the plate inside a sub-assembly |
+| A3 | **Width mate.** | 31 mates in 16 assemblies | Done for parallel pairs: `mate` with `type: "width"`, Centered, Free, Dimension and Percent, paired planar faces/reference planes or a cylindrical/axis tab, nested paths, expressions and mode editing. Tested with geometry changes, bounded dragging and save/reopen. Drafted/nonparallel pairs remain a gap; tried on the same two converted parts: the plate centred on the 3 mm sheet lands at x = -1.5 |
 | A4 | **Other mates:** slot, limit angle, symmetric, path, coordinate. | 7, 2, 2, 1 and 1 mates | Gap |
 | A5 | **Assemblies have no configurations**, and a component can't choose one of its part's. | 10 assemblies have two (9 are left and right hinge), swapping component configurations and suppressing a different 40 to 50 mates; 24 of 202 instances use a part configuration other than the default | Gap |
 | A6 | **A part can't read another part's or the assembly's values.** | 25 of 50 assembly equations set one part's dimension from another's: `Weather Shield width = Door width - 50` | Decide |
@@ -180,7 +268,7 @@ suppression and linear patterns all have equivalents.
 | A8 | **Pattern count and spacing from an expression.** Whether `component_pattern` takes expressions is not known. | 2 equations (Gear Tray Assembly) | Check |
 | A9 | **Flexible sub-assemblies.** Sub-assemblies are rigid, by decision (ADR 0009). | The scripts mark sub-assemblies flexible (hinges, door stays) | Decide |
 | A10 | **In-context features.** Ruled out by decision (ADR 0009): each becomes an ordinary part feature driven by shared values. | 24 in 9 assemblies; one assembly-level cut; three layout sketches | Decide |
-| A11 | **Alignment and flip.** FabSys sets an alignment and a flip on a mate; PeetCAD has one `flip`. Whether it says which side a distance is measured to is not known. | Over half the scripts' mates set a distance; about a quarter flip | Check |
+| A11 | **Alignment and flip.** FabSys sets an alignment and a flip on a mate; PeetCAD has one `flip`. Whether it says which side a distance is measured to is not known. | Over half the scripts' mates set a distance; about a quarter flip | Check: on a distance mate between two reference planes, `flip` left the component on the same side (y = -25 both ways); on a coincident mate it turned it over. Which field picks the side of a distance is still to find |
 | A12 | **What the templates' own mates join.** Of 1,117 mate ends: 639 flat faces, 165 round faces, 82 round edges, 23 reference planes, 12 sketch lines, 6 straight edges, 3 sketch points; 188 came back empty (half of them on suppressed mates). So the templates' mates are nearly all on faces, which PeetCAD takes; reference planes (A1) matter for the mates FabSys adds, not for importing these. | The full export | Answered; the 93 empty ends on live mates need a look |
 
 ## FabSys as the driver
