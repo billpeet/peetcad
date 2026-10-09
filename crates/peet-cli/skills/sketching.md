@@ -105,3 +105,47 @@ it returns to the first point (don't repeat it).
 the piece), `offset`, `mirror` (entities and an `axis` line), `construction`, `delete`
 (entities), `remove` (relations and dimensions). After an edit, ids of the pieces may be
 new: read them from the reply.
+
+## Relations to the model
+
+Use `project` before relating or dimensioning sketch geometry to a model edge,
+vertex, or reference plane. Build the source feature above the sketch first. Pick
+edges and vertices with the selectors skill; select a plane by its feature name or
+`front`, `top`, `right`. The projection is locked construction geometry and follows
+upstream edits, configurations, and sketch placement changes. Existing relations
+and dimensions accept it by label or id. A plane supplies its intersection line
+with the sketch, so use `coincident` for a point on the plane and `distance` for its
+offset. Parallel planes have no intersection and are refused.
+
+For converted edges, set `convert` to true. The locked curves then participate in
+profiles. Projecting a face gives its boundary edges, including hole loops; address
+them by number, such as `outline.0.start`. The application exposes the supporting face's boundary as reference geometry when
+opening a sketch for editing. Scripts use `project` explicitly after creating the sketch
+on the face; those references work the same way.
+
+Straight edges project unless viewed end-on. Circular edges must be parallel to the
+sketch plane; tilted circles, ellipses and freeform edges are refused. Pick supported
+edges individually when a face includes an unsupported boundary. A missing source
+fails the sketch; suppression of a source suppresses its dependent sketches. Replace
+a projection with `delete` of its entity id, then project the replacement and recreate
+its relations. Use `feature` to inspect `projections`, locked entities, and failures.
+
+`collinear` adds parallel and point-on-line relations; `coradial` adds concentric and
+equal-radius relations. Remove both returned relation ids to remove either composite
+relation. `equal` already covers equal line lengths, `midpoint` places a point at a
+projected edge's midpoint, and `horizontal` or `vertical` accepts two points.
+`doubled_distance` measures twice a point's perpendicular distance to a centreline;
+its named value and expressions use the full doubled size.
+
+```jsonl
+{"op":"sketch","on":"top","name":"Stock profile","draw":[{"type":"rectangle","from":[0,0],"to":[40,30]}]}
+{"op":"extrude","sketch":"Stock profile","name":"Stock","depth":5}
+{"op":"sketch","on":{"feature":"Stock","side":"end"},"name":"Located","draw":[{"type":"project","edge":{"between":[[40,0,5],[40,30,5]]},"as":"edge"},{"type":"project","vertex":{"at":[40,30,5]},"as":"corner"},{"type":"project","plane":"right","as":"axis"},{"type":"point","at":[35,27],"as":"p"},{"type":"distance","of":["p","edge"],"value":5},{"type":"vertical_distance","of":["p","corner"],"value":3},{"type":"doubled_distance","of":["p","axis"],"driven":true,"name":"full_width"}]}
+{"op":"sketch","on":{"feature":"Stock","side":"end"},"name":"Converted","draw":[{"type":"project","face":{"feature":"Stock","side":"end"},"convert":true,"as":"outline"}]}
+{"op":"extrude","sketch":"Converted","depth":2}
+{"op":"feature","feature":"Located"}
+```
+
+```jsonl
+{"op":"sketch","on":"top","name":"Relations","draw":[{"type":"line","from":[0,0],"to":[10,0],"as":"a","construction":true},{"type":"fix","of":["a"]},{"type":"line","from":[2,2],"to":[8,3],"as":"b","construction":true},{"type":"collinear","of":["a","b"]},{"type":"circle","center":[20,20],"radius":3,"as":"c","construction":true},{"type":"fix","of":["c"]},{"type":"circle","center":[21,21],"radius":4,"as":"d","construction":true},{"type":"coradial","of":["c","d"]}]}
+```

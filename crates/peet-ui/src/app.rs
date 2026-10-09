@@ -591,22 +591,23 @@ impl PeetApp {
     /// Opens a sketch for editing and turns the view to look straight at it.
     fn open_sketch(&mut self, id: FeatureId) {
         self.close_sketch();
+        self.doc.finish_loading();
         // Sketches are drawn on the folded part.
         if self.doc.is_flat() {
             self.perform(Op::FlatPattern { on: Some(false) });
         }
-        let Some(f) = self.doc.model.sketch(id) else {
+        let Some((mut work, skipped)) = SketchItem::from_feature(&self.doc, id) else {
             return;
         };
-        let Some((plane, status)) = self.doc.sketch_placement(id) else {
-            return;
-        };
-        let mut work = SketchItem {
-            plane,
-            plane_name: self.doc.plane_name(&f.plane),
-            sketch: f.sketch.clone(),
-            status,
-        };
+        let plane = work.plane;
+        if skipped > 0 {
+            self.status_message = Some((
+                format!(
+                    "{skipped} face edges could not be projected. Sketch references support straight edges and circles parallel to the sketch plane."
+                ),
+                false,
+            ));
+        }
         self.sketch = Some(SketchEditor::new(ItemId::Feature(id), &mut work));
         self.ribbon_tab = RibbonTab::Sketch;
         self.sketch_work = Some(work);
@@ -635,6 +636,11 @@ impl PeetApp {
         self.change(&format!("Edit {name}"), |m| {
             if let Some(f) = m.feature_mut(id) {
                 if let Some(s) = f.sketch_mut() {
+                    s.projections = work
+                        .projections
+                        .into_iter()
+                        .filter(|p| work.sketch.entity(p.entity).is_some())
+                        .collect();
                     s.sketch = work.sketch;
                 }
                 f.visible = true;

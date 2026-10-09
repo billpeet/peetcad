@@ -844,6 +844,67 @@ mod tests {
     }
 
     #[test]
+    fn opening_a_sketch_on_a_base_flange_exposes_its_edges() {
+        let mut app = PeetApp::headless();
+        for op in [
+            serde_json::json!({"op":"sketch","on":"top","draw":[{"type":"rectangle","from":[0,0],"to":[40,30]}]}),
+            serde_json::json!({"op":"base_flange","sketch":"Sketch1","thickness":2}),
+        ] {
+            let reply = peet_ops::apply_json(&mut app.doc, &op, peet_ops::Undo::Step);
+            assert!(reply.ok, "{}", reply.json);
+        }
+        let body = &app.doc.evaluation().bodies[0];
+        let face = body
+            .solid
+            .face_ids()
+            .find(|f| body.face_center(*f).z > 1.9)
+            .unwrap();
+        let plane = peet_model::face_sketch_plane(&body.solid, face).unwrap();
+        app.new_sketch(PlaneRef::Face(body.face_ref(face)), plane);
+        let work = app.sketch_work.as_ref().unwrap();
+        let edge_count = work
+            .sketch
+            .entities()
+            .filter(|(_, e)| e.locked && e.kind() == peet_sketch::EntityKind::Line)
+            .count();
+        assert_eq!(
+            edge_count, 4,
+            "Smart Dimension needs the four base-flange edges in the editor"
+        );
+        let id = app.sketch.as_ref().unwrap().item.feature().unwrap();
+        let work = app.sketch_work.as_mut().unwrap();
+        work.sketch.add_circle(DVec2::new(10., 10.), 2.);
+        app.close_sketch();
+        assert!(app.untranslated().is_empty());
+        assert_eq!(
+            app.doc.model.sketch(id).unwrap().projections.len(),
+            4,
+            "the UI commit must keep the model references"
+        );
+        app.change("Cut", |m| {
+            m.add_sheet_cut(id);
+        });
+        assert_eq!(app.doc.evaluation().failures().count(), 0);
+        app.open_sketch(id);
+        let work = app.sketch_work.as_ref().unwrap();
+        assert_eq!(
+            work.projections.len(),
+            4,
+            "reopening must not duplicate the edges or project the downstream cut hole"
+        );
+        assert!(work.projections.iter().all(|p| match &p.source {
+            peet_model::projection::Source::Edge(e) => e.features().all(|source| source.0 < id.0),
+            _ => false,
+        }));
+        app.close_sketch();
+        let bytes = peet_io::document::save(&app.doc.model, &Default::default(), None).unwrap();
+        assert_eq!(
+            peet_io::document::open(&bytes).unwrap().model,
+            app.doc.model
+        );
+    }
+
+    #[test]
     fn commands_need_something_to_work_on() {
         let app = PeetApp::headless();
         for cmd in [

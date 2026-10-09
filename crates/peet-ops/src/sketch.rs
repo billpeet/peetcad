@@ -71,6 +71,8 @@ pub enum Relation {
     Tangent,
     Equal,
     Concentric,
+    Collinear,
+    Coradial,
     Midpoint,
     Symmetric,
     Fix,
@@ -80,6 +82,7 @@ pub enum Relation {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Measure {
     Distance,
+    DoubledDistance,
     Length,
     HorizontalDistance,
     VerticalDistance,
@@ -88,7 +91,7 @@ pub enum Measure {
     Angle,
 }
 
-const RELATIONS: [(Relation, &str, &str); 11] = [
+const RELATIONS: [(Relation, &str, &str); 13] = [
     (
         Relation::Coincident,
         "coincident",
@@ -109,6 +112,16 @@ const RELATIONS: [(Relation, &str, &str); 11] = [
         "two lines (length) or two circles or arcs (radius)",
     ),
     (Relation::Concentric, "concentric", "two circles or arcs"),
+    (
+        Relation::Collinear,
+        "collinear",
+        "two lines on the same infinite line",
+    ),
+    (
+        Relation::Coradial,
+        "coradial",
+        "two circles or arcs with the same centre and radius",
+    ),
     (Relation::Midpoint, "midpoint", "a point and a line"),
     (
         Relation::Symmetric,
@@ -118,11 +131,16 @@ const RELATIONS: [(Relation, &str, &str); 11] = [
     (Relation::Fix, "fix", "an entity, held where it is"),
 ];
 
-const MEASURES: [(Measure, &str, &str); 7] = [
+const MEASURES: [(Measure, &str, &str); 8] = [
     (
         Measure::Distance,
         "distance",
         "two points, or a point and a line",
+    ),
+    (
+        Measure::DoubledDistance,
+        "doubled_distance",
+        "twice the perpendicular distance from a point to a centreline",
     ),
     (Measure::Length, "length", "a line"),
     (
@@ -136,7 +154,11 @@ const MEASURES: [(Measure, &str, &str); 7] = [
     (Measure::Angle, "angle", "two lines"),
 ];
 
-const GEOMETRY: [(&str, &str); 10] = [
+const GEOMETRY: [(&str, &str); 11] = [
+    (
+        "project",
+        "exactly one of edge, vertex, plane, face; convert: use the projected edge in profiles",
+    ),
     ("point", "at"),
     ("line", "from, to"),
     ("polyline", "points, closed: connected lines"),
@@ -197,7 +219,19 @@ const EDITS: [(&str, &str); 8] = [
 /// One thing to draw or do in a sketch. Points are `[x, y]` in the sketch plane and
 /// lengths are numbers, both in document units.
 #[derive(Clone, Debug, PartialEq)]
+pub enum ProjectionSel {
+    Edge(crate::value::EdgeSel),
+    Vertex(crate::value::VertexSel),
+    Plane(crate::value::PlaneSel),
+    Face(crate::value::FaceSel),
+}
+
+#[derive(Clone, Debug, PartialEq)]
 pub enum Draw {
+    Project {
+        source: ProjectionSel,
+        convert: bool,
+    },
     Point {
         at: [f64; 2],
     },
@@ -325,6 +359,7 @@ impl Draw {
 
     fn word(&self) -> &'static str {
         match self {
+            Self::Project { .. } => "project",
             Self::Point { .. } => "point",
             Self::Line { .. } => "line",
             Self::Polyline { .. } => "polyline",
@@ -381,6 +416,27 @@ impl DrawItem {
             }
         } else {
             match kind {
+                "project" => {
+                    let edge = a.parsed("edge", crate::value::EdgeSel::parse)?;
+                    let vertex = a.parsed("vertex", crate::value::VertexSel::parse)?;
+                    let plane = a.parsed("plane", crate::value::PlaneSel::parse)?;
+                    let face = a.parsed("face", crate::value::FaceSel::parse)?;
+                    let source = match (edge, vertex, plane, face) {
+                        (Some(e), None, None, None) => ProjectionSel::Edge(e),
+                        (None, Some(v), None, None) => ProjectionSel::Vertex(v),
+                        (None, None, Some(p), None) => ProjectionSel::Plane(p),
+                        (None, None, None, Some(f)) => ProjectionSel::Face(f),
+                        _ => {
+                            return Err(
+                                "project needs exactly one of edge, vertex, plane or face".into()
+                            );
+                        }
+                    };
+                    Draw::Project {
+                        source,
+                        convert: a.flag("convert", false)?,
+                    }
+                }
                 "point" => Draw::Point {
                     at: a.required("at", p2)?,
                 },
@@ -669,6 +725,7 @@ fn measure(kind: Measure, of: &[EntityId]) -> Result<ConstraintKind, String> {
     use ConstraintKind as K;
     Ok(match (kind, of) {
         (Measure::Distance, &[a, b]) => K::Distance(a, b),
+        (Measure::DoubledDistance, &[a, b]) => K::DoubledDistance(a, b),
         (Measure::Length, &[a]) => K::Length(a),
         (Measure::HorizontalDistance, &[a, b]) => K::HorizontalDistance(a, b),
         (Measure::VerticalDistance, &[a, b]) => K::VerticalDistance(a, b),
@@ -718,6 +775,8 @@ fn one(
     labels: &mut HashMap<String, Named>,
     doc: &Document,
     item: &DrawItem,
+    projections: &mut Vec<peet_model::projection::Projection>,
+    plane: peet_math::Plane,
 ) -> Result<Value, String> {
     let units = &doc.model.parameters.units;
     let p = |p: &[f64; 2]| mm2(*p, units);
@@ -728,6 +787,76 @@ fn one(
     let failed = |e: ops::OpError| e.to_string();
 
     let made: Option<Named> = match &item.draw {
+        Draw::Project { source, convert } => {
+            use peet_model::projection::{
+                Projection, Shape, Source, intersect_plane, project_edge,
+            };
+            if let ProjectionSel::Face(f) = source {
+                let (b, id) = crate::select::face(doc, f)?;
+                let body = &doc.evaluation().bodies[b];
+                let mut curves = Vec::new();
+                for &l in &body.solid.face(id).loops {
+                    for c in body.solid.loop_coedges(l) {
+                        let edge = body.solid.coedge(c).edge;
+                        let shape = project_edge(body.solid.edge(edge), plane)?;
+                        let entity = shape.add(sketch, !convert || item.construction);
+                        projections.push(Projection {
+                            entity,
+                            source: Source::Edge(
+                                body.edge_ref(edge)
+                                    .ok_or("The face edge has no persistent reference.")?,
+                            ),
+                        });
+                        curves.push(entity);
+                    }
+                }
+                reply.insert(
+                    "curves".into(),
+                    curves.iter().map(|id| entity_out(sketch, *id)).collect(),
+                );
+                return finish(
+                    item,
+                    reply,
+                    labels,
+                    Some(Named::Shape {
+                        curves,
+                        points: Vec::new(),
+                        names: &[],
+                    }),
+                    false,
+                );
+            }
+            let (source, shape) = match source {
+                ProjectionSel::Face(_) => unreachable!(),
+                ProjectionSel::Edge(e) => {
+                    let (b, id) = crate::select::edge(doc, e)?;
+                    (
+                        Source::Edge(crate::select::edge_ref(doc, e)?),
+                        project_edge(doc.evaluation().bodies[b].solid.edge(id), plane)?,
+                    )
+                }
+                ProjectionSel::Vertex(v) => {
+                    let r = crate::select::vertex_ref(doc, v)?;
+                    (
+                        Source::Point(peet_model::PointRef::Vertex(r.clone())),
+                        Shape::Point(plane.to_plane_coords(r.hint)),
+                    )
+                }
+                ProjectionSel::Plane(p) => {
+                    if *convert {
+                        return Err(
+                            "A reference plane can only be projected as construction geometry."
+                                .into(),
+                        );
+                    }
+                    let (r, p) = crate::select::plane(doc, p)?;
+                    (Source::Plane(r), intersect_plane(plane, p)?)
+                }
+            };
+            let entity = shape.add(sketch, !convert || item.construction);
+            projections.push(Projection { entity, source });
+            Some(Named::Entity(entity))
+        }
         Draw::Point { at } => Some(Named::Entity(sketch.add_point(p(at)))),
         Draw::Line { from, to } => Some(Named::Entity(sketch.add_line(p(from), p(to)))),
         Draw::Circle { center, radius } => {
@@ -805,6 +934,40 @@ fn one(
                     .iter()
                     .map(|c| c.0)
                     .collect()
+            } else if matches!(kind, Relation::Collinear | Relation::Coradial) {
+                let [a, b] = of[..] else {
+                    return Err("it takes two entities in 'of'".into());
+                };
+                let kinds = if *kind == Relation::Collinear {
+                    sketch
+                        .validate(&ConstraintKind::Parallel(a, b))
+                        .map_err(|e| e.to_string())?;
+                    let (start, _) = sketch.endpoints(a).unwrap();
+                    vec![
+                        ConstraintKind::Parallel(a, b),
+                        ConstraintKind::PointOnCurve {
+                            point: start,
+                            curve: b,
+                        },
+                    ]
+                } else {
+                    sketch
+                        .validate(&ConstraintKind::Concentric(a, b))
+                        .map_err(|e| e.to_string())?;
+                    vec![
+                        ConstraintKind::Concentric(a, b),
+                        ConstraintKind::Equal(a, b),
+                    ]
+                };
+                kinds
+                    .into_iter()
+                    .map(|k| {
+                        sketch
+                            .add_constraint(k)
+                            .map(|id| id.0)
+                            .map_err(|e| e.to_string())
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
             } else {
                 let k = relation(sketch, *kind, &of)?;
                 vec![sketch.add_constraint(k).map_err(|e| e.to_string())?.0]
@@ -895,6 +1058,14 @@ fn one(
         Draw::Delete { of } => {
             let mut removed = Vec::new();
             for id in resolve_all(sketch, labels, of)? {
+                if projections.iter().any(|p| p.entity == id) {
+                    let mut owned = sketch.entity(id).unwrap().geometry.points();
+                    owned.push(id);
+                    for id in owned {
+                        sketch.entity_mut(id).unwrap().locked = false;
+                    }
+                    projections.retain(|p| p.entity != id);
+                }
                 if sketch.entity(id).is_some() {
                     removed.extend(sketch.remove_entity(id).map_err(|e| e.to_string())?);
                 }
@@ -990,15 +1161,22 @@ fn finish(
 
 /// Applies a draw list to a sketch. Returns what each item made, in order.
 pub(crate) fn draw(
-    sketch: &mut Sketch,
+    feature: &mut peet_model::SketchFeature,
     items: &[DrawItem],
     doc: &Document,
 ) -> Result<Vec<Value>, String> {
     let mut labels = HashMap::new();
     let mut out = Vec::new();
     for (i, item) in items.iter().enumerate() {
-        let reply = one(sketch, &mut labels, doc, item)
-            .map_err(|e| format!("draw item {} ({}): {e}", i + 1, item.draw.word()))?;
+        let reply = one(
+            &mut feature.sketch,
+            &mut labels,
+            doc,
+            item,
+            &mut feature.projections,
+            feature.placement,
+        )
+        .map_err(|e| format!("draw item {} ({}): {e}", i + 1, item.draw.word()))?;
         out.push(reply);
     }
     Ok(out)

@@ -28,12 +28,17 @@ fn harness() -> Harness<'static, State> {
 
 /// A harness whose frames are `step_dt` seconds apart (short enough, a double-click fits).
 fn harness_stepping(step_dt: f32) -> Harness<'static, State> {
-    let mut item = SketchItem {
+    let item = SketchItem {
         plane: Plane::TOP,
         plane_name: "Top Plane".to_owned(),
         sketch: Sketch::new(),
+        projections: Vec::new(),
         status: SketchStatus::Under,
     };
+    harness_with_item(item, step_dt)
+}
+
+fn harness_with_item(mut item: SketchItem, step_dt: f32) -> Harness<'static, State> {
     let editor = SketchEditor::new(ItemId::Feature(peet_model::FeatureId(1000)), &mut item);
     let camera = Camera {
         rotation: StandardView::Top.rotation(),
@@ -615,4 +620,61 @@ fn spline_points_drag_and_the_curve_is_picked() {
     let s = &h.state().item.sketch;
     assert!(splines(s).is_empty());
     assert_eq!(count(s, EntityKind::Point), 1, "only the origin is left");
+}
+
+#[test]
+fn smart_dimension_picks_a_base_flange_edge_for_a_slot() {
+    let mut doc = peet_document::Document::default();
+    for op in [
+        serde_json::json!({"op":"sketch","on":"top","draw":[{"type":"rectangle","from":[0,0],"to":[40,30]}]}),
+        serde_json::json!({"op":"base_flange","sketch":"Sketch1","thickness":2}),
+        serde_json::json!({"op":"sketch","name":"Slot","on":{"feature":"Base-Flange1","side":"top"},"draw":[{"type":"slot","from":[10,10],"to":[25,10],"radius":3}]}),
+    ] {
+        let reply = peet_ops::apply_json(&mut doc, &op, peet_ops::Undo::Step);
+        assert!(reply.ok, "{}", reply.json);
+    }
+    let id = doc.model.features().find(|f| f.name == "Slot").unwrap().id;
+    let (item, skipped) = SketchItem::from_feature(&doc, id).unwrap();
+    assert_eq!(skipped, 0);
+    let mut h = harness_with_item(item, 0.25);
+    command(&mut h, CommandId::SmartDimension);
+    click(&mut h, DVec2::new(25., 10.));
+    click(&mut h, DVec2::new(40., 15.));
+    click(&mut h, DVec2::new(32., 20.));
+    let (cid, kind) = h
+        .state()
+        .item
+        .sketch
+        .constraints()
+        .find(|(_, c)| c.dimension.is_some())
+        .map(|(id, c)| (id, c.kind))
+        .expect("Smart Dimension placed a distance to the flange edge");
+    let ConstraintKind::Distance(point, line) = kind else {
+        panic!("expected point-to-edge distance, got {kind:?}")
+    };
+    assert_eq!(h.state().item.sketch.kind(line), Some(EntityKind::Line));
+    assert!(h.state().item.sketch.entity(line).unwrap().locked);
+    assert!(
+        (h.state()
+            .item
+            .sketch
+            .constraint(cid)
+            .unwrap()
+            .dimension
+            .as_ref()
+            .unwrap()
+            .value
+            - 15.)
+            .abs()
+            < 1e-6
+    );
+    h.state_mut()
+        .editor
+        .edit
+        .as_mut()
+        .expect("value editor opens")
+        .text = "12".into();
+    key(&mut h, Key::Enter);
+    assert!((h.state().item.sketch.point(point).x - 28.).abs() < 1e-6);
+    assert!((h.state().item.sketch.measure(&kind).unwrap() - 12.).abs() < 1e-6);
 }

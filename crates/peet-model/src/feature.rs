@@ -273,6 +273,9 @@ pub struct SketchFeature {
     /// be opened and moved to another plane.
     pub placement: Plane,
     pub sketch: Sketch,
+    /// Model references refreshed into locked sketch geometry before each solve.
+    #[serde(default)]
+    pub projections: Vec<crate::projection::Projection>,
 }
 
 /// An extrusion of a sketch's regions.
@@ -815,7 +818,16 @@ impl FeatureKind {
     pub fn dependencies(&self) -> Vec<FeatureId> {
         let mut out = Vec::new();
         match self {
-            Self::Sketch(s) => plane_deps(&s.plane, &mut out),
+            Self::Sketch(s) => {
+                plane_deps(&s.plane, &mut out);
+                for p in &s.projections {
+                    match &p.source {
+                        crate::projection::Source::Edge(e) => out.extend(e.features()),
+                        crate::projection::Source::Point(p) => point_deps(p, &mut out),
+                        crate::projection::Source::Plane(p) => plane_deps(p, &mut out),
+                    }
+                }
+            }
             Self::Extrude(e) => {
                 out.push(e.sketch);
                 if let crate::EndCondition::UpTo(p) = &e.params.end {
@@ -1221,6 +1233,146 @@ impl Feature {
         match &mut self.kind {
             FeatureKind::Extrude(e) => Some(e),
             _ => None,
+        }
+    }
+}
+
+// Binary layouts of sketch features before model schema 9.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SketchFeatureV8 {
+    plane: PlaneRef,
+    placement: Plane,
+    sketch: Sketch,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum FeatureKindV8 {
+    Sketch(Box<SketchFeatureV8>),
+    Extrude(Box<ExtrudeFeature>),
+    Plane(PlaneDef),
+    Axis(AxisDef),
+    Point(PointDef),
+    CoordSystem(CoordSystemDef),
+    BaseFlange(Box<BaseFlangeFeature>),
+    EdgeFlange(Box<EdgeFlangeFeature>),
+    SheetCut(Box<SheetCutFeature>),
+    Hem(Box<HemFeature>),
+    SketchedBend(Box<SketchedBendFeature>),
+    Jog(Box<JogFeature>),
+    MiterFlange(Box<MiterFlangeFeature>),
+    Corner(Box<CornerFeature>),
+    Form(Box<FormFeature>),
+    Pattern(Box<PatternFeature>),
+    Mirror(Box<MirrorFeature>),
+    Revolve(Box<RevolveFeature>),
+    Blend(Box<BlendFeature>),
+    Shell(Box<ShellFeature>),
+    Draft(Box<DraftFeature>),
+    Hole(Box<HoleFeature>),
+    Import(Box<ImportFeature>),
+    Sweep(Box<SweepFeature>),
+    Loft(Box<LoftFeature>),
+    ConvertToSheet(Box<ConvertToSheetFeature>),
+}
+impl From<FeatureKindV8> for FeatureKind {
+    fn from(kind: FeatureKindV8) -> Self {
+        match kind {
+            FeatureKindV8::Sketch(s) => Self::Sketch(Box::new(SketchFeature {
+                plane: s.plane,
+                placement: s.placement,
+                sketch: s.sketch,
+                projections: Vec::new(),
+            })),
+            FeatureKindV8::Extrude(v) => Self::Extrude(v),
+            FeatureKindV8::Plane(v) => Self::Plane(v),
+            FeatureKindV8::Axis(v) => Self::Axis(v),
+            FeatureKindV8::Point(v) => Self::Point(v),
+            FeatureKindV8::CoordSystem(v) => Self::CoordSystem(v),
+            FeatureKindV8::BaseFlange(v) => Self::BaseFlange(v),
+            FeatureKindV8::EdgeFlange(v) => Self::EdgeFlange(v),
+            FeatureKindV8::SheetCut(v) => Self::SheetCut(v),
+            FeatureKindV8::Hem(v) => Self::Hem(v),
+            FeatureKindV8::SketchedBend(v) => Self::SketchedBend(v),
+            FeatureKindV8::Jog(v) => Self::Jog(v),
+            FeatureKindV8::MiterFlange(v) => Self::MiterFlange(v),
+            FeatureKindV8::Corner(v) => Self::Corner(v),
+            FeatureKindV8::Form(v) => Self::Form(v),
+            FeatureKindV8::Pattern(v) => Self::Pattern(v),
+            FeatureKindV8::Mirror(v) => Self::Mirror(v),
+            FeatureKindV8::Revolve(v) => Self::Revolve(v),
+            FeatureKindV8::Blend(v) => Self::Blend(v),
+            FeatureKindV8::Shell(v) => Self::Shell(v),
+            FeatureKindV8::Draft(v) => Self::Draft(v),
+            FeatureKindV8::Hole(v) => Self::Hole(v),
+            FeatureKindV8::Import(v) => Self::Import(v),
+            FeatureKindV8::Sweep(v) => Self::Sweep(v),
+            FeatureKindV8::Loft(v) => Self::Loft(v),
+            FeatureKindV8::ConvertToSheet(v) => Self::ConvertToSheet(v),
+        }
+    }
+}
+impl From<&FeatureKind> for FeatureKindV8 {
+    fn from(kind: &FeatureKind) -> Self {
+        match kind {
+            FeatureKind::Sketch(s) => Self::Sketch(Box::new(SketchFeatureV8 {
+                plane: s.plane.clone(),
+                placement: s.placement,
+                sketch: s.sketch.clone(),
+            })),
+            FeatureKind::Extrude(v) => Self::Extrude(v.clone()),
+            FeatureKind::Plane(v) => Self::Plane(v.clone()),
+            FeatureKind::Axis(v) => Self::Axis(v.clone()),
+            FeatureKind::Point(v) => Self::Point(v.clone()),
+            FeatureKind::CoordSystem(v) => Self::CoordSystem(v.clone()),
+            FeatureKind::BaseFlange(v) => Self::BaseFlange(v.clone()),
+            FeatureKind::EdgeFlange(v) => Self::EdgeFlange(v.clone()),
+            FeatureKind::SheetCut(v) => Self::SheetCut(v.clone()),
+            FeatureKind::Hem(v) => Self::Hem(v.clone()),
+            FeatureKind::SketchedBend(v) => Self::SketchedBend(v.clone()),
+            FeatureKind::Jog(v) => Self::Jog(v.clone()),
+            FeatureKind::MiterFlange(v) => Self::MiterFlange(v.clone()),
+            FeatureKind::Corner(v) => Self::Corner(v.clone()),
+            FeatureKind::Form(v) => Self::Form(v.clone()),
+            FeatureKind::Pattern(v) => Self::Pattern(v.clone()),
+            FeatureKind::Mirror(v) => Self::Mirror(v.clone()),
+            FeatureKind::Revolve(v) => Self::Revolve(v.clone()),
+            FeatureKind::Blend(v) => Self::Blend(v.clone()),
+            FeatureKind::Shell(v) => Self::Shell(v.clone()),
+            FeatureKind::Draft(v) => Self::Draft(v.clone()),
+            FeatureKind::Hole(v) => Self::Hole(v.clone()),
+            FeatureKind::Import(v) => Self::Import(v.clone()),
+            FeatureKind::Sweep(v) => Self::Sweep(v.clone()),
+            FeatureKind::Loft(v) => Self::Loft(v.clone()),
+            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(v.clone()),
+        }
+    }
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeatureV8 {
+    id: FeatureId,
+    name: String,
+    suppressed: bool,
+    visible: bool,
+    kind: FeatureKindV8,
+}
+impl From<FeatureV8> for Feature {
+    fn from(f: FeatureV8) -> Self {
+        Self {
+            id: f.id,
+            name: f.name,
+            suppressed: f.suppressed,
+            visible: f.visible,
+            kind: f.kind.into(),
+        }
+    }
+}
+impl From<&Feature> for FeatureV8 {
+    fn from(f: &Feature) -> Self {
+        Self {
+            id: f.id,
+            name: f.name.clone(),
+            suppressed: f.suppressed,
+            visible: f.visible,
+            kind: (&f.kind).into(),
         }
     }
 }

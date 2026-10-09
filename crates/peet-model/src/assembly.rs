@@ -1137,3 +1137,79 @@ mod tests {
         assert!(bent.validate().unwrap_err().contains("placement"));
     }
 }
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct DefinitionV8 {
+    id: DefId,
+    model: Arc<crate::model::ModelV8>,
+    link: Option<Link>,
+}
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct AssemblyV8 {
+    definitions: Vec<Arc<DefinitionV8>>,
+    components: Vec<Arc<Component>>,
+    next_definition: u32,
+    next_component: u32,
+    mates: Vec<Arc<Mate>>,
+    next_mate: u32,
+    #[serde(default)]
+    explode: Vec<Arc<ExplodeStep>>,
+    #[serde(default)]
+    next_explode: u32,
+    #[serde(default)]
+    patterns: Vec<Arc<ComponentPattern>>,
+    #[serde(default)]
+    next_pattern: u32,
+}
+impl From<AssemblyV8> for Assembly {
+    fn from(a: AssemblyV8) -> Self {
+        Self {
+            definitions: a
+                .definitions
+                .iter()
+                .map(|d| {
+                    Arc::new(Definition {
+                        id: d.id,
+                        model: Arc::new((*d.model).clone().into()),
+                        link: d.link.clone(),
+                    })
+                })
+                .collect(),
+            components: a.components,
+            next_definition: a.next_definition,
+            next_component: a.next_component,
+            mates: a.mates,
+            next_mate: a.next_mate,
+            explode: a.explode,
+            next_explode: a.next_explode,
+            patterns: a.patterns,
+            next_pattern: a.next_pattern,
+        }
+    }
+}
+impl AssemblyV8 {
+    pub fn of(a: &Assembly) -> Self {
+        Self {
+            definitions: a
+                .definitions
+                .iter()
+                .map(|d| {
+                    Arc::new(DefinitionV8 {
+                        id: d.id,
+                        model: Arc::new(crate::model::ModelV8::of(&d.model)),
+                        link: d.link.clone(),
+                    })
+                })
+                .collect(),
+            components: a.components.clone(),
+            next_definition: a.next_definition,
+            next_component: a.next_component,
+            mates: a.mates.clone(),
+            next_mate: a.next_mate,
+            explode: a.explode.clone(),
+            next_explode: a.next_explode,
+            patterns: a.patterns.clone(),
+            next_pattern: a.next_pattern,
+        }
+    }
+}

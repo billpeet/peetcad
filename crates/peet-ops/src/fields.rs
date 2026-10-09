@@ -849,7 +849,7 @@ macro_rules! feature_args {
 feature_args! {
     /// A sketch's placement. (Sketches are added with `Op::Sketch`.)
     SketchPlane: FeatureKind::Sketch(f) => &mut **f,
-        SketchFeature { plane, placement: _, sketch: _ } => {
+        SketchFeature { plane, placement: _, sketch: _, projections: _ } => {
     /// What the sketch lies on.
     on: PlaneSel as PlaneF = plane,
     }

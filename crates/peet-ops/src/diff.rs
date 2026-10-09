@@ -426,10 +426,11 @@ pub fn diff_scoped(
                         configurations: None,
                     });
                 }
-                if a.sketch != b.sketch {
+                if a.sketch != b.sketch || a.projections != b.projections {
                     ops.push(Op::SetSketch {
                         sketch: by_id(f.id),
                         content: Box::new(b.sketch.clone()),
+                        projections: b.projections.clone(),
                         configurations: values.cloned(),
                     });
                 }
@@ -504,6 +505,7 @@ pub fn diff_scoped(
                     ops.push(Op::SetSketch {
                         sketch: by_id(f.id),
                         content: Box::new(s.sketch.clone()),
+                        projections: s.projections.clone(),
                         configurations: None,
                     });
                 }

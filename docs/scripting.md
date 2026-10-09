@@ -189,6 +189,7 @@ A `draw` list holds items with a `type`:
 
 | Types | Fields |
 |---|---|
+| `project` | exactly one of `edge`, `vertex`, `plane`, `face` selectors; `convert` includes projected edges in profiles |
 | `point` | `at` |
 | `line` | `from`, `to` |
 | `polyline` | `points`, `closed` |
@@ -199,8 +200,8 @@ A `draw` list holds items with a `type`:
 | `center_rectangle` | `center`, `corner` |
 | `slot` | `from`, `to`, `radius` |
 | `polygon` | `center`, `vertex`, `sides` |
-| `coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `tangent`, `equal`, `concentric`, `midpoint`, `symmetric`, `fix` | `of` (entities) |
-| `distance`, `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle` | `of`, `value`, `name`, `driven` |
+| `coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `tangent`, `equal`, `concentric`, `collinear`, `coradial`, `midpoint`, `symmetric`, `fix` | `of` (entities) |
+| `distance`, `doubled_distance`, `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle` | `of`, `value`, `name`, `driven` |
 | `fillet` | `corner`, `radius` |
 | `trim`, `extend` | `curve`, `near` |
 | `offset` | `of`, `distance` |
@@ -213,6 +214,23 @@ Geometry takes `as` (a label) and `construction`. An entity is an id, a label fr
 same list, or a part of one: `"a.start"`, `"a.end"`, `"c.center"`, `"r.bottom"`,
 `"p.2"` (a shape's curve by number), `"s.2"` (a spline's fit point by number, from 0),
 `"origin"`. Labels last for one operation; the reply and the `feature` query give the ids.
+
+`project` stores a persistent model reference and refreshes locked geometry before
+solving. It defaults to construction geometry. `convert: true` makes projected edges
+profile geometry; `face` projects every boundary edge, addressed as `label.0`, etc.
+Vertices project to points and planes to their intersection line with the sketch.
+Straight edges and circles/arcs parallel to the sketch plane are supported. Parallel
+planes, collapsed edges and other projected curve types fail with a diagnostic.
+Relations and dimensions use the projected ids like other sketch entities. Delete a
+projection by its root entity id to remove its source and attached relations.
+The `feature` query returns `projections` and marks reference entities `locked`.
+The application adds the supporting face's boundary references when opening a sketch
+for editing, so Smart Dimension and relations can select its edges and corners.
+Scripts obtain those references with an explicit `project` item.
+
+`collinear` creates parallel plus point-on-line relations; `coradial` creates concentric
+plus equal-radius relations. Each returns both relation ids. `doubled_distance` is twice
+the perpendicular distance from a point to a line, with its own editable dimension name.
 
 A spline passes through its points and has no other shape of its own: its points take
 `coincident`, `fix` and dimensions like a line's ends, and moving them moves the curve.

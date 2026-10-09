@@ -82,7 +82,7 @@ pub use pattern::{
     PatternChange, PatternEdit, PatternLineSel, PatternSel, PatternSpec, PatternStepSpec,
 };
 pub use session::{DocSel, SessionCommand, apply_session, apply_session_json};
-pub use sketch::{Draw, DrawItem, Ent, Measure, Relation};
+pub use sketch::{Draw, DrawItem, Ent, Measure, ProjectionSel, Relation};
 pub use value::{
     AxisSel, Bend, Configs, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel,
     HoleStandard, Input, PlaneSel, PointSel, Regions, RevolveAxis, Side, VertexQuery, VertexSel,
@@ -963,7 +963,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             if !draw.is_empty()
                 && let Some(s) = model.feature_mut(id).and_then(|f| f.sketch_mut())
             {
-                let drawn = sketch::draw(&mut s.sketch, draw, doc)?;
+                let drawn = sketch::draw(s, draw, doc)?;
                 done.data.insert("drawn".to_owned(), json!(drawn));
             }
             done.created.push(id);
@@ -973,7 +973,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
         Op::Draw { sketch, draw } => {
             let id = sketch_id(doc, sketch)?;
             if let Some(s) = model.feature_mut(id).and_then(|f| f.sketch_mut()) {
-                let drawn = sketch::draw(&mut s.sketch, draw, doc)?;
+                let drawn = sketch::draw(s, draw, doc)?;
                 done.data.insert("drawn".to_owned(), json!(drawn));
             }
             done.feature = Some(id);
@@ -1079,11 +1079,13 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
         Op::SetSketch {
             sketch,
             content,
+            projections,
             configurations,
         } => {
             let id = sketch_id(doc, sketch)?;
             if let Some(s) = model.feature_mut(id).and_then(|f| f.sketch_mut()) {
                 s.sketch = (**content).clone();
+                s.projections = projections.clone();
             }
             rescope(&mut model, doc, id, configurations.as_ref(), &[])?;
             done.feature = Some(id);

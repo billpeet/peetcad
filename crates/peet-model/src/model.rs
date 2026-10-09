@@ -87,7 +87,7 @@ pub struct Model {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelV7 {
     name: String,
-    features: Vec<Arc<Feature>>,
+    features: Vec<Arc<crate::feature::FeatureV8>>,
     parameters: Parameters,
     rollback: Option<usize>,
     datums_visible: [bool; 4],
@@ -100,7 +100,11 @@ impl From<ModelV7> for Model {
     fn from(m: ModelV7) -> Self {
         Self {
             name: m.name,
-            features: m.features,
+            features: m
+                .features
+                .into_iter()
+                .map(|f| Arc::new((*f).clone().into()))
+                .collect(),
             parameters: m.parameters,
             rollback: m.rollback,
             datums_visible: m.datums_visible,
@@ -120,7 +124,11 @@ impl ModelV7 {
     pub fn of(model: &Model) -> Self {
         Self {
             name: model.name.clone(),
-            features: model.features.clone(),
+            features: model
+                .features
+                .iter()
+                .map(|f| Arc::new(crate::feature::FeatureV8::from(&**f)))
+                .collect(),
             parameters: model.parameters.clone(),
             rollback: model.rollback,
             datums_visible: model.datums_visible,
@@ -135,7 +143,7 @@ impl ModelV7 {
 #[derive(Deserialize)]
 pub struct ModelV4 {
     name: String,
-    features: Vec<Arc<Feature>>,
+    features: Vec<Arc<crate::feature::FeatureV8>>,
     parameters: Parameters,
     rollback: Option<usize>,
     datums_visible: [bool; 4],
@@ -148,7 +156,11 @@ impl From<ModelV4> for Model {
     fn from(m: ModelV4) -> Self {
         Self {
             name: m.name,
-            features: m.features,
+            features: m
+                .features
+                .into_iter()
+                .map(|f| Arc::new((*f).clone().into()))
+                .collect(),
             parameters: m.parameters,
             rollback: m.rollback,
             datums_visible: m.datums_visible,
@@ -167,7 +179,7 @@ impl From<ModelV4> for Model {
 #[derive(Deserialize)]
 pub struct ModelV5 {
     name: String,
-    features: Vec<Arc<Feature>>,
+    features: Vec<Arc<crate::feature::FeatureV8>>,
     parameters: Parameters,
     rollback: Option<usize>,
     datums_visible: [bool; 4],
@@ -180,7 +192,11 @@ impl From<ModelV5> for Model {
     fn from(m: ModelV5) -> Self {
         Self {
             name: m.name,
-            features: m.features,
+            features: m
+                .features
+                .into_iter()
+                .map(|f| Arc::new((*f).clone().into()))
+                .collect(),
             parameters: m.parameters,
             rollback: m.rollback,
             datums_visible: m.datums_visible,
@@ -380,6 +396,7 @@ impl Model {
             plane,
             placement,
             sketch: Sketch::new(),
+            projections: Vec::new(),
         })))
     }
 
@@ -797,5 +814,70 @@ impl DependencyGraph {
             }
         }
         out
+    }
+}
+
+/// Model schema 8, including nested assembly definitions.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelV8 {
+    pub name: String,
+    pub(crate) features: Vec<Arc<crate::feature::FeatureV8>>,
+    pub parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+    #[serde(default)]
+    pub(crate) configurations: Configurations,
+    #[serde(default)]
+    pub material: Option<Material>,
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+    #[serde(default)]
+    assembly: Option<Arc<crate::assembly::AssemblyV8>>,
+}
+impl From<ModelV8> for Model {
+    fn from(m: ModelV8) -> Self {
+        Self {
+            name: m.name,
+            features: m
+                .features
+                .into_iter()
+                .map(|f| Arc::new((*f).clone().into()))
+                .collect(),
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            configurations: m.configurations,
+            material: m.material,
+            color: m.color,
+            assembly: m.assembly.map(|a| Arc::new((*a).clone().into())),
+        }
+    }
+}
+impl ModelV8 {
+    pub fn of(m: &Model) -> Self {
+        Self {
+            name: m.name.clone(),
+            features: m
+                .features
+                .iter()
+                .map(|f| Arc::new(crate::feature::FeatureV8::from(&**f)))
+                .collect(),
+            parameters: m.parameters.clone(),
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters.clone(),
+            configurations: m.configurations.clone(),
+            material: m.material.clone(),
+            color: m.color,
+            assembly: m
+                .assembly
+                .as_ref()
+                .map(|a| Arc::new(crate::assembly::AssemblyV8::of(a))),
+        }
     }
 }
