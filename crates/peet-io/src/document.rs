@@ -537,16 +537,16 @@ mod tests {
             .id;
         // Use the evaluated table when assigning the stored expression.
         let params = model.parameters.clone();
-        if let peet_model::FeatureKind::Pattern(p) = &mut model.feature_mut(id).unwrap().kind {
-            if let peet_model::PatternDef::Circular { count, .. } = &mut p.def {
-                count
-                    .set_input(
-                        "if(copies > 5, copies, 4)",
-                        peet_model::ScalarKind::Number,
-                        &params,
-                    )
-                    .unwrap();
-            }
+        if let peet_model::FeatureKind::Pattern(p) = &mut model.feature_mut(id).unwrap().kind
+            && let peet_model::PatternDef::Circular { count, .. } = &mut p.def
+        {
+            count
+                .set_input(
+                    "if(copies > 5, copies, 4)",
+                    peet_model::ScalarKind::Number,
+                    &params,
+                )
+                .unwrap();
         }
         let bytes = save(&model, &Metadata::default(), None).unwrap();
         assert_eq!(
