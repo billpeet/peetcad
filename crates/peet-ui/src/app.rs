@@ -4205,7 +4205,7 @@ impl PeetApp {
                         first: LinearDirection {
                             direction: AxisRef::Standard(along),
                             spacing: Scalar::new(20.0),
-                            count: 2,
+                            count: Scalar::new(2.0),
                             flip: false,
                         },
                         second: None,
@@ -4215,7 +4215,7 @@ impl PeetApp {
                     vec![seed],
                     PatternDef::Circular {
                         axis: AxisRef::Standard(normal),
-                        count: 4,
+                        count: Scalar::new(4.0),
                         angle: Scalar::new(360.0),
                         flip: false,
                     },

@@ -1008,7 +1008,15 @@ fn every_script_in_the_skills_runs_and_builds() {
                     } else {
                         "ok"
                     };
-                    assert_eq!(feature["status"], wanted, "{name}: {reply}");
+                    if reply["op"] == "set_suppression_expression" {
+                        // The rule can build or suppress, depending on the parameters.
+                        assert!(
+                            matches!(feature["status"].as_str(), Some("ok" | "suppressed")),
+                            "{name}: {reply}"
+                        );
+                    } else {
+                        assert_eq!(feature["status"], wanted, "{name}: {reply}");
+                    }
                 }
                 assert_ne!(reply["definition"], "over_defined", "{name}: {reply}");
             }

@@ -144,6 +144,32 @@ bodies. They copy extrudes, cuts, revolves, holes, sheet metal cuts and forms; t
 a fillet, fillet all the edges in one feature. `count` includes the original. A linear
 pattern becomes a grid with `direction2`, `spacing2`, `count2`.
 
+`count` and a grid's `count2` can follow parameters: use an expression when the
+number of copies changes with a part size. Expressions return a unitless whole number
+from 2 to 10000, including the original. A grid has at most 10000 instances in total.
+Use `int` to round down deliberately; fractional results fail instead of being rounded.
+Use `set_suppression_expression` when there should be no copies below a threshold.
+A pattern with count 1 fails because it has no copies to build.
+
+```jsonl
+{"op": "set_parameter", "name": "width", "value": "299mm"}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-50, -50], "to": [50, 50]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 4}
+{"op": "sketch", "name": "Seed", "on": {"feature": "Extrude1", "side": "end"}, "draw": [{"type": "circle", "center": [15, 0], "radius": 1}]}
+{"op": "cut", "sketch": "Seed", "end": "through_all"}
+{"op": "linear_pattern", "features": ["Cut-Extrude1"], "direction": "x", "spacing": 5, "count": "iif(width > 299mm, 3, 2)"}
+{"op": "set_parameter", "name": "width", "value": "300mm"}
+{"op": "edit", "feature": "LPattern1", "direction2": "y", "spacing2": 5, "count2": "int(width / 100mm)"}
+{"op": "feature", "feature": "LPattern1"}
+{"op": "bodies"}
+```
+
+`circular_pattern` accepts the same count expressions. Read `feature` for the stored
+expression and its evaluated value; a failed count appears in `failures`. Fix its
+parameter or `edit` the count, then check `bodies` again. Counts can differ between
+configurations with `edit`'s `configurations`, just like spacing or an angle. A numeric
+count clears its expression.
+
 ## Reference geometry
 
 `plane` (offset `from` a plane by `distance`; or `from` + `about` + `angle`; or halfway

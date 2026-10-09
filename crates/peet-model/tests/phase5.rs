@@ -279,13 +279,13 @@ fn pattern_and_mirror_of_sheet_cuts() {
             first: LinearDirection {
                 direction: AxisRef::Standard(StdAxis::X),
                 spacing: Scalar::new(20.0),
-                count: 4,
+                count: Scalar::new(4.0),
                 flip: false,
             },
             second: Some(LinearDirection {
                 direction: AxisRef::Standard(StdAxis::Y),
                 spacing: Scalar::new(30.0),
-                count: 2,
+                count: Scalar::new(2.0),
                 flip: false,
             }),
         },
@@ -348,7 +348,7 @@ fn mirror_and_circular_pattern_of_solid_cuts() {
         vec![cut],
         PatternDef::Circular {
             axis: AxisRef::Standard(StdAxis::Z),
-            count: 6,
+            count: Scalar::new(6.0),
             angle: Scalar::new(360.0),
             flip: false,
         },
@@ -448,7 +448,7 @@ fn copies_of_unsupported_features_fail_clearly() {
             first: LinearDirection {
                 direction: AxisRef::Standard(StdAxis::X),
                 spacing: Scalar::new(20.0),
-                count: 2,
+                count: Scalar::new(2.0),
                 flip: false,
             },
             second: None,

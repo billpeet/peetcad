@@ -551,6 +551,13 @@ pub fn diff_scoped(
                 configurations: as_set_directly(old.suppression_differs(f.id)),
             });
         }
+        if f.suppression_expression.as_ref() != was.and_then(|o| o.suppression_expression.as_ref())
+        {
+            ops.push(Op::SetSuppressionExpression {
+                feature: by_id(f.id),
+                value: f.suppression_expression.clone(),
+            });
+        }
         if f.visible != visible {
             ops.push(Op::Show {
                 feature: by_id(f.id),

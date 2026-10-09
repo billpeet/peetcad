@@ -268,13 +268,13 @@ pub fn chassis() -> (Model, Engine) {
         first: LinearDirection {
             direction: AxisRef::Standard(StdAxis::X),
             spacing: Scalar::new(x),
-            count: nx,
+            count: Scalar::new(f64::from(nx)),
             flip: false,
         },
         second: Some(LinearDirection {
             direction: AxisRef::Standard(StdAxis::Y),
             spacing: Scalar::new(y),
-            count: ny,
+            count: Scalar::new(f64::from(ny)),
             flip: false,
         }),
     };
@@ -404,7 +404,7 @@ pub fn housing() -> (Model, Engine) {
         vec![hole],
         crate::PatternDef::Circular {
             axis: crate::AxisRef::Standard(crate::StdAxis::Z),
-            count: hs::BOLTS,
+            count: Scalar::new(f64::from(hs::BOLTS)),
             angle: Scalar::new(360.0),
             flip: false,
         },

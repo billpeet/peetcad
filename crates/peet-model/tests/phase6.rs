@@ -668,7 +668,7 @@ fn bolt_circle_and_mirrored_revolve() {
         vec![hole],
         PatternDef::Circular {
             axis: AxisRef::Standard(StdAxis::Z),
-            count: 6,
+            count: Scalar::new(6.0),
             angle: Scalar::new(360.0),
             flip: false,
         },

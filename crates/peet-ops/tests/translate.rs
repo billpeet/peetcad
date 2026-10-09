@@ -272,7 +272,7 @@ fn the_tools_changes_are_made_by_operations() {
                 first: LinearDirection {
                     direction: AxisRef::Standard(StdAxis::X),
                     spacing: Scalar::new(20.0),
-                    count: 2,
+                    count: Scalar::new(2.0),
                     flip: false,
                 },
                 second: None,
@@ -293,7 +293,7 @@ fn the_tools_changes_are_made_by_operations() {
             Some(LinearDirection {
                 direction: AxisRef::Standard(StdAxis::Y),
                 spacing: Scalar::new(12.0),
-                count: 2,
+                count: Scalar::new(2.0),
                 flip: true,
             }),
         );

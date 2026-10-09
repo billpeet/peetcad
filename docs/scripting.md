@@ -155,6 +155,20 @@ only: the web build does not listen.
 | point in a sketch | `[x, y]` in the sketch plane |
 | point in the model | `[x, y, z]` |
 
+Expressions support `if(condition, yes, no)` and the alias `iif`. Comparisons `<`,
+`<=`, `>`, `>=`, `==` or `=`, and `!=` or `<>` return a plain 1 or 0. Arithmetic binds
+before comparisons; chained comparisons are refused. Zero is false, any finite
+nonzero plain number is true. Only the selected branch is evaluated, and its units
+must suit the field using it. Both branches' names must exist and their dependencies
+must be free of cycles. Comparisons use the same unit adoption as addition: a bare
+number adopts the other operand's units in the document's units. `int(x)` is `floor(x)`,
+rounding down in document units. Part pattern counts also accept expressions.
+
+```jsonl
+{"op": "set_parameter", "name": "width", "value": "300mm"}
+{"op": "set_parameter", "name": "depth", "value": "iif(width > 299mm, 8mm, 4mm)"}
+```
+
 ## Selectors
 
 A selector must match exactly one thing. If it matches none or several, the error lists
@@ -259,6 +273,14 @@ with their defaults' types):
 - `edge_flange` and `hem` take `edges` to make one feature per edge.
 - `linear_pattern` becomes a grid with `direction2`, `spacing2`, `count2`; `"direction2":
   null` makes it a row again.
+- `count` for linear and circular part patterns, and a grid's `count2`, accept a number
+  or an expression such as `"iif(width > 299mm, 3, 2)"` or `"int(width / 100mm)"`.
+  Counts include the original and must evaluate to unitless whole numbers from 2 to
+  10000; a grid has at most 10000 instances in total. Fractional or out-of-range counts
+  fail at rebuild. Unit mismatches, unknown names and expression errors reject an input;
+  errors caused by later parameter changes fail the pattern at rebuild. Use
+  `set_suppression_expression` when no copies should be made. Counts can differ between
+  configurations with `edit`'s `configurations`. A numeric count clears its expression.
 - A reference that the application lets the user pick afterwards (a flange's or hem's
   `edge`, a draft's `neutral`, a sweep's `path`) can be `null`: the feature is added
   waiting for it. Leaving it out is an error.
@@ -284,6 +306,7 @@ with their defaults' types):
 |---|---|
 | `edit` | `feature`, then any of its fields; `configurations` for its numeric fields |
 | `rename` | `feature`, `name` |
+| `set_suppression_expression` | `feature`, `value`: expression text, or `null` to clear. A part-wide rule evaluated with the active configuration's parameters; zero builds, finite nonzero suppresses |
 | `suppress` | `feature`, `on` (default true), `configurations`. What is built on a suppressed feature is suppressed with it |
 | `show` | `feature`, `on` (default true) |
 | `show` | `datum` (`origin`, `front`, `top`, `right`, `planes`), `on`: the built-in reference geometry |
@@ -302,7 +325,22 @@ with their defaults' types):
 | `set_color` | `color` (`"#rrggbb"` or `[r, g, b]`, or `null` for the usual colour): what the part is drawn in |
 | `undo`, `redo` | |
 
-### Configurations
+#A suppression expression overrides the saved manual flag while it is set. Clearing
+it restores the per-configuration manual flags. `suppress` changes those saved flags;
+`feature` returns `suppression_expression`, effective `suppressed` or `null` on an
+invalid rule, and `manual_suppressed`. `features` reports the effective rebuild status.
+`suppressed_in` lists saved manual flags. Syntax errors reject the operation;
+evaluation errors make the feature fail at rebuild and appear in `failures`.
+Rules read parameters, so drive a sketch dimension and its rule from a shared parameter.
+SolidWorks suppression strings must be translated to 1 for suppressed and 0 for
+unsuppressed by the importer.
+
+```jsonl
+{"op": "set_suppression_expression", "feature": "Vent", "value": "iif(width > 300mm, 0, 1)"}
+{"op": "set_suppression_expression", "feature": "Vent", "value": null}
+```
+
+## Configurations
 
 A part has one or more configurations: versions of it that differ in which features are
 suppressed and in its numbers: parameters, the numeric values of features and the

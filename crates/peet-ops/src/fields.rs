@@ -114,6 +114,11 @@ macro_rules! scalar_field {
 scalar_field!(Length, ScalarKind::Length, "length");
 scalar_field!(Angle, ScalarKind::Angle, "angle in degrees");
 scalar_field!(Number, ScalarKind::Number, "number");
+scalar_field!(
+    PatternCount,
+    ScalarKind::Number,
+    "whole number from 2 to 10000 (original included), or an expression returning one"
+);
 
 /// A length that falls back to the body's default when absent.
 pub(crate) struct OptLength;
@@ -628,7 +633,7 @@ fn second_direction() -> LinearDirection {
     LinearDirection {
         direction: AxisRef::Standard(StdAxis::Y),
         spacing: Scalar::new(20.0),
-        count: 2,
+        count: Scalar::new(2.0),
         flip: false,
     }
 }
@@ -700,7 +705,7 @@ macro_rules! second_field {
 }
 
 second_field!(Spacing2, Length, spacing);
-second_field!(Count2, Count, count);
+second_field!(Count2, PatternCount, count);
 second_field!(Flip2, Flag, flip);
 
 fn field_arg<F: Field>(a: &mut Args, name: &str) -> Result<Option<F::Arg>, String> {
@@ -1084,12 +1089,12 @@ feature_args! {
     direction: AxisSel as AxisF = direction,
     spacing: Input as Length = spacing,
     /// How many, the original included.
-    count: u32 as Count = count,
+    count: Input as PatternCount = count,
     flip: bool as Flag = flip,
     /// `Some(None)`: a row, not a grid.
     direction2: Option<AxisSel> as Direction2 = second,
     spacing2: Input as Spacing2 = second,
-    count2: u32 as Count2 = second,
+    count2: Input as Count2 = second,
     flip2: bool as Flip2 = second,
     }
 }
@@ -1100,7 +1105,7 @@ feature_args! {
         PatternFeature { seeds, def: PatternDef::Circular { axis, count, angle, flip } } => {
     features: Vec<FeatureSel> as Features = seeds,
     axis: AxisSel as AxisF = axis,
-    count: u32 as Count = count,
+    count: Input as PatternCount = count,
     angle: Input as Angle = angle,
     flip: bool as Flag = flip,
     }
@@ -1496,7 +1501,7 @@ feature_ops! {
         "Copies of features around an axis."
         => Some(pattern(PatternDef::Circular {
             axis: AxisRef::Standard(StdAxis::Z),
-            count: 4,
+            count: Scalar::new(4.0),
             angle: Scalar::new(360.0),
             flip: false,
         })),

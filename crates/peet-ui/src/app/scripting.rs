@@ -594,6 +594,78 @@ mod tests {
     }
 
     #[test]
+    fn pattern_count_expressions_are_scriptable_in_the_application() {
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op":"set_parameter", "name":"width", "value":"299mm"}),
+        );
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op":"sketch", "on":"top", "draw":[{"type":"rectangle", "from":[0,0], "to":[2,2]}]}),
+        );
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op":"extrude", "sketch":"Sketch1", "depth":4}),
+        );
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op":"linear_pattern", "features":["Extrude1"], "direction":"x", "spacing":5, "count":"iif(width > 299mm, 3, 2)"}),
+        );
+        assert_eq!(app.doc.bodies.len(), 2);
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op":"set_parameter", "name":"width", "value":"300mm"}),
+        );
+        assert_eq!(app.doc.bodies.len(), 3);
+    }
+
+    #[test]
+    fn suppression_rules_are_scriptable_in_the_application() {
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op":"set_parameter", "name":"width", "value":"300mm"}),
+        );
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op":"sketch", "on":"top", "draw":[{"type":"rectangle", "from":[0,0], "to":[20,10]}]}),
+        );
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op":"extrude", "sketch":"Sketch1", "depth":"if(width > 300mm, 8mm, 4mm)"}),
+        );
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op":"set_suppression_expression", "feature":"Extrude1", "value":"width <= 300mm"}),
+        );
+        assert!(app.doc.bodies.is_empty());
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op":"set_parameter", "name":"width", "value":"301mm"}),
+        );
+        assert_eq!(app.doc.bodies.len(), 1);
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op":"set_suppression_expression", "feature":"Extrude1", "value":null}),
+        );
+        assert_eq!(app.doc.bodies.len(), 1);
+    }
+
+    #[test]
     fn operations_drive_the_application() {
         let ctx = egui::Context::default();
         let mut app = PeetApp::headless();

@@ -13,7 +13,8 @@ use crate::assembly::Assembly;
 use crate::config::{Configurations, ConfigurationsV5};
 use crate::extrude::{Extrude, Operation};
 use crate::feature::{
-    ExtrudeFeature, Feature, FeatureId, FeatureKind, PlaneRef, SketchFeature, StdPlane,
+    ExtrudeFeature, Feature, FeatureId, FeatureKind, FeatureV8, FeatureV9, PlaneRef, SketchFeature,
+    StdPlane,
 };
 use crate::material::Material;
 use crate::naming::{FaceName, FaceRole};
@@ -81,13 +82,71 @@ pub struct Model {
     assembly: Option<Arc<Assembly>>,
 }
 
+/// The model layout shared by schemas 8 and 9, parameterized by their feature layout.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelLegacy<F> {
+    name: String,
+    features: Vec<F>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+    configurations: Configurations,
+    material: Option<Material>,
+    color: Option<[u8; 3]>,
+    assembly: Option<crate::assembly::AssemblyLegacy<F>>,
+}
+
+/// A schema 8 model, before sketch projections and suppression rules.
+pub type ModelV8 = ModelLegacy<FeatureV8>;
+/// A schema 9 model: sketch projections, with literal pattern counts and no suppression rules.
+pub type ModelV9 = ModelLegacy<FeatureV9>;
+
+impl<F: From<Feature>> ModelLegacy<F> {
+    /// The old layout, used to verify migration of parts and nested assemblies.
+    pub fn of(m: &Model) -> Self {
+        Self {
+            name: m.name.clone(),
+            features: m.features().cloned().map(F::from).collect(),
+            parameters: m.parameters.clone(),
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters.clone(),
+            configurations: m.configurations.clone(),
+            material: m.material.clone(),
+            color: m.color,
+            assembly: m.assembly().map(crate::assembly::AssemblyLegacy::of),
+        }
+    }
+}
+
+impl<F: Into<Feature>> From<ModelLegacy<F>> for Model {
+    fn from(m: ModelLegacy<F>) -> Self {
+        Self {
+            name: m.name,
+            features: m.features.into_iter().map(|f| Arc::new(f.into())).collect(),
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            configurations: m.configurations,
+            material: m.material,
+            color: m.color,
+            assembly: m.assembly.map(|a| Arc::new(a.into())),
+        }
+    }
+}
+
 /// A model as files of model schemas 6 and 7 hold it: before a part had a material and
 /// a colour, and before there were assemblies. The file format is not self-describing,
 /// so an older model is read as this and converted.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ModelV7 {
     name: String,
-    features: Vec<Arc<crate::feature::FeatureV8>>,
+    features: Vec<FeatureV8>,
     parameters: Parameters,
     rollback: Option<usize>,
     datums_visible: [bool; 4],
@@ -100,11 +159,7 @@ impl From<ModelV7> for Model {
     fn from(m: ModelV7) -> Self {
         Self {
             name: m.name,
-            features: m
-                .features
-                .into_iter()
-                .map(|f| Arc::new((*f).clone().into()))
-                .collect(),
+            features: m.features.into_iter().map(|f| Arc::new(f.into())).collect(),
             parameters: m.parameters,
             rollback: m.rollback,
             datums_visible: m.datums_visible,
@@ -124,11 +179,7 @@ impl ModelV7 {
     pub fn of(model: &Model) -> Self {
         Self {
             name: model.name.clone(),
-            features: model
-                .features
-                .iter()
-                .map(|f| Arc::new(crate::feature::FeatureV8::from(&**f)))
-                .collect(),
+            features: model.features().map(FeatureV8::of).collect(),
             parameters: model.parameters.clone(),
             rollback: model.rollback,
             datums_visible: model.datums_visible,
@@ -143,7 +194,7 @@ impl ModelV7 {
 #[derive(Deserialize)]
 pub struct ModelV4 {
     name: String,
-    features: Vec<Arc<crate::feature::FeatureV8>>,
+    features: Vec<FeatureV8>,
     parameters: Parameters,
     rollback: Option<usize>,
     datums_visible: [bool; 4],
@@ -156,11 +207,7 @@ impl From<ModelV4> for Model {
     fn from(m: ModelV4) -> Self {
         Self {
             name: m.name,
-            features: m
-                .features
-                .into_iter()
-                .map(|f| Arc::new((*f).clone().into()))
-                .collect(),
+            features: m.features.into_iter().map(|f| Arc::new(f.into())).collect(),
             parameters: m.parameters,
             rollback: m.rollback,
             datums_visible: m.datums_visible,
@@ -179,7 +226,7 @@ impl From<ModelV4> for Model {
 #[derive(Deserialize)]
 pub struct ModelV5 {
     name: String,
-    features: Vec<Arc<crate::feature::FeatureV8>>,
+    features: Vec<FeatureV8>,
     parameters: Parameters,
     rollback: Option<usize>,
     datums_visible: [bool; 4],
@@ -192,11 +239,7 @@ impl From<ModelV5> for Model {
     fn from(m: ModelV5) -> Self {
         Self {
             name: m.name,
-            features: m
-                .features
-                .into_iter()
-                .map(|f| Arc::new((*f).clone().into()))
-                .collect(),
+            features: m.features.into_iter().map(|f| Arc::new(f.into())).collect(),
             parameters: m.parameters,
             rollback: m.rollback,
             datums_visible: m.datums_visible,
@@ -380,6 +423,7 @@ impl Model {
                 id,
                 name,
                 suppressed: false,
+                suppression_expression: None,
                 visible: true,
                 kind,
             }),
@@ -814,70 +858,5 @@ impl DependencyGraph {
             }
         }
         out
-    }
-}
-
-/// Model schema 8, including nested assembly definitions.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ModelV8 {
-    pub name: String,
-    pub(crate) features: Vec<Arc<crate::feature::FeatureV8>>,
-    pub parameters: Parameters,
-    rollback: Option<usize>,
-    datums_visible: [bool; 4],
-    next_id: u32,
-    name_counters: BTreeMap<String, u32>,
-    #[serde(default)]
-    pub(crate) configurations: Configurations,
-    #[serde(default)]
-    pub material: Option<Material>,
-    #[serde(default)]
-    pub color: Option<[u8; 3]>,
-    #[serde(default)]
-    assembly: Option<Arc<crate::assembly::AssemblyV8>>,
-}
-impl From<ModelV8> for Model {
-    fn from(m: ModelV8) -> Self {
-        Self {
-            name: m.name,
-            features: m
-                .features
-                .into_iter()
-                .map(|f| Arc::new((*f).clone().into()))
-                .collect(),
-            parameters: m.parameters,
-            rollback: m.rollback,
-            datums_visible: m.datums_visible,
-            next_id: m.next_id,
-            name_counters: m.name_counters,
-            configurations: m.configurations,
-            material: m.material,
-            color: m.color,
-            assembly: m.assembly.map(|a| Arc::new((*a).clone().into())),
-        }
-    }
-}
-impl ModelV8 {
-    pub fn of(m: &Model) -> Self {
-        Self {
-            name: m.name.clone(),
-            features: m
-                .features
-                .iter()
-                .map(|f| Arc::new(crate::feature::FeatureV8::from(&**f)))
-                .collect(),
-            parameters: m.parameters.clone(),
-            rollback: m.rollback,
-            datums_visible: m.datums_visible,
-            next_id: m.next_id,
-            name_counters: m.name_counters.clone(),
-            configurations: m.configurations.clone(),
-            material: m.material.clone(),
-            color: m.color,
-            assembly: m
-                .assembly
-                .as_ref()
-                .map(|a| Arc::new(crate::assembly::AssemblyV8::of(a))),
-        }
     }
 }

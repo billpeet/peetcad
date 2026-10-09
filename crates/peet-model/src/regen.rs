@@ -342,9 +342,16 @@ impl Engine {
         for index in 0..model.len() {
             let feature = model.feature_arc(index);
             let id = feature.id;
+            let suppression = if index < built {
+                feature.effective_suppression(&model.parameters)
+            } else {
+                Ok(false)
+            };
             let skipped = if index >= built {
                 Some(Status::RolledBack)
-            } else if feature.suppressed {
+            } else if let Err(message) = suppression {
+                Some(Status::Failed(message))
+            } else if suppression == Ok(true) {
                 Some(Status::Suppressed)
             } else {
                 // What it uses, in tree order, so the message names the first.
@@ -1831,12 +1838,13 @@ impl<'m> Ctx<'m, '_> {
 
     /// Where a pattern's copies go (the original excluded).
     fn pattern_motions(&self, def: &PatternDef) -> Result<Vec<pattern::Motion>, String> {
-        let count = |n: u32, what: &str| {
-            if (2..=10_000).contains(&n) {
-                Ok(n)
+        let count = |s: &crate::Scalar, what: &str| {
+            let n = self.scalar(s, ScalarKind::Number, &format!("{what} count"))?;
+            if n.is_finite() && n.fract() == 0.0 && (2.0..=10_000.0).contains(&n) {
+                Ok(n as u32)
             } else {
                 Err(format!(
-                    "The {what} count must be between 2 and 10000 (it is {n})."
+                    "The {what} count must be a whole number between 2 and 10000 (it is {n})."
                 ))
             }
         };
@@ -1848,13 +1856,19 @@ impl<'m> Ctx<'m, '_> {
                         .map_err(|m| format!("{what}: {m}"))?;
                     let spacing = self.scalar(&d.spacing, ScalarKind::Length, "Spacing")?;
                     let sign = if d.flip { -1.0 } else { 1.0 };
-                    Ok::<_, String>((axis.dir * spacing * sign, count(d.count, what)?))
+                    Ok::<_, String>((axis.dir * spacing * sign, count(&d.count, what)?))
                 };
                 let (s1, n1) = step(first, "direction")?;
                 let (s2, n2) = match second {
                     Some(d) => step(d, "second direction")?,
                     None => (DVec3::ZERO, 1),
                 };
+                if u64::from(n1) * u64::from(n2) > 10_000 {
+                    return Err(
+                        "The grid count must be at most 10000 in total, the original included."
+                            .to_owned(),
+                    );
+                }
                 let mut out = Vec::new();
                 for j in 0..n2 {
                     for i in 0..n1 {
@@ -1875,7 +1889,7 @@ impl<'m> Ctx<'m, '_> {
                 flip,
             } => {
                 let a = self.axis(axis).map_err(|m| format!("Axis: {m}"))?;
-                let n = count(*n, "copy")?;
+                let n = count(n, "copy")?;
                 let total = self.scalar(angle, ScalarKind::Angle, "Angle")?;
                 if total.abs() < 1e-9 {
                     return Err("The angle must not be zero.".to_owned());

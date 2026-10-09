@@ -313,6 +313,11 @@ pub enum Op {
         on: bool,
         configurations: Configs,
     },
+    /// Set a part-wide suppression rule, or clear it to restore manual flags.
+    SetSuppressionExpression {
+        feature: FeatureSel,
+        value: Option<String>,
+    },
     /// Show or hide a feature's own geometry (a sketch, a plane).
     Show {
         feature: FeatureSel,
@@ -609,6 +614,7 @@ impl Op {
             Self::SetDimension { .. } => "set_dimension",
             Self::Rename { .. } => "rename",
             Self::Suppress { .. } => "suppress",
+            Self::SetSuppressionExpression { .. } => "set_suppression_expression",
             Self::Show { .. } => "show",
             Self::Delete { .. } => "delete",
             Self::Move { .. } => "move",
@@ -788,6 +794,11 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
         "Change fields of a feature. Its numeric values can differ between configurations.",
     ),
     ("rename", "feature, name", "Rename a feature."),
+    (
+        "set_suppression_expression",
+        "feature, value (expression text, or null to clear)",
+        "Set a part-wide suppression rule using the active configuration's parameters. Zero builds; a finite nonzero plain number suppresses. Overrides manual flags until cleared.",
+    ),
     (
         "suppress",
         "feature, on (default true), configurations (\"this\" (default), \"all\", a name or a list of names)",
@@ -1207,6 +1218,16 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "rename" => Op::Rename {
             feature: feature(a, "feature")?,
             name: a.required("name", |v| text(v).map(str::to_owned))?,
+        },
+        "set_suppression_expression" => Op::SetSuppressionExpression {
+            feature: feature(a, "feature")?,
+            value: match a.take_nullable("value") {
+                Some(Value::Null) => None,
+                Some(v) => Some(text(&v).map_err(|e| format!("value: {e}"))?.to_owned()),
+                None => {
+                    return Err("'set_suppression_expression' needs a 'value' field.".to_owned());
+                }
+            },
         },
         "suppress" => Op::Suppress {
             feature: feature(a, "feature")?,

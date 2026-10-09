@@ -3,11 +3,12 @@
 //! # Grammar
 //!
 //! ```text
+//! compare  = sum [ ("<" | "<=" | ">" | ">=" | "==" | "=" | "!=" | "<>") sum ]
 //! sum      = product { ("+" | "-") product }
 //! product  = unary { ("*" | "/") unary }
 //! unary    = ("-" | "+") unary | power
 //! power    = postfix [ "^" unary ]          (right associative: 2^3^2 = 2^9)
-//! postfix  = number [unit] | "(" sum ")" [unit] | name "(" [sum {"," sum}] ")" | name
+//! postfix  = number [unit] | "(" compare ")" [unit] | name "(" [compare {"," compare}] ")" | name
 //! number   = 12 | 12.5 | .5 | 1e3 | 2.5E-2
 //! name     = [A-Za-z_][A-Za-z0-9_]*
 //! unit     = (mm | cm | m | in | " | ft | deg | rad | °) [ "^" ["-"] digit ]
@@ -44,8 +45,11 @@
 //!
 //! # Functions
 //!
-//! `sin cos tan asin acos atan atan2 sqrt abs min max round floor ceil`. `min`/`max` take
-//! one or more arguments, `atan2(y, x)` two, the others one. The constant `pi` is π, a
+//! `sin cos tan asin acos atan atan2 sqrt abs min max round floor ceil int if iif`.
+//! `if(condition, yes, no)` and its alias `iif` evaluate only the selected branch.
+//! Conditions are plain numbers, zero false and nonzero true. Comparisons return 0 or 1,
+//! adopting document units for bare numbers. `int` is an alias for `floor`.
+//! `min`/`max` take one or more arguments, `atan2(y, x)` two, the others one. The constant `pi` is π, a
 //! plain number.
 //!
 //! * `sin cos tan` take an angle; a plain number is in **degrees**: `sin(30)` and
@@ -449,6 +453,8 @@ enum Func {
     Round,
     Floor,
     Ceil,
+    Int,
+    If,
 }
 
 const FUNCTIONS: &[(&str, Func)] = &[
@@ -466,6 +472,9 @@ const FUNCTIONS: &[(&str, Func)] = &[
     ("round", Func::Round),
     ("floor", Func::Floor),
     ("ceil", Func::Ceil),
+    ("int", Func::Int),
+    ("if", Func::If),
+    ("iif", Func::If),
 ];
 
 /// A unit suffix: its factor to base units (mm, degrees) and what it measures.
@@ -520,6 +529,7 @@ impl Func {
     /// (min, max) argument count; `None` max means variadic.
     fn arity(self) -> (usize, Option<usize>) {
         match self {
+            Func::If => (3, Some(3)),
             Func::Atan2 => (2, Some(2)),
             Func::Min | Func::Max => (1, None),
             _ => (1, Some(1)),
@@ -565,6 +575,7 @@ enum Tok {
     Ident(String),
     /// `+ - * / ^`
     Op(char),
+    Compare(BinOp),
     LParen,
     RParen,
     Comma,
@@ -638,6 +649,23 @@ fn lex(src: &str) -> Result<Vec<Token>, ExprError> {
             i += 1;
             match c {
                 '+' | '-' | '*' | '/' | '^' => Tok::Op(c),
+                '<' | '>' | '=' | '!' => {
+                    let next = chars.get(i).copied();
+                    let op = match (c, next) {
+                        ('<', Some('=')) => BinOp::Le,
+                        ('>', Some('=')) => BinOp::Ge,
+                        ('=', Some('=')) => BinOp::Eq,
+                        ('!', Some('=')) | ('<', Some('>')) => BinOp::Ne,
+                        ('<', _) => BinOp::Lt,
+                        ('>', _) => BinOp::Gt,
+                        ('=', _) => BinOp::Eq,
+                        _ => return Err(ExprError::new(format!("expected '!=' at column {col}"))),
+                    };
+                    if matches!(next, Some('=')) || (c == '<' && next == Some('>')) {
+                        i += 1;
+                    }
+                    Tok::Compare(op)
+                }
                 '(' => Tok::LParen,
                 ')' => Tok::RParen,
                 ',' => Tok::Comma,
@@ -700,6 +728,12 @@ enum BinOp {
     Mul,
     Div,
     Pow,
+    Lt,
+    Le,
+    Gt,
+    Ge,
+    Eq,
+    Ne,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -759,6 +793,27 @@ impl Parser {
             )),
             _ => ExprError::new(format!("unexpected '{}' at column {}", t.text, t.col)),
         }
+    }
+
+    fn compare(&mut self) -> Result<Node, ExprError> {
+        let lhs = self.sum()?;
+        if let Tok::Compare(op) = self.peek().tok {
+            let col = self.next().col;
+            let rhs = self.sum()?;
+            if matches!(self.peek().tok, Tok::Compare(_)) {
+                return Err(ExprError::new(format!(
+                    "chained comparisons at column {} need separate conditions",
+                    self.peek().col
+                )));
+            }
+            return Ok(Node::Bin {
+                op,
+                lhs: Box::new(lhs),
+                rhs: Box::new(rhs),
+                col,
+            });
+        }
+        Ok(lhs)
     }
 
     fn sum(&mut self) -> Result<Node, ExprError> {
@@ -827,7 +882,7 @@ impl Parser {
         let value = match t.tok {
             Tok::Num(v) => Node::Num(v),
             Tok::LParen => {
-                let inner = self.sum()?;
+                let inner = self.compare()?;
                 let close = self.next();
                 if close.tok != Tok::RParen {
                     return Err(match close.tok {
@@ -907,7 +962,7 @@ impl Parser {
             self.next();
         } else {
             loop {
-                args.push(self.sum()?);
+                args.push(self.compare()?);
                 let t = self.next();
                 match t.tok {
                     Tok::Comma => continue,
@@ -977,7 +1032,7 @@ impl Expr {
             return Err(ExprError::new("enter a value or an expression"));
         }
         let mut p = Parser { tokens, pos: 0 };
-        let root = p.sum()?;
+        let root = p.compare()?;
         let t = p.next();
         if t.tok != Tok::End {
             return Err(p.unexpected(&t, "the end of the expression"));
@@ -1134,6 +1189,35 @@ impl Eval<'_> {
                             dim,
                         }
                     }
+                    BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge | BinOp::Eq | BinOp::Ne => {
+                        let Some((x, y, _)) = self.unify(a, b) else {
+                            return Err(ExprError::new(format!(
+                                "can't compare {} and {} at column {col}",
+                                a.describe(units),
+                                b.describe(units)
+                            )));
+                        };
+                        if !x.is_finite() || !y.is_finite() {
+                            return Err(ExprError::new(format!(
+                                "comparison at column {col} needs finite values"
+                            )));
+                        }
+                        Quantity::number(
+                            if match op {
+                                BinOp::Lt => x < y,
+                                BinOp::Le => x <= y,
+                                BinOp::Gt => x > y,
+                                BinOp::Ge => x >= y,
+                                BinOp::Eq => x == y,
+                                BinOp::Ne => x != y,
+                                _ => unreachable!(),
+                            } {
+                                1.0
+                            } else {
+                                0.0
+                            },
+                        )
+                    }
                     BinOp::Mul => Quantity {
                         value: a.value * b.value,
                         dim: a.dim.plus(b.dim).ok_or_else(too_high)?,
@@ -1193,6 +1277,19 @@ impl Eval<'_> {
                 }
                 Ok(q)
             }
+            Node::Call {
+                func: Func::If,
+                args,
+                col,
+            } => {
+                let condition = self.node(&args[0])?;
+                if !condition.dim.is_none() || !condition.value.is_finite() {
+                    return Err(ExprError::new(format!(
+                        "if at column {col} needs a finite plain number as its condition"
+                    )));
+                }
+                self.node(&args[if condition.value != 0.0 { 1 } else { 2 }])
+            }
             Node::Call { func, args, col } => {
                 let args = args
                     .iter()
@@ -1228,6 +1325,7 @@ impl Eval<'_> {
             )))
         };
         Ok(match func {
+            Func::If => unreachable!("conditionals evaluate only the selected branch"),
             Func::Sin | Func::Cos | Func::Tan => {
                 // A plain number is an angle in degrees.
                 if !arg.dim.is_none() && arg.dim != Dim::ANGLE {
@@ -1301,7 +1399,7 @@ impl Eval<'_> {
                 value: x.abs(),
                 dim: arg.dim,
             },
-            Func::Round | Func::Floor | Func::Ceil => {
+            Func::Round | Func::Floor | Func::Ceil | Func::Int => {
                 // In document units: round(0.6in) is 1 in in an inch document.
                 let scale = units.scale(arg.dim);
                 let mut v = x / scale;
@@ -1312,7 +1410,7 @@ impl Eval<'_> {
                 }
                 let v = match func {
                     Func::Round => v.round(),
-                    Func::Floor => v.floor(),
+                    Func::Floor | Func::Int => v.floor(),
                     _ => v.ceil(),
                 };
                 Quantity {
@@ -2006,6 +2104,52 @@ mod tests {
             close(got.value, value) && got.dim == dim,
             "got {got:?}, expected {value} {dim:?}"
         );
+    }
+
+    #[test]
+    fn comparisons_and_conditionals() {
+        for (src, expected) in [
+            ("1 + 2 * 3 > 6", 1.0),
+            ("1 < 1", 0.0),
+            ("1 <= 1", 1.0),
+            ("2 >= 3", 0.0),
+            ("2 == 2", 1.0),
+            ("2 = 3", 0.0),
+            ("2 != 3", 1.0),
+            ("2 <> 2", 0.0),
+            ("if(width > 9, 3, 2)", 3.0),
+            ("iif(0, 1 / 0, if(-2, 7, sqrt(-1)))", 7.0),
+            ("int(-2.3)", -3.0),
+            ("int(2.9)", 2.0),
+        ] {
+            assert_eq!(ev(src), expected, "{src}");
+        }
+        assert_q(q("if(len > 19mm, 2in, 1 / 0)"), 50.8, Dim::LENGTH);
+        assert_q(q("if(0, 30deg, 3mm)"), 3.0, Dim::LENGTH);
+        assert_q(q("1in == 25.4mm"), 1.0, Dim::NONE);
+        assert_eq!(q_in(INCH, "20mm < 1").value, 1.0);
+        assert_eq!(q_in(MM, "20mm < 1").value, 0.0);
+        assert!(qerr("1mm < 2deg").contains("can't compare"));
+        assert!(qerr("if(1mm, 2, 3)").contains("plain number"));
+        assert!(err("if(1, 2)").contains("3 arguments"));
+        assert!(err("1 < 2 < 3").contains("chained comparisons"));
+        assert!(qerr("1e309 > 0").contains("finite values"));
+        assert!(err("if(1, 1 / 0, 2)").contains("division by zero"));
+        for name in ["if", "iif", "int"] {
+            assert!(check_name(name).is_err());
+        }
+    }
+
+    #[test]
+    fn conditional_parameters_follow_dependencies() {
+        let mut p = Parameters::default();
+        p.set("width", "299mm").unwrap();
+        p.set("copies", "iif(width > 299, 3, 2)").unwrap();
+        assert_eq!(p.get("copies"), Some(2.0));
+        p.set("width", "300mm").unwrap();
+        assert_eq!(p.get("copies"), Some(3.0));
+        p.set("safe", "if(width > 0, 5mm, 1 / 0)").unwrap();
+        assert_eq!(p.get("safe"), Some(5.0));
     }
 
     #[test]
