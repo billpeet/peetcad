@@ -62,7 +62,7 @@ pub mod sketch;
 mod value;
 
 pub use assembly::{CompSel, ComponentChange, InsertSource, Placing, Point3};
-pub use diff::{Translation, apply_model, diff};
+pub use diff::{Translation, apply_model, apply_model_scoped, diff, diff_scoped};
 pub use explode::{ExplodeChange, ExplodeSel};
 pub use export::export_bytes;
 pub use fields::{
@@ -84,8 +84,8 @@ pub use pattern::{
 pub use session::{DocSel, SessionCommand, apply_session, apply_session_json};
 pub use sketch::{Draw, DrawItem, Ent, Measure, Relation};
 pub use value::{
-    AxisSel, Bend, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel, HoleStandard,
-    Input, PlaneSel, PointSel, Regions, RevolveAxis, Side, VertexQuery, VertexSel,
+    AxisSel, Bend, Configs, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel,
+    HoleStandard, Input, PlaneSel, PointSel, Regions, RevolveAxis, Side, VertexQuery, VertexSel,
 };
 
 use peet_document::Document;
@@ -176,6 +176,66 @@ fn rename(model: &mut Model, id: FeatureId, name: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// Whether nothing but numeric values differs between two definitions of a feature.
+fn only_values_differ(before: &FeatureKind, after: &FeatureKind) -> bool {
+    let mut probe = after.clone();
+    let old = before.slots();
+    for (name, _, value) in probe.slots_mut() {
+        if let Some((_, _, was)) = old.iter().find(|(n, ..)| *n == name) {
+            *value = (*was).clone();
+        }
+    }
+    probe == *before
+}
+
+/// Says which configurations the numeric values of a feature that an operation changed
+/// in `model` are changed in. Without `configurations` they are left as a change to the
+/// model is: in the active configuration where they already differ, in all otherwise.
+///
+/// `given` are the values the operation set, whether or not that changed them in the
+/// active configuration: a value set to what it already is here still has to reach the
+/// other configurations asked for.
+fn rescope(
+    model: &mut Model,
+    doc: &Document,
+    id: FeatureId,
+    configurations: Option<&Configs>,
+    given: &[peet_model::Slot],
+) -> Result<(), String> {
+    let Some(configurations) = configurations else {
+        return Ok(());
+    };
+    let scope = configurations.resolve(doc)?;
+    for v in model.values(id) {
+        if let Some((_, before)) = doc.model.value(id, &v.slot)
+            && (before != v.value || given.contains(&v.slot))
+        {
+            model.rescope_value(id, &v.slot, before, &scope)?;
+        }
+    }
+    Ok(())
+}
+
+/// The numeric values of a feature that `fields` set: found by setting them on a copy
+/// whose values are all marked, and seeing which marks are gone.
+fn values_given(kind: &FeatureKind, fields: &FeatureArgs, doc: &Document) -> Vec<peet_model::Slot> {
+    let mark = peet_model::Scalar {
+        value: 0.0,
+        expression: Some("\u{1}".to_owned()),
+    };
+    let mut probe = kind.clone();
+    for (_, _, value) in probe.slots_mut() {
+        *value = mark.clone();
+    }
+    let _ = fields.set(&mut probe, doc, false);
+    probe
+        .slots()
+        .into_iter()
+        .filter(|(_, _, value)| **value != mark)
+        .map(|(name, ..)| peet_model::Slot::Field(name.to_owned()))
+        .collect()
+}
+
 fn check_copies(doc: &Document, kind: &FeatureKind) -> Result<(), String> {
     let seeds = match kind {
         FeatureKind::Pattern(p) => &p.seeds,
@@ -246,6 +306,12 @@ fn help() -> Map<String, Value> {
         }
         let mut f = describe();
         f.insert("name".to_owned(), json!("text"));
+        if matches!(*word, "edge_flange" | "hem") {
+            f.insert(
+                "edges".to_owned(),
+                json!("list of edges, in place of 'edge': one feature per edge (a 'name' is numbered: Wall1, Wall2, …)"),
+            );
+        }
         match word.split_once('.') {
             // One operation with several forms, told apart by the fields given.
             Some((name, form)) => {
@@ -328,6 +394,7 @@ fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, V
         Query::Features => object(query::features(doc)),
         Query::Feature(f) => object(query::feature(doc, f.resolve(doc)?)),
         Query::Parameters => object(query::parameters(doc)),
+        Query::Configurations => object(query::configurations(doc)),
         Query::Bodies => object(query::bodies(doc)),
         Query::Faces { body } => object(query::faces(doc, *body)?),
         Query::Edges { body } => object(query::edges(doc, *body)?),
@@ -832,7 +899,11 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.created = ids;
             label
         }
-        Op::Edit { feature, fields } => {
+        Op::Edit {
+            feature,
+            fields,
+            configurations,
+        } => {
             let id = feature.resolve(doc)?;
             let Some(f) = model.feature_mut(id) else {
                 return Err("The feature no longer exists.".to_owned());
@@ -861,6 +932,23 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                     f.kind = other;
                 }
             }
+            // Only numeric values can differ between configurations.
+            let several = doc.model.configurations().len() > 1;
+            if let (Some(c), Some(before)) = (configurations, doc.feature(id))
+                && several
+                && *c != Configs::All
+                && !only_values_differ(&before.kind, &f.kind)
+            {
+                return Err(format!(
+                    "Only the numeric values of {} can differ between configurations: change its other fields in an 'edit' without 'configurations' (they are the same in every configuration).",
+                    f.name
+                ));
+            }
+            let given = match configurations {
+                Some(_) => values_given(&f.kind, fields, doc),
+                None => Vec::new(),
+            };
+            rescope(&mut model, doc, id, configurations.as_ref(), &given)?;
             done.feature = Some(id);
             format!("Edit {}", model.name_of(id))
         }
@@ -896,11 +984,18 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             sketch,
             name,
             value,
+            configurations,
         } => {
             let id = sketch_id(doc, sketch)?;
             if let Some(s) = model.feature_mut(id).and_then(|f| f.sketch_mut()) {
                 sketch::set_dimension(&mut s.sketch, doc, name, value)?;
             }
+            let given: Vec<peet_model::Slot> = model
+                .slot_named(id, name)
+                .map(|v| v.slot)
+                .into_iter()
+                .collect();
+            rescope(&mut model, doc, id, configurations.as_ref(), &given)?;
             done.feature = Some(id);
             done.sketch = Some(id);
             format!("Edit {}", model.name_of(id))
@@ -911,11 +1006,13 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.feature = Some(id);
             format!("Rename {}", doc.model.name_of(id))
         }
-        Op::Suppress { feature, on } => {
+        Op::Suppress {
+            feature,
+            on,
+            configurations,
+        } => {
             let id = feature.resolve(doc)?;
-            if let Some(f) = model.feature_mut(id) {
-                f.suppressed = *on;
-            }
+            model.set_suppressed(id, *on, &configurations.resolve(doc)?)?;
             done.feature = Some(id);
             let word = if *on { "Suppress" } else { "Unsuppress" };
             format!("{word} {}", model.name_of(id))
@@ -979,20 +1076,28 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 format!("Roll Back to {}", model.name_of(id))
             }
         },
-        Op::SetSketch { sketch, content } => {
+        Op::SetSketch {
+            sketch,
+            content,
+            configurations,
+        } => {
             let id = sketch_id(doc, sketch)?;
             if let Some(s) = model.feature_mut(id).and_then(|f| f.sketch_mut()) {
                 s.sketch = (**content).clone();
             }
+            rescope(&mut model, doc, id, configurations.as_ref(), &[])?;
             done.feature = Some(id);
             done.sketch = Some(id);
             format!("Edit {}", model.name_of(id))
         }
-        Op::SetParameter { name, value } => {
+        Op::SetParameter {
+            name,
+            value,
+            configurations,
+        } => {
             model
-                .parameters
-                .set(name, &value.text())
-                .map_err(|e| format!("{name}: {}", e.message))?;
+                .set_parameter(name, &value.text(), &configurations.resolve(doc)?)
+                .map_err(|e| format!("{name}: {e}"))?;
             if let Some(p) = model.parameters.entries.iter().find(|p| p.name == *name) {
                 done.data.insert(
                     "parameter".to_owned(),
@@ -1009,8 +1114,56 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             if !model.parameters.entries.iter().any(|p| p.name == *name) {
                 return Err(format!("There is no parameter called '{name}'."));
             }
-            model.parameters.remove(name);
+            model.remove_parameter(name);
             format!("Delete {name}")
+        }
+        Op::AddConfiguration {
+            name,
+            copy,
+            comment,
+        } => {
+            let copy = copy
+                .as_deref()
+                .map(|c| value::configuration(doc, c))
+                .transpose()?;
+            let id = model.add_configuration(name, copy)?;
+            if let Some(comment) = comment {
+                model.set_configuration_comment(id, comment);
+            }
+            model.activate_configuration(id);
+            let name = model.active_configuration().name.clone();
+            done.data.insert("configuration".to_owned(), json!(name));
+            format!("Add Configuration {name}")
+        }
+        Op::EditConfiguration {
+            configuration,
+            name,
+            comment,
+        } => {
+            let id = value::configuration(doc, configuration)?;
+            if let Some(name) = name {
+                model.rename_configuration(id, name)?;
+            }
+            if let Some(comment) = comment {
+                model.set_configuration_comment(id, comment);
+            }
+            format!("Edit Configuration {configuration}")
+        }
+        Op::DeleteConfiguration { configuration } => {
+            let id = value::configuration(doc, configuration)?;
+            model.remove_configuration(id)?;
+            done.data.insert(
+                "configuration".to_owned(),
+                json!(model.active_configuration().name),
+            );
+            format!("Delete Configuration {configuration}")
+        }
+        Op::Configuration { configuration } => {
+            let id = value::configuration(doc, configuration)?;
+            done.changed = doc.activate_configuration(id);
+            done.data
+                .insert("configuration".to_owned(), json!(configuration));
+            return Ok(done);
         }
         Op::SetUnits { length } => {
             if let Some((name, e)) = model

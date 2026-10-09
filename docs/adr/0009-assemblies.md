@@ -111,8 +111,8 @@ assembly command is an operation, and a new `assemblies` skill covers them.
 
 ## What stage 1 built
 
-- `peet_model::Material` and `Model::material`, `Model::color` (model schema 5; older
-  files are read as `ModelV4`). Densities in the material tables. Operations
+- `peet_model::Material` and `Model::material`, `Model::color` (model schema 8 once merged
+  with configurations; schema 6 and 7 files are read as `ModelV7`). Densities in the material tables. Operations
   `set_material` and `set_color`; `mass` gives `mass_kg`. The mass properties window
   sets the part's material and colour.
 - `peet-solve`: `Problem`, `Options`, `Space` and the sparse Cholesky, generic over an
@@ -126,8 +126,8 @@ assembly command is an operation, and a new `assemblies` skill covers them.
 
 ## What stage 2 built so far
 
-- `peet_model::Assembly` (definitions, components), `Model::assembly`, model schema 6
-  (version 5 files are read as `ModelV5`), instances in the `Evaluation`.
+- `peet_model::Assembly` (definitions, components), `Model::assembly`, in model schema 8
+  with the material and colour, instances in the `Evaluation`.
 - `Document::placed` (where each shown body is, and whose), `Document::embedded`.
 - Operations: `new` with `assembly`, `insert` (from a file, a sample, an open document
   or another component), `place`, `fix`, `replace`, `rename` / `suppress` / `show` /
@@ -267,7 +267,7 @@ assembly is opened again (there was no folder to watch).
 
 Left of stage 3: a script can't describe a face of a part inside a
 sub-assembly (the application can pick one, and the model and the solve handle it);
-tangent and other mates beyond the roadmap's list. Mates were added to model schema 6,
+tangent and other mates beyond the roadmap's list. Mates were added to the same model schema,
 which no released version writes, without another version number.
 
 ## What stage 4 built
@@ -309,7 +309,7 @@ which no released version writes, without another version number.
   view can't affect a mate, and nothing is rebuilt to show one: the application
   animates `amount` over 0.4 s, moving instance transforms only. Dragging a component
   is refused while the view is exploded.
-- Component and explode fields were added to model schema 6 (still unreleased), so an
+- Component and explode fields were added to the same, still unreleased, model schema, so an
   assembly file written by an earlier build of this phase does not open.
 
 ## What stage 6 built
@@ -396,3 +396,15 @@ which no released version writes, without another version number.
   not slow down.
 - Operations that mean "the document" now mean "the current document", and the hosts
   (the application, the command line, tests) hold a session.
+
+## Merging with configurations
+
+Configurations, sketch splines and the live session (`peet-live`) were merged to main
+while this was on its branch. Both had given the model new schemas 5 and 6 with
+different layouts. Main's numbers stand (5 and 6 for configurations, 7 for splines);
+everything of this phase is model schema 8, and schema 6 and 7 files are read as
+`ModelV7` (a model with configurations, without material, colour or assembly) and
+converted. Files written by this branch before the merge are not read: no released
+version wrote them. An assembly has no configurations of its own (each of its parts has
+its own), so the configuration operations and the configuration list are refused or
+hidden in an assembly, as the other part operations are.

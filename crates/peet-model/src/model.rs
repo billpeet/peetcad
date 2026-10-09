@@ -10,6 +10,7 @@ use peet_sketch::expr::Parameters;
 use serde::{Deserialize, Serialize};
 
 use crate::assembly::Assembly;
+use crate::config::{Configurations, ConfigurationsV5};
 use crate::extrude::{Extrude, Operation};
 use crate::feature::{
     ExtrudeFeature, Feature, FeatureId, FeatureKind, PlaneRef, SketchFeature, StdPlane,
@@ -49,7 +50,10 @@ pub struct Model {
     pub name: String,
     /// The history, in build order. Shared pointers make snapshots (for undo) cheap: a
     /// snapshot copies only the features that change afterwards.
-    features: Vec<Arc<Feature>>,
+    ///
+    /// These, and the parameters, are those of the active configuration (see
+    /// [`crate::config`]).
+    pub(crate) features: Vec<Arc<Feature>>,
     /// Named values usable in every expression, and the document's units.
     pub parameters: Parameters,
     /// How many features are built: the rollback bar sits below this many. `None` means
@@ -60,6 +64,9 @@ pub struct Model {
     next_id: u32,
     /// The next number for automatic names, per name prefix.
     name_counters: BTreeMap<String, u32>,
+    /// The part's configurations, and what differs between them.
+    #[serde(default)]
+    pub(crate) configurations: Configurations,
     /// What the part is made of: its name in a bill of materials and the density its
     /// mass is worked out with. `None` until one is chosen.
     #[serde(default)]
@@ -74,8 +81,90 @@ pub struct Model {
     assembly: Option<Arc<Assembly>>,
 }
 
-/// The model as files of model schema 5 have it: before there were assemblies.
+/// A model as files of model schemas 6 and 7 hold it: before a part had a material and
+/// a colour, and before there were assemblies. The file format is not self-describing,
+/// so an older model is read as this and converted.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelV7 {
+    name: String,
+    features: Vec<Arc<Feature>>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+    configurations: Configurations,
+}
+
+impl From<ModelV7> for Model {
+    fn from(m: ModelV7) -> Self {
+        Self {
+            name: m.name,
+            features: m.features,
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            configurations: m.configurations,
+            material: None,
+            color: None,
+            assembly: None,
+        }
+    }
+}
+
+impl ModelV7 {
+    /// `model` as it would have been saved before: a part, without its material and
+    /// colour.
+    pub fn of(model: &Model) -> Self {
+        Self {
+            name: model.name.clone(),
+            features: model.features.clone(),
+            parameters: model.parameters.clone(),
+            rollback: model.rollback,
+            datums_visible: model.datums_visible,
+            next_id: model.next_id,
+            name_counters: model.name_counters.clone(),
+            configurations: model.configurations.clone(),
+        }
+    }
+}
+
+/// A model as files of model schema 4 and earlier hold it: before configurations.
+#[derive(Deserialize)]
+pub struct ModelV4 {
+    name: String,
+    features: Vec<Arc<Feature>>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+}
+
+impl From<ModelV4> for Model {
+    /// The same part, with the one configuration every part starts with.
+    fn from(m: ModelV4) -> Self {
+        Self {
+            name: m.name,
+            features: m.features,
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            configurations: Configurations::default(),
+            material: None,
+            color: None,
+            assembly: None,
+        }
+    }
+}
+
+/// A model as files of model schema 5 hold it: with configurations that differ in
+/// suppression and parameters only.
+#[derive(Deserialize)]
 pub struct ModelV5 {
     name: String,
     features: Vec<Arc<Feature>>,
@@ -84,8 +173,7 @@ pub struct ModelV5 {
     datums_visible: [bool; 4],
     next_id: u32,
     name_counters: BTreeMap<String, u32>,
-    material: Option<Material>,
-    color: Option<[u8; 3]>,
+    configurations: ConfigurationsV5,
 }
 
 impl From<ModelV5> for Model {
@@ -98,72 +186,10 @@ impl From<ModelV5> for Model {
             datums_visible: m.datums_visible,
             next_id: m.next_id,
             name_counters: m.name_counters,
-            material: m.material,
-            color: m.color,
-            assembly: None,
-        }
-    }
-}
-
-impl ModelV5 {
-    /// `model` as it would have been saved before: a part, without an assembly.
-    pub fn of(model: &Model) -> Self {
-        Self {
-            name: model.name.clone(),
-            features: model.features.clone(),
-            parameters: model.parameters.clone(),
-            rollback: model.rollback,
-            datums_visible: model.datums_visible,
-            next_id: model.next_id,
-            name_counters: model.name_counters.clone(),
-            material: model.material.clone(),
-            color: model.color,
-        }
-    }
-}
-
-/// The model as files up to model schema 4 have it: before a part had a material and a
-/// colour. The file format is not self-describing, so an older model is read as this
-/// and converted.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
-pub struct ModelV4 {
-    name: String,
-    features: Vec<Arc<Feature>>,
-    parameters: Parameters,
-    rollback: Option<usize>,
-    datums_visible: [bool; 4],
-    next_id: u32,
-    name_counters: BTreeMap<String, u32>,
-}
-
-impl From<ModelV4> for Model {
-    fn from(m: ModelV4) -> Self {
-        Self {
-            name: m.name,
-            features: m.features,
-            parameters: m.parameters,
-            rollback: m.rollback,
-            datums_visible: m.datums_visible,
-            next_id: m.next_id,
-            name_counters: m.name_counters,
+            configurations: m.configurations.into(),
             material: None,
             color: None,
             assembly: None,
-        }
-    }
-}
-
-impl ModelV4 {
-    /// `model` as it would have been saved before: without its material and colour.
-    pub fn of(model: &Model) -> Self {
-        Self {
-            name: model.name.clone(),
-            features: model.features.clone(),
-            parameters: model.parameters.clone(),
-            rollback: model.rollback,
-            datums_visible: model.datums_visible,
-            next_id: model.next_id,
-            name_counters: model.name_counters.clone(),
         }
     }
 }
@@ -178,6 +204,7 @@ impl Default for Model {
             datums_visible: [true; 4],
             next_id: 1,
             name_counters: BTreeMap::new(),
+            configurations: Configurations::default(),
             material: None,
             color: None,
             assembly: None,
@@ -269,9 +296,13 @@ impl Model {
 
     /// Words for a face name, for messages: "the end face of Extrude1".
     pub fn describe_face(&self, name: &FaceName) -> String {
+        // A pattern, a mirror or a feature made at several places marks each copy's faces
+        // with which copy they are: that is said once, not as a part of the face.
+        let copy = |role: FaceRole| matches!(role, FaceRole::Instance(_));
         let parts: Vec<String> = name
             .origins()
             .iter()
+            .filter(|o| !copy(o.role))
             .map(|o| {
                 let role = match o.role {
                     FaceRole::NearCap => "start face",
@@ -295,7 +326,12 @@ impl Model {
                 format!("the {role} of {}", self.name_of(o.feature))
             })
             .collect();
-        parts.join(" joined with ")
+        let copied = name.origins().iter().find(|o| copy(o.role));
+        match (parts.is_empty(), copied) {
+            (true, Some(o)) => format!("a face of a copy made by {}", self.name_of(o.feature)),
+            (false, Some(_)) => format!("{} (one of several)", parts.join(" joined with ")),
+            (_, None) => parts.join(" joined with "),
+        }
     }
 
     // ---- Editing ----
@@ -316,7 +352,7 @@ impl Model {
     }
 
     /// Adds a feature with an automatic name, at the rollback bar (the end of the built
-    /// part of the tree), and returns its id.
+    /// part of the tree), and returns its id. It exists in every configuration.
     pub fn add(&mut self, kind: FeatureKind) -> FeatureId {
         let id = FeatureId(self.next_id);
         self.next_id += 1;
@@ -569,6 +605,7 @@ impl Model {
         {
             *r -= 1;
         }
+        self.tidy_configurations();
         Some(Arc::unwrap_or_clone(removed))
     }
 
@@ -633,6 +670,7 @@ impl Model {
         self.next_id = self.next_id.max(max.saturating_add(1));
         self.rollback = self.rollback.filter(|&b| b < self.features.len());
         self.parameters.evaluate();
+        self.validate_configurations()?;
         if self.assembly.is_some() && !self.features.is_empty() {
             return Err(
                 "The model is damaged: it is an assembly, and has features of its own.".to_owned(),

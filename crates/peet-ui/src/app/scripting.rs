@@ -9,7 +9,7 @@
 
 use peet_ops::{
     AppCommand, DocSel, Host, Op, Query, Reply, SessionCommand, SketchTool, Toggle, Undo, View,
-    Window, apply_model, apply_session,
+    Window, apply_model_scoped, apply_session,
 };
 use peet_sheetmetal::{CheckRules, MaterialLibrary};
 use serde_json::{Map, Value, json};
@@ -71,6 +71,7 @@ pub fn coverage(cmd: CommandId) -> Coverage {
         | C::SketchCenterRectangle
         | C::SketchCircle
         | C::SketchArc
+        | C::SketchSpline
         | C::SketchSlot
         | C::SketchPolygon
         | C::SketchPoint
@@ -133,6 +134,7 @@ pub fn coverage(cmd: CommandId) -> Coverage {
         C::FlatPattern => Op("flat_pattern"),
         // Windows whose contents are data: the operation gives the data.
         C::Parameters => Op("parameters"),
+        C::ConfigurationTable => Op("configurations"),
         C::BendTable => Op("bend_table"),
         C::SheetChecks => Op("checks"),
         C::GaugeTables => Op("materials"),
@@ -192,6 +194,7 @@ pub fn command_for(command: &AppCommand) -> CommandId {
             Window::KeyboardShortcuts => C::KeyboardShortcuts,
             Window::About => C::About,
             Window::Parameters => C::Parameters,
+            Window::Configurations => C::ConfigurationTable,
             Window::BendTable => C::BendTable,
             Window::Checks => C::SheetChecks,
             Window::Materials => C::GaugeTables,
@@ -217,6 +220,7 @@ pub fn command_for(command: &AppCommand) -> CommandId {
             SketchTool::Offset => C::SketchOffset,
             SketchTool::Mirror => C::SketchMirror,
             SketchTool::Dimension => C::SmartDimension,
+            SketchTool::Spline => C::SketchSpline,
         },
         AppCommand::Quit => C::Quit,
     }
@@ -410,7 +414,9 @@ impl PeetApp {
             materials: &mut self.settings.materials,
             check_rules: &mut self.settings.check_rules,
         };
-        let done = apply_model(&mut host, &mut self.doc, new, label, key);
+        // Values the tool changed go to this configuration only if that is asked for.
+        let values = self.values_this_only.then_some(peet_ops::Configs::This);
+        let done = apply_model_scoped(&mut host, &mut self.doc, new, label, key, values.as_ref());
         if merge.is_none() {
             self.doc.seal_history();
         }
@@ -696,6 +702,7 @@ mod tests {
             &Op::Suppress {
                 feature: "Extrude1".into(),
                 on: true,
+                configurations: peet_ops::Configs::default(),
             },
             Undo::Step,
         );
@@ -754,6 +761,7 @@ mod tests {
                     thickness: Some(2.into()),
                     ..Default::default()
                 }),
+                configurations: None,
             },
             Undo::Step,
         );
@@ -844,6 +852,211 @@ mod tests {
             assert!(all.contains(&word), "{word} is not in {all:?}");
         }
         // Nothing the application did was beyond the operations.
+        assert_eq!(app.untranslated(), &[] as &[String]);
+    }
+
+    #[test]
+    fn configurations_are_made_and_used_through_the_interface() {
+        use crate::configs_ui::ConfigAction;
+        use crate::document::ItemId;
+        use crate::tree::TreeAction;
+        use peet_ops::Configs;
+
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "open_sample", "sample": "enclosure"}),
+        );
+        let id = |app: &PeetApp, name: &str| {
+            let f = app.doc.model.features().find(|f| f.name == name);
+            f.expect("the feature").id
+        };
+        let cut = id(&app, "Sheet-Cut1");
+        let flange = id(&app, "Edge-Flange1");
+        app.update_title(&ctx);
+        assert_eq!(app.title, "Enclosure Panel - PeetCAD");
+
+        // The list: a new configuration is a copy and becomes the active one.
+        app.apply_configs(vec![ConfigAction::Add]);
+        assert_eq!(app.doc.model.active_configuration().name, "Configuration2");
+        app.apply_configs(vec![ConfigAction::Rename {
+            from: "Configuration2".to_owned(),
+            to: "Blank".to_owned(),
+        }]);
+        app.update_title(&ctx);
+        assert_eq!(app.title, "Enclosure Panel [Blank] * - PeetCAD");
+
+        // The tree: suppressing is for this configuration, or for all of them.
+        app.apply_tree(vec![TreeAction::SetSuppressed {
+            feature: cut,
+            on: true,
+            all: false,
+        }]);
+        app.apply_tree(vec![TreeAction::SetSuppressed {
+            feature: flange,
+            on: true,
+            all: true,
+        }]);
+        // The toolbar's Suppress is for this configuration too.
+        app.selected = Some(ItemId::Feature(id(&app, "Sheet-Cut2")));
+        app.execute(&ctx, CommandId::ToggleSuppress);
+        let default = app.doc.model.configuration_named("Default").unwrap().id;
+        assert_eq!(app.doc.model.suppressed_in(cut, default), Some(false));
+        assert_eq!(app.doc.model.suppressed_in(flange, default), Some(true));
+        assert!(app.doc.model.suppression_differs(id(&app, "Sheet-Cut2")));
+
+        // Back to the first one, a copy of it, and the copy deleted again.
+        app.apply_configs(vec![ConfigAction::Activate("Default".to_owned())]);
+        assert!(!app.doc.model.feature(cut).unwrap().suppressed);
+        assert!(app.doc.model.feature(flange).unwrap().suppressed);
+        app.apply_configs(vec![ConfigAction::Copy("Blank".to_owned())]);
+        assert_eq!(app.doc.model.active_configuration().name, "Configuration3");
+        assert!(app.doc.model.feature(cut).unwrap().suppressed);
+        app.apply_configs(vec![ConfigAction::Delete("Configuration3".to_owned())]);
+        assert_eq!(app.doc.model.active_configuration().name, "Blank");
+        // What can't be done is said, and changes nothing.
+        app.apply_configs(vec![ConfigAction::Rename {
+            from: "Blank".to_owned(),
+            to: "Default".to_owned(),
+        }]);
+        assert!(matches!(&app.status_message, Some((m, true)) if m.contains("already called")));
+        assert_eq!(app.doc.model.configurations().len(), 2);
+
+        // All of it was operations, with their scopes.
+        let journal = app.journal();
+        assert!(journal.iter().any(|op| matches!(
+            op,
+            Op::Suppress {
+                configurations: Configs::This,
+                ..
+            }
+        )));
+        assert!(journal.iter().any(|op| matches!(
+            op,
+            Op::Suppress {
+                configurations: Configs::All,
+                ..
+            }
+        )));
+        let words: Vec<&str> = journal.iter().map(Op::word).collect();
+        for word in [
+            "add_configuration",
+            "edit_configuration",
+            "configuration",
+            "delete_configuration",
+        ] {
+            assert!(words.contains(&word), "{word} is not in {words:?}");
+        }
+        assert_eq!(app.untranslated(), &[] as &[String]);
+    }
+
+    #[test]
+    fn values_differ_per_configuration_through_the_panels_and_the_table() {
+        use crate::config_table::set_value_op;
+        use peet_model::{Scalar, Slot};
+        use peet_ops::Configs;
+
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "sketch", "on": "top", "draw": [
+                {"type": "rectangle", "from": [0, 0], "to": [80, 50], "as": "r"},
+                {"type": "length", "of": ["r.bottom"], "value": 80, "name": "width"},
+            ]}),
+        );
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "extrude", "sketch": "Sketch1", "depth": 8}),
+        );
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "add_configuration", "name": "Other"}),
+        );
+        let sketch = app.doc.model.features().next().unwrap().id;
+        let extrude = app.doc.model.features().nth(1).unwrap().id;
+        let default = app.doc.model.configuration_named("Default").unwrap().id;
+        let depth = Slot::Field("depth".to_owned());
+        let in_default = |app: &PeetApp, feature, slot: &Slot| {
+            let v = app.doc.model.value_in(feature, slot, default);
+            v.unwrap().value
+        };
+        let set_depth = |app: &mut PeetApp, v: f64| {
+            app.change("Edit Extrude1", |m| {
+                let e = m.feature_mut(extrude).unwrap().extrude_mut().unwrap();
+                e.params.depth = Scalar::new(v);
+            });
+        };
+
+        // The panel, as it starts: a value that is the same everywhere changes everywhere.
+        set_depth(&mut app, 9.0);
+        assert_eq!(in_default(&app, extrude, &depth), 9.0);
+        // "This configuration": the others keep theirs.
+        app.values_this_only = true;
+        set_depth(&mut app, 12.0);
+        assert_eq!(in_default(&app, extrude, &depth), 9.0);
+        assert!(matches!(
+            app.journal().last(),
+            Some(Op::Edit {
+                configurations: Some(Configs::This),
+                ..
+            })
+        ));
+        app.values_this_only = false;
+
+        // The table: a value typed in a configuration's column changes that one.
+        let value = app.doc.model.slot_named(extrude, "depth").unwrap();
+        let named = Configs::Named(vec!["Default".to_owned()]);
+        let op = set_value_op(&app.doc, extrude, &value, "2 * 7", &named).unwrap();
+        assert!(app.perform(op).ok);
+        assert_eq!(in_default(&app, extrude, &depth), 14.0);
+        assert_eq!(app.doc.model.value(extrude, &depth).unwrap().1.value, 12.0);
+        let width = app.doc.model.slot_named(sketch, "width").unwrap();
+        let op = set_value_op(&app.doc, sketch, &width, "100", &named).unwrap();
+        assert!(matches!(op, Op::SetDimension { .. }));
+        assert!(app.perform(op).ok);
+        assert_eq!(in_default(&app, sketch, &width.slot), 100.0);
+        assert_eq!(
+            app.doc.model.value(sketch, &width.slot).unwrap().1.value,
+            80.0
+        );
+        // And "=" makes it the same everywhere again.
+        let op = set_value_op(&app.doc, sketch, &width, "80", &Configs::All).unwrap();
+        assert!(app.perform(op).ok);
+        assert!(!app.doc.model.value_differs(sketch, &width.slot));
+        // What can't be evaluated is refused, with the reason.
+        let op = set_value_op(&app.doc, extrude, &value, "2 * nothing", &named).unwrap();
+        assert!(!app.perform_quietly(op).ok);
+
+        // A bend model's value is a field of `bend`.
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "open_sample", "sample": "enclosure", "discard": true}),
+        );
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "add_configuration", "name": "Soft"}),
+        );
+        let flange = app.doc.model.features().nth(1).unwrap().id;
+        let k = app.doc.model.slot_named(flange, "k_factor").unwrap();
+        let op = set_value_op(&app.doc, flange, &k, "0.38", &Configs::This).unwrap();
+        assert!(app.perform(op).ok);
+        assert!(app.doc.model.value_differs(flange, &k.slot));
+
+        // The table is a window like the others.
+        ok(
+            &mut app,
+            &ctx,
+            json!({"op": "window", "open": "configurations"}),
+        );
+        assert!(app.windows.configurations);
         assert_eq!(app.untranslated(), &[] as &[String]);
     }
 }

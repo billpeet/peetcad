@@ -1,6 +1,6 @@
 ---
 name: peet
-description: Build, edit, inspect and export PeetCAD parts and assemblies (.peet files) with the `peet` command line. Read before running peet. More with `peet skills sketching`, `selectors`, `solids`, `sheet-metal`, `assemblies`.
+description: Build, edit, inspect and export PeetCAD parts and assemblies (.peet files) with the `peet` command line. Read before running peet. More with `peet skills sketching`, `selectors`, `solids`, `sheet-metal`, `assemblies`, `configurations`, `live`.
 ---
 
 # peet
@@ -48,6 +48,9 @@ Done when `status` shows `"failures": []` and `bodies` has the sizes that were a
 
 ## What the replies and `peet ops` don't say
 
+- **A part that is open in PeetCAD is changed there**, on screen, and not saved: `peet`
+  says "Applying to PeetCAD" on standard error when it does. Read `peet skills live`
+  before going on.
 - **Each `peet` call is separate.** It opens the file, applies, and saves if the part
   changed and every operation was applied. `undo` only reaches back within one call: to
   take back an earlier call, `edit` or `delete`.
@@ -104,3 +107,8 @@ script. Otherwise one `peet` call per part is simpler.
   pattern, DXF, materials, checks): `peet skills sheet-metal`.
 - **Putting parts together** (an assembly: inserting parts as components, placing them,
   changing a part of an assembly): `peet skills assemblies`.
+- **Several versions of one part in one file** (sizes, with and without features;
+  `status` shows a `configuration` other than `Default`, or `suppress` and
+  `set_parameter` should apply to some versions only): `peet skills configurations`.
+- **A part the user has open in PeetCAD**, or showing them something (turning the view,
+  opening a window): `peet skills live`.

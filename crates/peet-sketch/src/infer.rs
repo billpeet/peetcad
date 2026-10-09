@@ -35,7 +35,7 @@
 use peet_math::{DVec2, tolerance};
 
 use crate::curve::Curve;
-use crate::sketch::{ConstraintId, ConstraintKind, EntityId, EntityKind, Geometry, Sketch};
+use crate::sketch::{ConstraintId, ConstraintKind, EntityId, Geometry, Sketch};
 
 /// Tuning for inference. Distances are in sketch units (mm); the UI derives them from
 /// pixel tolerances at the current zoom.
@@ -282,11 +282,12 @@ impl Ctx<'_> {
         })
     }
 
-    /// Curves (lines, circles, arcs) that can be snapped to.
+    /// Curves (lines, circles, arcs) that can be snapped to. Splines are left out: there
+    /// is no relation that holds a point on one, so only their fit points snap.
     fn curves(&self, skip_anchor_curve: bool) -> impl Iterator<Item = (EntityId, Curve)> + '_ {
         let anchor_curve = self.anchor.and_then(|a| a.curve);
         self.sketch.entities().filter_map(move |(id, e)| {
-            if e.kind() == EntityKind::Point
+            if !e.kind().is_analytic()
                 || self.exclude.contains(&id)
                 || (skip_anchor_curve && anchor_curve == Some(id))
             {
@@ -311,6 +312,9 @@ impl Ctx<'_> {
                 Geometry::Line { start, end } | Geometry::Arc { start, end, .. }
                     if start == p || end == p =>
                 {
+                    return Inferred::Coincident(p);
+                }
+                Geometry::Spline { ref points, .. } if points.contains(&p) => {
                     return Inferred::Coincident(p);
                 }
                 Geometry::Circle { center, .. } | Geometry::Arc { center, .. }
@@ -462,7 +466,8 @@ impl Ctx<'_> {
                 };
                 Some((c, d, false))
             }
-            Curve::Circle { .. } => None,
+            // Nothing continues a spline: it has no tangency relation to keep.
+            Curve::Circle { .. } | Curve::Spline(_) => None,
         }
     }
 

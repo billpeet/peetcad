@@ -38,7 +38,7 @@ pub mod split;
 #[cfg(test)]
 mod tests;
 
-pub use build::{BendLine, FaceTag, FlatLoop, SheetBody, SheetError, build};
+pub use build::{BendLine, FaceTag, FlatLoop, SPLINE_REFUSAL, SheetBody, SheetError, build};
 pub use checks::{CheckKind, CheckRules, Finding, Rule, Severity, check, error_finding};
 pub use corner::{Corner, CornerKind, CornerRelief, CornerSpec};
 pub use flange::{Attachment, EdgeFlangeSpec, HemKind, HemSpec, Segment};

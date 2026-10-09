@@ -48,6 +48,7 @@ pub enum CommandId {
     EditSketch,
     ExitSketch,
     Parameters,
+    ConfigurationTable,
     DeleteSelection,
     SketchSelect,
     SketchLine,
@@ -136,6 +137,7 @@ pub enum CommandId {
     LinearComponentPattern,
     CircularComponentPattern,
     OpenSampleAssembly,
+    SketchSpline,
 }
 
 /// Static description of a command.
@@ -164,7 +166,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 127] = [
+    pub const ALL: [Self; 129] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -204,6 +206,7 @@ impl CommandId {
         Self::EditSketch,
         Self::ExitSketch,
         Self::Parameters,
+        Self::ConfigurationTable,
         Self::DeleteSelection,
         Self::SketchSelect,
         Self::SketchLine,
@@ -292,6 +295,7 @@ impl CommandId {
         Self::LinearComponentPattern,
         Self::CircularComponentPattern,
         Self::OpenSampleAssembly,
+        Self::SketchSpline,
     ];
 
     pub fn info(self) -> CommandInfo {
@@ -498,6 +502,12 @@ impl CommandId {
                 "Named values you can use in dimension expressions (width = 2 * height).",
                 None,
             ),
+            Self::ConfigurationTable => (
+                "Configurations Table…",
+                "Tools",
+                "What differs between the part's configurations: suppressed features, parameters, feature values and sketch dimensions, with a column per configuration.",
+                None,
+            ),
             Self::DeleteSelection => (
                 "Delete",
                 "Edit",
@@ -534,6 +544,12 @@ impl CommandId {
                 "Sketch",
                 "Draw an arc from its centre, start and end.",
                 key(Key::A),
+            ),
+            Self::SketchSpline => (
+                "Spline",
+                "Sketch",
+                "Draw a smooth curve through points: click each point, then double-click, press Enter or right-click to finish. Click the first point again to close it.",
+                None,
             ),
             Self::SketchSlot => (
                 "Slot",
@@ -829,7 +845,7 @@ impl CommandId {
             Self::Draft => (
                 "Draft",
                 "Features",
-                "Taper the selected faces (flat ones, or round ones along the pull) by an angle, keeping their size where they cross a neutral plane.",
+                "Taper the selected faces (flat ones, round ones along the pull, or freeform ones) by an angle, keeping their size where they cross a neutral plane.",
                 None,
             ),
             Self::Hole => (
@@ -853,7 +869,7 @@ impl CommandId {
             Self::Sweep => (
                 "Sweep",
                 "Features",
-                "Carry the selected (or open) sketch along a path drawn in another sketch: lines and arcs joined end to end, starting on the profile's plane and square to it. Corners between straight pieces are mitred.",
+                "Carry the selected (or open) sketch along a path drawn in another sketch: lines and arcs joined end to end, starting on the profile's plane and square to it. Corners between straight pieces are mitred. The path can also be a spline.",
                 None,
             ),
             Self::CutSweep => (

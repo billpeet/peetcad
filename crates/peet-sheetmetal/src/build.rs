@@ -111,7 +111,7 @@ impl SheetError {
 }
 
 /// What a face of a sheet metal body is.
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum FaceTag {
     /// The top side (`z = t`) of a piece.
     Top { piece: usize },
@@ -185,11 +185,10 @@ impl SheetBody {
         let [f0, f1] = faces[..] else {
             return Err("The edge is not on this body.".to_owned());
         };
-        let (Some(&t0), Some(&t1)) = (self.faces.get(f0.index()), self.faces.get(f1.index()))
-        else {
+        let (Some(t0), Some(t1)) = (self.faces.get(f0.index()), self.faces.get(f1.index())) else {
             return Err("The edge is not on this body.".to_owned());
         };
-        let pick = |cap: FaceTag, wall: FaceTag| match (cap, wall) {
+        let pick = |cap: &FaceTag, wall: &FaceTag| match (cap, wall) {
             (
                 FaceTag::Top { piece },
                 FaceTag::Wall {
@@ -207,7 +206,12 @@ impl SheetBody {
                     reversed,
                     ..
                 },
-            ) if piece == wp => Some((piece, matches!(cap, FaceTag::Top { .. }), curve, reversed)),
+            ) if piece == wp => Some((
+                *piece,
+                matches!(cap, FaceTag::Top { .. }),
+                curve.clone(),
+                *reversed,
+            )),
             _ => None,
         };
         let Some((piece, top, curve, reversed)) = pick(t0, t1).or_else(|| pick(t1, t0)) else {
@@ -253,6 +257,11 @@ impl SheetBody {
     }
 }
 
+/// What a sheet metal feature says to a sketch with a spline in it.
+pub const SPLINE_REFUSAL: &str = "Sheet metal can't use splines yet: flat patterns and their \
+     DXF export are made of lines and arcs. Redraw the spline as lines and arcs (a three-point \
+     arc is often close enough), or mark it as construction geometry.";
+
 /// Builds the folded solid and the rest of the sheet body.
 pub fn build(layout: Layout) -> Result<(Solid, SheetBody), SheetError> {
     // The geometry comes from the layout with its corners worked out; the body keeps the
@@ -295,7 +304,10 @@ pub fn build(layout: Layout) -> Result<(Solid, SheetBody), SheetError> {
                 kind: f.kind,
                 up: f.up,
                 height: f.height,
-                outline: area.edges().map(|e| (e.curve, e.reversed)).collect(),
+                outline: area
+                    .edges()
+                    .map(|e| (e.curve.clone(), e.reversed))
+                    .collect(),
                 center: f.center(),
                 lance: f.open_side.and_then(|o| match &f.shape {
                     crate::form::FormShape::Polygon(p) => Some([p[o], p[(o + 1) % p.len()]]),
@@ -422,15 +434,91 @@ fn interior_point(region: &Region) -> Option<DVec2> {
         .map(|[a, b, c]| (a + b + c) / 3.0)
 }
 
+/// Leaves out the scrap that reliefs cut loose: a fragment of a piece, no bigger than a
+/// bend relief, that no longer touches the rest of that piece.
+///
+/// Two flanges set back a little from the same corner each cut a relief next to it, and
+/// between them the reliefs cut the corner of the sheet off. In the shop that scrap falls
+/// away and the corner is notched; here it is left out, so the sheet stays in one piece.
+/// Anything larger that comes loose is kept, and reported as a separate piece.
+fn drop_scrap(layout: &Layout, kept: Vec<(Region, usize)>) -> Vec<(Region, usize)> {
+    let n = kept.len();
+    if n < 2 {
+        return kept;
+    }
+    // The ends of every edge of a region, in the direction the region runs round it.
+    let ends = |region: &Region| -> Vec<(u32, DVec2, DVec2)> {
+        std::iter::once(&region.outer)
+            .chain(&region.holes)
+            .flat_map(|l| &l.edges)
+            .map(|e| {
+                if e.reversed {
+                    (e.entity.0, e.curve.end(), e.curve.start())
+                } else {
+                    (e.entity.0, e.curve.start(), e.curve.end())
+                }
+            })
+            .collect()
+    };
+    let edges: Vec<Vec<(u32, DVec2, DVec2)>> = kept.iter().map(|(r, _)| ends(r)).collect();
+    // Regions of one piece that share an edge are one fragment of it.
+    let mut fragments = UnionFind::new(n);
+    for i in 0..n {
+        for j in i + 1..n {
+            if kept[i].1 != kept[j].1 {
+                continue;
+            }
+            let touch = edges[i].iter().any(|a| {
+                edges[j]
+                    .iter()
+                    .any(|b| a.0 == b.0 && close(a.1, b.2) && close(a.2, b.1))
+            });
+            if touch {
+                fragments.union(i, j);
+            }
+        }
+    }
+    let area = |region: &Region| -> f64 {
+        region
+            .outer
+            .edges
+            .iter()
+            .map(|e| area_term(&e.curve, e.reversed))
+            .sum::<f64>()
+            .abs()
+    };
+    let mut size: HashMap<usize, f64> = HashMap::new();
+    for (i, (region, _)) in kept.iter().enumerate() {
+        *size.entry(fragments.find(i)).or_default() += area(region);
+    }
+    // The largest fragment of each piece is the piece.
+    let mut largest: HashMap<usize, (usize, f64)> = HashMap::new();
+    for (i, (_, piece)) in kept.iter().enumerate() {
+        let fragment = fragments.find(i);
+        let a = size[&fragment];
+        let best = largest.entry(*piece).or_insert((fragment, a));
+        if a > best.1 {
+            *best = (fragment, a);
+        }
+    }
+    let s = &layout.settings;
+    let relief = s.radius + s.thickness * (1.0 + s.relief_ratio);
+    let scrap = 2.0 * relief * relief;
+    let keep: Vec<bool> = (0..n)
+        .map(|i| {
+            let fragment = fragments.find(i);
+            largest[&kept[i].1].0 == fragment || size[&fragment] > scrap
+        })
+        .collect();
+    kept.into_iter()
+        .zip(keep)
+        .filter_map(|(k, keep)| keep.then_some(k))
+        .collect()
+}
+
 /// `½ ∮ (x dy − y dx)` of a curve in traversal direction (exact for arcs).
 fn area_term(c: &Curve, reversed: bool) -> f64 {
-    let a = match *c {
-        Curve::Circle { radius, .. } => PI * radius * radius,
-        Curve::Arc { radius, sweep, .. } => {
-            0.5 * c.start().perp_dot(c.end()) + 0.5 * radius * radius * (sweep - sweep.sin())
-        }
-        Curve::Line { a, b } => 0.5 * a.perp_dot(b),
-    };
+    let a = c.area_term();
     if reversed { -a } else { a }
 }
 
@@ -500,7 +588,7 @@ impl Flat {
         let mut inputs: Vec<(peet_sketch::EntityId, Curve)> = Vec::new();
         let mut tags: Vec<CurveTag> = Vec::new();
         let mut add = |e: &Edge2| {
-            inputs.push((peet_sketch::EntityId(inputs.len() as u32), e.curve));
+            inputs.push((peet_sketch::EntityId(inputs.len() as u32), e.curve.clone()));
             tags.push(e.tag);
         };
         for p in &layout.pieces {
@@ -515,6 +603,10 @@ impl Flat {
         let form_areas: Vec<_> = layout.forms.iter().map(|f| f.area()).collect();
         for a in &form_areas {
             a.edges().for_each(&mut add);
+        }
+        // Everything from here on (folding, flat patterns, DXF export) is lines and arcs.
+        if inputs.iter().any(|(_, c)| matches!(c, Curve::Spline(_))) {
+            return Err(SheetError::Message(SPLINE_REFUSAL.to_owned()));
         }
         let profile = regions_of_curves(&inputs);
 
@@ -560,6 +652,7 @@ impl Flat {
         if kept.is_empty() {
             return Err(SheetError::Empty);
         }
+        let kept = drop_scrap(layout, kept);
 
         // Half-edges, closed curves split in two so every edge has two vertices.
         let mut halves: Vec<Half> = Vec::new();
@@ -569,7 +662,7 @@ impl Flat {
             for l in std::iter::once(&region.outer).chain(&region.holes) {
                 let first = halves.len();
                 for e in &l.edges {
-                    for (curve, reversed) in split_closed(e.curve, e.reversed) {
+                    for (curve, reversed) in split_closed(e.curve.clone(), e.reversed) {
                         let (start, end) = if reversed {
                             (curve.end(), curve.start())
                         } else {
@@ -712,7 +805,7 @@ impl Flat {
             if ha.twin.is_some() || hb.twin.is_some() {
                 return false;
             }
-            let (Curve::Line { .. }, Curve::Line { .. }) = (ha.curve, hb.curve) else {
+            let (Curve::Line { .. }, Curve::Line { .. }) = (&ha.curve, &hb.curve) else {
                 return false;
             };
             let da = (ha.end - ha.start).normalize_or_zero();
@@ -744,7 +837,7 @@ impl Flat {
                 }
                 let (a, b) = (halves[h0].start, halves[last].end);
                 let curve = if last == h0 {
-                    halves[h0].curve
+                    halves[h0].curve.clone()
                 } else {
                     Curve::Line { a, b }
                 };
@@ -850,7 +943,7 @@ impl Flat {
                 .sum();
             let edges: Vec<(Curve, bool)> = lp
                 .iter()
-                .map(|&e| (self.edges[e].curve, self.edges[e].reversed))
+                .map(|&e| (self.edges[e].curve.clone(), self.edges[e].reversed))
                 .collect();
             out.push(FlatLoop {
                 edges: join_pieces(edges),
@@ -867,7 +960,7 @@ impl Flat {
             let edges: Vec<Edge2> = l
                 .iter()
                 .map(|&e| Edge2 {
-                    curve: self.edges[e].curve,
+                    curve: self.edges[e].curve.clone(),
                     reversed: self.edges[e].reversed,
                     tag: self.edges[e].tag,
                 })
@@ -939,7 +1032,7 @@ fn join_pieces(mut edges: Vec<(Curve, bool)>) -> Vec<(Curve, bool)> {
         if !close(q, q2) {
             return None;
         }
-        match (a.0, b.0) {
+        match (&a.0, &b.0) {
             (Curve::Line { .. }, Curve::Line { .. }) => {
                 let (d1, d2) = ((q - p).normalize_or_zero(), (r - q2).normalize_or_zero());
                 (d1.dot(d2) > 0.0 && d1.perp_dot(d2).abs() <= 1e-9)
@@ -958,7 +1051,7 @@ fn join_pieces(mut edges: Vec<(Curve, bool)>) -> Vec<(Curve, bool)> {
                     sweep: s2,
                     ..
                 },
-            ) if close(c1, c2)
+            ) if close(*c1, *c2)
                 && (r1 - r2).abs() <= SAME_POINT
                 && a.1 == b.1
                 && s1 + s2 < std::f64::consts::TAU - 1e-9 =>
@@ -966,7 +1059,7 @@ fn join_pieces(mut edges: Vec<(Curve, bool)>) -> Vec<(Curve, bool)> {
                 // In curve direction the pieces run first-to-second, or second-to-first
                 // when traversed backwards.
                 let (from, to) = if a.1 { (r, p) } else { (p, r) };
-                Some((Curve::arc_from_points(c1, from, to), a.1))
+                Some((Curve::arc_from_points(*c1, from, to), a.1))
             }
             _ => None,
         }
@@ -1118,6 +1211,7 @@ impl Flat {
                         start_angle + sweep,
                     ),
                     Curve::Circle { .. } => unreachable!("circles are split into arcs"),
+                    Curve::Spline(_) => unreachable!("splines are refused before thickening"),
                 };
                 info.edges.push(EdgeSource::Cap { edge: i, top });
                 id
@@ -1205,6 +1299,7 @@ impl Flat {
             }
             let shell = shell_of[&suf.find(e.face)];
             let (surface, reversed) = match e.curve {
+                Curve::Spline(_) => return Err(SheetError::Message(SPLINE_REFUSAL.to_owned())),
                 Curve::Line { .. } => {
                     let (a, b) = e.ends();
                     let dir = (b - a).extend(0.0);
@@ -1229,7 +1324,7 @@ impl Flat {
             tags.push(FaceTag::Wall {
                 piece: self.faces[e.face].piece,
                 tag: e.tag,
-                curve: e.curve,
+                curve: e.curve.clone(),
                 reversed: e.reversed,
             });
             info.faces.push(FaceSource::Wall { edge: i });
@@ -1529,6 +1624,7 @@ type Use = (EdgeId, bool);
 /// The right-hand normal of a curve traversed in loop order, at `p`.
 fn right_normal(curve: &Curve, reversed: bool, p: DVec2) -> DVec2 {
     let tangent = match *curve {
+        Curve::Spline(ref s) => s.tangent_at(s.closest_point(p).0),
         Curve::Line { a, b } => (b - a).normalize_or_zero(),
         Curve::Arc { center, .. } | Curve::Circle { center, .. } => {
             let r = (p - center).normalize_or_zero();
@@ -1594,7 +1690,7 @@ impl Flat {
             let v = start(k);
             let n2 = right_normal(&next.curve, next.reversed, v);
             let n1 = right_normal(&prev.curve, prev.reversed, v);
-            let point = match (prev.curve, next.curve) {
+            let point = match (&prev.curve, &next.curve) {
                 (Curve::Line { .. }, Curve::Line { .. }) if n1.perp_dot(n2).abs() > 1e-9 => {
                     // Where the two moved lines cross.
                     let (p1, d1) = (v + n1 * shift(k + n - 1), DVec2::new(-n1.y, n1.x));
@@ -1704,7 +1800,14 @@ impl Flat {
         let cht: Vec<Use> = (0..n)
             .map(|k| {
                 let e = edge(k);
-                curve_edge(cx, e.curve, e.reversed, h + t, vht[k], vht[(k + 1) % n])
+                curve_edge(
+                    cx,
+                    e.curve.clone(),
+                    e.reversed,
+                    h + t,
+                    vht[k],
+                    vht[(k + 1) % n],
+                )
             })
             .collect();
         let mut cw0: Vec<Option<Use>> = vec![None; n];
@@ -1776,6 +1879,9 @@ impl Flat {
                 let right = right_normal(curve, reversed, mid);
                 let normal = if left { -right } else { right };
                 Ok(match *curve {
+                    Curve::Spline(_) => {
+                        return Err(SheetError::Message(SPLINE_REFUSAL.to_owned()));
+                    }
                     Curve::Line { a, b } => {
                         let d = (b - a).extend(0.0);
                         let plane =

@@ -2655,7 +2655,28 @@ mod tests {
         assert!(app.doc.is_assembly());
         assert!(app.doc.get(part).is_none());
         assert_eq!(app.doc.undo_label(), Some("Edit Bracket"));
-        assert_eq!(app.doc.evaluation().component_problems().count(), 2);
+        // The edit is in the assembly's part, for both of its components. (What was
+        // built on the suppressed feature is suppressed with it; the rib, which stands
+        // on a plane of its own, is still built.)
+        let stored = app
+            .doc
+            .model
+            .assembly()
+            .unwrap()
+            .definitions()
+            .next()
+            .unwrap();
+        let suppressed = stored.model.features().find(|f| f.name == "Extrude1");
+        assert!(suppressed.is_some_and(|f| f.suppressed));
+        assert_eq!(app.doc.bodies.len(), 2);
+        assert!(std::sync::Arc::ptr_eq(
+            &app.doc.bodies[0],
+            &app.doc.bodies[1]
+        ));
+        assert!(
+            app.doc.bodies[0].solid.bounds().size().x < 100.0,
+            "the rib alone"
+        );
         draw(&mut app, &ctx);
 
         app.selected_component = Some(second);

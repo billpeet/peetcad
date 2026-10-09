@@ -521,3 +521,156 @@ fn patterns_mirrors_and_reference_geometry() {
 fn round6(v: f64) -> f64 {
     (v * 1e6).round() / 1e6
 }
+
+#[test]
+fn splines_are_drawn_read_back_and_extruded() {
+    let mut doc = Document::default();
+    let reply = ok(
+        &mut doc,
+        json!({"op": "sketch", "on": "top", "name": "Wave", "draw": [
+            {"type": "line", "from": [0, 20], "to": [0, 0], "as": "left"},
+            {"type": "line", "from": [0, 0], "to": [40, 0], "as": "bottom"},
+            {"type": "line", "from": [40, 0], "to": [40, 20], "as": "right"},
+            {"type": "spline", "points": [[40, 20], [28, 26], [12, 16], [0, 20]], "as": "top"},
+            {"type": "coincident", "of": ["left.end", "origin"]},
+            {"type": "coincident", "of": ["left.end", "bottom.start"]},
+            {"type": "coincident", "of": ["bottom.end", "right.start"]},
+            {"type": "coincident", "of": ["right.end", "top.start"]},
+            {"type": "coincident", "of": ["top.end", "left.start"]},
+            {"type": "vertical_distance", "of": ["top.1", "origin"], "value": 30, "name": "crest"},
+            {"type": "spline", "points": [[5, 4], [11, 3], [12, 9], [6, 11]], "closed": true,
+             "construction": true, "as": "blob"},
+            {"type": "fix", "of": ["blob"]},
+        ]}),
+    );
+    let top = &reply["drawn"][3];
+    assert_eq!(top["type"], "spline");
+    assert_eq!(top["closed"], false);
+    assert_eq!(top["points"].as_array().unwrap().len(), 4);
+    assert_eq!(reply["drawn"][10]["closed"], true);
+    assert_eq!(reply["drawn"][11]["relations"].as_array().unwrap().len(), 4);
+
+    // The query gives each spline's points and where they are, after solving.
+    let read = ok(&mut doc, json!({"op": "feature", "feature": "Wave"}));
+    let splines: Vec<&Value> = read["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["type"] == "spline")
+        .collect();
+    assert_eq!(splines.len(), 2);
+    assert_eq!(splines[0]["id"], top["id"]);
+    assert_eq!(splines[0]["points"], top["points"]);
+    let through = splines[0]["through"].as_array().unwrap();
+    assert_eq!(through.len(), 4);
+    close(through[1][1].as_f64().unwrap(), 30.0);
+    assert_eq!(splines[1]["closed"], true);
+    assert_eq!(splines[1]["construction"], true);
+
+    // The profile extrudes: its volume is its area times the depth.
+    let ex = ok(
+        &mut doc,
+        json!({"op": "extrude", "sketch": "Wave", "depth": 8}),
+    );
+    assert_eq!(ex["created"][0]["status"], "ok", "{ex}");
+    let area_of = |doc: &Document| {
+        let sketch = &doc
+            .model
+            .features()
+            .next()
+            .unwrap()
+            .sketch()
+            .unwrap()
+            .sketch;
+        peet_sketch::region::find_regions(sketch).regions[0].area()
+    };
+    let area = area_of(&doc);
+    assert!((volume(&doc) - area * 8.0).abs() < 1e-4 * area * 8.0);
+
+    // Changing the dimension moves the fit point, and the solid follows.
+    ok(
+        &mut doc,
+        json!({"op": "set_dimension", "sketch": "Wave", "name": "crest", "value": 22}),
+    );
+    let smaller = area_of(&doc);
+    assert!(smaller < area - 10.0);
+    assert!((volume(&doc) - smaller * 8.0).abs() < 1e-4 * area * 8.0);
+
+    // A fit point can be deleted by its id: the spline passes through the rest.
+    let second = top["points"][1].clone();
+    ok(
+        &mut doc,
+        json!({"op": "draw", "sketch": "Wave", "draw": [{"type": "delete", "of": [second]}]}),
+    );
+    let read = ok(&mut doc, json!({"op": "feature", "feature": "Wave"}));
+    let spline = read["entities"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["type"] == "spline")
+        .unwrap();
+    assert_eq!(spline["points"].as_array().unwrap().len(), 3);
+}
+
+#[test]
+fn spline_mistakes_are_explained() {
+    let mut doc = Document::default();
+    ok(
+        &mut doc,
+        json!({"op": "sketch", "on": "top", "name": "S", "draw": [
+            {"type": "spline", "points": [[0, 0], [10, 8], [25, -3], [40, 6]]},
+            {"type": "line", "from": [20, -10], "to": [20, 10]},
+        ]}),
+    );
+    let draw = |doc: &mut Document, items: Value| {
+        error(doc, json!({"op": "draw", "sketch": "S", "draw": items}))
+    };
+    let e = draw(&mut doc, json!([{"type": "spline", "points": [[1, 1]]}]));
+    assert!(e.contains("at least two different points"), "{e}");
+    let e = draw(
+        &mut doc,
+        json!([{"type": "spline", "points": [[1, 1], [2, 2]], "closed": true}]),
+    );
+    assert!(e.contains("at least three different points"), "{e}");
+    let e = draw(
+        &mut doc,
+        json!([
+            {"type": "spline", "points": [[0, 30], [10, 38], [25, 27]], "as": "s"},
+            {"type": "point", "at": [5, 35], "as": "p"},
+            {"type": "coincident", "of": ["p", "s"]},
+        ]),
+    );
+    assert!(e.contains("can't be held on a spline"), "{e}");
+    let e = draw(
+        &mut doc,
+        json!([
+            {"type": "spline", "points": [[0, 30], [10, 38], [25, 27]], "as": "s"},
+            {"type": "fix", "of": ["s.7"]},
+        ]),
+    );
+    assert!(e.contains("has no '7'"), "{e}");
+    let e = draw(
+        &mut doc,
+        json!([
+            {"type": "spline", "points": [[0, 30], [10, 38], [25, 27]], "as": "s"},
+            {"type": "trim", "curve": "s", "near": [10, 38]},
+        ]),
+    );
+    assert!(e.contains("trimming a spline"), "{e}");
+    let e = draw(
+        &mut doc,
+        json!([
+            {"type": "spline", "points": [[0, 30], [10, 38], [25, 27]], "as": "s"},
+            {"type": "offset", "of": ["s"], "distance": 2},
+        ]),
+    );
+    assert!(e.contains("offsetting a spline"), "{e}");
+
+    // Help lists the spline with the other geometry.
+    let help = ok(&mut doc, json!({"op": "help"}));
+    let spline = help["draw"]["geometry"]["spline"].as_str().unwrap();
+    assert!(
+        spline.contains("points") && spline.contains("closed"),
+        "{spline}"
+    );
+}

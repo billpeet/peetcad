@@ -3,11 +3,15 @@
 //! A sketch is a flat list of entities and a flat list of constraints, both addressed by
 //! stable ids. Ids are never reused within a sketch, so a removed entity's id stays dead.
 //!
-//! **Points carry the geometry.** Lines, arcs and circles reference point entities (their
-//! endpoints and centres) instead of storing coordinates, so "coincident" is a constraint
-//! between two points and every solver variable is either a point coordinate or a circle
-//! radius. Points created as part of a curve are *owned* by it: they are hidden from the
-//! user as separate items and removed together with the curve.
+//! **Points carry the geometry.** Lines, arcs, circles and splines reference point entities
+//! (their endpoints, centres and fit points) instead of storing coordinates, so
+//! "coincident" is a constraint between two points and every solver variable is either a
+//! point coordinate or a circle radius. Points created as part of a curve are *owned* by
+//! it: they are hidden from the user as separate items and removed together with the curve.
+//!
+//! **Splines** pass through their fit points and have no other data: the curve is derived
+//! from where the points are ([`crate::spline`]), so a spline adds no equations to the
+//! solver and its points take the same relations and dimensions as a line's ends.
 
 use peet_math::DVec2;
 use serde::{Deserialize, Serialize};
@@ -47,6 +51,14 @@ pub enum Geometry {
         start: EntityId,
         end: EntityId,
     },
+    /// A smooth curve through `points`, in order. A closed spline returns to its first
+    /// point (which is not repeated in the list) and is smooth there too.
+    ///
+    /// The curve is a function of the points' positions alone (see [`crate::spline`]).
+    Spline {
+        points: Vec<EntityId>,
+        closed: bool,
+    },
 }
 
 impl Geometry {
@@ -57,6 +69,7 @@ impl Geometry {
             Self::Line { start, end } => vec![start, end],
             Self::Circle { center, .. } => vec![center],
             Self::Arc { center, start, end } => vec![center, start, end],
+            Self::Spline { ref points, .. } => points.clone(),
         }
     }
 }
@@ -68,6 +81,7 @@ pub enum EntityKind {
     Line,
     Circle,
     Arc,
+    Spline,
 }
 
 impl EntityKind {
@@ -77,6 +91,7 @@ impl EntityKind {
             Self::Line => "Line",
             Self::Circle => "Circle",
             Self::Arc => "Arc",
+            Self::Spline => "Spline",
         }
     }
 
@@ -85,9 +100,15 @@ impl EntityKind {
         matches!(self, Self::Circle | Self::Arc)
     }
 
-    /// Lines, circles and arcs.
+    /// Lines, circles, arcs and splines.
     pub fn is_curve(self) -> bool {
         !matches!(self, Self::Point)
+    }
+
+    /// Lines, circles and arcs: the curves with an equation the solver can hold a point
+    /// to, or make another curve tangent to.
+    pub fn is_analytic(self) -> bool {
+        matches!(self, Self::Line | Self::Circle | Self::Arc)
     }
 }
 
@@ -111,6 +132,7 @@ impl Entity {
             Geometry::Line { .. } => EntityKind::Line,
             Geometry::Circle { .. } => EntityKind::Circle,
             Geometry::Arc { .. } => EntityKind::Arc,
+            Geometry::Spline { .. } => EntityKind::Spline,
         }
     }
 }
@@ -296,6 +318,8 @@ pub enum SketchError {
     },
     /// Locked entities (the origin, projected geometry) can't be moved or removed.
     Locked(EntityId),
+    /// A spline was given too few points to pass through.
+    TooFewPoints { closed: bool },
 }
 
 impl std::fmt::Display for SketchError {
@@ -308,6 +332,15 @@ impl std::fmt::Display for SketchError {
                 expected,
             } => write!(f, "{constraint} needs {expected}"),
             Self::Locked(_) => write!(f, "reference geometry can't be changed"),
+            Self::TooFewPoints { closed: false } => write!(
+                f,
+                "a spline needs at least two different points to pass through"
+            ),
+            Self::TooFewPoints { closed: true } => write!(
+                f,
+                "a closed spline needs at least three different points to pass through; add a \
+                 point, or leave it open"
+            ),
         }
     }
 }
@@ -425,9 +458,16 @@ impl Sketch {
         }
     }
 
-    /// Resolved geometry of a line, circle or arc (`None` for points and dead ids).
+    /// Resolved geometry of a line, circle, arc or spline (`None` for points and dead ids).
     pub fn curve(&self, id: EntityId) -> Option<Curve> {
         match self.entity(id)?.geometry {
+            Geometry::Spline { ref points, closed } => {
+                let through = points
+                    .iter()
+                    .map(|p| self.try_point(*p))
+                    .collect::<Option<Vec<DVec2>>>()?;
+                Some(Curve::spline_through(&through, closed))
+            }
             Geometry::Point { .. } => None,
             Geometry::Line { start, end } => Some(Curve::Line {
                 a: self.try_point(start)?,
@@ -448,10 +488,23 @@ impl Sketch {
         }
     }
 
-    /// Endpoints of a line or arc (start, end). `None` for other entities.
+    /// Endpoints of a line, arc or open spline (start, end). `None` for other entities.
     pub fn endpoints(&self, id: EntityId) -> Option<(EntityId, EntityId)> {
         match self.entity(id)?.geometry {
             Geometry::Line { start, end } | Geometry::Arc { start, end, .. } => Some((start, end)),
+            Geometry::Spline {
+                ref points,
+                closed: false,
+            } => Some((*points.first()?, *points.last()?)),
+            _ => None,
+        }
+    }
+
+    /// The fit points of a spline, in order, and whether it is closed. `None` for other
+    /// entities.
+    pub fn spline_points(&self, id: EntityId) -> Option<(&[EntityId], bool)> {
+        match &self.entity(id)?.geometry {
+            Geometry::Spline { points, closed } => Some((points, *closed)),
             _ => None,
         }
     }
@@ -586,6 +639,35 @@ impl Sketch {
         id
     }
 
+    /// Adds a spline through `through`, in order, with a new point for each owned by it.
+    /// `closed` brings it back to the first point (which must not be repeated at the
+    /// end). An open spline needs two different points, a closed one three.
+    pub fn add_spline(&mut self, through: &[DVec2], closed: bool) -> Result<EntityId, SketchError> {
+        let mut different: Vec<DVec2> = Vec::new();
+        for p in through {
+            if !different.iter().any(|q| q.distance(*p) <= 1e-9) {
+                different.push(*p);
+            }
+        }
+        if different.len() < if closed { 3 } else { 2 } || through.iter().any(|p| !p.is_finite()) {
+            return Err(SketchError::TooFewPoints { closed });
+        }
+        let id = EntityId(self.entities.len() as u32);
+        let points = (1..=through.len() as u32)
+            .map(|i| EntityId(id.0 + i))
+            .collect();
+        self.push_entity(Entity {
+            geometry: Geometry::Spline { points, closed },
+            construction: false,
+            owner: None,
+            locked: false,
+        });
+        for p in through {
+            self.push_owned_point(*p, id, false);
+        }
+        Ok(id)
+    }
+
     /// Marks an entity (and the points it owns) as construction geometry or not.
     pub fn set_construction(&mut self, id: EntityId, construction: bool) {
         let Some(entity) = self.entity_mut(id) else {
@@ -680,7 +762,7 @@ impl Sketch {
         };
         let ok = match *kind {
             Coincident(a, b) => k(a) == K::Point && k(b) == K::Point && a != b,
-            PointOnCurve { point, curve } => k(point) == K::Point && k(curve).is_curve(),
+            PointOnCurve { point, curve } => k(point) == K::Point && k(curve).is_analytic(),
             Horizontal(l) | Vertical(l) | Length(l) => k(l) == K::Line,
             HorizontalPoints(a, b)
             | VerticalPoints(a, b)
@@ -726,9 +808,9 @@ impl Sketch {
     pub fn fix(&mut self, id: EntityId) -> Result<Vec<ConstraintId>, SketchError> {
         let entity = self.entity(id).ok_or(SketchError::MissingEntity(id))?;
         let mut added = Vec::new();
-        let points = match entity.geometry {
+        let points = match &entity.geometry {
             Geometry::Point { .. } => vec![id],
-            ref g => g.points(),
+            g => g.points(),
         };
         let is_circle = entity.kind() == EntityKind::Circle;
         for p in points {
@@ -753,6 +835,9 @@ impl Sketch {
 
     /// Removes an entity, the points it owns (unless other curves still use them) and every
     /// constraint referring to anything removed. Returns the removed entity ids.
+    ///
+    /// Removing a point removes the curves that use it, except that a spline with points
+    /// to spare just stops passing through it.
     pub fn remove_entity(&mut self, id: EntityId) -> Result<Vec<EntityId>, SketchError> {
         let entity = self.entity(id).ok_or(SketchError::MissingEntity(id))?;
         if entity.locked {
@@ -771,6 +856,9 @@ impl Sketch {
                 let users: Vec<EntityId> = self.curves_using(id).collect();
                 self.entities[id.0 as usize] = None;
                 for user in users {
+                    if self.drop_spline_point(user, id) {
+                        continue;
+                    }
                     if self.entity(user).is_some() {
                         removed.extend(self.remove_entity(user)?);
                     }
@@ -790,6 +878,24 @@ impl Sketch {
         }
         self.remove_dangling_constraints();
         Ok(removed)
+    }
+
+    /// Takes `point` out of the spline `curve` if the spline has enough other points left
+    /// (two, or three if it is closed). Returns whether it did.
+    fn drop_spline_point(&mut self, curve: EntityId, point: EntityId) -> bool {
+        let Some(Entity {
+            geometry: Geometry::Spline { points, closed },
+            ..
+        }) = self.entity_mut(curve)
+        else {
+            return false;
+        };
+        let left = points.iter().filter(|p| **p != point).count();
+        if left < if *closed { 3 } else { 2 } {
+            return false;
+        }
+        points.retain(|p| *p != point);
+        true
     }
 
     /// Removes constraints that reference entities that no longer exist.
@@ -833,6 +939,7 @@ impl Sketch {
                 swap(start);
                 swap(end);
             }
+            Geometry::Spline { points, .. } => points.iter_mut().for_each(swap),
         }
         changed
     }
@@ -879,7 +986,10 @@ fn expected_kinds(kind: &ConstraintKind) -> &'static str {
     match kind {
         Coincident(..) | HorizontalPoints(..) | VerticalPoints(..) => "two different points",
         HorizontalDistance(..) | VerticalDistance(..) => "two different points",
-        PointOnCurve { .. } => "a point and a line, circle or arc",
+        PointOnCurve { .. } => {
+            "a point and a line, circle or arc (a point can't be held on a spline: make it \
+             coincident with one of the spline's points instead)"
+        }
         Horizontal(_) | Vertical(_) | Length(_) => "a line",
         Parallel(..) | Perpendicular(..) | Angle(..) => "two lines",
         Tangent(..) => "a line and a circle/arc, or two circles/arcs",
@@ -967,6 +1077,84 @@ mod tests {
         assert_eq!(dim.value, 5.0);
         let d2 = s.add_dimension(ConstraintKind::Radius(c), 3.0).unwrap();
         assert_eq!(s.dimension_by_name("d2"), Some(d2));
+    }
+
+    #[test]
+    fn spline_owns_its_fit_points() {
+        let mut s = Sketch::new();
+        let through = [
+            DVec2::ZERO,
+            DVec2::new(5.0, 4.0),
+            DVec2::new(10.0, -2.0),
+            DVec2::new(15.0, 0.0),
+        ];
+        let id = s.add_spline(&through, false).unwrap();
+        assert_eq!(s.kind(id), Some(EntityKind::Spline));
+        let (points, closed) = s.spline_points(id).unwrap();
+        let points = points.to_vec();
+        assert!(!closed);
+        assert_eq!(points.len(), 4);
+        assert_eq!(s.endpoints(id), Some((points[0], points[3])));
+        for (p, at) in points.iter().zip(through) {
+            assert_eq!(s.entity(*p).unwrap().owner, Some(id));
+            assert_eq!(s.point(*p), at);
+            // The curve passes through every one of them.
+            assert!(s.curve(id).unwrap().distance(at) < 1e-9);
+        }
+        // Moving a point moves the curve.
+        s.set_point(points[1], DVec2::new(5.0, 9.0));
+        assert!(s.curve(id).unwrap().distance(DVec2::new(5.0, 9.0)) < 1e-9);
+        // Its points take the relations a line's ends do, but nothing rides on the curve.
+        let l = s.add_line(DVec2::new(15.0, 0.0), DVec2::new(20.0, 0.0));
+        let (start, _) = s.endpoints(l).unwrap();
+        assert!(
+            s.add_constraint(ConstraintKind::Coincident(points[3], start))
+                .is_ok()
+        );
+        let err = s
+            .add_constraint(ConstraintKind::PointOnCurve {
+                point: start,
+                curve: id,
+            })
+            .unwrap_err();
+        assert!(err.to_string().contains("spline"), "{err}");
+        assert!(s.add_constraint(ConstraintKind::Tangent(l, id)).is_err());
+        assert_eq!(s.fix(id).unwrap().len(), 4);
+        // A point to spare can go; the spline stays.
+        let removed = s.remove_entity(points[1]).unwrap();
+        assert_eq!(removed, vec![points[1]]);
+        assert_eq!(s.spline_points(id).unwrap().0.len(), 3);
+        s.remove_entity(points[2]).unwrap();
+        assert!(s.entity(id).is_some());
+        // With two left, removing one removes the spline.
+        let removed = s.remove_entity(points[0]).unwrap();
+        assert!(removed.contains(&id));
+        assert!(s.entity(points[3]).is_none());
+    }
+
+    #[test]
+    fn splines_need_enough_points() {
+        let mut s = Sketch::new();
+        let p = DVec2::new(1.0, 2.0);
+        assert_eq!(
+            s.add_spline(&[p], false),
+            Err(SketchError::TooFewPoints { closed: false })
+        );
+        assert_eq!(
+            s.add_spline(&[p, p], false),
+            Err(SketchError::TooFewPoints { closed: false })
+        );
+        let err = s.add_spline(&[p, DVec2::ZERO], true).unwrap_err();
+        assert!(err.to_string().contains("three"), "{err}");
+        assert_eq!(s.entities().count(), 1, "nothing was added");
+        let closed = s
+            .add_spline(&[p, DVec2::ZERO, DVec2::new(4.0, -3.0)], true)
+            .unwrap();
+        assert!(s.curve(closed).unwrap().is_closed());
+        assert_eq!(s.endpoints(closed), None);
+        s.set_construction(closed, true);
+        let (points, _) = s.spline_points(closed).unwrap();
+        assert!(points.iter().all(|p| s.entity(*p).unwrap().construction));
     }
 
     #[test]

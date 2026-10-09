@@ -1,6 +1,6 @@
 //! Resolved 2D curve geometry: evaluation, closest points and intersections.
 //!
-//! [`Curve`] is the geometry of a sketch line, circle or arc with coordinates filled in
+//! [`Curve`] is the geometry of a sketch line, circle, arc or spline with coordinates filled in
 //! (the sketch itself stores curves as references to point entities). Everything here is
 //! plain `f64` math with no knowledge of ids or constraints, used by the editing
 //! operations, region detection, hit testing and rendering.
@@ -8,13 +8,23 @@
 //! **Parameters.** Every curve has a parameter `t`:
 //! - line: `a + t (b - a)`, with the segment at `0..=1` (the infinite line extends beyond),
 //! - arc: `start_angle + t * sweep`, with the arc at `0..=1` (the rest of the circle beyond),
-//! - circle: angle / 2π measured counter-clockwise from +X, in `0..1`.
+//! - circle: angle / 2π measured counter-clockwise from +X, in `0..1`,
+//! - spline: its own parameter, scaled so that the curve (or the stretch of it) is at
+//!   `0..=1`. A spline has nothing beyond its ends: past them it carries straight on.
+//!
+//! **Splines** ([`crate::spline`]) have no closed forms, so their closest points and
+//! intersections are found numerically, to [`tolerance::LINEAR`]. A closed spline is, like
+//! a circle, a curve without ends; it has a seam at parameter 0, and cutting it always
+//! cuts there too.
 
 use std::f64::consts::TAU;
 
 use peet_math::{DVec2, tolerance};
 
-#[derive(Clone, Copy, Debug, PartialEq)]
+use crate::spline::{Spline, SplinePiece};
+
+/// The geometry of a sketch curve. Cheap to clone: a spline's data is shared.
+#[derive(Clone, Debug, PartialEq)]
 pub enum Curve {
     Line {
         a: DVec2,
@@ -31,6 +41,8 @@ pub enum Curve {
         start_angle: f64,
         sweep: f64,
     },
+    /// A spline through fit points, or a stretch of one.
+    Spline(SplinePiece),
 }
 
 /// A point where two curves meet, with the parameter on each.
@@ -66,9 +78,23 @@ impl Curve {
         }
     }
 
+    /// The spline through `through`, in order (see [`Spline::interpolate`]).
+    pub fn spline_through(through: &[DVec2], closed: bool) -> Self {
+        Self::Spline(SplinePiece::whole(Spline::interpolate(through, closed)))
+    }
+
+    /// The stretch of spline this curve is, if it is one.
+    pub fn as_spline(&self) -> Option<&SplinePiece> {
+        match self {
+            Self::Spline(s) => Some(s),
+            _ => None,
+        }
+    }
+
     /// Point at parameter `t` (see the module docs). Works outside `0..=1` too.
     pub fn point_at(&self, t: f64) -> DVec2 {
         match *self {
+            Self::Spline(ref s) => s.point_at(t),
             Self::Line { a, b } => a + (b - a) * t,
             Self::Circle { center, radius } => center + DVec2::from_angle(t * TAU) * radius,
             Self::Arc {
@@ -83,6 +109,7 @@ impl Curve {
     /// Unit tangent at `t`, in the direction of increasing `t`.
     pub fn tangent_at(&self, t: f64) -> DVec2 {
         match *self {
+            Self::Spline(ref s) => s.tangent_at(t),
             Self::Line { a, b } => (b - a).normalize_or(DVec2::X),
             Self::Circle { .. } => DVec2::from_angle(t * TAU).perp(),
             Self::Arc {
@@ -91,12 +118,37 @@ impl Curve {
         }
     }
 
-    /// Start point (lines and arcs). A circle "starts" at angle 0.
+    /// Signed curvature at `t`: positive where the curve turns left, the reciprocal of
+    /// the radius for circles and arcs (which run counter-clockwise), zero for lines.
+    pub fn curvature_at(&self, t: f64) -> f64 {
+        match self {
+            Self::Line { .. } => 0.0,
+            Self::Circle { radius, .. } | Self::Arc { radius, .. } => 1.0 / radius,
+            Self::Spline(s) => s.curvature_at(t),
+        }
+    }
+
+    /// `½ ∫ (x dy − y dx)` along the curve in its own direction: what it adds to the
+    /// signed area of a loop it is part of. Exact for every kind of curve.
+    pub fn area_term(&self) -> f64 {
+        match self {
+            Self::Line { a, b } => 0.5 * a.perp_dot(*b),
+            Self::Circle { radius, .. } => std::f64::consts::PI * radius * radius,
+            // The chord's share plus the circular segment between chord and arc.
+            Self::Arc { radius, sweep, .. } => {
+                0.5 * self.start().perp_dot(self.end())
+                    + 0.5 * radius * radius * (sweep - sweep.sin())
+            }
+            Self::Spline(s) => s.area_term(),
+        }
+    }
+
+    /// Start point (lines, arcs and splines). A circle "starts" at angle 0.
     pub fn start(&self) -> DVec2 {
         self.point_at(0.0)
     }
 
-    /// End point (lines and arcs). A circle ends where it starts.
+    /// End point (lines, arcs and splines). A circle ends where it starts.
     pub fn end(&self) -> DVec2 {
         match self {
             Self::Circle { .. } => self.point_at(0.0),
@@ -104,21 +156,26 @@ impl Curve {
         }
     }
 
+    /// Whether the curve has no ends: a circle, or the whole of a closed spline.
     pub fn is_closed(&self) -> bool {
-        matches!(self, Self::Circle { .. })
+        match self {
+            Self::Circle { .. } => true,
+            Self::Spline(s) => s.is_closed(),
+            _ => false,
+        }
     }
 
     pub fn center(&self) -> Option<DVec2> {
         match *self {
-            Self::Line { .. } => None,
             Self::Circle { center, .. } | Self::Arc { center, .. } => Some(center),
+            Self::Line { .. } | Self::Spline(_) => None,
         }
     }
 
     pub fn radius(&self) -> Option<f64> {
         match *self {
-            Self::Line { .. } => None,
             Self::Circle { radius, .. } | Self::Arc { radius, .. } => Some(radius),
+            Self::Line { .. } | Self::Spline(_) => None,
         }
     }
 
@@ -132,6 +189,7 @@ impl Curve {
 
     pub fn length(&self) -> f64 {
         match *self {
+            Self::Spline(ref s) => s.length(),
             Self::Line { a, b } => a.distance(b),
             Self::Circle { radius, .. } => TAU * radius,
             Self::Arc { radius, sweep, .. } => radius * sweep,
@@ -139,9 +197,10 @@ impl Curve {
     }
 
     /// Perpendicular distance from `p` to the infinite line through a line segment. For
-    /// circular curves: distance to the full circle.
+    /// circular curves: distance to the full circle. For a spline: distance to the curve.
     pub fn distance_to_line(&self, p: DVec2) -> f64 {
         match *self {
+            Self::Spline(ref s) => s.closest_point(p).1.distance(p),
             Self::Line { a, b } => match (b - a).try_normalize() {
                 Some(d) => d.perp_dot(p - a).abs(),
                 None => p.distance(a),
@@ -153,9 +212,11 @@ impl Curve {
     }
 
     /// Parameter of the point on the *unbounded* curve (infinite line, full circle) closest
-    /// to `p`. For arcs the result is in `[0, 2π / sweep)`.
+    /// to `p`. For arcs the result is in `[0, 2π / sweep)`. A spline has no unbounded
+    /// form: the result is on the curve as drawn.
     pub fn project(&self, p: DVec2) -> f64 {
         match *self {
+            Self::Spline(ref s) => s.closest_point(p).0,
             Self::Line { a, b } => {
                 let d = b - a;
                 let len2 = d.length_squared();
@@ -179,6 +240,7 @@ impl Curve {
     pub fn contains_param(&self, t: f64) -> bool {
         match self {
             Self::Circle { .. } => true,
+            Self::Spline(_) => (-1e-9..=1.0 + 1e-9).contains(&t),
             _ => {
                 let slack = tolerance::LINEAR / self.length().max(tolerance::LINEAR);
                 (-slack..=1.0 + slack).contains(&t)
@@ -189,6 +251,7 @@ impl Curve {
     /// Closest point on the *bounded* curve to `p`, as `(t, point)`.
     pub fn closest_point(&self, p: DVec2) -> (f64, DVec2) {
         match *self {
+            Self::Spline(ref s) => s.closest_point(p),
             Self::Line { .. } => {
                 let t = self.project(p).clamp(0.0, 1.0);
                 (t, self.point_at(t))
@@ -217,7 +280,8 @@ impl Curve {
     }
 
     /// Intersections of the *bounded* curves (segments and arcs as drawn). Tangent contacts
-    /// are reported once. Overlapping collinear/co-circular curves report no points.
+    /// are reported once. Overlapping collinear/co-circular curves report no points. Two
+    /// splines that touch without crossing report no point either.
     pub fn intersect(&self, other: &Curve) -> Vec<Intersection> {
         self.intersect_unbounded(other)
             .into_iter()
@@ -231,13 +295,47 @@ impl Curve {
     }
 
     /// Intersections of the *unbounded* curves (infinite lines, full circles). Parameters
-    /// may be outside `0..=1` (see [`Curve::project`] for arcs).
+    /// may be outside `0..=1` (see [`Curve::project`] for arcs). Splines are never
+    /// extended: only the other curve is unbounded.
     pub fn intersect_unbounded(&self, other: &Curve) -> Vec<Intersection> {
-        let points = match (self.carrier(), other.carrier()) {
-            (Carrier::Line(p, d), Carrier::Line(q, e)) => line_line(p, d, q, e),
-            (Carrier::Line(p, d), Carrier::Circle(c, r))
-            | (Carrier::Circle(c, r), Carrier::Line(p, d)) => line_circle(p, d, c, r),
-            (Carrier::Circle(c1, r1), Carrier::Circle(c2, r2)) => circle_circle(c1, r1, c2, r2),
+        let on_spline = |s: &SplinePiece, carrier: Carrier| match carrier {
+            Carrier::Line(p, d) => s.meet_line(p, d),
+            Carrier::Circle(c, r) => s.meet_circle(c, r),
+        };
+        let points = match (self, other) {
+            (Self::Spline(a), Self::Spline(b)) => {
+                return a
+                    .meet_spline(b)
+                    .into_iter()
+                    .map(|(t_a, t_b, point)| Intersection { point, t_a, t_b })
+                    .collect();
+            }
+            (Self::Spline(s), _) => {
+                return on_spline(s, other.carrier())
+                    .into_iter()
+                    .map(|(t_a, point)| Intersection {
+                        point,
+                        t_a,
+                        t_b: other.project(point),
+                    })
+                    .collect();
+            }
+            (_, Self::Spline(s)) => {
+                return on_spline(s, self.carrier())
+                    .into_iter()
+                    .map(|(t_b, point)| Intersection {
+                        point,
+                        t_a: self.project(point),
+                        t_b,
+                    })
+                    .collect();
+            }
+            _ => match (self.carrier(), other.carrier()) {
+                (Carrier::Line(p, d), Carrier::Line(q, e)) => line_line(p, d, q, e),
+                (Carrier::Line(p, d), Carrier::Circle(c, r))
+                | (Carrier::Circle(c, r), Carrier::Line(p, d)) => line_circle(p, d, c, r),
+                (Carrier::Circle(c1, r1), Carrier::Circle(c2, r2)) => circle_circle(c1, r1, c2, r2),
+            },
         };
         points
             .into_iter()
@@ -249,8 +347,21 @@ impl Curve {
             .collect()
     }
 
+    /// Where the curve crosses itself: the two parameters and the point. Only a spline can.
+    pub fn self_intersections(&self) -> Vec<Intersection> {
+        match self {
+            Self::Spline(s) => s
+                .meet_self()
+                .into_iter()
+                .map(|(t_a, t_b, point)| Intersection { point, t_a, t_b })
+                .collect(),
+            _ => Vec::new(),
+        }
+    }
+
     /// Splits the curve at the given parameters (inside `0..1`), returning the pieces in
-    /// order. A circle split at `n >= 2` parameters gives `n` arcs; at one, one arc.
+    /// order. A circle split at `n >= 2` parameters gives `n` arcs; at one, one arc. A
+    /// closed spline is always cut at its seam (parameter 0) as well.
     pub fn split(&self, params: &[f64]) -> Vec<Curve> {
         let mut ts: Vec<f64> = params.iter().copied().filter(|t| t.is_finite()).collect();
         ts.sort_by(f64::total_cmp);
@@ -258,7 +369,7 @@ impl Curve {
         match *self {
             Self::Circle { center, radius } => {
                 if ts.is_empty() {
-                    return vec![*self];
+                    return vec![self.clone()];
                 }
                 let n = ts.len();
                 (0..n)
@@ -298,10 +409,11 @@ impl Curve {
         }
     }
 
-    /// The part of a line or arc between parameters `t0 < t1`. For a circle, the arc from
-    /// `t0` to `t1` counter-clockwise.
+    /// The part of a line, arc or spline between parameters `t0 < t1`. For a circle, the
+    /// arc from `t0` to `t1` counter-clockwise.
     pub fn sub_curve(&self, t0: f64, t1: f64) -> Curve {
         match *self {
+            Self::Spline(ref s) => Self::Spline(s.sub_piece(t0, t1)),
             Self::Line { .. } => Self::Line {
                 a: self.point_at(t0),
                 b: self.point_at(t1),
@@ -329,6 +441,7 @@ impl Curve {
     /// Axis-aligned bounds `(min, max)` of the bounded curve.
     pub fn bounds(&self) -> (DVec2, DVec2) {
         match *self {
+            Self::Spline(ref s) => s.bounds(),
             Self::Line { a, b } => (a.min(b), a.max(b)),
             Self::Circle { center, radius } => (center - radius, center + radius),
             Self::Arc {
@@ -357,6 +470,7 @@ impl Curve {
     /// both ends (a circle repeats its first point at the end).
     pub fn tessellate(&self, tolerance: f64) -> Vec<DVec2> {
         match *self {
+            Self::Spline(ref s) => s.tessellate(tolerance),
             Self::Line { a, b } => vec![a, b],
             Self::Circle { radius, .. } | Self::Arc { radius, .. } => {
                 let sweep = match *self {
@@ -374,12 +488,14 @@ impl Curve {
         }
     }
 
+    /// The unbounded curve a line, circle or arc lies on.
     fn carrier(&self) -> Carrier {
         match *self {
             Self::Line { a, b } => Carrier::Line(a, b - a),
             Self::Circle { center, radius } | Self::Arc { center, radius, .. } => {
                 Carrier::Circle(center, radius)
             }
+            Self::Spline(_) => unreachable!("splines are intersected numerically"),
         }
     }
 }

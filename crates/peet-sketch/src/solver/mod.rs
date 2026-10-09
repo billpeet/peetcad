@@ -289,8 +289,7 @@ impl Solver {
                             {
                                 Some(i) => i,
                                 None => {
-                                    let (pts, n) = curve_points(g);
-                                    let points = pts[..n]
+                                    let points = curve_points(g)
                                         .iter()
                                         .filter(|&&p| point_slot(p) != NONE)
                                         .map(|&p| (p, pos(point_slot(p))))

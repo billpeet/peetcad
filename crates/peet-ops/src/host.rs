@@ -121,6 +121,7 @@ word_enum! {
         KeyboardShortcuts = "keyboard_shortcuts",
         About = "about",
         Parameters = "parameters",
+        Configurations = "configurations",
         BendTable = "bend_table",
         Checks = "checks",
         Materials = "materials",
@@ -148,6 +149,7 @@ word_enum! {
         Offset = "offset",
         Mirror = "mirror",
         Dimension = "dimension",
+        Spline = "spline",
     }
 }
 

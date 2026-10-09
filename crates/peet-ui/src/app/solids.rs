@@ -235,7 +235,7 @@ impl PeetApp {
         if path.is_some() {
             self.show_in_3d(profile, 1.0);
         } else if self.doc.sweep_path_choices(id).is_empty() {
-            self.error("A sweep needs a path: draw it in a second sketch (lines and arcs, starting on the profile's plane), then choose it as the Path in the properties.");
+            self.error("A sweep needs a path: draw it in a second sketch (lines and arcs, or a spline, starting on the profile's plane), then choose it as the Path in the properties.");
         } else {
             self.picking = Some((id, Slot::SweepPath));
             self.status_message = None;

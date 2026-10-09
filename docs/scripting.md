@@ -41,6 +41,7 @@ peet op JSON... [options]          # operations given as JSON
 peet OPERATION [field=value...]    # one operation, by name
 peet ops [OPERATION]               # the operations, or one with its fields
 peet skills [NAME]                 # how to use peet, for an agent
+peet sessions                      # the running PeetCADs and the part each has open
 peet new PART.peet                 # an empty part file
 peet dump PART.peet [OUT.ron]      # a part as readable text
 peet pack IN.ron PART.peet         # and back
@@ -56,6 +57,9 @@ peet pack IN.ron PART.peet         # and back
 | `--keep-going` | carry on after an operation that can't be applied |
 | `--strict` | fail if the part ends with features that can't be built |
 | `--materials CSV` | use these material and gauge tables, not the built-in ones |
+| `--live` | apply to a running PeetCAD, and fail if there is none to apply to |
+| `--headless` | work on the file, even if it is open in a running PeetCAD |
+| `--pid N` | apply to the running PeetCAD with this process id |
 | `--pretty` | indent the replies |
 | `-q`, `--quiet` | say nothing on standard error |
 
@@ -82,7 +86,8 @@ peet pack IN.ron PART.peet         # and back
 `peet skills` lists instructions written for an agent that is going to use `peet`, and
 `peet skills NAME` prints one. `core` is the one to start with: it gives the working loop
 and points to the others (`sketching`, `selectors`, `solids`, `sheet-metal`,
-`assemblies`) for when a task reaches them. They are in `crates/peet-cli/skills/` and are built into the binary,
+`assemblies`, `configurations`, `live`) for when a
+task reaches them. They are in `crates/peet-cli/skills/` and are built into the binary,
 so they describe the version being run. Every script in them is run by a test, and
 [AGENTS.md](../AGENTS.md) asks that a new feature is added to them.
 
@@ -92,9 +97,39 @@ so they describe the version being run. Every script in them is run by a test, a
 | 1 | an operation was not applied, or `--strict` found features that can't be built. Nothing was saved |
 | 2 | the command line or a file was the problem. Nothing was applied |
 
-The application's own operations (`view`, `toggle`, `window`, …) need a running PeetCAD,
-so `peet` refuses them. Applying operations to a part that is open in the application is
-stage 5 of [the plan](scripting-plan.md).
+### A part that is open in PeetCAD
+
+If the part given with `--file` is open in a running PeetCAD, `peet` applies the
+operations there and not to the file: the part changes on screen, and each operation is
+an undo step of the application ([ADR 0010](adr/0010-live-attach.md)).
+
+```sh
+peet sessions                          # {"sessions": [{"pid", "file", "name", "modified", "version"}]}
+peet features -f bracket.peet          # goes to PeetCAD if bracket.peet is open there
+peet run build.jsonl --live            # the one running PeetCAD, whatever it has open
+peet view to=front --live
+```
+
+- **Which.** `--file` open in a PeetCAD: that one. `--live` without `--file`: the only
+  PeetCAD running (a part never saved has no file, so this is how to reach it). `--pid`:
+  that process. `--headless`: the file, whatever is open. `--live` fails if there is
+  nothing to attach to; without it a part open nowhere is worked on as a file.
+- **Saving.** Nothing is saved: the part is left modified, as if the user had changed
+  it. A script saves with the `save` operation.
+- **Failure.** A run stops at an operation that can't be applied, and the ones before it
+  stay applied.
+- **`--new`, `--out` and `--materials`** are about files and are refused on a part that
+  is open. The material tables and check limits are the application's settings.
+- **Paths** in operations are relative to where `peet` is run.
+- **Busy.** While a sketch is open for editing in the application, operations that change
+  the part are refused. If the application takes no operation for 20 seconds (a file
+  dialog is open), the operation is refused and not applied.
+- The application's own operations (`view`, `toggle`, `window`, …) work only here.
+  Without a running PeetCAD they are refused.
+
+A running PeetCAD listens on a local socket (a named pipe on Windows) and lists itself
+in `sessions/` in its data folder. Only the same user's processes can connect. Native
+only: the web build does not listen.
 
 ## Replies
 
@@ -148,7 +183,7 @@ the geometry through later edits.
 |---|---|
 | `sketch` | `on` (plane), `name`, `draw` |
 | `draw` | `sketch`, `draw` |
-| `set_dimension` | `sketch`, `name` (`"d1"`), `value` |
+| `set_dimension` | `sketch`, `name` (`"d1"`), `value`, `configurations` |
 
 A `draw` list holds items with a `type`:
 
@@ -159,6 +194,7 @@ A `draw` list holds items with a `type`:
 | `polyline` | `points`, `closed` |
 | `circle` | `center`, `radius` |
 | `arc` | `center`, `start`, `end` (counter-clockwise) |
+| `spline` | `points`, `closed` (a smooth curve through the points; a closed one returns to the first, which is not repeated) |
 | `rectangle` | `from`, `to` (parts `bottom`, `right`, `top`, `left`) |
 | `center_rectangle` | `center`, `corner` |
 | `slot` | `from`, `to`, `radius` |
@@ -175,8 +211,18 @@ A `draw` list holds items with a `type`:
 
 Geometry takes `as` (a label) and `construction`. An entity is an id, a label from the
 same list, or a part of one: `"a.start"`, `"a.end"`, `"c.center"`, `"r.bottom"`,
-`"p.2"` (a shape's curve by number), `"origin"`. Labels last for one operation; the reply
-and the `feature` query give the ids.
+`"p.2"` (a shape's curve by number), `"s.2"` (a spline's fit point by number, from 0),
+`"origin"`. Labels last for one operation; the reply and the `feature` query give the ids.
+
+A spline passes through its points and has no other shape of its own: its points take
+`coincident`, `fix` and dimensions like a line's ends, and moving them moves the curve.
+There are no tangent handles yet, and a spline takes no `tangent` relation; nothing can
+be made `coincident` with the curve itself, only with its points. `trim`, `extend`,
+`offset` and `fillet` refuse splines; `mirror` copies them. A profile with a spline can
+be extruded, revolved (the spline must stay clear of the axis) and lofted (a spline side
+joins lines and other splines, not arcs), and a spline can be a sweep's path; sheet metal
+features refuse it.
+
 
 ### Features
 
@@ -202,7 +248,9 @@ with their defaults' types):
   or an axis selector. Left out, it is the sketch's first construction line, else
   `sketch_y`.
 - `sweep` takes `profile` and `path` (two sketches). Corners between straight pieces of
-  the path are mitred.
+  the path are mitred. A path with a spline in it is followed as a whole: it has no
+  corners, the profile's plane only has to cross its start (not squarely), and the sides
+  are freeform.
 - `loft` takes `profiles`: two or more sketches in order, each with the same number of
   edges (a circle adapts).
 - `convert_to_sheet` turns a solid of one wall thickness into a sheet metal body. It takes
@@ -211,14 +259,15 @@ with their defaults' types):
 - `hole` drills at every point of its sketch. `standard` (`{"size": "M6", "fit": "close"
   | "normal" | "loose" | "tapped"}`) sets every size; sizes given as well win.
 - `fillet` and `chamfer` take `edges` and `size`; `shell` takes `open` (faces to remove)
-  and `thickness`; `draft` takes `faces` (flat, or round along
-  the pull), `neutral` (a plane) and `angle`.
+  and `thickness`; `draft` takes `faces` (flat, round along
+  the pull, or freeform), `neutral` (a plane) and `angle`.
 
 | Operation | Fields |
 |---|---|
-| `edit` | `feature`, then any of its fields |
+| `edit` | `feature`, then any of its fields; `configurations` for its numeric fields |
 | `rename` | `feature`, `name` |
-| `suppress`, `show` | `feature`, `on` (default true) |
+| `suppress` | `feature`, `on` (default true), `configurations`. What is built on a suppressed feature is suppressed with it |
+| `show` | `feature`, `on` (default true) |
 | `show` | `datum` (`origin`, `front`, `top`, `right`, `planes`), `on`: the built-in reference geometry |
 | `delete` | `feature` or `features` |
 | `move` | `feature`, and `before`, `after` or `index` |
@@ -228,12 +277,42 @@ with their defaults' types):
 
 | Operation | Fields |
 |---|---|
-| `set_parameter` | `name`, `value` |
+| `set_parameter` | `name`, `value`, `configurations`. A new parameter exists in every configuration |
 | `delete_parameter` | `name` |
 | `set_units` | `length` (`mm`, `cm`, `m`, `in`, `ft`) |
 | `set_material` | `material` (a name, or `null` for none), `density` in kg/m³ (left out: the material tables' density for that material). What the part is made of: saved with it, and what `mass` weighs it with |
 | `set_color` | `color` (`"#rrggbb"` or `[r, g, b]`, or `null` for the usual colour): what the part is drawn in |
 | `undo`, `redo` | |
+
+### Configurations
+
+A part has one or more configurations: versions of it that differ in which features are
+suppressed and in its numbers: parameters, the numeric values of features and the
+dimensions of sketches. One is active: it is what every other operation reads, builds
+and exports.
+
+| Operation | Fields |
+|---|---|
+| `add_configuration` | `name`, `copy` (a configuration; default the active one), `comment`. It becomes the active one |
+| `edit_configuration` | `configuration`, `name`, `comment` |
+| `delete_configuration` | `configuration`. A part keeps at least one |
+| `configuration` | `configuration`: make it the active one. Not an undo step |
+
+`suppress`, `set_parameter`, `edit` and `set_dimension` take `configurations`: `"this"`
+(the active one), `"all"`, a configuration's name, or a list of names. Left out,
+`suppress` and `set_parameter` mean `"this"`; `edit` and `set_dimension` change a value
+that already differs between configurations in the active one, and a value that doesn't
+in all of them. Only the numeric fields of a feature can differ: an `edit` with
+`configurations` other than `"all"` that changes another field is refused.
+
+```json
+{"op": "add_configuration", "name": "Thick"}
+{"op": "set_parameter", "name": "thickness", "value": "2mm"}
+{"op": "suppress", "feature": "Sheet-Cut1", "configurations": ["Thick", "Blank"]}
+{"op": "edit", "feature": "Extrude1", "depth": 12, "configurations": "this"}
+{"op": "set_dimension", "sketch": "Sketch1", "name": "width", "value": 120, "configurations": "Thick"}
+{"op": "configuration", "configuration": "Default"}
+```
 
 ### Queries
 
@@ -242,7 +321,8 @@ with their defaults' types):
 | `status` | name, file, units, material, colour, counts, failures, undo and redo labels |
 | `features` | the tree, each feature's status and what it uses |
 | `feature` (`feature`) | its fields; a sketch's plane, definition, entities, relations and dimensions |
-| `parameters` | named values and units |
+| `parameters` | named values and units; a parameter that differs between configurations lists its expression in each |
+| `configurations` | the configurations, the active one, and what differs: the configurations each feature is suppressed in, each parameter's expression in every configuration, and under `values` each feature value and sketch dimension in every configuration |
 | `bodies` | bounds, volume, counts; flat size and thickness for sheet metal |
 | `faces`, `edges` (`body`) | what made each face, normals, centres; edge ends and the faces they join |
 | `bend_table` (`body`) | flat size, area, and each bend |
@@ -420,7 +500,7 @@ Without one they are refused.
 | `view` | `to` (`isometric`, `front`, `back`, `left`, `right`, `top`, `bottom`) |
 | `zoom_to_fit` | |
 | `toggle` | `what` (`perspective`, `grid`, `view_cube`, `feature_tree`, `properties`, `performance_overlay`, `relations`, `construction`), `on` (left out: the other way) |
-| `window` | `open` (`command_palette`, `settings`, `keyboard_shortcuts`, `about`, `parameters`, `bend_table`, `checks`, `materials`, `mass`) |
+| `window` | `open` (`command_palette`, `settings`, `keyboard_shortcuts`, `about`, `parameters`, `configurations`, `bend_table`, `checks`, `materials`, `mass`) |
 | `edit_sketch` | `sketch`: open it in the sketch editor |
 | `exit_sketch` | finish the open sketch, writing it to the part |
 | `tool` | `tool` (`select`, `line`, `rectangle`, `center_rectangle`, `circle`, `arc`, `slot`, `polygon`, `point`, `trim`, `extend`, `fillet`, `offset`, `mirror`, `dimension`) |

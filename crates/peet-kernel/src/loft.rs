@@ -1,7 +1,7 @@
 //! Lofts: a solid through a series of profiles on different planes.
 //!
-//! **Matching.** Each profile is the outline of a sketch region: lines and arcs joined
-//! end to end. Every profile must have the same number of pieces, so that piece `k` of
+//! **Matching.** Each profile is the outline of a sketch region: lines, arcs and splines
+//! joined end to end. Every profile must have the same number of pieces, so that piece `k` of
 //! one profile is joined to piece `k` of the next. A full circle has no corners of its
 //! own and takes them from its neighbours: it is cut into arcs at the directions of the
 //! nearest cornered profile's corners (four quarter arcs if every profile is a circle),
@@ -14,7 +14,8 @@
 //! All the side surfaces place the profiles at the same parameters, so neighbours meet
 //! exactly along the rail through their shared corners. A side between two straight
 //! pieces that lie in one plane is made a plane, so a loft between similar polygons on
-//! parallel planes has flat sides like any other prism or frustum.
+//! parallel planes has flat sides like any other prism or frustum. A spline piece can be
+//! joined to lines and to other splines, not yet to an arc (their degrees differ).
 //!
 //! **Topology** is that of an extrusion: a cap on the first and the last profile, a side
 //! face per piece, a rail edge per corner. The caps' edges are the profiles' own lines
@@ -24,12 +25,13 @@ use std::f64::consts::TAU;
 use std::sync::Arc;
 
 use peet_math::{DVec2, DVec3, Frame, Plane, tolerance};
-use peet_sketch::Curve;
 use peet_sketch::region::Region;
+use peet_sketch::{Curve, SplinePiece};
 
 use crate::extrude::{PreparedLoop, prepare_loop};
 use crate::geom::{Circle3, Curve3, Surface};
 use crate::nurbs::{NurbsCurve, NurbsSurface};
+use crate::profile::spline_curve;
 use crate::topo::{EdgeId, VertexId};
 use crate::{KernelError, Solid};
 
@@ -53,7 +55,7 @@ pub enum LoftFace {
 }
 
 /// One piece of a profile, in its plane, in the direction the profile is walked.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Piece {
     Line {
         a: DVec2,
@@ -66,11 +68,20 @@ enum Piece {
         from: f64,
         sweep: f64,
     },
+    /// A stretch of a sketch spline, walked against its own direction if `backwards`.
+    Spline {
+        piece: SplinePiece,
+        backwards: bool,
+    },
 }
 
 impl Piece {
     fn start(&self) -> DVec2 {
         match *self {
+            Self::Spline {
+                ref piece,
+                backwards,
+            } => piece.point_at(if backwards { 1.0 } else { 0.0 }),
             Self::Line { a, .. } => a,
             Self::Arc {
                 center,
@@ -83,6 +94,13 @@ impl Piece {
 
     fn reversed(&self) -> Self {
         match *self {
+            Self::Spline {
+                ref piece,
+                backwards,
+            } => Self::Spline {
+                piece: piece.clone(),
+                backwards: !backwards,
+            },
             Self::Line { a, b } => Self::Line { a: b, b: a },
             Self::Arc {
                 center,
@@ -119,6 +137,23 @@ pub fn loft(sections: &[LoftSection<'_>]) -> Result<Solid, KernelError> {
 
 /// [`loft`], also reporting what each face of the result is (by face index).
 pub fn loft_traced(sections: &[LoftSection<'_>]) -> Result<(Solid, Vec<LoftFace>), KernelError> {
+    let (solid, faces) = loft_unchecked(sections)?;
+    if let Err(problems) = crate::validate::validate(&solid) {
+        let list: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
+        return Err(KernelError::InvalidResult(format!(
+            "The loft produced an invalid solid (do the profiles twist, or cross each \
+             other?): {}.",
+            list.join("; ")
+        )));
+    }
+    Ok((solid, faces))
+}
+
+/// [`loft_traced`] without the check that the result is a valid solid, for a caller that
+/// checks what it makes of it.
+pub(crate) fn loft_unchecked(
+    sections: &[LoftSection<'_>],
+) -> Result<(Solid, Vec<LoftFace>), KernelError> {
     let invalid = |m: String| KernelError::InvalidInput(m);
     if sections.len() < 2 {
         return Err(invalid("a loft needs at least two profiles".to_owned()));
@@ -168,6 +203,10 @@ pub fn loft_traced(sections: &[LoftSection<'_>]) -> Result<(Solid, Vec<LoftFace>
                                 };
                                 if p.reversed { arc.reversed() } else { arc }
                             }
+                            Curve::Spline(ref s) => Piece::Spline {
+                                piece: s.clone(),
+                                backwards: p.reversed,
+                            },
                             Curve::Circle { .. } => {
                                 unreachable!("full circles are handled as circle loops")
                             }
@@ -274,6 +313,9 @@ pub fn loft_traced(sections: &[LoftSection<'_>]) -> Result<(Solid, Vec<LoftFace>
         }
     };
     let mut profiles: Vec<Vec<(Piece, usize)>> = Vec::with_capacity(count);
+    // Each circle is cut where the circle before it was, so that a row of circles on
+    // planes that turn a long way (a swept pipe) keeps its corners in line.
+    let mut directions = directions;
     for (i, o) in outlines.into_iter().enumerate() {
         profiles.push(match o {
             Outline::Pieces(p) => p,
@@ -304,6 +346,13 @@ pub fn loft_traced(sections: &[LoftSection<'_>]) -> Result<(Solid, Vec<LoftFace>
                         i + 1
                     )));
                 }
+                directions = angles
+                    .iter()
+                    .map(|a| {
+                        let (s, c) = a.sin_cos();
+                        (frame.x_axis() * c + frame.y_axis() * s) * radius
+                    })
+                    .collect();
                 (0..n)
                     .map(|k| {
                         let from = angles[k];
@@ -354,6 +403,23 @@ pub fn loft_traced(sections: &[LoftSection<'_>]) -> Result<(Solid, Vec<LoftFace>
         profiles[i].rotate_left(best);
     }
 
+    // A side must be of one degree all the way: a spline (cubic) and an arc (a rational
+    // quadratic) can't be made so yet.
+    for k in 0..n {
+        let has = |f: fn(&Piece) -> bool| profiles.iter().position(|p| f(&p[k].0));
+        let spline = has(|p| matches!(p, Piece::Spline { .. }));
+        let arc = has(|p| matches!(p, Piece::Arc { .. }));
+        if let (Some(spline), Some(arc)) = (spline, arc) {
+            return Err(KernelError::Unsupported(format!(
+                "a loft side that joins a spline (profile {}) to an arc or a circle (profile \
+                 {}). Draw that arc as a spline through three points, or the spline as lines \
+                 and arcs",
+                spline + 1,
+                arc + 1
+            )));
+        }
+    }
+
     // The geometry: each corner's rail, each piece's surface.
     let rails: Vec<Vec<DVec3>> = (0..n)
         .map(|k| {
@@ -368,9 +434,16 @@ pub fn loft_traced(sections: &[LoftSection<'_>]) -> Result<(Solid, Vec<LoftFace>
         .collect();
     let nurbs = |m: crate::nurbs::NurbsError| invalid(format!("the loft can't be made: {m}"));
     let params = NurbsSurface::section_params(&rails).map_err(nurbs)?;
-    let curve_3d = |i: usize, piece: &Piece| -> NurbsCurve {
+    let curve_3d = |i: usize, piece: &Piece| -> Result<NurbsCurve, KernelError> {
         let plane = sections[i].plane;
-        match *piece {
+        Ok(match *piece {
+            Piece::Spline {
+                ref piece,
+                backwards,
+            } => {
+                let curve = spline_curve(piece, |p| plane.from_plane_coords(p))?;
+                if backwards { curve.reversed() } else { curve }
+            }
             Piece::Line { a, b } => {
                 NurbsCurve::line(plane.from_plane_coords(a), plane.from_plane_coords(b), 1)
             }
@@ -388,7 +461,7 @@ pub fn loft_traced(sections: &[LoftSection<'_>]) -> Result<(Solid, Vec<LoftFace>
                 from,
                 sweep,
             ),
-        }
+        })
     };
 
     let mut solid = Solid::new();
@@ -399,44 +472,53 @@ pub fn loft_traced(sections: &[LoftSection<'_>]) -> Result<(Solid, Vec<LoftFace>
     let top_v: Vec<VertexId> = (0..n).map(|k| solid.add_vertex(rails[k][last])).collect();
     // The caps' edges: the first and last profiles' own curves. Each is stored in its
     // curve's own direction; the flag says whether the profile runs against it.
-    let cap_edges = |solid: &mut Solid, i: usize, v: &[VertexId]| -> Vec<(EdgeId, bool)> {
-        let plane = sections[i].plane;
-        (0..n)
-            .map(|k| {
-                let (from, to) = (v[k], v[(k + 1) % n]);
-                match profiles[i][k].0 {
-                    Piece::Line { .. } => (solid.add_line_edge(from, to), false),
-                    Piece::Arc {
-                        center,
-                        radius,
-                        from: a0,
-                        sweep,
-                    } => {
-                        let circle = Curve3::Circle(Circle3 {
-                            frame: Frame {
-                                origin: plane.from_plane_coords(center),
-                                rotation: plane.frame.rotation,
-                            },
-                            radius,
-                        });
-                        if sweep > 0.0 {
-                            (solid.add_edge(circle, from, to, a0, a0 + sweep), false)
-                        } else {
-                            (solid.add_edge(circle, to, from, a0 + sweep, a0), true)
+    let cap_edges =
+        |solid: &mut Solid, i: usize, v: &[VertexId]| -> Result<Vec<(EdgeId, bool)>, KernelError> {
+            let plane = sections[i].plane;
+            (0..n)
+                .map(|k| {
+                    let (from, to) = (v[k], v[(k + 1) % n]);
+                    Ok(match profiles[i][k].0 {
+                        Piece::Spline { .. } => {
+                            let curve = curve_3d(i, &profiles[i][k].0)?;
+                            let (lo, hi) = curve.domain();
+                            let curve = Curve3::Nurbs(Arc::new(curve));
+                            (solid.add_edge(curve, from, to, lo, hi), false)
                         }
-                    }
-                }
-            })
-            .collect()
-    };
-    let bottom_e = cap_edges(&mut solid, 0, &bottom_v);
-    let top_e = cap_edges(&mut solid, last, &top_v);
+                        Piece::Line { .. } => (solid.add_line_edge(from, to), false),
+                        Piece::Arc {
+                            center,
+                            radius,
+                            from: a0,
+                            sweep,
+                        } => {
+                            let circle = Curve3::Circle(Circle3 {
+                                frame: Frame {
+                                    origin: plane.from_plane_coords(center),
+                                    rotation: plane.frame.rotation,
+                                },
+                                radius,
+                            });
+                            if sweep > 0.0 {
+                                (solid.add_edge(circle, from, to, a0, a0 + sweep), false)
+                            } else {
+                                (solid.add_edge(circle, to, from, a0 + sweep, a0), true)
+                            }
+                        }
+                    })
+                })
+                .collect()
+        };
+    let bottom_e = cap_edges(&mut solid, 0, &bottom_v)?;
+    let top_e = cap_edges(&mut solid, last, &top_v)?;
 
     // Sides and rails. A rail is the edge of its two neighbouring surfaces.
     let mut surfaces: Vec<Surface> = Vec::with_capacity(n);
     for k in 0..n {
-        let section_curves: Vec<NurbsCurve> =
-            (0..count).map(|i| curve_3d(i, &profiles[i][k].0)).collect();
+        let section_curves: Vec<NurbsCurve> = (0..count)
+            .map(|i| curve_3d(i, &profiles[i][k].0))
+            .collect::<Result<_, _>>()?;
+
         let flat = flat_side(&profiles, &rails, k, count);
         surfaces.push(match flat {
             Some(plane) => Surface::Plane(plane),
@@ -494,15 +576,6 @@ pub fn loft_traced(sections: &[LoftSection<'_>]) -> Result<(Solid, Vec<LoftFace>
     faces.push(LoftFace::Start);
     let backwards: Vec<(EdgeId, bool)> = bottom_e.iter().rev().map(|&(e, r)| (e, !r)).collect();
     solid.add_loop(start, &backwards);
-
-    if let Err(problems) = crate::validate::validate(&solid) {
-        let list: Vec<&str> = problems.iter().map(|p| p.message.as_str()).collect();
-        return Err(KernelError::InvalidResult(format!(
-            "The loft produced an invalid solid (do the profiles twist, or cross each \
-             other?): {}.",
-            list.join("; ")
-        )));
-    }
     Ok((solid, faces))
 }
 

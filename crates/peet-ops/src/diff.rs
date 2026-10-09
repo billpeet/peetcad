@@ -18,18 +18,41 @@ use crate::fields::{FeatureArgs, SketchPlane, input_of};
 use crate::host::Host;
 use crate::mate::{MateChange, MateEndSel, MateType};
 use crate::op::{DatumSel, New, Op, Place, RollTo};
-use crate::value::{FeatureSel, Input};
+use crate::value::{Configs, FeatureSel, Input};
 use crate::{Undo, apply_with};
 
 fn by_id(id: FeatureId) -> FeatureSel {
     FeatureSel::Id(id)
 }
 
+/// What a value set on the model itself applies to: the active configuration if the
+/// value differs between configurations, every configuration if it doesn't.
+fn as_set_directly(differs: bool) -> Configs {
+    if differs { Configs::This } else { Configs::All }
+}
+
 /// The operations that turn the document's model into `new`, in the order to apply them.
+///
+/// The model holds the active configuration, so a tool's change is one to that
+/// configuration where it differs from the others, and to all of them where it doesn't.
+/// Changes to the configurations themselves are operations from the start, not found
+/// here.
 ///
 /// Fails, with the reason, if the change is one the operations can't express.
 pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
+    diff_scoped(doc, new, None)
+}
+
+/// [`diff`], with the configurations the numeric values that changed (feature values and
+/// sketch dimensions) are changed in. `None`: as a change to the model is (see above).
+pub fn diff_scoped(
+    doc: &Document,
+    new: &Model,
+    values: Option<&Configs>,
+) -> Result<Vec<Op>, String> {
     let old = &doc.model;
+    // With one configuration there is nothing to choose.
+    let values = values.filter(|_| old.configurations().len() > 1);
     let mut ops = Vec::new();
     if old.name != new.name {
         return Err("the part was renamed, which no operation does".to_owned());
@@ -62,6 +85,7 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
                 ops.push(Op::SetParameter {
                     name: p.name.clone(),
                     value: Input::Expr(p.expression.clone()),
+                    configurations: as_set_directly(old.parameter_differs(&p.name)),
                 });
             }
         }
@@ -399,23 +423,49 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
                         fields: FeatureArgs::SketchPlane(SketchPlane {
                             on: Some(b.plane.clone().into()),
                         }),
+                        configurations: None,
                     });
                 }
                 if a.sketch != b.sketch {
                     ops.push(Op::SetSketch {
                         sketch: by_id(f.id),
                         content: Box::new(b.sketch.clone()),
+                        configurations: values.cloned(),
                     });
                 }
             }
             (a, b) if a != b => {
-                let fields = FeatureArgs::changes(a, b, doc)
-                    .filter(|c| !c.is_empty())
-                    .ok_or_else(|| format!("{} was changed in a way no operation does", f.name))?;
-                ops.push(Op::Edit {
-                    feature: by_id(f.id),
-                    fields,
-                });
+                // With a scope for the values, they are changed on their own: the other
+                // fields are the same in every configuration.
+                let mut half = a.clone();
+                if values.is_some() {
+                    let now = b.slots();
+                    for (name, _, value) in half.slots_mut() {
+                        if let Some((_, _, v)) = now.iter().find(|(n, ..)| *n == name) {
+                            *value = (*v).clone();
+                        }
+                    }
+                }
+                let mut any = false;
+                for (from, to, configurations) in [(a, &half, values), (&half, b, None)] {
+                    if from == to {
+                        continue;
+                    }
+                    let fields = FeatureArgs::changes(from, to, doc)
+                        .filter(|c| !c.is_empty())
+                        .ok_or_else(|| {
+                            format!("{} was changed in a way no operation does", f.name)
+                        })?;
+                    ops.push(Op::Edit {
+                        feature: by_id(f.id),
+                        fields,
+                        configurations: configurations.cloned(),
+                    });
+                    any = true;
+                }
+                if !any {
+                    return Err(format!("{} was changed in a way no operation does", f.name));
+                }
             }
             _ => {}
         }
@@ -454,6 +504,7 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
                     ops.push(Op::SetSketch {
                         sketch: by_id(f.id),
                         content: Box::new(s.sketch.clone()),
+                        configurations: None,
                     });
                 }
             }
@@ -495,6 +546,7 @@ pub fn diff(doc: &Document, new: &Model) -> Result<Vec<Op>, String> {
             ops.push(Op::Suppress {
                 feature: by_id(f.id),
                 on: f.suppressed,
+                configurations: as_set_directly(old.suppression_differs(f.id)),
             });
         }
         if f.visible != visible {
@@ -583,8 +635,37 @@ pub fn apply_model(
     label: &str,
     key: u64,
 ) -> Translation {
+    apply_model_scoped(host, doc, new, label, key, None)
+}
+
+/// [`apply_model`], with the configurations the numeric values that changed (feature
+/// values and sketch dimensions) are changed in: what the application's "this
+/// configuration only" asks for. `None`: as a change to the model is.
+pub fn apply_model_scoped(
+    host: &mut dyn Host,
+    doc: &mut Document,
+    new: Model,
+    label: &str,
+    key: u64,
+    values: Option<&Configs>,
+) -> Translation {
     let undo = Undo::Group(key);
-    let ops = match diff(doc, &new) {
+    let mut new = new;
+    // The model asked for, with the values that changed given their scope.
+    if let Some(scope) = values.and_then(|c| c.resolve(doc).ok()) {
+        let ids: Vec<FeatureId> = new.features().map(|f| f.id).collect();
+        for id in ids {
+            for v in new.values(id) {
+                if let Some((_, before)) = doc.model.value(id, &v.slot)
+                    && before != v.value
+                {
+                    let _ = new.rescope_value(id, &v.slot, before, &scope);
+                }
+            }
+        }
+    }
+    new.tidy_configurations();
+    let ops = match diff_scoped(doc, &new, values) {
         Ok(ops) => ops,
         Err(reason) => {
             let changed = doc.change_merging(label, key, |m| *m = new);

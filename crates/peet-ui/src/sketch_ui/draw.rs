@@ -426,7 +426,9 @@ fn glyph_anchor(sketch: &Sketch, view: &SketchView, e: EntityId) -> Option<Pos2>
         _ => {
             let curve = sketch.curve(e)?;
             let (at, t) = match curve {
-                Curve::Line { .. } | Curve::Arc { .. } => (curve.point_at(0.5), 0.5),
+                Curve::Line { .. } | Curve::Arc { .. } | Curve::Spline(_) => {
+                    (curve.point_at(0.5), 0.5)
+                }
                 Curve::Circle { .. } => (curve.point_at(0.125), 0.125),
             };
             let dir = view.screen_dir(at, curve.tangent_at(t));

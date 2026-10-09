@@ -23,6 +23,11 @@ struct State {
 }
 
 fn harness() -> Harness<'static, State> {
+    harness_stepping(0.25)
+}
+
+/// A harness whose frames are `step_dt` seconds apart (short enough, a double-click fits).
+fn harness_stepping(step_dt: f32) -> Harness<'static, State> {
     let mut item = SketchItem {
         plane: Plane::TOP,
         plane_name: "Top Plane".to_owned(),
@@ -45,6 +50,7 @@ fn harness() -> Harness<'static, State> {
     };
     let mut h = Harness::builder()
         .with_size(egui::vec2(900.0, 700.0))
+        .with_step_dt(step_dt)
         .build_ui_state(
             |ui, s: &mut State| {
                 let rect = ui.max_rect();
@@ -385,4 +391,228 @@ fn arc_direction_follows_the_cursor() {
         arc.length()
     );
     assert!(arc.point_at(0.5).y < 0.0 && arc.point_at(0.5).x > 0.0);
+}
+
+// ---- The spline tool ----
+
+fn v(x: f64, y: f64) -> DVec2 {
+    DVec2::new(x, y)
+}
+
+fn splines(s: &Sketch) -> Vec<peet_sketch::EntityId> {
+    s.entities()
+        .filter(|(_, e)| e.kind() == EntityKind::Spline)
+        .map(|(id, _)| id)
+        .collect()
+}
+
+fn right_click(h: &mut Harness<'_, State>, p: DVec2) {
+    let pos = to_screen(h, p);
+    h.hover_at(pos);
+    frames(h, 2);
+    for pressed in [true, false] {
+        h.event(Event::PointerButton {
+            pos,
+            button: PointerButton::Secondary,
+            pressed,
+            modifiers: Modifiers::NONE,
+        });
+        h.step();
+    }
+    frames(h, 2);
+}
+
+/// Two clicks in quick succession at a sketch position.
+fn double_click(h: &mut Harness<'_, State>, p: DVec2) {
+    let pos = to_screen(h, p);
+    h.hover_at(pos);
+    frames(h, 2);
+    for _ in 0..2 {
+        button(h, pos, true);
+        h.step();
+        button(h, pos, false);
+        h.step();
+    }
+    frames(h, 2);
+}
+
+#[test]
+fn spline_tool_places_points_until_enter() {
+    let mut h = harness();
+    command(&mut h, CommandId::SketchSpline);
+    assert_eq!(h.state().editor.tool, Tool::Spline);
+    click(&mut h, DVec2::ZERO); // on the origin
+    click(&mut h, v(20.0, 15.0));
+    click(&mut h, v(40.0, -5.0));
+    assert!(
+        splines(&h.state().item.sketch).is_empty(),
+        "not finished yet"
+    );
+    assert!(h.state().editor.hint().contains("Enter"));
+
+    // The preview is the spline through the clicks and the cursor.
+    h.hover_at(to_screen(&h, v(60.0, 10.0)));
+    frames(&mut h, 2);
+    {
+        let s = h.state();
+        let preview = s.editor.preview(&s.item.sketch);
+        assert_eq!(preview.len(), 1);
+        assert!(matches!(preview[0], peet_sketch::Curve::Spline(_)));
+        for p in [DVec2::ZERO, v(20.0, 15.0), v(40.0, -5.0)] {
+            assert!(preview[0].distance(p) < 0.5, "{p}");
+        }
+        assert!(preview[0].end().distance(v(60.0, 10.0)) < 0.5);
+    }
+
+    click(&mut h, v(60.0, 10.0));
+    key(&mut h, Key::Enter);
+    {
+        let s = &h.state().item.sketch;
+        let found = splines(s);
+        assert_eq!(found.len(), 1);
+        let (points, closed) = s.spline_points(found[0]).unwrap();
+        assert!(!closed);
+        assert_eq!(points.len(), 4);
+        assert!(s.point(points[3]).distance(v(60.0, 10.0)) < 0.5);
+        // The first click's snap to the origin became a relation on the first point.
+        assert!(has(s, |k| matches!(k, ConstraintKind::Coincident(a, b)
+            if (*a == points[0] && *b == Sketch::ORIGIN)
+                || (*b == points[0] && *a == Sketch::ORIGIN))));
+        assert_eq!(s.point(points[0]), DVec2::ZERO);
+    }
+    // The tool stays active for the next spline, with nothing pending.
+    assert_eq!(h.state().editor.tool, Tool::Spline);
+    assert!(h.state().editor.clicks.is_empty());
+    // One undo step takes the whole spline away.
+    command(&mut h, CommandId::Undo);
+    assert!(splines(&h.state().item.sketch).is_empty());
+    assert_eq!(count(&h.state().item.sketch, EntityKind::Point), 1);
+}
+
+#[test]
+fn spline_closes_on_its_first_point() {
+    let mut h = harness();
+    command(&mut h, CommandId::SketchSpline);
+    for p in [v(30.0, 0.0), v(0.0, 20.0), v(-30.0, 0.0), v(0.0, -20.0)] {
+        click(&mut h, p);
+    }
+    // Hovering the first point shows the closed curve.
+    h.hover_at(to_screen(&h, v(30.4, 0.3)));
+    frames(&mut h, 2);
+    {
+        let s = h.state();
+        let preview = s.editor.preview(&s.item.sketch);
+        assert!(preview[0].is_closed());
+    }
+    click(&mut h, v(30.4, 0.3));
+    let s = &h.state().item.sketch;
+    let found = splines(s);
+    assert_eq!(found.len(), 1);
+    let (points, closed) = s.spline_points(found[0]).unwrap();
+    assert!(closed);
+    assert_eq!(points.len(), 4, "the closing click adds no point");
+    assert!(s.curve(found[0]).unwrap().is_closed());
+    assert!(h.state().editor.clicks.is_empty());
+    // A closed spline is a region to extrude.
+    assert_eq!(peet_sketch::region::find_regions(s).regions.len(), 1);
+}
+
+#[test]
+fn spline_finishes_on_double_click_and_right_click_and_escape_cancels() {
+    let mut h = harness_stepping(0.02);
+
+    command(&mut h, CommandId::SketchSpline);
+    // Esc drops the points placed so far and keeps the tool.
+    click(&mut h, v(-40.0, 20.0));
+    click(&mut h, v(-20.0, 30.0));
+    click(&mut h, v(0.0, 20.0));
+    key(&mut h, Key::Escape);
+    assert!(splines(&h.state().item.sketch).is_empty());
+    assert!(h.state().editor.clicks.is_empty());
+    assert_eq!(h.state().editor.tool, Tool::Spline);
+
+    // A double-click places the last point and finishes. Quick clicks in different
+    // places before it are points like any other.
+    click(&mut h, v(-40.0, -20.0));
+    click(&mut h, v(-20.0, -30.0));
+    assert_eq!(h.state().editor.clicks.len(), 2);
+    frames(&mut h, 40);
+    double_click(&mut h, v(0.0, -20.0));
+    {
+        let s = &h.state().item.sketch;
+        let found = splines(s);
+        assert_eq!(found.len(), 1);
+        assert_eq!(s.spline_points(found[0]).unwrap().0.len(), 3);
+    }
+    assert!(h.state().editor.clicks.is_empty());
+
+    // A right-click finishes without adding a point. Two points make a straight spline.
+    frames(&mut h, 40); // let the double-click window pass
+
+    click(&mut h, v(20.0, 40.0));
+    click(&mut h, v(50.0, 40.0));
+    right_click(&mut h, v(60.0, 30.0));
+    {
+        let s = &h.state().item.sketch;
+        let found = splines(s);
+        assert_eq!(found.len(), 2);
+        assert_eq!(s.spline_points(found[1]).unwrap().0.len(), 2);
+        assert!((s.curve(found[1]).unwrap().length() - 30.0).abs() < 0.5);
+    }
+    // With one point placed there is nothing to finish: Enter drops it.
+    click(&mut h, v(20.0, 55.0));
+    key(&mut h, Key::Enter);
+    assert_eq!(splines(&h.state().item.sketch).len(), 2);
+    assert!(h.state().editor.clicks.is_empty());
+}
+
+#[test]
+fn spline_points_drag_and_the_curve_is_picked() {
+    let mut h = harness();
+    command(&mut h, CommandId::SketchSpline);
+    for p in [v(-40.0, 0.0), v(-10.0, 20.0), v(20.0, -10.0), v(50.0, 10.0)] {
+        click(&mut h, p);
+    }
+    key(&mut h, Key::Enter);
+    command(&mut h, CommandId::SketchSelect);
+    let spline = splines(&h.state().item.sketch)[0];
+    let points = h
+        .state()
+        .item
+        .sketch
+        .spline_points(spline)
+        .unwrap()
+        .0
+        .to_vec();
+
+    // Hovering the curve between fit points picks the spline; hovering a fit point, it.
+    let on_curve = h.state().item.sketch.curve(spline).unwrap().point_at(0.5);
+    h.hover_at(to_screen(&h, on_curve));
+    frames(&mut h, 2);
+    assert_eq!(h.state().editor.hover, Some(super::Sel::Entity(spline)));
+    h.hover_at(to_screen(&h, v(-10.0, 20.0)));
+    frames(&mut h, 2);
+    assert_eq!(h.state().editor.hover, Some(super::Sel::Entity(points[1])));
+    assert_eq!(
+        super::describe_entity(&h.state().item.sketch, points[1]),
+        format!("Spline {} point 2", spline.0)
+    );
+
+    // Dragging a fit point moves it, and the curve with it; the other points stay.
+    drag(&mut h, v(-10.0, 20.0), v(-5.0, 35.0));
+    {
+        let s = &h.state().item.sketch;
+        assert!(s.point(points[1]).distance(v(-5.0, 35.0)) < 0.5);
+        assert!(s.point(points[0]).distance(v(-40.0, 0.0)) < 0.5);
+        assert!(s.curve(spline).unwrap().distance(s.point(points[1])) < 1e-9);
+        assert!(h.state().editor.last_report.converged);
+    }
+    // Clicking the curve selects it, and Delete removes the spline and its points.
+    let on_curve = h.state().item.sketch.curve(spline).unwrap().point_at(0.8);
+    click(&mut h, on_curve);
+    assert_eq!(h.state().editor.selection, vec![super::Sel::Entity(spline)]);
+    command(&mut h, CommandId::DeleteSelection);
+    let s = &h.state().item.sketch;
+    assert!(splines(s).is_empty());
+    assert_eq!(count(s, EntityKind::Point), 1, "only the origin is left");
 }

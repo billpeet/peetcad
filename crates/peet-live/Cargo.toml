@@ -1,0 +1,20 @@
+[package]
+name = "peet-live"
+description = "How peet reaches a running PeetCAD: the list of running sessions, and operations sent to one over a local socket"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+log.workspace = true
+serde_json.workspace = true
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+# Local sockets (MIT/Apache-2.0): a named pipe on Windows, a Unix domain socket elsewhere.
+# Only this user's processes can connect to either.
+interprocess = "2.4"
+
+[lints]
+workspace = true

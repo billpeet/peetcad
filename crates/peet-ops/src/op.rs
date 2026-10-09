@@ -17,7 +17,7 @@ use crate::library::{CheckRule, Gauge};
 use crate::mate::{MateChange, MateEndSel, MateSel, MateType};
 use crate::session::SessionCommand;
 use crate::sketch::{self, DrawItem};
-use crate::value::{EdgeSel, FeatureSel, GeomSel, Input, PlaneSel};
+use crate::value::{Configs, EdgeSel, FeatureSel, GeomSel, Input, PlaneSel};
 
 word_enum! {
     /// A sample part that comes with PeetCAD.
@@ -203,6 +203,8 @@ pub enum Query {
     /// One feature: its fields, and a sketch's contents.
     Feature(FeatureSel),
     Parameters,
+    /// The configurations, which one is active, and what differs between them.
+    Configurations,
     /// Bounds, volume, and flat size for sheet metal.
     Bodies,
     /// The faces of one body, or of all.
@@ -271,9 +273,15 @@ pub enum Op {
     /// Add features (several as one step: an edge flange on each of several edges).
     Add(Vec<New>),
     /// Change fields of a feature. `fields` must be of the feature's kind.
+    ///
+    /// Its numeric values can differ between configurations: `configurations` says which
+    /// ones the new values are for. Left out, a value that already differs changes in
+    /// the active configuration and one that doesn't changes in all of them. The other
+    /// fields are the same in every configuration.
     Edit {
         feature: FeatureSel,
         fields: FeatureArgs,
+        configurations: Option<Configs>,
     },
     /// Add a sketch on a plane or a flat face, and draw in it.
     Sketch {
@@ -286,20 +294,24 @@ pub enum Op {
         sketch: FeatureSel,
         draw: Vec<DrawItem>,
     },
-    /// Change a sketch dimension (`"d1"`).
+    /// Change a sketch dimension (`"d1"`), in the configurations given (as for
+    /// [`Op::Edit`]).
     SetDimension {
         sketch: FeatureSel,
         name: String,
         value: Input,
+        configurations: Option<Configs>,
     },
     Rename {
         feature: FeatureSel,
         name: String,
     },
-    /// Suppress a feature (skip it when rebuilding), or unsuppress it.
+    /// Suppress a feature (skip it when rebuilding, with everything built on it), or
+    /// unsuppress it, in some configurations.
     Suppress {
         feature: FeatureSel,
         on: bool,
+        configurations: Configs,
     },
     /// Show or hide a feature's own geometry (a sketch, a plane).
     Show {
@@ -319,14 +331,42 @@ pub enum Op {
     },
     /// Replace what is drawn in a sketch: how the sketch editor commits its work. A
     /// script draws with `Draw`.
+    ///
+    /// `configurations` says which ones the dimensions whose values changed are changed
+    /// in (as for [`Op::Edit`]); what is drawn is the same in every configuration.
     SetSketch {
         sketch: FeatureSel,
         content: Box<peet_sketch::Sketch>,
+        configurations: Option<Configs>,
     },
-    /// Add or change a named value usable in every expression.
+    /// Add or change a named value usable in every expression. A new one exists in
+    /// every configuration; an existing one changes in the configurations given.
     SetParameter {
         name: String,
         value: Input,
+        configurations: Configs,
+    },
+    /// Add a configuration: a copy of another (the active one if absent), which becomes
+    /// the active one.
+    AddConfiguration {
+        name: String,
+        copy: Option<String>,
+        comment: Option<String>,
+    },
+    /// Rename a configuration, or change its comment.
+    EditConfiguration {
+        configuration: String,
+        name: Option<String>,
+        comment: Option<String>,
+    },
+    /// Delete a configuration. A part keeps at least one.
+    DeleteConfiguration {
+        configuration: String,
+    },
+    /// Make a configuration the active one: the one built, shown and exported. Like the
+    /// flat pattern view, it is not an undo step.
+    Configuration {
+        configuration: String,
     },
     DeleteParameter {
         name: String,
@@ -339,7 +379,7 @@ pub enum Op {
     ImportStep {
         file: Source,
     },
-    /// Bring the lines, arcs, circles and polylines of a DXF file into a sketch.
+    /// Bring the lines, arcs, circles, polylines and fit-point splines of a DXF file into a sketch.
     ImportDxf {
         file: Source,
         into: DxfTarget,
@@ -574,6 +614,10 @@ impl Op {
             Self::Rollback { .. } => "rollback",
             Self::SetSketch { .. } => "set_sketch",
             Self::SetParameter { .. } => "set_parameter",
+            Self::AddConfiguration { .. } => "add_configuration",
+            Self::EditConfiguration { .. } => "edit_configuration",
+            Self::DeleteConfiguration { .. } => "delete_configuration",
+            Self::Configuration { .. } => "configuration",
             Self::DeleteParameter { .. } => "delete_parameter",
             Self::SetUnits { .. } => "set_units",
             Self::ImportStep { .. } => "import_step",
@@ -618,6 +662,7 @@ impl Op {
                 Query::Features => "features",
                 Query::Feature(_) => "feature",
                 Query::Parameters => "parameters",
+                Query::Configurations => "configurations",
                 Query::Bodies => "bodies",
                 Query::Faces { .. } => "faces",
                 Query::Edges { .. } => "edges",
@@ -679,11 +724,6 @@ fn new_features(op: &str, a: &mut Args) -> Result<Vec<New>, String> {
         if edges.is_empty() {
             return Err("'edges' is empty.".to_owned());
         }
-        if name.is_some() && edges.len() > 1 {
-            return Err(
-                "'name' can't be used with several edges: rename them afterwards.".to_owned(),
-            );
-        }
         Some(edges)
     } else {
         None
@@ -697,9 +737,12 @@ fn new_features(op: &str, a: &mut Args) -> Result<Vec<New>, String> {
             feature: args,
         }]);
     };
+    // Several features from one name are numbered: Wall1, Wall2, …
+    let several = edges.len() > 1;
     Ok(edges
         .into_iter()
-        .map(|edge| {
+        .enumerate()
+        .map(|(i, edge)| {
             let mut feature = args.clone();
             match &mut feature {
                 FeatureArgs::EdgeFlange(f) => f.edge = Some(Some(edge)),
@@ -707,7 +750,13 @@ fn new_features(op: &str, a: &mut Args) -> Result<Vec<New>, String> {
                 _ => {}
             }
             New {
-                name: name.clone(),
+                name: name.as_ref().map(|n| {
+                    if several {
+                        format!("{n}{}", i + 1)
+                    } else {
+                        n.clone()
+                    }
+                }),
                 feature,
             }
         })
@@ -729,19 +778,19 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "set_dimension",
-        "sketch, name, value",
-        "Change a sketch dimension (\"d1\") to a number or an expression.",
+        "sketch, name, value, configurations (\"this\", \"all\", a name or a list of names; left out: this one if the dimension already differs between configurations, else all)",
+        "Change a sketch dimension (\"d1\") to a number or an expression, in some configurations.",
     ),
     (
         "edit",
-        "feature, then any of the feature's fields ('on' for a sketch: its plane)",
-        "Change fields of a feature.",
+        "feature, then any of the feature's fields ('on' for a sketch: its plane), configurations (\"this\", \"all\", a name or a list of names: for numeric fields only; left out: this one for a value that already differs between configurations, else all)",
+        "Change fields of a feature. Its numeric values can differ between configurations.",
     ),
     ("rename", "feature, name", "Rename a feature."),
     (
         "suppress",
-        "feature, on (default true)",
-        "Suppress a feature (skip it when rebuilding), or unsuppress it.",
+        "feature, on (default true), configurations (\"this\" (default), \"all\", a name or a list of names)",
+        "Suppress a feature (skip it when rebuilding, with everything built on it), or unsuppress it, in some configurations.",
     ),
     (
         "show",
@@ -761,8 +810,33 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "set_parameter",
-        "name, value",
-        "Add or change a named value usable in every expression.",
+        "name, value, configurations (\"this\" (default), \"all\", a name or a list of names)",
+        "Add or change a named value usable in every expression. A new one exists in every configuration.",
+    ),
+    (
+        "add_configuration",
+        "name, copy (a configuration; default the active one), comment",
+        "Add a configuration, which starts as a copy and becomes the active one.",
+    ),
+    (
+        "edit_configuration",
+        "configuration, name, comment",
+        "Rename a configuration, or change its comment.",
+    ),
+    (
+        "delete_configuration",
+        "configuration",
+        "Delete a configuration. A part keeps at least one.",
+    ),
+    (
+        "configuration",
+        "configuration",
+        "Make a configuration the active one: the one built, shown and exported. Not an undo step.",
+    ),
+    (
+        "configurations",
+        "",
+        "The configurations, which one is active, and what differs between them.",
     ),
     ("delete_parameter", "name", "Remove a named value."),
     (
@@ -841,7 +915,8 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "import_dxf",
         "path, and sketch (an existing one) or on (a plane: a new sketch; default top) with name; unit (mm, cm, m, in, ft), placement (keep, centred, lower_left)",
-        "Bring the lines, arcs, circles and polylines of a DXF file into a sketch.",
+        "Bring the lines, arcs, circles, polylines and fit-point splines of a DXF file into a sketch.
+",
     ),
     (
         "materials",
@@ -934,6 +1009,23 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "features" => Op::Query(Query::Features),
         "feature" => Op::Query(Query::Feature(feature(a, "feature")?)),
         "parameters" => Op::Query(Query::Parameters),
+        "configurations" => Op::Query(Query::Configurations),
+        "add_configuration" => Op::AddConfiguration {
+            name: a.required("name", |v| text(v).map(str::to_owned))?,
+            copy: a.string("copy")?,
+            comment: a.string("comment")?,
+        },
+        "edit_configuration" => Op::EditConfiguration {
+            configuration: a.required("configuration", |v| text(v).map(str::to_owned))?,
+            name: a.string("name")?,
+            comment: a.string("comment")?,
+        },
+        "delete_configuration" => Op::DeleteConfiguration {
+            configuration: a.required("configuration", |v| text(v).map(str::to_owned))?,
+        },
+        "configuration" => Op::Configuration {
+            configuration: a.required("configuration", |v| text(v).map(str::to_owned))?,
+        },
         "bodies" => Op::Query(Query::Bodies),
         "faces" => Op::Query(Query::Faces { body: body(a)? }),
         "edges" => Op::Query(Query::Edges { body: body(a)? }),
@@ -1095,9 +1187,11 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             sketch: feature(a, "sketch")?,
             name: a.required("name", |v| text(v).map(str::to_owned))?,
             value: a.required("value", Input::parse)?,
+            configurations: a.parsed("configurations", Configs::parse)?,
         },
         "edit" => {
             let target = feature(a, "feature")?;
+            let configurations = a.parsed("configurations", Configs::parse)?;
             let id = target.resolve(doc)?;
             let kind = doc
                 .feature(id)
@@ -1106,6 +1200,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             Op::Edit {
                 feature: target,
                 fields: FeatureArgs::parse_for(kind, a)?,
+                configurations,
             }
         }
         "rename" => Op::Rename {
@@ -1115,6 +1210,9 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "suppress" => Op::Suppress {
             feature: feature(a, "feature")?,
             on: a.flag("on", true)?,
+            configurations: a
+                .parsed("configurations", Configs::parse)?
+                .unwrap_or_default(),
         },
         "show" if a.has("datum") => Op::ShowDatum {
             datum: a.required("datum", DatumSel::parse)?,
@@ -1167,6 +1265,9 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "set_parameter" => Op::SetParameter {
             name: a.required("name", |v| text(v).map(str::to_owned))?,
             value: a.required("value", Input::parse)?,
+            configurations: a
+                .parsed("configurations", Configs::parse)?
+                .unwrap_or_default(),
         },
         "delete_parameter" => Op::DeleteParameter {
             name: a.required("name", |v| text(v).map(str::to_owned))?,

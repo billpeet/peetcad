@@ -377,6 +377,110 @@ impl Mesh2 {
         }
     }
 
+    /// Adds points inside the mesh on a grid of about `step`, each splitting the triangle
+    /// it falls in. Points close to the boundary are left out: the boundary has its own.
+    ///
+    /// A long face that is finely divided both ways (a swept freeform face) gets its
+    /// inner points here in one go; [`Self::split_long`] alone would halve every edge
+    /// across it separately and make many times more.
+    pub fn seed_grid(&mut self, step: DVec2, max_points: usize) {
+        let (lo, hi) = self.points.iter().fold(
+            (DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)),
+            |(lo, hi), p| (lo.min(*p), hi.max(*p)),
+        );
+        let size = hi - lo;
+        if !(size.x > 0.0 && size.y > 0.0 && step.x > 0.0 && step.y > 0.0) {
+            return;
+        }
+        let nx = (size.x / step.x).ceil().max(1.0);
+        let ny = (size.y / step.y).ceil().max(1.0);
+        if nx * ny > max_points as f64 || (nx < 2.0 && ny < 2.0) {
+            return;
+        }
+        let (nx, ny) = (nx as usize, ny as usize);
+        let cell = DVec2::new(size.x / nx as f64, size.y / ny as f64);
+        let clear = 0.3 * cell.x.min(cell.y);
+        // Nearer an inner edge than this, a point is on it.
+        let on_edge = 1e-6 * clear;
+        // Rows of points fall in neighbouring triangles: look near the last one first.
+        let mut last = 0;
+        for j in 1..ny.max(2) {
+            for i in 1..nx.max(2) {
+                let p = lo
+                    + DVec2::new(
+                        if nx < 2 {
+                            0.5 * size.x
+                        } else {
+                            cell.x * i as f64
+                        },
+                        if ny < 2 {
+                            0.5 * size.y
+                        } else {
+                            cell.y * j as f64
+                        },
+                    );
+                let count = self.tris.len();
+                // The triangle it is in (or on an inner edge of), clear of the boundary.
+                let height = |m: &Self, a: u32, b: u32| {
+                    let (pa, pb) = (m.p(a), m.p(b));
+                    cross(pa, pb, p) / (pb - pa).length().max(1e-300)
+                };
+                let found = (0..count).map(|k| (last + k) % count).find(|&t| {
+                    let tri = self.tris[t];
+                    (0..3).all(|k| {
+                        let (a, b) = (tri[k], tri[(k + 1) % 3]);
+                        let boundary = !self.edges.contains_key(&(b, a));
+                        height(self, a, b) > if boundary { clear } else { -on_edge }
+                    })
+                });
+                let Some(t) = found.filter(|&t| {
+                    let tri = self.tris[t];
+                    (0..3).all(|k| (self.p(tri[k]) - p).length() > clear)
+                }) else {
+                    continue;
+                };
+                last = t;
+                let tri = self.tris[t];
+                let on = (0..3)
+                    .map(|k| (tri[k], tri[(k + 1) % 3]))
+                    .find(|&(a, b)| height(self, a, b) <= on_edge);
+                self.points.push(p);
+                let m = (self.points.len() - 1) as u32;
+                match on {
+                    // On an edge: both its triangles are split in two.
+                    Some((a, b)) => {
+                        let Some(&t2) = self.edges.get(&(b, a)) else {
+                            self.points.pop();
+                            continue;
+                        };
+                        let c = self.opposite(t, a, b);
+                        let d = self.opposite(t2, b, a);
+                        // The far triangle must be clear of the boundary too.
+                        let near_boundary = [(b, d), (d, a)].iter().any(|&(u, v)| {
+                            !self.edges.contains_key(&(v, u)) && height(self, u, v) <= clear
+                        });
+                        if near_boundary || (self.p(d) - p).length() <= clear {
+                            self.points.pop();
+                            continue;
+                        }
+                        self.edges.remove(&(a, b));
+                        self.edges.remove(&(b, a));
+                        self.set_tri(t, [a, m, c]);
+                        self.push_tri([m, b, c]);
+                        self.set_tri(t2, [b, m, d]);
+                        self.push_tri([m, a, d]);
+                    }
+                    None => {
+                        let [a, b, c] = tri;
+                        self.set_tri(t, [a, b, m]);
+                        self.push_tri([b, c, m]);
+                        self.push_tri([c, a, m]);
+                    }
+                }
+            }
+        }
+    }
+
     /// Splits interior edges whose `|Δx|` exceeds `max_dx` at their midpoints until none
     /// remain (or `max_points` new points have been added). Boundary edges are left alone.
     ///

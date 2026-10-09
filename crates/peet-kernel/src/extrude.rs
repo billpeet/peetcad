@@ -12,6 +12,11 @@
 //! what `find_regions` produces for a circle) becomes one closed circle edge per cap and one
 //! cylinder face with a seam line.
 //!
+//! A spline piece becomes a freeform side face: the ruled surface between the spline at
+//! `from` and the same spline at `to`, which is exactly the spline swept along the normal.
+//! Its cap edges are the spline itself ([`crate::profile::spline_curve`]). A closed
+//! spline is cut in two first, so no face goes all the way round.
+//!
 //! **Orientation.** The region lies to the left of every loop edge (outer loops run
 //! counter-clockwise, holes clockwise), so the outward side of a side face is to the right of
 //! the loop direction. The top cap uses the plane's normal and walks the loops as given; the
@@ -20,12 +25,15 @@
 //! clockwise (the material is outside the circle, as for a round hole).
 
 use std::f64::consts::TAU;
+use std::sync::Arc;
 
 use peet_math::{DVec2, DVec3, Frame, Plane, tolerance};
 use peet_sketch::Curve;
 use peet_sketch::region::{LoopEdge, Region};
 
 use crate::geom::{Circle3, Curve3, Cylinder, Surface};
+use crate::nurbs::NurbsSurface;
+use crate::profile::spline_curve;
 use crate::topo::{EdgeId, ShellId, VertexId};
 use crate::{KernelError, Solid};
 
@@ -38,7 +46,8 @@ const SAME_CIRCLE: f64 = 10.0 * tolerance::LINEAR;
 /// Extrudes `regions` (in `plane`'s 2D coordinates, as found by
 /// `peet_sketch::region::find_regions`) along the plane normal, from offset `from` to offset
 /// `to` (mm along the normal, `from < to`). Each region becomes one closed shell: planar caps
-/// at both ends, a planar side face per line and a cylindrical side face per arc or circle.
+/// at both ends, a planar side face per line, a cylindrical side face per arc or circle and
+/// a freeform side face per spline.
 /// Holes in regions become inner loops on the caps and inward-facing side walls. Disjoint
 /// regions give a solid with several shells (lumps).
 ///
@@ -115,14 +124,14 @@ pub fn extrude_traced(
                     .map_err(|m| KernelError::InvalidInput(format!("region {ri}: hole {hi} {m}")))
             })
             .collect::<Result<Vec<_>, _>>()?;
-        builder.add_region(ri, &outer, &holes);
+        builder.add_region(ri, &outer, &holes)?;
     }
     debug_assert_eq!(builder.faces.len(), builder.solid.faces.len());
     Ok((builder.solid, builder.faces))
 }
 
 /// A loop edge after cleaning: geometry plus traversal direction.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) struct Piece {
     pub curve: Curve,
     pub reversed: bool,
@@ -140,7 +149,7 @@ impl Piece {
 
 /// A cleaned loop.
 pub(crate) enum PreparedLoop {
-    /// A general loop of lines and arcs, at least two pieces.
+    /// A general loop of lines, arcs and splines, at least two pieces.
     Pieces(Vec<Piece>),
     /// A full circle; `reversed` means clockwise. `start_angle` is where the seam goes.
     Circle {
@@ -156,16 +165,30 @@ pub(crate) enum PreparedLoop {
 /// Drops degenerate pieces, detects full circles and fixes the winding (counter-clockwise
 /// for outer loops, clockwise for holes). Errors describe the problem for the user.
 pub(crate) fn prepare_loop(edges: &[LoopEdge], outer: bool) -> Result<PreparedLoop, String> {
-    let mut pieces: Vec<Piece> = edges
-        .iter()
-        .enumerate()
-        .filter(|(_, e)| e.curve.length() > MIN_EDGE_LENGTH)
-        .map(|(source, e)| Piece {
-            curve: e.curve,
+    let mut pieces: Vec<Piece> = Vec::with_capacity(edges.len());
+    for (source, e) in edges.iter().enumerate() {
+        if e.curve.length() <= MIN_EDGE_LENGTH {
+            continue;
+        }
+        let piece = |curve: Curve| Piece {
+            curve,
             reversed: e.reversed,
             source,
-        })
-        .collect();
+        };
+        if matches!(e.curve, Curve::Spline(_)) && e.curve.is_closed() {
+            // A whole closed spline: two halves, in the order the loop passes them.
+            let halves = [e.curve.sub_curve(0.0, 0.5), e.curve.sub_curve(0.5, 1.0)];
+            let [first, second] = if e.reversed {
+                let [a, b] = halves;
+                [b, a]
+            } else {
+                halves
+            };
+            pieces.extend([piece(first), piece(second)]);
+        } else {
+            pieces.push(piece(e.curve.clone()));
+        }
+    }
     if pieces.is_empty() {
         return Err("has no edges".to_owned());
     }
@@ -220,19 +243,13 @@ fn curve_is_finite(c: &Curve) -> bool {
         } => {
             center.is_finite() && radius.is_finite() && start_angle.is_finite() && sweep.is_finite()
         }
+        Curve::Spline(ref s) => s.spline().control_points().iter().all(|p| p.is_finite()),
     }
 }
 
-/// `½ ∮ (x dy − y dx)` of a piece in loop direction (exact for arcs).
+/// `½ ∮ (x dy − y dx)` of a piece in loop direction (exact for arcs and splines).
 fn signed_area_contribution(p: &Piece) -> f64 {
-    let c = &p.curve;
-    let a = match *c {
-        Curve::Circle { radius, .. } => std::f64::consts::PI * radius * radius,
-        Curve::Arc { radius, sweep, .. } => {
-            0.5 * c.start().perp_dot(c.end()) + 0.5 * radius * radius * (sweep - sweep.sin())
-        }
-        Curve::Line { a, b } => 0.5 * a.perp_dot(b),
-    };
+    let a = p.curve.area_term();
     if p.reversed { -a } else { a }
 }
 
@@ -240,7 +257,7 @@ fn signed_area_contribution(p: &Piece) -> f64 {
 fn full_circle(pieces: &[Piece], outer: bool) -> Option<PreparedLoop> {
     let (center, radius) = match pieces[0].curve {
         Curve::Circle { center, radius } | Curve::Arc { center, radius, .. } => (center, radius),
-        Curve::Line { .. } => return None,
+        Curve::Line { .. } | Curve::Spline(_) => return None,
     };
     let mut total = 0.0;
     for p in pieces {
@@ -322,11 +339,16 @@ impl Builder {
         }
     }
 
-    fn add_region(&mut self, region: usize, outer: &PreparedLoop, holes: &[PreparedLoop]) {
+    fn add_region(
+        &mut self,
+        region: usize,
+        outer: &PreparedLoop,
+        holes: &[PreparedLoop],
+    ) -> Result<(), KernelError> {
         let shell = self.solid.add_shell();
-        let mut built = vec![self.add_loop_sides(shell, outer, region, 0)];
+        let mut built = vec![self.add_loop_sides(shell, outer, region, 0)?];
         for (hi, h) in holes.iter().enumerate() {
-            built.push(self.add_loop_sides(shell, h, region, hi + 1));
+            built.push(self.add_loop_sides(shell, h, region, hi + 1)?);
         }
         // Caps: top walks the loops as given, bottom walks them backwards.
         let top_plane = Plane {
@@ -347,6 +369,7 @@ impl Builder {
             let uses: Vec<(EdgeId, bool)> = l.caps.iter().rev().map(|&(b, _, r)| (b, !r)).collect();
             self.solid.add_loop(bottom, &uses);
         }
+        Ok(())
     }
 
     /// Adds the side faces of one loop and returns its cap edges.
@@ -356,7 +379,7 @@ impl Builder {
         l: &PreparedLoop,
         region: usize,
         loop_index: usize,
-    ) -> BuiltLoop {
+    ) -> Result<BuiltLoop, KernelError> {
         let side = |edge: usize| ExtrudeFace::Side {
             region,
             loop_index,
@@ -402,9 +425,9 @@ impl Builder {
                         (seam, true),
                     ],
                 );
-                BuiltLoop {
+                Ok(BuiltLoop {
                     caps: vec![(bottom, top, reversed)],
-                }
+                })
             }
             PreparedLoop::Pieces(ref pieces) => {
                 let n = pieces.len();
@@ -424,7 +447,7 @@ impl Builder {
                 for (i, p) in pieces.iter().enumerate() {
                     let j = (i + 1) % n;
                     let wall =
-                        self.add_piece_edges(p, [bottom_v[i], bottom_v[j]], [top_v[i], top_v[j]]);
+                        self.add_piece_edges(p, [bottom_v[i], bottom_v[j]], [top_v[i], top_v[j]])?;
                     let face = self.solid.add_face(shell, wall.surface, wall.face_reversed);
                     self.faces.push(side(p.source));
                     self.solid.add_loop(
@@ -438,26 +461,57 @@ impl Builder {
                     );
                     caps.push((wall.bottom, wall.top, wall.reversed));
                 }
-                BuiltLoop { caps }
+                Ok(BuiltLoop { caps })
             }
         }
     }
 
-    /// Cap edges and side surface of a line or arc piece running (in loop order) from
-    /// `bottom[0]` to `bottom[1]` (and `top[0]` to `top[1]`).
+    /// Cap edges and side surface of a line, arc or spline piece running (in loop order)
+    /// from `bottom[0]` to `bottom[1]` (and `top[0]` to `top[1]`).
     fn add_piece_edges(
         &mut self,
         p: &Piece,
         bottom: [VertexId; 2],
         top: [VertexId; 2],
-    ) -> SideEdges {
+    ) -> Result<SideEdges, KernelError> {
         // Vertices in the curve's own direction.
         let (b0, b1, t0, t1) = if p.reversed {
             (bottom[1], bottom[0], top[1], top[0])
         } else {
             (bottom[0], bottom[1], top[0], top[1])
         };
-        match p.curve {
+        Ok(match p.curve {
+            Curve::Spline(ref s) => {
+                // The spline at both ends, in loop direction: the surface ruled between
+                // them then has its outside to the right of the loop, like a line's plane.
+                let (from, to) = (self.from, self.to);
+                let mut low = spline_curve(s, |q| self.point(q, from))?;
+                if p.reversed {
+                    low = low.reversed();
+                }
+                let rise = self.normal() * (to - from);
+                let high = low.mapped(|q| q + rise);
+                let surface = NurbsSurface::skin_at(&[low.clone(), high.clone()], &[0.0, 1.0])
+                    .map_err(|e| {
+                        KernelError::InvalidInput(format!(
+                            "a spline of the profile can't be extruded: {e}"
+                        ))
+                    })?;
+                let (lo, hi) = low.domain();
+                let be =
+                    self.solid
+                        .add_edge(Curve3::Nurbs(Arc::new(low)), bottom[0], bottom[1], lo, hi);
+                let te = self
+                    .solid
+                    .add_edge(Curve3::Nurbs(Arc::new(high)), top[0], top[1], lo, hi);
+                SideEdges {
+                    bottom: be,
+                    top: te,
+                    surface: Surface::Nurbs(Arc::new(surface)),
+                    face_reversed: false,
+                    reversed: false,
+                }
+            }
             Curve::Line { .. } => {
                 let be = self.solid.add_line_edge(b0, b1);
                 let te = self.solid.add_line_edge(t0, t1);
@@ -506,12 +560,13 @@ impl Builder {
                 }
             }
             Curve::Circle { .. } => unreachable!("full circles are handled as circle loops"),
-        }
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+
     use std::f64::consts::PI;
 
     use super::*;

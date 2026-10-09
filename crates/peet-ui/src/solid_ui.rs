@@ -205,7 +205,7 @@ pub fn revolve_panel(
 }
 
 /// The words under a sweep's panel.
-pub const SWEEP_HINT: &str = "The path is a sketch of lines and arcs joined end to end, starting on the profile's plane and square to it. Corners between straight pieces are mitred; an arc must meet its neighbours tangent.";
+pub const SWEEP_HINT: &str = "The path is a sketch of lines and arcs joined end to end, starting on the profile's plane and square to it. Corners between straight pieces are mitred; an arc must meet its neighbours tangent. A spline can be the path too: one end on the profile's plane, with no corners.";
 
 /// Sweep: the path's sketch and the operation.
 pub fn sweep_panel(
@@ -535,7 +535,7 @@ pub fn draft_panel(
             }
         });
     ui.add_space(6.0);
-    ui.weak("Flat faces can be drafted, and round faces whose axis is along the direction of pull (they become cones). The neutral plane's normal is the direction of pull; each face turns about the line where it crosses the neutral plane, so the part keeps its size there.");
+    ui.weak("Flat faces can be drafted, round faces whose axis is along the direction of pull (they become cones), and freeform faces such as the walls of an extruded spline or the sides of a loft. The neutral plane's normal is the direction of pull; each face turns about the curve where it crosses the neutral plane, so the part keeps its size there.");
     out
 }
 

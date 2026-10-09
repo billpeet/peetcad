@@ -11,10 +11,12 @@ use peet_model::{
 use peet_platform::Instant;
 use peet_render::{Projection, StandardView};
 
-use peet_ops::Op;
+use peet_ops::{Configs, Input, Op};
 
 use crate::bodies::GeomRef;
 use crate::commands::{CommandId, CommandState};
+use crate::config_table::{self, ConfigTable};
+use crate::configs_ui::{self, ConfigAction, ConfigList};
 use crate::document::{Document, FileLocation, ItemId, Persistent, Session, SketchItem};
 use crate::features_ui::{self, ERROR, PICKING, Picked, Slot};
 use crate::files::{self, AfterDiscard, FileState};
@@ -30,6 +32,8 @@ use crate::viewport::{Viewport, ViewportParams};
 
 mod assembly;
 mod convert;
+#[cfg(not(target_arch = "wasm32"))]
+mod live;
 pub mod scripting;
 mod solids;
 
@@ -54,6 +58,7 @@ struct OpenWindows {
     shortcuts: bool,
     about: bool,
     parameters: bool,
+    configurations: bool,
     bend_table: bool,
     sheet_checks: bool,
     gauges: bool,
@@ -105,6 +110,14 @@ pub struct PeetApp {
     /// Inputs of the "add parameter" row in the parameters window.
     new_param: (String, String),
     param_error: Option<String>,
+    /// The configurations list above the feature tree.
+    config_list: ConfigList,
+    /// The configurations table window.
+    config_table: ConfigTable,
+    /// Values changed in the panels (feature values, sketch dimensions) change in the
+    /// active configuration only. Otherwise a value that is the same in every
+    /// configuration changes in all of them.
+    values_this_only: bool,
     /// Body face, edge or vertex under the cursor (from GPU picking).
     hovered_geom: Option<GeomRef>,
     /// Selected body faces, edges and vertices.
@@ -159,6 +172,9 @@ pub struct PeetApp {
     inserting_linked: bool,
     /// The file dialog of Insert Part, waiting for an answer.
     inserting: Option<peet_platform::Pending<Result<Option<peet_platform::OpenedFile>, String>>>,
+    /// This session, as `peet` reaches it (not in the browser).
+    #[cfg(not(target_arch = "wasm32"))]
+    live: Option<peet_live::Server>,
 }
 
 impl PeetApp {
@@ -173,7 +189,11 @@ impl PeetApp {
             .and_then(|s| eframe::get_value(s, STORAGE_KEY))
             .unwrap_or_default();
 
-        Self::with_renderer(settings, cc.wgpu_render_state.clone(), process_start)
+        #[cfg_attr(target_arch = "wasm32", expect(unused_mut))]
+        let mut app = Self::with_renderer(settings, cc.wgpu_render_state.clone(), process_start);
+        #[cfg(not(target_arch = "wasm32"))]
+        app.start_live(&cc.egui_ctx);
+        app
     }
 
     /// The app without a GPU or a window: commands work, the viewport shows nothing.
@@ -247,6 +267,9 @@ impl PeetApp {
             sketch_work: None,
             new_param: (String::new(), String::new()),
             param_error: None,
+            config_list: ConfigList::default(),
+            config_table: ConfigTable::default(),
+            values_this_only: false,
             hovered_geom: None,
             selected_geom: Vec::new(),
             picking: None,
@@ -264,6 +287,8 @@ impl PeetApp {
             dxf_import: None,
             step_import: None,
             notice: None,
+            #[cfg(not(target_arch = "wasm32"))]
+            live: None,
         }
     }
 
@@ -1264,7 +1289,7 @@ impl PeetApp {
             CommandId::ExportStep => enabled(!self.doc.bodies.is_empty()),
             CommandId::EditSketch => enabled(!in_sketch && self.selected_sketch().is_some()),
             CommandId::ExitSketch => enabled(in_sketch),
-            CommandId::Parameters => enabled(true),
+            CommandId::Parameters | CommandId::ConfigurationTable => enabled(true),
             CommandId::DeleteSelection => enabled(!in_sketch && self.selected_feature().is_some()),
             CommandId::ToggleSuppress => CommandState {
                 enabled: !in_sketch && self.selected_feature().is_some(),
@@ -1467,6 +1492,7 @@ impl PeetApp {
                     self.change_component(id, peet_ops::ComponentChange::Suppress(on));
                 }
             }
+            CommandId::ConfigurationTable => self.windows.configurations = true,
             CommandId::DeleteSelection => {
                 if let Some(id) = self.selected_feature() {
                     let name = self.doc.model.name_of(id).to_owned();
@@ -1478,7 +1504,7 @@ impl PeetApp {
             }
             CommandId::ToggleSuppress => {
                 if let Some(id) = self.selected_feature() {
-                    self.set_suppressed(id, None);
+                    self.set_suppressed(id, None, Configs::This);
                 }
             }
             CommandId::RollToEnd => {
@@ -1551,21 +1577,49 @@ impl PeetApp {
         ctx.request_repaint();
     }
 
-    fn set_suppressed(&mut self, id: FeatureId, suppressed: Option<bool>) {
+    /// Suppresses a feature, or unsuppresses it (`None`: the other way), in the
+    /// configurations given.
+    fn set_suppressed(&mut self, id: FeatureId, suppressed: Option<bool>, configurations: Configs) {
         let Some(f) = self.doc.feature(id) else {
             return;
         };
-        let value = suppressed.unwrap_or(!f.suppressed);
-        let label = format!(
-            "{} {}",
-            if value { "Suppress" } else { "Unsuppress" },
-            f.name
-        );
-        self.change(&label, |m| {
-            if let Some(f) = m.feature_mut(id) {
-                f.suppressed = value;
-            }
+        self.perform(Op::Suppress {
+            feature: id.into(),
+            on: suppressed.unwrap_or(!f.suppressed),
+            configurations,
         });
+    }
+
+    /// Applies what the user did in the configurations list.
+    fn apply_configs(&mut self, actions: Vec<ConfigAction>) {
+        for action in actions {
+            let op = match action {
+                ConfigAction::Activate(configuration) => Op::Configuration { configuration },
+                ConfigAction::Add => Op::AddConfiguration {
+                    name: configs_ui::new_name(&self.doc),
+                    copy: None,
+                    comment: None,
+                },
+                ConfigAction::Copy(of) => Op::AddConfiguration {
+                    name: configs_ui::new_name(&self.doc),
+                    copy: Some(of),
+                    comment: None,
+                },
+                ConfigAction::Rename { from, to } => Op::EditConfiguration {
+                    configuration: from,
+                    name: Some(to),
+                    comment: None,
+                },
+                ConfigAction::Delete(configuration) => Op::DeleteConfiguration { configuration },
+            };
+            let switched = matches!(op, Op::Configuration { .. } | Op::AddConfiguration { .. });
+            if self.perform(op).ok && switched {
+                self.info(format!(
+                    "Configuration {}",
+                    self.doc.model.active_configuration().name
+                ));
+            }
+        }
     }
 
     fn apply_tree(&mut self, actions: Vec<TreeAction>) {
@@ -1630,7 +1684,10 @@ impl PeetApp {
                         }
                     });
                 }
-                TreeAction::SetSuppressed(id, s) => self.set_suppressed(id, Some(s)),
+                TreeAction::SetSuppressed { feature, on, all } => {
+                    let configurations = if all { Configs::All } else { Configs::This };
+                    self.set_suppressed(feature, Some(on), configurations);
+                }
                 TreeAction::Delete(id) => {
                     self.selected = Some(ItemId::Feature(id));
                     self.execute_delete(id);
@@ -1722,8 +1779,14 @@ impl PeetApp {
 
     /// Keeps the window title in step with the document name and modified state.
     fn update_title(&mut self, ctx: &egui::Context) {
+        // The active configuration is named once the part has more than one.
+        let configuration = if self.doc.model.configurations().len() > 1 {
+            format!(" [{}]", self.doc.model.active_configuration().name)
+        } else {
+            String::new()
+        };
         let title = format!(
-            "{}{} - {APP_NAME}",
+            "{}{configuration}{} - {APP_NAME}",
             self.doc.title(),
             if self.doc.is_modified() { " *" } else { "" }
         );
@@ -2010,6 +2073,13 @@ impl PeetApp {
                                 ribbon::stack(ui, |ui| {
                                     tool(ui, pending, CommandId::EditSketch, "Edit Sketch", Small);
                                     tool(ui, pending, CommandId::Parameters, "Parameters", Small);
+                                    tool(
+                                        ui,
+                                        pending,
+                                        CommandId::ConfigurationTable,
+                                        "Configurations",
+                                        Small,
+                                    );
                                 });
                             });
                             ribbon::group(ui, "Features", |ui| {
@@ -2128,6 +2198,7 @@ impl PeetApp {
                                 tool(ui, pending, CommandId::SketchRectangle, "Rectangle", Large);
                                 tool(ui, pending, CommandId::SketchCircle, "Circle", Large);
                                 tool(ui, pending, CommandId::SketchArc, "Arc", Large);
+                                tool(ui, pending, CommandId::SketchSpline, "Spline", Large);
                                 ribbon::stack(ui, |ui| {
                                     tool(
                                         ui,
@@ -2430,6 +2501,19 @@ impl PeetApp {
                 ui.weak("(modified)");
             }
         });
+        // (An assembly has no configurations of its own: its parts have theirs.)
+        let configs = if self.doc.is_assembly() {
+            Vec::new()
+        } else {
+            configs_ui::configs_ui(ui, &self.doc, &mut self.config_list)
+        };
+        if !configs.is_empty() {
+            // Another configuration is another part: sketch editing ends first.
+            if self.sketch.is_some() {
+                self.close_sketch();
+            }
+            self.apply_configs(configs);
+        }
         ui.separator();
         if self.doc.is_assembly() {
             egui::ScrollArea::vertical().show(ui, |ui| self.assembly_tree(ui));
@@ -2459,8 +2543,36 @@ impl PeetApp {
         }
     }
 
+    /// With several configurations: which ones a value changed in the panels (a
+    /// feature's value, a sketch's dimension) is changed in.
+    fn value_scope(&mut self, ui: &mut Ui, pending: &mut Vec<CommandId>) {
+        if self.doc.model.configurations().len() < 2 {
+            self.values_this_only = false;
+            return;
+        }
+        let active = self.doc.model.active_configuration().name.clone();
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Values change in");
+            ui.selectable_value(&mut self.values_this_only, false, "all")
+                .on_hover_text("A value you change here changes in every configuration, unless it already differs between them: then it changes in this one.");
+            ui.selectable_value(&mut self.values_this_only, true, "this configuration")
+                .on_hover_text(format!(
+                    "A value you change here (a size, an angle, a sketch dimension) changes in {active} only. Everything else about a feature is the same in every configuration."
+                ));
+            if ui
+                .small_button("Table…")
+                .on_hover_text("What differs between the configurations, with a column for each.")
+                .clicked()
+            {
+                pending.push(CommandId::ConfigurationTable);
+            }
+        });
+        ui.separator();
+    }
+
     fn properties(&mut self, ui: &mut Ui, pending: &mut Vec<CommandId>) {
         ui.add_space(4.0);
+        self.value_scope(ui, pending);
         if let (Some(editor), Some(work)) = (&mut self.sketch, &mut self.sketch_work) {
             let name = editor
                 .item
@@ -2542,6 +2654,13 @@ impl PeetApp {
             return;
         };
         let picking = self.picking.filter(|(p, _)| *p == id).map(|(_, s)| s);
+        if let Some(peet_model::Status::SuppressedBy(parent)) = self.doc.status(id) {
+            ui.weak(format!(
+                "Suppressed with {}, which it is built on.",
+                self.doc.model.name_of(*parent)
+            ));
+            ui.add_space(4.0);
+        }
         features_ui::status_line(ui, self.doc.status(id));
 
         // The name, applied when the field loses focus.
@@ -2977,10 +3096,48 @@ impl PeetApp {
         command
     }
 
+    fn configurations_window(&mut self, ctx: &egui::Context) {
+        if !self.windows.configurations {
+            return;
+        }
+        let mut open = true;
+        let mut ops = Vec::new();
+        egui::Window::new("Configurations Table")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(520.0)
+            .show(ctx, |ui| {
+                if self.sketch.is_some() {
+                    ui.weak("Finish the sketch to change the table.");
+                    return;
+                }
+                let selected = self.selected.and_then(ItemId::feature);
+                ops =
+                    config_table::config_table_ui(ui, &self.doc, &mut self.config_table, selected);
+            });
+        self.windows.configurations = open;
+        for op in ops {
+            let reply = self.perform_quietly(op);
+            self.config_table.error = reply.json["error"].as_str().map(str::to_owned);
+        }
+    }
+
     fn parameters_window(&mut self, ctx: &egui::Context) {
         let mut open = self.windows.parameters;
         let mut params = self.doc.model.parameters.clone();
         let mut units_changed = false;
+        // With several configurations each has a column, and a value typed in one changes
+        // that configuration: those changes are operations with a scope from the start.
+        let configs: Vec<(peet_model::ConfigId, String)> = self
+            .doc
+            .model
+            .configurations()
+            .iter()
+            .map(|c| (c.id, c.name.clone()))
+            .collect();
+        let several = configs.len() > 1;
+        let active = self.doc.model.active_configuration().id;
+        let mut scoped: Vec<Op> = Vec::new();
         egui::Window::new("Parameters")
             .open(&mut open)
             .collapsible(false)
@@ -3007,15 +3164,29 @@ impl PeetApp {
                 .on_hover_text("Lengths are shown in this unit, and plain numbers you type are taken in it. Angles are in degrees.");
                 ui.add_space(4.0);
                 ui.weak("Named values for expressions anywhere a value is typed: 2 * height + 5, 3in, 30deg. Sketch dimension names (d1, d2, …) work in that sketch's expressions too.");
+                if several {
+                    ui.add_space(4.0);
+                    ui.weak("Each configuration has a column. A value typed in one changes that configuration only; right-click a value to use it in all of them.");
+                }
                 ui.add_space(6.0);
                 let mut remove = None;
                 egui::Grid::new("parameters")
-                    .num_columns(4)
+                    .num_columns(3 + configs.len())
                     .spacing([8.0, 6.0])
                     .striped(true)
                     .show(ui, |ui| {
                         ui.strong("Name");
-                        ui.strong("Expression");
+                        if several {
+                            for (id, name) in &configs {
+                                if *id == active {
+                                    ui.strong(format!("● {name}"));
+                                } else {
+                                    ui.label(name);
+                                }
+                            }
+                        } else {
+                            ui.strong("Expression");
+                        }
                         ui.strong("Value");
                         ui.end_row();
                         for i in 0..params.entries.len() {
@@ -3024,18 +3195,53 @@ impl PeetApp {
                                 (e.name.clone(), e.expression.clone(), e.display(&params.units))
                             };
                             ui.monospace(&name);
-                            let key = egui::Id::new(("param_expr", name.as_str()));
-                            let mut text = ui.data(|m| m.get_temp::<String>(key)).unwrap_or_else(|| expression.clone());
-                            let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(160.0));
-                            if r.changed() {
-                                ui.data_mut(|m| m.insert_temp(key, text.clone()));
+                            for (config, config_name) in configs.iter().filter(|_| several) {
+                                let expression = self
+                                    .doc
+                                    .model
+                                    .parameter_in(&name, *config)
+                                    .map_or_else(|| expression.clone(), str::to_owned);
+                                let key = egui::Id::new(("param_expr", name.as_str(), config.0));
+                                let mut text = ui.data(|m| m.get_temp::<String>(key)).unwrap_or_else(|| expression.clone());
+                                let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(110.0));
+                                if r.changed() {
+                                    ui.data_mut(|m| m.insert_temp(key, text.clone()));
+                                }
+                                if r.lost_focus() {
+                                    ui.data_mut(|m| m.remove::<String>(key));
+                                    if text != expression {
+                                        scoped.push(Op::SetParameter {
+                                            name: name.clone(),
+                                            value: Input::Expr(text.clone()),
+                                            configurations: Configs::Named(vec![config_name.clone()]),
+                                        });
+                                    }
+                                }
+                                r.context_menu(|ui| {
+                                    if ui.button("Use in All Configurations").clicked() {
+                                        scoped.push(Op::SetParameter {
+                                            name: name.clone(),
+                                            value: Input::Expr(expression.clone()),
+                                            configurations: Configs::All,
+                                        });
+                                        ui.close();
+                                    }
+                                });
                             }
-                            if r.lost_focus() {
-                                ui.data_mut(|m| m.remove::<String>(key));
-                                if text != expression {
-                                    match params.set(&name, &text) {
-                                        Ok(_) => self.param_error = None,
-                                        Err(e) => self.param_error = Some(format!("{name}: {e}")),
+                            if !several {
+                                let key = egui::Id::new(("param_expr", name.as_str()));
+                                let mut text = ui.data(|m| m.get_temp::<String>(key)).unwrap_or_else(|| expression.clone());
+                                let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(160.0));
+                                if r.changed() {
+                                    ui.data_mut(|m| m.insert_temp(key, text.clone()));
+                                }
+                                if r.lost_focus() {
+                                    ui.data_mut(|m| m.remove::<String>(key));
+                                    if text != expression {
+                                        match params.set(&name, &text) {
+                                            Ok(_) => self.param_error = None,
+                                            Err(e) => self.param_error = Some(format!("{name}: {e}")),
+                                        }
                                     }
                                 }
                             }
@@ -3084,6 +3290,15 @@ impl PeetApp {
                 "Edit Parameters"
             };
             self.change(label, |m| m.parameters = params);
+            if let (Some(editor), Some(work)) = (&mut self.sketch, &mut self.sketch_work) {
+                editor.refresh(work, &self.doc.model.parameters);
+            }
+        }
+        if !scoped.is_empty() {
+            for op in scoped {
+                let reply = self.perform_quietly(op);
+                self.param_error = reply.json["error"].as_str().map(str::to_owned);
+            }
             if let (Some(editor), Some(work)) = (&mut self.sketch, &mut self.sketch_work) {
                 editor.refresh(work, &self.doc.model.parameters);
             }
@@ -3545,6 +3760,13 @@ fn menu_button(ui: &mut Ui, cmd: CommandId, state: CommandState) -> bool {
 
 /// A compact toolbar button for a command. Returns true if clicked.
 impl eframe::App for PeetApp {
+    /// What `peet` sent is applied here and not in `ui`: this runs while the window is
+    /// minimised too, when nothing is drawn.
+    #[cfg(not(target_arch = "wasm32"))]
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.serve_live(ctx);
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         self.perf.begin_frame();
         let ctx = ui.ctx().clone();
@@ -3752,6 +3974,7 @@ impl eframe::App for PeetApp {
         self.shortcuts_window(&ctx);
         self.about_window(&ctx);
         self.parameters_window(&ctx);
+        self.configurations_window(&ctx);
         self.sheet_checks_window(&ctx);
         self.gauge_window(&ctx);
         self.mass_properties_window(&ctx);

@@ -33,14 +33,25 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 ///   bodies. Earlier models decode unchanged (new variants at the end of the feature enum).
 /// - B-rep 4 (Phase 6): cones, spheres and tori as surfaces; blend, shell and import roles
 ///   in face names. Earlier caches decode unchanged.
-/// - Model 5 (Phase 7): the part's material and colour, which are new fields of the model
-///   itself. Models up to version 4 are read as [`peet_model::ModelV4`] and converted.
-/// - Model 6 (Phase 7): assemblies. A model can hold an assembly: its parts (each a whole
-///   model), its components and its mates. Version 5 models are read as
-///   [`peet_model::ModelV5`]. (Mates and links were added to version 6 before any version
-///   of PeetCAD that writes it was released.)
+/// - Model 5 (configurations): the model holds its configurations. Earlier models have
+///   another layout: they are read as [`peet_model::ModelV4`] and converted, to a part
+///   with one configuration. Their caches are tagged with the hash of the model as it was
+///   stored, so they no longer match and the part is rebuilt once.
+/// - Model 6 (configurations stage 2): feature values and sketch dimensions can differ
+///   between configurations, which the configurations hold in one more table. Schema 5
+///   models are read as [`peet_model::ModelV5`] and converted.
+/// - Model 7: splines in sketches. Schema 6 models decode unchanged (a new variant at
+///   the end of the sketch geometry enum).
+/// - Model 8 (Phase 7): the part's material and colour, and assemblies. A model can hold
+///   an assembly: its parts (each a whole model), its components, its mates, its
+///   component patterns and its exploded view. These are new fields of the model itself,
+///   so schema 6 and 7 models are read as [`peet_model::ModelV7`] and converted.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 6;
+pub const MODEL_SCHEMA: u16 = 8;
+/// The last model schema without configurations.
+const MODEL_SCHEMA_BEFORE_CONFIGURATIONS: u16 = 4;
+/// The last model schema without materials and assemblies.
+const MODEL_SCHEMA_BEFORE_ASSEMBLIES: u16 = 7;
 pub const BREP_SCHEMA: u16 = 4;
 pub const MESH_SCHEMA: u16 = 1;
 
@@ -152,18 +163,19 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
     check_schema(&r, SectionKind::METADATA, METADATA_SCHEMA)?;
     check_schema(&r, SectionKind::MODEL, MODEL_SCHEMA)?;
     let metadata: Metadata = r.read(SectionKind::METADATA)?.unwrap_or_default();
-    // Before version 5 a model had no material or colour, and before version 6 no
-    // assembly (see `MODEL_SCHEMA`).
-    let model = match r.schema_version(SectionKind::MODEL) {
-        Some(v) if v < 5 => r
+    let model: Option<Model> = match r.schema_version(SectionKind::MODEL) {
+        Some(v) if v <= MODEL_SCHEMA_BEFORE_CONFIGURATIONS => r
             .read::<peet_model::ModelV4>(SectionKind::MODEL)?
             .map(Model::from),
         Some(5) => r
             .read::<peet_model::ModelV5>(SectionKind::MODEL)?
             .map(Model::from),
+        Some(v) if v <= MODEL_SCHEMA_BEFORE_ASSEMBLIES => r
+            .read::<peet_model::ModelV7>(SectionKind::MODEL)?
+            .map(Model::from),
         _ => r.read(SectionKind::MODEL)?,
     };
-    let mut model: Model =
+    let mut model =
         model.ok_or_else(|| PeetError::new("The file is damaged: it has no model in it."))?;
     model.validate().map_err(PeetError::new)?;
     let model_hash = peet_model::hash::of(&model);
@@ -339,23 +351,26 @@ mod tests {
     #[test]
     fn models_from_before_materials_still_open() {
         let (mut model, _) = bracket();
-        // As version 4 wrote it: the same fields, without the material and the colour.
-        let mut w = Writer::new();
-        w.section(SectionKind::METADATA, 1, &Metadata::default())
+        // As versions 6 and 7 wrote it: the same fields, without the material, the colour
+        // and the assembly.
+        let mut old = Vec::new();
+        for version in [6, 7] {
+            let mut w = Writer::new();
+            w.section(SectionKind::METADATA, 1, &Metadata::default())
+                .unwrap();
+            w.section(
+                SectionKind::MODEL,
+                version,
+                &peet_model::ModelV7::of(&model),
+            )
             .unwrap();
-        w.section(SectionKind::MODEL, 4, &peet_model::ModelV4::of(&model))
-            .unwrap();
-        let old = w.finish();
-        assert_eq!(open(&old).unwrap().model, model);
+            old = w.finish();
+            assert_eq!(open(&old).unwrap().model, model, "schema {version}");
+        }
 
         // The new fields are saved, and a file with them is not read as an old one.
         model.material = Some(peet_model::Material::new("Mild steel", 7850.0).unwrap());
         model.color = Some([200, 40, 40]);
-        // As version 5 wrote it: with them, before assemblies.
-        let mut w = Writer::new();
-        w.section(SectionKind::MODEL, 5, &peet_model::ModelV5::of(&model))
-            .unwrap();
-        assert_eq!(open(&w.finish()).unwrap().model, model);
         let new = save(&model, &Metadata::default(), None).unwrap();
         assert_eq!(open(&new).unwrap().model, model);
         let text = to_text(&new).unwrap();

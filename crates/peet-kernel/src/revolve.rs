@@ -2,7 +2,9 @@
 //!
 //! **Surfaces.** Turned about the axis, a line of the profile sweeps a plane (square to the
 //! axis), a cylinder (parallel to it) or a cone; an arc sweeps a sphere (centred on the
-//! axis) or a torus. A line lying on the axis sweeps nothing.
+//! axis) or a torus. A line lying on the axis sweeps nothing. A spline sweeps an exact
+//! freeform surface ([`crate::profile::revolved_surface`]); it must stay clear of the
+//! axis, where such a surface would be pinched to a point.
 //!
 //! **Coordinates.** The profile is described in the half-plane `(ρ, z)`: `ρ` is the
 //! distance from the axis, `z` the height along it. The axis direction is taken so that
@@ -22,15 +24,21 @@
 //!   face only (each face wraps all the way round it), so faces meeting there get a
 //!   vertex each. Every loop of the region gives a closed shell of its own.
 //! - *A partial turn* adds the two flat caps, the profile at the start and at the end.
+//! - *A spline turned all the way* is two faces, each half a turn: a freeform surface
+//!   never closes on itself. Every circle of a loop with a spline in it is then two half
+//!   circles, so that the faces next to the spline's share its edges.
 
 use std::f64::consts::{PI, TAU};
 
+use std::sync::Arc;
+
 use peet_math::{DVec2, DVec3, Frame, Plane, tolerance};
-use peet_sketch::Curve;
 use peet_sketch::region::Region;
+use peet_sketch::{Curve, SplinePiece};
 
 use crate::extrude::{Piece, PreparedLoop, prepare_loop};
 use crate::geom::{Circle3, Cone, Curve3, Cylinder, Sphere, Surface, Torus};
+use crate::profile::{revolved_surface, spline_curve};
 use crate::topo::{EdgeId, ShellId, VertexId};
 use crate::{KernelError, Solid};
 
@@ -67,7 +75,7 @@ pub enum RevolveFace {
 
 /// Revolves `regions` (in `plane`'s 2D coordinates) about `axis` from the angle `from` to
 /// the angle `to` (radians, `from < to`, at most a full turn apart; 0 is the sketch plane).
-/// The regions must lie on one side of the axis; they may touch it.
+/// The regions must lie on one side of the axis; they may touch it (but not with a spline).
 pub fn revolve(
     plane: &Plane,
     regions: &[Region],
@@ -202,6 +210,12 @@ impl Chart {
         )
     }
 
+    /// `(ρ, z)` of a sketch point as it is: an affine map, for control points.
+    fn raw(&self, p: DVec2) -> DVec2 {
+        let w = p - self.origin;
+        DVec2::new(w.dot(self.rho_dir), w.dot(self.z_dir))
+    }
+
     /// A sketch angle as an angle in the chart (counter-clockwise from the `ρ` axis).
     fn angle(&self, sketch_angle: f64) -> f64 {
         sketch_angle - self.rho_dir.to_angle()
@@ -237,6 +251,12 @@ fn extent(l: &PreparedLoop, origin: DVec2, left: DVec2) -> Vec<(f64, f64)> {
                         lo = d(center) - radius;
                     }
                 }
+                if let Curve::Spline(s) = &p.curve {
+                    for q in s.tessellate(SPLINE_SAMPLING) {
+                        lo = lo.min(d(q));
+                        hi = hi.max(d(q));
+                    }
+                }
                 (lo, hi)
             })
             .collect(),
@@ -248,8 +268,11 @@ fn arc_contains(start: f64, sweep: f64, angle: f64) -> bool {
     (angle - start).rem_euclid(TAU) < sweep
 }
 
+/// How finely a spline is sampled to see how close it comes to the axis (mm).
+const SPLINE_SAMPLING: f64 = 1e-3;
+
 /// One piece of a profile loop, in the chart.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 struct Swept {
     /// What the piece sweeps.
     kind: Kind,
@@ -260,7 +283,7 @@ struct Swept {
     source: usize,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 enum Kind {
     /// A line on the axis: no face.
     Axis,
@@ -276,6 +299,8 @@ enum Kind {
         v0: f64,
         sweep: f64,
     },
+    /// A spline (in sketch coordinates), clear of the axis: a freeform surface.
+    Spline(SplinePiece),
 }
 
 struct Builder {
@@ -299,12 +324,29 @@ enum Ring {
     /// On the axis. In a partial turn every face shares the vertex.
     Pole(Option<VertexId>),
     /// Off the axis: the vertices at the start and end angles (the same one for a full
-    /// turn) and the circle edge between them.
+    /// turn) and the circle edge between them. In a loop with a spline turned all the way
+    /// the circle is two halves: `edge` to the vertex `mid`, half a turn on, and `second`
+    /// from there.
     Circle {
         start: VertexId,
         end: VertexId,
         edge: EdgeId,
+        second: Option<(VertexId, EdgeId)>,
     },
+}
+
+impl Ring {
+    /// The ring's edges as a loop passes them, forwards or `reversed`.
+    fn uses(&self, reversed: bool, out: &mut Vec<(EdgeId, bool)>) {
+        let Self::Circle { edge, second, .. } = *self else {
+            return;
+        };
+        match (second, reversed) {
+            (None, _) => out.push((edge, reversed)),
+            (Some((_, second)), false) => out.extend([(edge, false), (second, false)]),
+            (Some((_, second)), true) => out.extend([(second, true), (edge, true)]),
+        }
+    }
 }
 
 impl Builder {
@@ -420,6 +462,9 @@ impl Builder {
             }
         };
         let n = pieces.len();
+        // A spline turned all the way is made in two halves, which need half circles.
+        let halved = self.full && pieces.iter().any(|p| matches!(p.kind, Kind::Spline(_)));
+        let half = self.u0 + PI;
 
         // The profile's vertices, swept.
         let mut rings: Vec<Ring> = Vec::with_capacity(points.len());
@@ -438,8 +483,27 @@ impl Builder {
                     frame: self.frame_at(q.y),
                     radius: q.x,
                 });
-                let edge = self.solid.add_edge(circle, start, end, self.u0, self.u1);
-                Ring::Circle { start, end, edge }
+                if halved {
+                    let mid = self.solid.add_vertex(self.point(q, half));
+                    let edge = self
+                        .solid
+                        .add_edge(circle.clone(), start, mid, self.u0, half);
+                    let second = self.solid.add_edge(circle, mid, end, half, self.u1);
+                    Ring::Circle {
+                        start,
+                        end,
+                        edge,
+                        second: Some((mid, second)),
+                    }
+                } else {
+                    let edge = self.solid.add_edge(circle, start, end, self.u0, self.u1);
+                    Ring::Circle {
+                        start,
+                        end,
+                        edge,
+                        second: None,
+                    }
+                }
             });
         }
 
@@ -453,7 +517,9 @@ impl Builder {
                 edge: piece.source,
             };
             // A flat face of a full turn is bounded by its circles alone.
-            if let (true, Kind::Flat { up }) = (self.full, piece.kind) {
+            if self.full
+                && let Kind::Flat { up } = piece.kind
+            {
                 let normal = self.base.z_axis() * if up { 1.0 } else { -1.0 };
                 let surface = Plane::from_origin_normal_x(
                     self.frame_at(a.y).origin,
@@ -470,8 +536,10 @@ impl Builder {
                 // one farther from the axis is the outer loop.
                 let (first, second) = if a.x > b.x { (i, j) } else { (j, i) };
                 for k in [first, second] {
-                    if let Ring::Circle { edge, .. } = rings[k] {
-                        self.solid.add_loop(face, &[(edge, k == j)]);
+                    let mut uses = Vec::with_capacity(2);
+                    rings[k].uses(k == j, &mut uses);
+                    if !uses.is_empty() {
+                        self.solid.add_loop(face, &uses);
                     }
                 }
                 continue;
@@ -491,35 +559,77 @@ impl Builder {
             let (a0, a1) = ends(self, rings[i], a);
             let (b0, b1) = ends(self, rings[j], b);
             // Its edges, in the piece's own direction.
+            let (from, to) = if piece.forward { (a, b) } else { (b, a) };
             let (m0, m1) = {
                 let (s0, e0, s1, e1) = if piece.forward {
                     (a0, b0, a1, b1)
                 } else {
                     (b0, a0, b1, a1)
                 };
-                let (from, to) = if piece.forward { (a, b) } else { (b, a) };
-                let m0 = self.meridian(piece, from, to, self.u0, s0, e0);
+                let m0 = self.meridian(piece, from, to, self.u0, s0, e0)?;
                 let m1 = if self.full || matches!(piece.kind, Kind::Axis) {
                     m0
                 } else {
-                    self.meridian(piece, from, to, self.u1, s1, e1)
+                    self.meridian(piece, from, to, self.u1, s1, e1)?
                 };
                 (m0, m1)
             };
             caps.push((m0, m1, !piece.forward));
+            if self.full
+                && let Kind::Spline(spline) = &piece.kind
+            {
+                // Two faces of half a turn each, meeting along the spline at the start
+                // angle and again half a turn on.
+                let (
+                    Ring::Circle {
+                        edge: a_first,
+                        second: Some((a_mid, a_second)),
+                        ..
+                    },
+                    Ring::Circle {
+                        edge: b_first,
+                        second: Some((b_mid, b_second)),
+                        ..
+                    },
+                ) = (rings[i], rings[j])
+                else {
+                    return unsupported("a spline that touches the axis");
+                };
+                let (s, e) = if piece.forward {
+                    (a_mid, b_mid)
+                } else {
+                    (b_mid, a_mid)
+                };
+                let middle = self.meridian(piece, from, to, half, s, e)?;
+                for (start, ring_a, ring_b, near, far) in [
+                    (self.u0, a_first, b_first, m0, middle),
+                    (half, a_second, b_second, middle, m0),
+                ] {
+                    let (surface, reversed) =
+                        self.spline_surface(spline, piece.forward, start, PI)?;
+                    let face = self.solid.add_face(shell, surface, reversed);
+                    self.faces.push(tag);
+                    self.solid.add_loop(
+                        face,
+                        &[
+                            (ring_a, false),
+                            (far, !piece.forward),
+                            (ring_b, true),
+                            (near, piece.forward),
+                        ],
+                    );
+                }
+                continue;
+            }
             let Some((surface, reversed)) = self.surface(piece, a, b)? else {
                 continue;
             };
             let face = self.solid.add_face(shell, surface, reversed);
             self.faces.push(tag);
-            let mut uses = Vec::with_capacity(4);
-            if let Ring::Circle { edge, .. } = rings[i] {
-                uses.push((edge, false));
-            }
+            let mut uses = Vec::with_capacity(6);
+            rings[i].uses(false, &mut uses);
             uses.push((m1, !piece.forward));
-            if let Ring::Circle { edge, .. } = rings[j] {
-                uses.push((edge, true));
-            }
+            rings[j].uses(true, &mut uses);
             uses.push((m0, piece.forward));
             self.solid.add_loop(face, &uses);
         }
@@ -575,11 +685,26 @@ impl Builder {
                     sweep,
                 }
             }
+            Curve::Spline(ref s) => {
+                let nearest = s
+                    .tessellate(SPLINE_SAMPLING)
+                    .iter()
+                    .map(|q| self.chart.raw(*q).x)
+                    .fold(f64::INFINITY, f64::min);
+                if a.x <= 0.0 || b.x <= 0.0 || nearest <= ON_AXIS + 2.0 * SPLINE_SAMPLING {
+                    return unsupported(
+                        "a spline that touches or crosses the axis. End the spline short of \
+                         the axis and close the profile with a line to it",
+                    );
+                }
+                Kind::Spline(s.clone())
+            }
             Curve::Circle { .. } => unreachable!("full circles are handled as circle loops"),
         };
         Ok(Swept {
             kind,
-            // Lines are stored in loop direction, arcs counter-clockwise.
+            // Lines are stored in loop direction, arcs counter-clockwise, splines their
+            // own way.
             forward: matches!(p.curve, Curve::Line { .. }) || !p.reversed,
             source: p.source,
         })
@@ -595,8 +720,14 @@ impl Builder {
         u: f64,
         start: VertexId,
         end: VertexId,
-    ) -> EdgeId {
-        match piece.kind {
+    ) -> Result<EdgeId, KernelError> {
+        Ok(match piece.kind {
+            Kind::Spline(ref s) => {
+                let curve = spline_curve(s, |q| self.point(self.chart.raw(q), u))?;
+                let (lo, hi) = curve.domain();
+                self.solid
+                    .add_edge(Curve3::Nurbs(Arc::new(curve)), start, end, lo, hi)
+            }
             Kind::Round {
                 center,
                 radius,
@@ -621,7 +752,36 @@ impl Builder {
                 let curve = Curve3::line_through(p, q).expect("profile lines have a length");
                 self.solid.add_edge(curve, start, end, 0.0, p.distance(q))
             }
-        }
+        })
+    }
+
+    /// The surface a spline sweeps from the angle `from` over `sweep` (less than a full
+    /// turn), and whether its outside is against the surface's natural normal.
+    /// `forward` says whether the loop runs the spline's own way.
+    fn spline_surface(
+        &self,
+        spline: &SplinePiece,
+        forward: bool,
+        from: f64,
+        sweep: f64,
+    ) -> Result<(Surface, bool), KernelError> {
+        let profile = spline_curve(spline, |q| self.point(self.chart.raw(q), 0.0))?;
+        let surface = revolved_surface(&profile, &self.base, from, sweep)?;
+        let Surface::Nurbs(made) = &surface else {
+            unreachable!("a revolved spline is a freeform surface")
+        };
+        // The outside is to the right of the loop's direction in the chart. Compare it
+        // with the surface's own normal in the middle of the face.
+        let (lo, hi) = made.domain();
+        let uv = (lo + hi) * 0.5;
+        let axis = self.base.z_axis();
+        let at = made.point(uv) - self.base.origin;
+        let radial = (at - axis * at.dot(axis)).normalize_or_zero();
+        let along = profile.evaluate(uv.y)[1] * if forward { 1.0 } else { -1.0 };
+        let (t_rho, t_z) = (along.dot(self.base.x_axis()), along.dot(axis));
+        let outward = radial * t_z - axis * t_rho;
+        let reversed = made.normal(uv).dot(outward) < 0.0;
+        Ok((surface, reversed))
     }
 
     /// The surface a piece from `a` to `b` sweeps, and whether its outside is against the
@@ -634,6 +794,10 @@ impl Builder {
     ) -> Result<Option<(Surface, bool)>, KernelError> {
         Ok(Some(match piece.kind {
             Kind::Axis => return Ok(None),
+            Kind::Spline(ref spline) => {
+                self.spline_surface(spline, piece.forward, self.u0, self.u1 - self.u0)?
+            }
+
             Kind::Flat { up } => {
                 // A partial turn: a sector of the plane.
                 let normal = self.base.z_axis() * if up { 1.0 } else { -1.0 };

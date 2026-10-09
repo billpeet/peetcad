@@ -16,6 +16,7 @@ peet-document = { path = "crates/peet-document" }
 peet-io = { path = "crates/peet-io" }
 peet-cli = { path = "crates/peet-cli" }
 peet-kernel = { path = "crates/peet-kernel" }
+peet-live = { path = "crates/peet-live" }
 peet-math = { path = "crates/peet-math" }
 peet-model = { path = "crates/peet-model" }
 peet-ops = { path = "crates/peet-ops" }

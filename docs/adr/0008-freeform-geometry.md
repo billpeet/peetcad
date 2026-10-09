@@ -55,6 +55,49 @@ freeform face must rebuild exactly as fast as before.
   plane that halves it, so frames and pipe runs with square corners sweep directly.
 - **Draft on round walls.** A cylinder along the pull direction drafts to a cone, by the
   same re-solve as flat faces.
+- **Analytic faces with no closed-form crossing are traced too.** Cylinders and cones
+  that cross askew (a hole drilled across a hole of another size), and a plane along a
+  cone, are intersected by writing the part of one of them near the crossing exactly as
+  a NURBS patch and tracing on that. Both faces stay analytic; only the curve between
+  them is freeform. Tracing can't follow faces that only graze each other or cross
+  exactly at an edge, so a boolean that fails after tracing is reported as unsupported,
+  with advice, instead of as whatever went wrong downstream.
+- **Splines in the sketcher** are curves through fit points (natural cubics; closed ones
+  periodic), and the fit points are ordinary sketch points: the spline adds no equations
+  to the solver. The curve is held in `peet-sketch` as degree, knots and control points,
+  and the kernel builds its edge from exactly those, so the sketch and the solid agree.
+  A spline edge extrudes to an exact ruled NURBS face and revolves to an exact rational
+  one.
+- **Sweeps along a spline are skinned.** `sweep` (`peet-kernel/src/sweep.rs`) carries
+  the profile along any smooth path with a rotation-minimising frame (no twist about
+  the path), places it at stations, and joins the stations with the loft's skinning.
+  Stations are added until the surface is within a micron of the true sweep between
+  them. The ends are the profile exactly. Holes of the profile are swept through the
+  same stations and stitched in as inner faces, with no boolean. Paths of lines and arcs
+  alone keep their exact extrude-and-revolve construction.
+- **Offsets are fitted, and edges re-solved numerically.** The offset of a NURBS surface
+  is not one, so it is fitted to a fifth of the modelling tolerance
+  (`nurbs/fit.rs`), carried on a little past its edges so that neighbours that moved
+  apart still meet. Shell, offset and draft keep the "same topology, new surfaces"
+  method of ADR 0006: where two new surfaces have no closed-form intersection, the old
+  edge's points are moved onto both and a curve is fitted through them. Analytic edges
+  stay analytic. A wall thicker than a face's tightest curvature is refused before it
+  can fold. A freeform body is hollowed by assembling the body, its offset turned inside
+  out and the rims, without the boolean the analytic shell uses.
+- **Draft of a freeform face is a ruled surface.** The face is replaced by the lines
+  through its neutral curve (where it crosses the neutral plane) tilted from the pull
+  direction by the draft angle, which is what a mould needs and what makes the wall of
+  an extruded spline draftable.
+- **Freeform fillets are rolled, and put in by editing the topology.** For an edge the
+  analytic tools can't do (a freeform edge, an ellipse, the rim where two round faces
+  cross), the ball's centre and its two contact points are solved at stations along the
+  edge; the fillet is skinned from exact circular arcs through them, refined until it
+  is within half the modelling tolerance of the true surface and tangent to both faces.
+  The edge is then replaced by that face and its two neighbours are cut back to the
+  contact curves. Booleans can't do this: the fillet touches both faces without crossing
+  them. A chamfer is the ruled surface between the two curves a set distance from the
+  edge. Runs close on themselves or end on flat faces. Edges the analytic tools can do
+  still give exact cylinders, cones and tori.
 - **STEP import of freeform faces.** `B_SPLINE_CURVE_WITH_KNOTS`,
   `B_SPLINE_SURFACE_WITH_KNOTS` and their rational forms are read into the same
   variants, with unclamped knot vectors clamped exactly by knot insertion. A closed
@@ -65,11 +108,13 @@ freeform face must rebuild exactly as fast as before.
 
 ## Consequences
 
-- A freeform boolean costs a few tenths of a second where an analytic one costs
-  microseconds; the marching is where the time goes. Content-keyed regeneration means it
+- A freeform boolean, shell, draft, fillet or sweep costs from a few tenths of a second
+  to about a second where an analytic one costs microseconds; tracing, fitting and
+  validating many-piece surfaces is where the time goes. Content-keyed regeneration means it
   is paid only when that feature's inputs change.
 - Marched curves are approximations to tolerance, so a solid that has been through a
-  freeform boolean has edges that lie on their faces to about 2 µm rather than exactly.
+  freeform boolean has edges that lie on their faces to a fraction of the modelling tolerance (about
+  2 × 10⁻⁷ mm) rather than exactly, and volumes known to about a part in 10⁵.
   Validation and the STEP writer allow for it.
 - **Pinched faces are refused.** A freeform face that comes to a point where its
   surface collapses (the tip of a dome written as a B-spline, a three-sided patch) is
@@ -77,11 +122,12 @@ freeform face must rebuild exactly as fast as before.
   faces tessellate and measure wrongly. Analytic poles (a sphere's, a cone's apex) are
   unaffected.
 - **Not done.** Surfaces that touch along a curve instead of crossing (a loft tangent to
-  a cylinder) can't be intersected by marching and are refused. Fillets, chamfers,
-  shells and offsets are refused on freeform faces and edges: they need offset surfaces
-  and rolling-ball blends, which are the next piece of freeform work. Draft doesn't tilt
-  freeform faces. The sketcher has no splines yet, so a sweep path is still lines and
-  arcs, and a loft's profiles are lines, arcs and circles: freeform curves reach a model
-  through lofts, intersections and import, not yet through a sketch. Lofts have no guide
-  curves and no end tangency conditions, and their profiles must have the same number
-  of sides.
+  a cylinder) can't be intersected by tracing and are refused. Fillets that would have
+  to mitre into each other at a corner with a freeform edge, and fillets that end on a
+  curved face, are refused. A fillet that runs into a distant part of the body is not
+  noticed. A closed freeform face with a seam can't be offset (no feature makes one
+  today: closed splines extrude to two faces). The sketcher's splines have no tangent
+  handles and take no tangent relation, so a spline can't be made to leave a line or a
+  plane exactly squarely. Sketches are flat, so a path in space reaches the kernel's
+  sweep only from code. Lofts have no guide curves and no end tangency conditions, and
+  their profiles must have the same number of sides.

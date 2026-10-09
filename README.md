@@ -4,7 +4,7 @@ A lightweight parametric 3D CAD application written in Rust, with sheet metal fi
 It runs as a native Windows app and in the browser (WebAssembly), from one codebase.
 
 > **Status:** early development (Phase 6: general solid modelling, with revolves, sweeps,
-> lofts, a hole wizard, fillets and chamfers, shells, draft, freeform (NURBS) faces, STEP
+> lofts, a hole wizard, fillets and chamfers, shells, draft, sketch splines and freeform (NURBS) faces, STEP
 > import, converting solids to sheet metal and mass properties, next to sheet metal for everyday work: base, edge and mitre flanges,
 > hems, sketched bends and jogs, corners, forms, patterns and mirrors, manufacturing
 > checks, gauge tables, a live flat pattern, DXF export and import and STEP export. All
@@ -62,6 +62,7 @@ in the feature tree to edit it again, and press `Ctrl+Enter` to finish.
 | Action | Key |
 |---|---|
 | Line, rectangle, circle, arc | `L`, `R`, `C`, `A` (slot, polygon, point and centre rectangle are in the toolbar) |
+| Spline | **Spline** in the toolbar: click each point the curve passes through, then double-click, press `Enter` or right-click to finish; click the first point again to close it. Drag its points afterwards, or give them relations and dimensions like a line's ends |
 | Smart dimension | `D`, then click one or two entities and click to place the value |
 | Trim, offset, mirror | `T`, `O`, `M` (mirror uses the last selected line as the axis) |
 | Horizontal, vertical, equal | `H`, `V`, `E` with geometry selected; all relations are in the properties panel |
@@ -90,12 +91,12 @@ mesh.
 | Action | How |
 |---|---|
 | Turn a profile | Sketch half the section and a centreline (a construction line), then **Revolve** or **Cut-Revolve**. The axis can also be the sketch's own X or Y axis, another line of the sketch, or a reference axis or straight edge lying in the sketch plane. Set the angle (360° for a full turn), mid-plane, and the operation |
-| Sweep along a path | Sketch the profile, and in a second sketch the path: lines and arcs joined end to end (or one full circle), starting on the profile's plane and square to it. Corners between straight pieces are mitred, as on a frame or a pipe elbow; an arc must meet its neighbours tangent. Select the profile, then **Sweep** or **Cut-Sweep**, and pick the path |
+| Sweep along a path | Sketch the profile, and in a second sketch the path: lines and arcs joined end to end (or one full circle), starting on the profile's plane and square to it. Corners between straight pieces are mitred, as on a frame or a pipe elbow; an arc must meet its neighbours tangent. The path can also be a spline, for a pipe or a handle that curves freely: one end on the profile's plane, with no corners. Select the profile, then **Sweep** or **Cut-Sweep**, and pick the path |
 | Blend between profiles | Sketch closed profiles on planes one after another (offset planes), then **Loft** or **Cut-Loft** and click the sketches in order in the tree. Profiles are joined edge to edge, so each needs the same number of edges; a circle adapts to its neighbours, so a rectangle lofts to a circle. Two profiles are joined straight; three or more smoothly through each |
 | Drill holes | Sketch points on a flat face (one per hole), then **Hole**: a standard metric size with a close, normal or loose clearance fit or tapped; simple, counterbored or countersunk; through everything or blind with a drill point. Threads are cosmetic: the hole is drilled to tap size and carries the thread's designation |
-| Round or bevel edges | Select edges, then **Fillet** or **Chamfer**. With *tangent propagation* the blend carries on along edges that continue smoothly. Works on straight edges between flat faces and on round edges such as the rim of a hole or a boss; three fillets at a square corner meet in a ball |
-| Hollow a body | Select the faces to open, then **Shell**, and set the wall thickness. With no face selected the body becomes a closed hollow |
-| Taper walls | Select flat faces, or round faces whose axis is along the pull (they become cones), then **Draft**: pick the neutral plane (the part keeps its size there; its normal is the direction of pull) and the angle |
+| Round or bevel edges | Select edges, then **Fillet** or **Chamfer**. With *tangent propagation* the blend carries on along edges that continue smoothly. Exact on straight edges between flat faces and on round edges such as the rim of a hole or a boss (three fillets at a square corner meet in a ball); rolled along freeform edges, such as the rim of a loft or of a spline-walled extrusion, and where a hole crosses another. A run of freeform edges must close on itself or end on flat faces |
+| Hollow a body | Select the faces to open, then **Shell**, and set the wall thickness. With no face selected the body becomes a closed hollow. Freeform bodies (lofts, spline walls) shell too, while the wall is thinner than their tightest curve |
+| Taper walls | Select flat faces, round faces whose axis is along the pull (they become cones), or freeform faces (they become straight-sided through the curve where they cross the neutral plane), then **Draft**: pick the neutral plane (the part keeps its size there; its normal is the direction of pull) and the angle |
 | Copy features | Select an extrusion, a cut, a revolve or a hole in the tree, then **Linear Pattern**, **Circular Pattern** (a bolt circle is one hole patterned round an axis) or **Mirror** |
 | Bring in another system's part | **File → Import STEP**: solids made of flat, cylindrical, conical, spherical and toroidal faces come in as bodies you can keep working on. Freeform (NURBS) faces are read too |
 | Measure | Select a face, an edge or a vertex for its size (area, length, radius); select two for the distance and the angle between them. **Mass** (in the Evaluate group) lists volume, area, mass (set the density), centre of gravity and moments of inertia |
@@ -127,7 +128,7 @@ allowance or bend deduction) and relief type.
 | Bend table | **Bends**: flat size, and every bend's direction, angle, radius, K-factor, allowance and deduction (copy it as text for a spreadsheet) |
 | DXF for the laser | **File → Export Flat Pattern DXF**: outline, cutouts, bend lines, bend notes and form marks on separate layers, in mm |
 | STEP for other CAD | **File → Export STEP**: the folded part as exact geometry (AP214) |
-| Start from a drawing | **File → Import DXF**: lines, arcs, circles and polylines come into the open sketch, or into a new one. A closed outline is ready for **Base Flange** |
+| Start from a drawing | **File → Import DXF**: lines, arcs, circles, polylines and splines saved with fit points come into the open sketch, or into a new one. A closed outline of lines and arcs is ready for **Base Flange** |
 
 **File → Open Sample Enclosure Panel** opens a panel with four flanges, reliefs and
 cutouts. Try changing the `thickness` and `flange` parameters (**Tools → Parameters**).
@@ -145,8 +146,23 @@ is rebuilt (the status bar shows the last rebuild time).
 | Edit a feature | Select it; the properties panel edits it in place. Double-click a sketch to open it |
 | Reorder | Drag a feature up or down (it can't move above what it uses) |
 | Roll back | Drag the bar at the end of the tree up; new features are added there |
-| Suppress, delete, roll back to here | Right-click a feature |
+| Suppress, delete, roll back to here | Right-click a feature. What is built on a suppressed feature is suppressed with it |
 | Undo / redo | `Ctrl+Z` / `Ctrl+Y`, for every change to the part |
+
+### Configurations
+
+A part can hold several configurations: versions of it that differ in which features are
+suppressed and in its sizes, such as a panel in two thicknesses and as a plain blank.
+They are listed above the feature tree.
+
+| Action | How |
+|---|---|
+| Add a configuration | **+ Add Configuration**: a copy of the active one, which becomes the active one. Right-click a configuration to copy, rename or delete it |
+| Switch | Double-click a configuration. The active one is what is shown, measured and exported |
+| Suppress a feature in one configuration | Right-click it in the tree and **Suppress**; **Suppress in All Configurations** does what it says |
+| Give a parameter another value | **Tools → Parameters** shows a column per configuration; a value typed in one changes that configuration only |
+| Give a size another value | At the top of the properties panel, set **Values change in** to **this configuration**, then change a feature's value or a sketch's dimension as usual: the other configurations keep theirs. Set to **all**, a value that is the same everywhere changes everywhere |
+| See and edit what differs | **Configurations** in the ribbon (or **Table…** in the properties panel): a row for everything that differs and a column per configuration. Choose a feature to list all its values; type in a configuration's column to change that one; **=** uses the active configuration's value in all |
 
 A feature that can't be built turns red with the reason in its tooltip and properties; the
 rest of the part still builds. **Features → Reference Geometry** adds planes (offset, at an
@@ -201,7 +217,7 @@ crates/
   peet-sketch/    2D sketches: entities, constraints, solver, expressions, editing operations
   peet-kernel/    B-rep kernel: planes, cylinders, cones, spheres, tori and NURBS; extrude, revolve, loft, booleans, fillets and chamfers, shell and draft, validation, tessellation, mass properties
   peet-sheetmetal/ sheet metal: flat layouts of flanges and bends, folding, flat patterns, bend math, recognising sheet metal in a solid
-  peet-model/     the parametric core: feature tree, persistent naming, rebuilds, solid and sheet metal features, undo
+  peet-model/     the parametric core: feature tree, persistent naming, rebuilds, solid and sheet metal features, configurations, undo
   peet-io/        file formats: native .peet, STL export, DXF flat patterns and import, STEP export and import
   peet-document/  the open document, headless: model, rebuilds, undo and bodies, shared by the app and scripts
   peet-ops/       operations: everything a user can do as typed values or JSON, with selectors, queries and replies (docs/scripting.md)

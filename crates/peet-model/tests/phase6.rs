@@ -1094,3 +1094,49 @@ fn lofts_join_and_cut_bodies_and_take_features() {
         block_volume - funnel_volume
     );
 }
+
+#[test]
+fn a_hole_drilled_across_a_hole_of_another_size() {
+    // The two bores cross in curves with no closed form, which the kernel traces. What
+    // they share is counted once: 8 ∫₀⁴ √(16 − t²) √(36 − t²) dt.
+    let (mut p, _) = block(60.0, 40.0, 30.0);
+    let top = p.on_face(DVec3::Z, v3(30.0, 20.0, 30.0));
+    let down = sketch_at(&mut p, top, |s, to| {
+        s.add_circle(to(v3(30.0, 20.0, 30.0)), 6.0);
+    });
+    p.extrude(down, Operation::Cut, |e| {
+        e.end = peet_model::EndCondition::ThroughAll;
+    });
+    p.rebuild();
+    p.assert_ok();
+    let side = p.on_face(DVec3::X, v3(60.0, 20.0, 15.0));
+    let across = sketch_at(&mut p, side, |s, to| {
+        s.add_circle(to(v3(60.0, 20.0, 15.0)), 4.0);
+    });
+    p.extrude(across, Operation::Cut, |e| {
+        e.end = peet_model::EndCondition::ThroughAll;
+    });
+    p.rebuild();
+    p.assert_ok();
+    let n = 200_000;
+    let shared: f64 = (0..n)
+        .map(|k| {
+            let t = 4.0 * (f64::from(k) + 0.5) / f64::from(n);
+            8.0 * ((16.0 - t * t) * (36.0 - t * t)).sqrt() * 4.0 / f64::from(n)
+        })
+        .sum();
+    let expected = 60.0 * 40.0 * 30.0 - PI * 36.0 * 30.0 - PI * 16.0 * 60.0 + shared;
+    let volume = p.volume();
+    assert!(
+        (volume - expected).abs() < 1e-5 * expected,
+        "{volume} instead of {expected}"
+    );
+    // The rims where they cross are freeform curves on round faces.
+    assert!(
+        p.bodies()[0]
+            .solid
+            .edges
+            .iter()
+            .any(|e| matches!(e.curve, peet_kernel::Curve3::Nurbs(_)))
+    );
+}

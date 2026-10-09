@@ -144,6 +144,7 @@ fn loop_area(l: &peet_sheetmetal::FlatLoop) -> f64 {
                         + 0.5 * radius * radius * (sweep - sweep.sin())
                 }
                 Curve::Line { a, b } => 0.5 * a.perp_dot(b),
+                Curve::Spline(_) => c.area_term(),
             };
             if *reversed { -a } else { a }
         })

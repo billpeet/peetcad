@@ -1606,6 +1606,10 @@ impl NurbsSurface {
     }
 }
 
+// ---- Fitted surfaces: offsets and ruled surfaces (in a file of their own) ----
+
+pub mod fit;
+
 #[cfg(test)]
 mod tests {
     use super::*;

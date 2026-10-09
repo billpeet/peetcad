@@ -34,6 +34,12 @@ pub fn trim(sketch: &mut Sketch, curve: EntityId, pick: DVec2) -> Result<Vec<Ent
     let c = sketch.curve(curve).ok_or(OpError::Unsupported(
         "only lines, arcs and circles can be trimmed",
     ))?;
+    if matches!(c, Curve::Spline(_)) {
+        return Err(OpError::Unsupported(
+            "trimming a spline. Delete the fit points beyond the cut, or draw the spline again \
+             to end where you want it",
+        ));
+    }
     let cuts = cuts(sketch, curve, &c);
 
     if let Curve::Circle { .. } = c {
@@ -455,7 +461,11 @@ pub(super) fn bind_endpoint(
             }
         }
     }
-    if let Some(&x) = curves.first() {
+    // A spline can't hold a point: an end cut by one is left where it was cut.
+    if let Some(&x) = curves
+        .iter()
+        .find(|x| sketch.kind(**x).is_some_and(EntityKind::is_analytic))
+    {
         sketch.add_constraint(ConstraintKind::PointOnCurve { point, curve: x })?;
     }
     Ok(())

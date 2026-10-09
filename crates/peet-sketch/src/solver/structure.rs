@@ -98,14 +98,32 @@ impl Size {
     }
 }
 
+/// The points a curve is defined by: a few held inline, or a spline's own list.
+pub(crate) enum CurvePoints<'a> {
+    Inline([EntityId; 3], usize),
+    Listed(&'a [EntityId]),
+}
+
+impl std::ops::Deref for CurvePoints<'_> {
+    type Target = [EntityId];
+
+    fn deref(&self) -> &[EntityId] {
+        match self {
+            Self::Inline(points, n) => &points[..*n],
+            Self::Listed(points) => points,
+        }
+    }
+}
+
 /// The points a curve is defined by, without allocating.
-pub(crate) fn curve_points(g: &Geometry) -> ([EntityId; 3], usize) {
+pub(crate) fn curve_points(g: &Geometry) -> CurvePoints<'_> {
     let z = EntityId(0);
     match *g {
-        Geometry::Point { .. } => ([z; 3], 0),
-        Geometry::Line { start, end } => ([start, end, z], 2),
-        Geometry::Circle { center, .. } => ([center, z, z], 1),
-        Geometry::Arc { center, start, end } => ([center, start, end], 3),
+        Geometry::Point { .. } => CurvePoints::Inline([z; 3], 0),
+        Geometry::Line { start, end } => CurvePoints::Inline([start, end, z], 2),
+        Geometry::Circle { center, .. } => CurvePoints::Inline([center, z, z], 1),
+        Geometry::Arc { center, start, end } => CurvePoints::Inline([center, start, end], 3),
+        Geometry::Spline { ref points, .. } => CurvePoints::Listed(points),
     }
 }
 
@@ -153,10 +171,10 @@ pub(crate) fn fingerprint(sketch: &Sketch) -> u64 {
             Geometry::Line { .. } => 2,
             Geometry::Circle { .. } => 3,
             Geometry::Arc { .. } => 4,
+            Geometry::Spline { closed, .. } => 5 + u64::from(closed),
         };
         h = mix(h, (u64::from(id.0) << 8) | (tag << 1) | u64::from(e.locked));
-        let (pts, n) = curve_points(&e.geometry);
-        for p in &pts[..n] {
+        for p in curve_points(&e.geometry).iter() {
             h = mix(h, u64::from(p.0));
         }
     }
@@ -190,8 +208,7 @@ impl Structure {
         // Curves whose defining points are all live points.
         let mut curve_ok = vec![false; cap];
         for (id, e) in sketch.entities() {
-            let (pts, n) = curve_points(&e.geometry);
-            curve_ok[id.0 as usize] = n == 0 || pts[..n].iter().all(|&p| is_point(p));
+            curve_ok[id.0 as usize] = curve_points(&e.geometry).iter().all(|&p| is_point(p));
         }
 
         // Which constraints turn into anything at all.
@@ -368,7 +385,8 @@ impl Structure {
                     st.map.point[center.0 as usize],
                     st.map.point[start.0 as usize],
                 )),
-                Geometry::Point { .. } => {}
+                // A spline has no size of its own: it is as big as its points are apart.
+                Geometry::Point { .. } | Geometry::Spline { .. } => {}
             }
         }
 

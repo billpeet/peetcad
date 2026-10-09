@@ -302,7 +302,7 @@ fn status_word(status: Option<&Status>) -> &'static str {
         Some(Status::Ok) => "ok",
         Some(Status::Warning(_)) => "warning",
         Some(Status::Failed(_)) => "failed",
-        Some(Status::Suppressed) => "suppressed",
+        Some(Status::Suppressed | Status::SuppressedBy(_)) => "suppressed",
         Some(Status::RolledBack) | None => "not_built",
     }
 }

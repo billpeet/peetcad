@@ -469,10 +469,16 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
         | Op::FlatPattern { .. }
         | Op::ApplyMaterial { .. }
         | Op::SetMaterial { .. }
-        | Op::SetColor { .. } => true,
+        | Op::SetColor { .. }
+        // An assembly has no configurations of its own: each part has its own.
+        | Op::AddConfiguration { .. }
+        | Op::EditConfiguration { .. }
+        | Op::DeleteConfiguration { .. }
+        | Op::Configuration { .. } => true,
         Op::Query(q) => matches!(
             q,
             Query::Features
+                | Query::Configurations
                 | Query::Feature(_)
                 | Query::Bodies
                 | Query::Faces { .. }
@@ -504,7 +510,7 @@ fn status_word(status: Option<&Status>) -> &'static str {
         Some(Status::Ok) => "ok",
         Some(Status::Warning(_)) => "warning",
         Some(Status::Failed(_)) => "failed",
-        Some(Status::Suppressed) => "suppressed",
+        Some(Status::Suppressed | Status::SuppressedBy(_)) => "suppressed",
         Some(Status::RolledBack) | None => "not_built",
     }
 }

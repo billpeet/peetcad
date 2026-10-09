@@ -2017,6 +2017,17 @@ fn components_are_shown_hidden_and_coloured() {
     let mut part = Document::default();
     let e = error(&mut part, json!({"op": "show_all"}));
     assert!(e.contains("works on an assembly"), "{e}");
+    // Configurations are a part's: an assembly has none of its own to add or list.
+    for op in [
+        json!({"op": "add_configuration", "name": "Long"}),
+        json!({"op": "configurations"}),
+    ] {
+        let e = error(&mut doc, op);
+        assert!(
+            e.contains("is an assembly") && e.contains("open_component"),
+            "{e}"
+        );
+    }
 }
 
 #[test]

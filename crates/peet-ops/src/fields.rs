@@ -1513,7 +1513,7 @@ feature_ops! {
         "Cut a sketch's closed regions, turned about an axis, out of the bodies."
         => Some(revolve(Operation::Cut)),
     Sweep(Sweep) "sweep"
-        "Sweep a sketch's closed regions along the lines and arcs of another sketch (corners between lines are mitred)."
+        "Sweep a sketch's closed regions along the path drawn in another sketch: lines and arcs (corners between lines are mitred), or a spline."
         => Some(sweep(Operation::Add)),
     CutSweep(Sweep) "cut_sweep"
         "Cut a sketch's closed regions, swept along a path, out of the bodies."
@@ -1537,7 +1537,7 @@ feature_ops! {
         "Hollow the bodies, leaving walls of one thickness; 'open' faces are removed."
         => Some(FeatureKind::Shell(Box::new(ShellFeature::new(Vec::new())))),
     Draft(Draft) "draft"
-        "Taper faces about a neutral plane: flat ones, or round ones along the pull."
+        "Taper faces about a neutral plane: flat ones, round ones along the pull, or freeform ones."
         => Some(FeatureKind::Draft(Box::new(DraftFeature::new(Vec::new(), None)))),
     Hole(Hole) "hole"
         "Drill a hole at every point of a sketch: plain, counterbored or countersunk, to a standard size or given ones."

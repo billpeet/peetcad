@@ -14,10 +14,12 @@ path = "src/main.rs"
 [dependencies]
 peet-document.workspace = true
 peet-io.workspace = true
+peet-live.workspace = true
 peet-ops.workspace = true
 serde_json.workspace = true
 
 [dev-dependencies]
+peet-document.workspace = true
 peet-model.workspace = true
 
 [lints]
