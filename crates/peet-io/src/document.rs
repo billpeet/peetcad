@@ -46,8 +46,10 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 ///   an assembly: its parts (each a whole model), its components, its mates, its
 ///   component patterns and its exploded view. These are new fields of the model itself,
 ///   so schema 6 and 7 models are read as [`peet_model::ModelV7`] and converted.
+/// - Model 9: persistent sketch projections and doubled centreline dimensions. Earlier
+///   sketch layouts are read through the version 8 feature types, including nested parts.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 8;
+pub const MODEL_SCHEMA: u16 = 9;
 /// The last model schema without configurations.
 const MODEL_SCHEMA_BEFORE_CONFIGURATIONS: u16 = 4;
 /// The last model schema without materials and assemblies.
@@ -172,6 +174,9 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
             .map(Model::from),
         Some(v) if v <= MODEL_SCHEMA_BEFORE_ASSEMBLIES => r
             .read::<peet_model::ModelV7>(SectionKind::MODEL)?
+            .map(Model::from),
+        Some(8) => r
+            .read::<peet_model::ModelV8>(SectionKind::MODEL)?
             .map(Model::from),
         _ => r.read(SectionKind::MODEL)?,
     };
@@ -301,6 +306,24 @@ mod tests {
         assert_eq!(o.meshes.len(), 1);
         assert_eq!(o.meshes[0].stamp, bodies[0].stamp);
         assert!(o.warnings.is_empty());
+    }
+
+    #[test]
+    fn schema_8_parts_and_nested_assemblies_still_open() {
+        let (part, _) = bracket();
+        for model in [part.clone(), {
+            let mut assembly = Model::new_assembly();
+            let a = assembly.assembly_mut().unwrap();
+            let mut sub = Model::new_assembly();
+            sub.assembly_mut().unwrap().define(Arc::new(part.clone()));
+            a.define(Arc::new(sub));
+            assembly
+        }] {
+            let mut w = Writer::new();
+            w.section(SectionKind::MODEL, 8, &peet_model::ModelV8::of(&model))
+                .unwrap();
+            assert_eq!(open(&w.finish()).unwrap().model, model);
+        }
     }
 
     #[test]

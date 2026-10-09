@@ -432,6 +432,11 @@ impl Document {
         self.engine.evaluation()
     }
 
+    /// Model bodies before a feature, from the rebuild history rather than the final part.
+    pub fn bodies_before(&self, id: FeatureId) -> Option<&[Arc<peet_model::Body>]> {
+        self.engine.bodies_before(&self.model, id)
+    }
+
     /// Applies a change as one undo step and rebuilds. Returns whether anything changed.
     pub fn change(&mut self, label: &str, f: impl FnOnce(&mut Model)) -> bool {
         self.change_inner(label, None, f)

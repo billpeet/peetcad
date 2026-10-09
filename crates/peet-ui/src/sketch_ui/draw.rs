@@ -446,7 +446,7 @@ fn glyph_anchor(sketch: &Sketch, view: &SketchView, e: EntityId) -> Option<Pos2>
 pub fn dimension_anchor(sketch: &Sketch, kind: &ConstraintKind) -> Option<DVec2> {
     use ConstraintKind::*;
     match *kind {
-        Distance(a, b) => {
+        Distance(a, b) | DoubledDistance(a, b) => {
             let (p, q) = distance_points(sketch, a, b)?;
             Some((p + q) * 0.5)
         }
@@ -518,9 +518,13 @@ fn draw_dimension(
     let stroke = Stroke::new(1.0, color);
     let px = view.px();
     match *kind {
-        Distance(..) | Length(_) | HorizontalDistance(..) | VerticalDistance(..) => {
+        Distance(..)
+        | DoubledDistance(..)
+        | Length(_)
+        | HorizontalDistance(..)
+        | VerticalDistance(..) => {
             let (p1, p2) = match *kind {
-                Distance(a, b) => distance_points(sketch, a, b)?,
+                Distance(a, b) | DoubledDistance(a, b) => distance_points(sketch, a, b)?,
                 Length(l) => {
                     let c = sketch.curve(l)?;
                     (c.start(), c.end())

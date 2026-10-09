@@ -337,6 +337,7 @@ pub enum Op {
     SetSketch {
         sketch: FeatureSel,
         content: Box<peet_sketch::Sketch>,
+        projections: Vec<peet_model::projection::Projection>,
         configurations: Option<Configs>,
     },
     /// Add or change a named value usable in every expression. A new one exists in

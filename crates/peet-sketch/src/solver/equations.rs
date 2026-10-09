@@ -582,6 +582,7 @@ impl Ctx<'_> {
                 out.push(Eq::linear(&[(q, 1.0)], at.x, owner));
                 out.push(Eq::linear(&[(q + 1, 1.0)], at.y, owner));
             }
+            K::DoubledDistance(a, b) => self.emit(&K::Distance(a, b), value * 0.5, contact, out),
             K::Distance(a, b) => {
                 if self.is_point(a) && self.is_point(b) {
                     let (pa, pb) = (p(a), p(b));

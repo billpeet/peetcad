@@ -147,6 +147,7 @@ pub(crate) fn constraint_refs(kind: &ConstraintKind) -> ([EntityId; 3], usize, u
         Symmetric { a, b, axis } => ([a, b, axis], 3, 12),
         Fix { point, .. } => ([point, z, z], 1, 13),
         Distance(a, b) => ([a, b, z], 2, 14),
+        DoubledDistance(a, b) => ([a, b, z], 2, 21),
         Length(a) => ([a, z, z], 1, 15),
         HorizontalDistance(a, b) => ([a, b, z], 2, 16),
         VerticalDistance(a, b) => ([a, b, z], 2, 17),
@@ -292,7 +293,9 @@ impl Structure {
             if !curve_ok[id.0 as usize] {
                 continue;
             }
-            if let Geometry::Circle { .. } = e.geometry {
+            if let Geometry::Circle { .. } = e.geometry
+                && !e.locked
+            {
                 radius[id.0 as usize] = next;
                 radii.push((id, next));
                 next += 1;
@@ -302,6 +305,14 @@ impl Structure {
         for c in classes.iter_mut().filter(|c| c.locked.is_some()) {
             c.slot = next;
             next += 2;
+        }
+        for (id, e) in sketch.entities() {
+            if matches!(e.geometry, Geometry::Circle { .. }) && e.locked && curve_ok[id.0 as usize]
+            {
+                radius[id.0 as usize] = next;
+                radii.push((id, next));
+                next += 1;
+            }
         }
         let n_slots = next as usize;
         let mut point = vec![NONE; cap];
@@ -497,7 +508,7 @@ impl Structure {
             }
         }
         for &(id, slot) in &self.radii {
-            if !keep[slot as usize] {
+            if (slot as usize) < self.n_vars && !keep[slot as usize] {
                 sketch.set_radius(id, vals[slot as usize].abs());
             }
         }

@@ -202,13 +202,20 @@ impl Solver {
     /// possible. Refreshes driven dimension values afterwards.
     pub fn solve(&mut self, sketch: &mut Sketch) -> SolveReport {
         self.drag_starts.clear();
-        self.run(sketch, &[])
+        self.run(sketch, &[], None)
+    }
+
+    /// Solves after reference geometry moves, retaining side and tangency choices from
+    /// the previous solution. Both sketches must have identical entity topology.
+    pub fn solve_with_previous(&mut self, sketch: &mut Sketch, previous: &Sketch) -> SolveReport {
+        self.drag_starts.clear();
+        self.run(sketch, &[], Some(previous))
     }
 
     /// Solves with the drags as additional soft targets: constraints always win, and the
     /// dragged geometry gets as close to its targets as they allow.
     pub fn solve_drag(&mut self, sketch: &mut Sketch, drags: &[Drag]) -> SolveReport {
-        self.run(sketch, drags)
+        self.run(sketch, drags, None)
     }
 
     /// Degrees of freedom per entity and diagnostics for redundant/conflicting constraints,
@@ -314,8 +321,19 @@ impl Solver {
         self.eqs.extend(soft);
     }
 
-    fn run(&mut self, sketch: &mut Sketch, drags: &[Drag]) -> SolveReport {
+    fn run(
+        &mut self,
+        sketch: &mut Sketch,
+        drags: &[Drag],
+        previous: Option<&Sketch>,
+    ) -> SolveReport {
         self.prepare(sketch);
+        if let Some(previous) = previous {
+            let st = self.structure.as_ref().expect("prepared");
+            let mut branch_values = Vec::new();
+            st.load(previous, &mut branch_values);
+            equations::generate(sketch, &st.map, &branch_values, &mut self.eqs);
+        }
         if !drags.is_empty() {
             self.soft_equations(sketch, drags);
         }

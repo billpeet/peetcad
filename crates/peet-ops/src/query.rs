@@ -263,6 +263,9 @@ fn sketch_detail(doc: &Document, sketch: &Sketch) -> (Vec<Value>, Vec<Value>, Ve
             if free(id) {
                 m.insert("free".to_owned(), json!(true));
             }
+            if e.locked {
+                m.insert("locked".to_owned(), json!(true));
+            }
             if e.construction {
                 m.insert("construction".to_owned(), json!(true));
             }
@@ -345,6 +348,7 @@ pub fn feature(doc: &Document, id: FeatureId) -> Value {
         out.insert("entities".to_owned(), json!(entities));
         out.insert("relations".to_owned(), json!(relations));
         out.insert("dimensions".to_owned(), json!(dimensions));
+        out.insert("projections".to_owned(), json!(s.projections));
     }
     Value::Object(out)
 }

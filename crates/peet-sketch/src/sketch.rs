@@ -120,8 +120,8 @@ pub struct Entity {
     /// For points: the curve that created this point, if any. Owned points are removed with
     /// their owner and are not listed as separate items in the UI.
     pub owner: Option<EntityId>,
-    /// Locked (reference) entities are constants for the solver: the sketch origin now,
-    /// projected model edges later. The user cannot move or delete them.
+    /// Locked reference entities are constants for the solver: the sketch origin and
+    /// projected model geometry. Deleting a projection removes its model reference first.
     pub locked: bool,
 }
 
@@ -201,6 +201,8 @@ pub enum ConstraintKind {
     Diameter(EntityId),
     /// Angle between two lines, in degrees (0..=180).
     Angle(EntityId, EntityId),
+    /// Twice the perpendicular point-to-line distance, for centreline dimensions.
+    DoubledDistance(EntityId, EntityId),
 }
 
 impl ConstraintKind {
@@ -219,6 +221,7 @@ impl ConstraintKind {
             | Equal(a, b)
             | Concentric(a, b)
             | Distance(a, b)
+            | DoubledDistance(a, b)
             | HorizontalDistance(a, b)
             | VerticalDistance(a, b)
             | Angle(a, b) => vec![a, b],
@@ -234,6 +237,7 @@ impl ConstraintKind {
         matches!(
             self,
             Distance(..)
+                | DoubledDistance(..)
                 | Length(_)
                 | HorizontalDistance(..)
                 | VerticalDistance(..)
@@ -264,6 +268,7 @@ impl ConstraintKind {
             Symmetric { .. } => "Symmetric",
             Fix { .. } => "Fix",
             Distance(..) => "Distance",
+            DoubledDistance(..) => "Doubled distance",
             Length(_) => "Length",
             HorizontalDistance(..) => "Horizontal distance",
             VerticalDistance(..) => "Vertical distance",
@@ -529,6 +534,7 @@ impl Sketch {
     pub fn measure(&self, kind: &ConstraintKind) -> Option<f64> {
         use ConstraintKind::*;
         match *kind {
+            DoubledDistance(a, b) => self.measure(&Distance(a, b)).map(|d| d * 2.0),
             Distance(a, b) => match (self.kind(a)?, self.kind(b)?) {
                 (EntityKind::Point, EntityKind::Point) => {
                     Some(self.point(a).distance(self.point(b)))
@@ -794,6 +800,9 @@ impl Sketch {
                         (K::Point, K::Point) | (K::Point, K::Line) | (K::Line, K::Point)
                     )
             }
+            DoubledDistance(a, b) => {
+                a != b && matches!((k(a), k(b)), (K::Point, K::Line) | (K::Line, K::Point))
+            }
             Radius(c) | Diameter(c) => k(c).is_circular(),
         };
         if ok {
@@ -999,6 +1008,7 @@ fn expected_kinds(kind: &ConstraintKind) -> &'static str {
         Symmetric { .. } => "two points and a line",
         Fix { .. } => "a point",
         Distance(..) => "two points, or a point and a line",
+        DoubledDistance(..) => "a point and a line",
         Radius(_) | Diameter(_) => "a circle or arc",
     }
 }

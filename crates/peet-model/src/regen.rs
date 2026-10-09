@@ -290,6 +290,29 @@ impl Engine {
         &self.evaluation
     }
 
+    /// The bodies entering a feature in the most recent rebuild. Sketch editing uses
+    /// this history state so downstream cuts cannot become references into their sketch.
+    pub fn bodies_before(&self, model: &Model, id: FeatureId) -> Option<&[Arc<Body>]> {
+        let mut bodies: &[Arc<Body>] = &[];
+        for feature in model.features() {
+            if feature.id == id {
+                return Some(bodies);
+            }
+            if self
+                .evaluation
+                .state(feature.id)
+                .is_some_and(|s| s.status.is_built())
+                && let Some(built) = self
+                    .cache
+                    .get(&feature.id)
+                    .and_then(|c| c.bodies.as_deref())
+            {
+                bodies = built;
+            }
+        }
+        None
+    }
+
     /// Pulls a component of an assembly at the next rebuild (and only that one): a point
     /// of it towards a place, as far as its mates let it go. See [`crate::Drag`].
     pub fn set_drag(&mut self, drag: Option<mate::Drag>) {
@@ -703,7 +726,24 @@ impl Engine {
         };
         let mut write_back = None;
         let state = match &feature.kind {
-            FeatureKind::Sketch(s) => match ctx.plane(&s.plane) {
+            FeatureKind::Sketch(s) => match ctx.plane(&s.plane).and_then(|plane| {
+                let mut sketch = s.sketch.clone();
+                for projection in &s.projections {
+                    use crate::projection::{Shape, Source, intersect_plane, project_edge};
+                    let shape = match &projection.source {
+                        Source::Point(p) => Shape::Point(plane.to_plane_coords(ctx.point(p)?)),
+                        Source::Plane(p) => intersect_plane(plane, ctx.plane(p)?)?,
+                        Source::Edge(e) => {
+                            let found = find_edge(ctx.bodies, e).ok_or(
+                                "The projected edge no longer exists. Replace its projection.",
+                            )?;
+                            project_edge(ctx.bodies[found.body].solid.edge(found.id), plane)?
+                        }
+                    };
+                    shape.update(&mut sketch, projection.entity)?;
+                }
+                Ok((plane, sketch))
+            }) {
                 Err(e) => fail(
                     e,
                     Output::Sketch {
@@ -711,15 +751,18 @@ impl Engine {
                         definition: SketchStatus::Under,
                     },
                 ),
-                Ok(plane) => {
-                    let key = hash::of(&(1u8, &s.sketch, params_key, &plane));
+                Ok((plane, projected)) => {
+                    let key = hash::of(&(1u8, &projected, params_key, &plane));
                     match self.cache.get(&id).filter(|c| c.key == key) {
                         Some(c) => {
+                            if projected != s.sketch || plane != s.placement {
+                                write_back = Some((projected.clone(), plane));
+                            }
                             run.out_keys.insert(id, c.out_key);
                             reused(&c.state)
                         }
                         None => {
-                            let (state, sketch) = solve_sketch(&s.sketch, plane, model);
+                            let (state, sketch) = solve_sketch(&projected, plane, model, &s.sketch);
                             let out_key = hash::of(&(&sketch, &plane));
                             // Keyed on the solved sketch: that is what the model holds
                             // from now on.
@@ -1378,11 +1421,16 @@ fn reference(result: Result<Output, String>) -> FeatureState {
 }
 
 /// Evaluates a sketch's dimension expressions and solves it.
-fn solve_sketch(sketch: &Sketch, plane: Plane, model: &Model) -> (FeatureState, Sketch) {
+fn solve_sketch(
+    sketch: &Sketch,
+    plane: Plane,
+    model: &Model,
+    previous: &Sketch,
+) -> (FeatureState, Sketch) {
     let mut sketch = sketch.clone();
     let failures = expr::apply_expressions(&mut sketch, &model.parameters);
     let mut solver = Solver::new();
-    let report = solver.solve(&mut sketch);
+    let report = solver.solve_with_previous(&mut sketch, previous);
     let analysis = solver.analyze(&sketch);
     let definition = if analysis.is_over_defined() || !report.converged {
         SketchStatus::Over
