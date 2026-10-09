@@ -24,7 +24,7 @@ using Json = Dictionary<string, object?>;
 internal static class Program
 {
     /// <summary>Raise this when the output changes shape, so the importer can tell exports apart.</summary>
-    private const int FormatVersion = 2;
+    private const int FormatVersion = 3;
     private const string FlatPatternSuffix = "SM-FLAT-PATTERN";
     private const int MaxRestarts = 5;
 
@@ -384,6 +384,10 @@ internal static class Program
                 ["valueType"] = dimension.GetType(),
                 // swDimensionType_e: how it is drawn (linear, radial, diameter, angular, ...)
                 ["displayType"] = display.Type2,
+                // The direction its dimension line runs: along the sketch's x, its y, or from one point to the
+                // other. The same two points can be dimensioned all three ways.
+                ["lineDirection"] = Try(() => dimension.DimensionLineDirection?.ArrayData),
+                ["extensionDirection"] = Try(() => dimension.ExtensionLineDirection?.ArrayData),
                 // swDimensionDrivenState_e: 1 driven, 2 driving
                 ["drivenState"] = dimension.DrivenState,
                 ["readOnly"] = dimension.ReadOnly
@@ -448,7 +452,7 @@ internal static class Program
         // The edges, faces and sketches a definition refers to can only be read between these two calls, which
         // roll the model back to the feature and forward again. A suppressed feature has nothing to roll back to.
         MethodInfo? release = null;
-        if (readSelections && !suppressed) {
+        if (readSelections) {
             var owner = interfaces.FirstOrDefault(i => i.GetMethod("AccessSelections") != null && i.GetMethod("ReleaseSelectionAccess") != null);
             if (owner != null) {
                 var accessed = Try(() => owner.GetMethod("AccessSelections")!.Invoke(definition, new object?[] { doc, null }));
@@ -533,6 +537,47 @@ internal static class Program
 
         result["points"] = ArrayOf(sketch.GetSketchPoints2()).Cast<SketchPoint>().Select(Point).ToList();
 
+        result["segments"] = Segments(sketch);
+
+        // A block is a group of segments drawn once and placed any number of times. The sketch's own list
+        // of segments leaves out what is inside one, so each instance is written with its definition's
+        // segments (in the definition's own coordinates) and the transform that places them in this sketch.
+        var blocks = new List<Json>();
+        foreach (var instance in ArrayOf(Try(() => sketch.GetSketchBlockInstances())).OfType<SketchBlockInstance>()) {
+            var inner = Try(() => instance.Definition?.GetSketch()) as Sketch;
+            blocks.Add(new Json {
+                ["name"] = instance.Name,
+                ["definition"] = (inner as Feature)?.Name,
+                ["angle"] = instance.Angle,
+                ["scale"] = instance.Scale2,
+                ["blockToSketch"] = Try(() => instance.BlockToSketchTransform?.ArrayData),
+                ["segments"] = inner == null ? null : TryList(() => Segments(inner)),
+                ["points"] = inner == null ? null : TryList(() => ArrayOf(inner.GetSketchPoints2()).Cast<SketchPoint>().Select(Point).ToList())
+            });
+        }
+        if (blocks.Count > 0)
+            result["blocks"] = blocks;
+
+        var relations = new List<Json>();
+        foreach (var relation in ArrayOf(sketch.RelationManager?.GetRelations((int)swSketchRelationFilterType_e.swAll)).Cast<SketchRelation>()) {
+            var display = Try(() => relation.GetDisplayDimension()) as DisplayDimension;
+            relations.Add(new Json {
+                // swConstraintType_e
+                ["type"] = ((swConstraintType_e)relation.GetRelationType()).ToString().Replace("swConstraintType_", "").ToLowerInvariant(),
+                ["entities"] = ArrayOf(Try(() => relation.GetEntities())).Select(Describe).ToList(),
+                // What the relation is defined by when that is outside the sketch: the model edge a converted
+                // line follows, for one
+                ["defined"] = Defined(relation),
+                ["suppressed"] = relation.Suppressed ? true : null,
+                ["dimension"] = ((Dimension?)display?.GetDimension2(0))?.FullName
+            });
+        }
+        result["relations"] = relations;
+        return result;
+    }
+
+    private static List<Json> Segments(Sketch sketch)
+    {
         var segments = new List<Json>();
         foreach (var segment in ArrayOf(sketch.GetSketchSegments()).Cast<SketchSegment>()) {
             var kind = (swSketchSegments_e)segment.GetType();
@@ -576,24 +621,7 @@ internal static class Program
             }
             segments.Add(item);
         }
-        result["segments"] = segments;
-
-        var relations = new List<Json>();
-        foreach (var relation in ArrayOf(sketch.RelationManager?.GetRelations((int)swSketchRelationFilterType_e.swAll)).Cast<SketchRelation>()) {
-            var display = Try(() => relation.GetDisplayDimension()) as DisplayDimension;
-            relations.Add(new Json {
-                // swConstraintType_e
-                ["type"] = ((swConstraintType_e)relation.GetRelationType()).ToString().Replace("swConstraintType_", "").ToLowerInvariant(),
-                ["entities"] = ArrayOf(Try(() => relation.GetEntities())).Select(Describe).ToList(),
-                // What the relation is defined by when that is outside the sketch: the model edge a converted
-                // line follows, for one
-                ["defined"] = Defined(relation),
-                ["suppressed"] = relation.Suppressed ? true : null,
-                ["dimension"] = ((Dimension?)display?.GetDimension2(0))?.FullName
-            });
-        }
-        result["relations"] = relations;
-        return result;
+        return segments;
     }
 
     private static List<object?>? Defined(SketchRelation relation)
@@ -811,6 +839,16 @@ internal static class Program
 
     /// <summary>One value that cannot be read is left out. It does not end the export of the document.</summary>
     private static object? Try(Func<object?> read)
+    {
+        try {
+            return read();
+        }
+        catch (Exception) {
+            return null;
+        }
+    }
+
+    private static List<Json>? TryList(Func<List<Json>> read)
     {
         try {
             return read();

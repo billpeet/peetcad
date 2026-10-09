@@ -58,6 +58,29 @@ const fromSketch = (f, p) => add(add(add(f.o, mul(f.x, p.x * MM)), mul(f.y, p.y 
 const samePlane = (a, b) => Math.abs(Math.abs(dot(a.n, b.n)) - 1) < 1e-7 && Math.abs(dot(sub(a.o, b.o), b.n)) < 1e-4;
 /** A sketch point's place as a key: two points a tenth of a micron apart are one. */
 const spot = p => `${Math.round(p.x * 1e7)},${Math.round(p.y * 1e7)}`;
+/**
+ * A sketch with the segments of its blocks among its own. A block is a group of segments drawn once and
+ * placed by a transform; PeetCAD sketches have no blocks, so each instance's segments are drawn where it puts
+ * them and the grouping is lost. (The third export has what is in a block; before it they are missing.)
+ */
+function withBlocks(sketch) {
+  if (!sketch || !sketch.blocks || !sketch.blocks.some(b => (b.segments || []).length)) return sketch;
+  const segments = [...sketch.segments];
+  sketch.blocks.forEach((block, k) => {
+    const a = block.blockToSketch;
+    // The same layout as every SolidWorks transform: a rotation by rows, then the translation and the scale
+    const place = p => !p ? p : !a ? p : {
+      ...p,
+      x: (p.x * a[0] + p.y * a[3] + (p.z || 0) * a[6]) * (a[12] || 1) + a[9],
+      y: (p.x * a[1] + p.y * a[4] + (p.z || 0) * a[7]) * (a[12] || 1) + a[10],
+    };
+    (block.segments || []).forEach((g, i) => segments.push({
+      ...g, id: ["block" + k, i], start: place(g.start), end: place(g.end), center: place(g.center),
+      radius: g.radius === undefined ? undefined : g.radius * ((a && a[12]) || 1),
+    }));
+  });
+  return { ...sketch, segments, blockInstances: 0, blocksDrawn: sketch.blocks.length };
+}
 /** How far, in mm, an edge or a face may be from where SolidWorks has it and still be taken for the same one. */
 const NEAR = 2;
 
@@ -185,7 +208,7 @@ function importPart(doc, dir) {
    * sketch's own lines and arcs (a hole's circles at the sketch's points).
    */
   function importSketch(f, { name = f.name, needFace = false, draw = null } = {}) {
-    const s = f.sketch;
+    const s = withBlocks(f.sketch);
     if (!s || s.error) return { error: "the sketch was not exported" };
     if (s.is3D) return { error: "a 3D sketch" };
     const sf = frameOf(s.modelToSketch);
@@ -252,6 +275,7 @@ function importPart(doc, dir) {
     if (!reply.ok) return { error: reply.error };
     const partial = [...left];
     if (s.blockInstances) partial.push("sketch blocks");
+    if (s.blocksDrawn) report.notes.push(`${name} has ${s.blocksDrawn} sketch block${s.blocksDrawn > 1 ? "s" : ""}, drawn as plain geometry.`);
     if (away > 1e-4) report.notes.push(`${name} is on a face ${away.toFixed(3)} mm from where SolidWorks has it.`);
     const result = { name: reply.created[0].name, toPeet, frame: pf, partial, dimensions: new Map(), ids: new Map(), values: new Map((f.dimensions || []).map(d => [d.fullName, d.value])) };
     for (const o of own) { const d = (reply.drawn || []).find(x => x.as === o.as); if (d && o.g) result.ids.set(o.g.id.join("."), d.id); }
@@ -382,7 +406,11 @@ function importPart(doc, dir) {
             // Between two points SolidWorks measures along x, along y or straight, and the export does not
             // say which: it is the one whose size the points are apart
             const dx = Math.abs(pts[0].e.x - pts[1].e.x), dy = Math.abs(pts[0].e.y - pts[1].e.y), v = dim.value;
-            const kind = dim.displayType === 11 || (Math.abs(v - dx) < 1e-9 && dy > 1e-9) ? "horizontal" : dim.displayType === 12 || (Math.abs(v - dy) < 1e-9 && dx > 1e-9) ? "vertical" : null;
+            // The dimension line's direction is in the model's coordinates: along the sketch's x, its y, or neither
+            const line = dim.lineDirection && len(dim.lineDirection) > 1e-9 ? unit(dim.lineDirection.slice(0, 3)) : null;
+            const said = !line ? undefined : Math.abs(dot(line, sf.x)) > 0.9999 ? "horizontal" : Math.abs(dot(line, sf.y)) > 0.9999 ? "vertical" : null;
+            const kind = said !== undefined ? said
+              : dim.displayType === 11 || (Math.abs(v - dx) < 1e-9 && dy > 1e-9) ? "horizontal" : dim.displayType === 12 || (Math.abs(v - dy) < 1e-9 && dx > 1e-9) ? "vertical" : null;
             if (kind && !level(kind)) break;
             item = { type: kind ? level(kind) + "_distance" : "distance", of: pts.map(p => p.id), value };
           } else if (rounds.length && rounds.every(g => g.center !== undefined) && anyPoints.length + rounds.length === 2 && lines.length + outLines.length === 0) item = { type: "distance", of: [...anyPoints, ...rounds.map(g => g.center)], value };

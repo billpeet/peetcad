@@ -83,17 +83,28 @@ Run against SolidWorks 2026 on the whole template library (201 parts, 29 assembl
 all complete, in about 80 minutes, twice. The flat sizes in the DXF files agree with the
 flat-pattern configurations' bodies and with the bend deduction by hand.
 
-`formatVersion` is 2. Since 1, a definition also has its `Is…` methods (`IsBossFeature`
-is the only thing that tells a boss-extrude from a cut-extrude) and its values per
-reference (`Constraint[0]`); a relation's entities say where they are, because the id
-a relation gives for a segment is not the id the sketch lists it under; and every face
-has a `point` that is on it.
+`formatVersion` is 3. What each version added:
+
+- **2:** a definition has its `Is…` methods (`IsBossFeature` is the only thing that tells a
+  boss-extrude from a cut-extrude; a part's first extrude is `IsBaseExtrude`) and its
+  values per reference (a plane's `Constraint[0]`); a relation's entities say where they
+  are, because the id a relation gives for a segment is not the id the sketch lists it
+  under; and every face has a `point` that is on it.
+- **3:** a sketch has its `blocks`: each instance with its definition's segments, in the
+  definition's own coordinates, and `blockToSketch`, the transform that places them (the
+  sketch's own list of segments leaves out what is inside a block). A dimension has
+  `lineDirection`, the way it measures, in the model's coordinates: two points can be
+  dimensioned along x, along y or straight across. And the selections of suppressed
+  features are read where SolidWorks allows it, so that a suppressed flange has its
+  edges and a suppressed pattern its direction.
 
 `tally.js` counts what a folder of exports uses: see
 [docs/solidworks-library-tally.md](../../docs/solidworks-library-tally.md).
 
-Still missing: whether a distance dimension is horizontal, vertical or aligned (the
-importer works it out from the points), and the sketch a sketched bend is made from.
+Still missing: the definitions of composite curves (33, in one assembly); what a mate
+joins when its component is not loaded (the end is written with its numbers and no
+entity); and the selections of some suppressed features, which SolidWorks will not
+give.
 
 Known behaviour:
 

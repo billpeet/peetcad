@@ -103,9 +103,13 @@ quicker and enough to check shapes.
 - **Checking a suppressed feature.** It is built without anything to compare it with.
 - Assemblies.
 
-It reads both exports. The first (format 1) does not say whether an extrude is a boss
-or a cut, nor where a relation's entities are, so from it the name decides the first and
-few relations are found.
+It reads every format of export. The first does not say whether an extrude is a boss or
+a cut, nor where a relation's entities are, so from it the name decides the first and
+few relations are found. Before the third, what is inside a sketch block is missing and
+the way a distance is measured is worked out from the points.
+
+A sketch block is drawn as plain geometry where each instance puts it: PeetCAD sketches
+have no blocks, so the grouping is lost.
 
 ## Verdicts
 
