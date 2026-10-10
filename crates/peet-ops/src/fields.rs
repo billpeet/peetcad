@@ -154,6 +154,40 @@ impl Field for OptLength {
     }
 }
 
+/// A number that falls back to the body's default when absent.
+pub(crate) struct OptNumber;
+
+impl Field for OptNumber {
+    type Arg = Option<Input>;
+    type Target = Option<Scalar>;
+    const NULLABLE: bool = true;
+    fn describe() -> String {
+        "number, or null for the body's default".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        if v.is_null() {
+            Ok(None)
+        } else {
+            Input::parse(v).map(Some)
+        }
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        *target = arg
+            .as_ref()
+            .map(|a| a.scalar(ScalarKind::Number, doc))
+            .transpose()?;
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target
+            .as_ref()
+            .map_or(Value::Null, |s| scalar_out(s, ScalarKind::Number, doc))
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.as_ref().map(input_of))
+    }
+}
+
 pub(crate) struct Flag;
 
 impl Field for Flag {
@@ -284,6 +318,35 @@ impl<T: Words> Field for Choice<T> {
         json!(target.word())
     }
     fn arg(target: &T, _: &Document) -> Option<T> {
+        Some(target.clone())
+    }
+}
+
+/// One of a fixed set of words, or null for the body's default.
+pub(crate) struct OptChoice<T>(PhantomData<T>);
+
+impl<T: Words> Field for OptChoice<T> {
+    type Arg = Option<T>;
+    type Target = Option<T>;
+    const NULLABLE: bool = true;
+    fn describe() -> String {
+        format!("{}, or null for the body's default", T::words().join(" | "))
+    }
+    fn parse(v: &Value) -> Result<Option<T>, String> {
+        if v.is_null() {
+            Ok(None)
+        } else {
+            Choice::<T>::parse(v).map(Some)
+        }
+    }
+    fn assign(arg: &Option<T>, target: &mut Option<T>, _: &Document) -> Result<(), String> {
+        *target = arg.clone();
+        Ok(())
+    }
+    fn read(target: &Option<T>, _: &Document) -> Value {
+        target.as_ref().map_or(Value::Null, |t| json!(t.word()))
+    }
+    fn arg(target: &Option<T>, _: &Document) -> Option<Option<T>> {
         Some(target.clone())
     }
 }
@@ -974,7 +1037,7 @@ feature_args! {
 feature_args! {
     /// A flange with a bend on an edge of a sheet metal body.
     EdgeFlange: FeatureKind::EdgeFlange(f) => &mut **f,
-        EdgeFlangeFeature { edge, length, angle, position, offset_start, offset_end, flip, radius } => {
+        EdgeFlangeFeature { edge, length, angle, position, offset_start, offset_end, flip, radius, relief, relief_ratio } => {
     /// `Some(None)`: to be picked afterwards.
     edge: Option<EdgeSel> as OptEdge = edge,
     length: Input as Length = length,
@@ -985,6 +1048,11 @@ feature_args! {
     flip: bool as Flag = flip,
     /// `Some(None)` uses the body's default radius.
     radius: Option<Input> as OptLength = radius,
+    /// The relief where the flange is set back from an end of its edge. `Some(None)`
+    /// uses the body's.
+    relief: Option<ReliefType> as OptChoice<ReliefType> = relief,
+    /// That relief's size as a multiple of the thickness. `Some(None)` uses the body's.
+    relief_ratio: Option<Input> as OptNumber = relief_ratio,
     }
 }
 

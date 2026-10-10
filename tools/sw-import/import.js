@@ -775,7 +775,7 @@ function importPart(doc, dir) {
       chain.push(g);
     }
     if (!near(at, foot.end)) return { error: "its outline is not one closed loop" };
-    const sk = importSketch(sketch, { name: name + " sketch", needFace: true, draw: flat => {
+    const draw = flat => {
       const A = flat(foot.start), B = flat(foot.end);
       const width = Math.hypot(B[0] - A[0], B[1] - A[1]);
       const u = [(B[0] - A[0]) / width, (B[1] - A[1]) / width];
@@ -812,7 +812,14 @@ function importPart(doc, dir) {
       }
       for (const labels of groups.values()) for (let i = 1; i < labels.length; i++) items.push({ type: "coincident", of: [labels[0], labels[i]] });
       return items;
-    } });
+    };
+    // On the flange's own face: the middle of the outline is on it. A corner of the outline's foot can
+    // be on the edge of the face the flange is bent from as well, which is no place for a cut.
+    const sf = frameOf(sketch.sketch.modelToSketch);
+    const corners = chain.flatMap(g => [g.start, g.end]);
+    const middle = fromSketch(sf, { x: corners.reduce((t, q) => t + q.x, 0) / corners.length, y: corners.reduce((t, q) => t + q.y, 0) / corners.length });
+    let sk = sketchOnFace(name + " sketch", middle, sf.n, flat => draw(q => flat(fromSketch(sf, q))));
+    if (sk.error) sk = importSketch(sketch, { name: name + " sketch", needFace: true, draw });
     if (sk.error) return { error: sk.error };
     const reply = peet.apply({ op: "sheet_cut", sketch: sk.name, name });
     if (!reply.ok) { peet.apply({ op: "delete", feature: sk.name }); return { error: reply.error }; }
@@ -971,9 +978,24 @@ function importPart(doc, dir) {
           }
           return { edge: { at: edge.middle.map(tidy) }, offsets, outline };
         });
+        // A relief of the flange's own, where SolidWorks does not use the body's. One given as a width and
+        // a depth becomes a ratio of its width: PeetCAD's relief is as deep past the bend as it is wide.
+        const ownRelief = {};
+        if (v.UseDefaultBendRelief === false) {
+          const kind = { 1: "rectangular", 2: "tear", 3: "obround" }[v.AutoReliefType];
+          if (kind) ownRelief.relief = kind;
+          if (kind && kind !== "tear") {
+            if (v.UseReliefRatio && v.ReliefRatio > 0) ownRelief.relief_ratio = tidy(v.ReliefRatio);
+            else if (v.ReliefWidth > 0 && thickness) {
+              ownRelief.relief_ratio = tidy(v.ReliefWidth * MM / thickness);
+              if (Math.abs(v.ReliefWidth - v.ReliefDepth) > 1e-9) notes.push("its relief has a width and a depth of its own: the width is used for both");
+            }
+          }
+        }
         const common = {
           op: "edge_flange", name: f.name, length: tidy(length), angle: tidy(angle), position,
           ...(v.UseDefaultBendRadius === false ? { radius: tidy(Math.max(radius, 0.01)) } : {}),
+          ...ownRelief,
         };
         let built;
         if (ops.length === 1) built = buildFlange(f, { ...common, edge: ops[0].edge, ...ops[0].offsets });

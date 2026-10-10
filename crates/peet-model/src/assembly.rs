@@ -339,6 +339,79 @@ pub(crate) struct AssemblyLegacy<F> {
     next_pattern: u32,
 }
 
+/// The assembly layout of schema 11: today's, with schema 11 models in its definitions.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct AssemblyV11 {
+    definitions: Vec<DefinitionV11>,
+    components: Vec<Arc<Component>>,
+    next_definition: u32,
+    next_component: u32,
+    mates: Vec<Arc<Mate>>,
+    next_mate: u32,
+    explode: Vec<Arc<ExplodeStep>>,
+    next_explode: u32,
+    patterns: Vec<Arc<ComponentPattern>>,
+    next_pattern: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct DefinitionV11 {
+    id: DefId,
+    model: crate::model::ModelV11,
+    link: Option<Link>,
+}
+
+impl AssemblyV11 {
+    pub(crate) fn of(a: &Assembly) -> Self {
+        Self {
+            definitions: a
+                .definitions()
+                .map(|d| DefinitionV11 {
+                    id: d.id,
+                    model: crate::model::ModelV11::of(&d.model),
+                    link: d.link.clone(),
+                })
+                .collect(),
+            components: a.components.clone(),
+            next_definition: a.next_definition,
+            next_component: a.next_component,
+            mates: a.mates.clone(),
+            next_mate: a.next_mate,
+            explode: a.explode.clone(),
+            next_explode: a.next_explode,
+            patterns: a.patterns.clone(),
+            next_pattern: a.next_pattern,
+        }
+    }
+}
+
+impl From<AssemblyV11> for Assembly {
+    fn from(a: AssemblyV11) -> Self {
+        Self {
+            definitions: a
+                .definitions
+                .into_iter()
+                .map(|d| {
+                    Arc::new(Definition {
+                        id: d.id,
+                        model: Arc::new(d.model.into()),
+                        link: d.link,
+                    })
+                })
+                .collect(),
+            components: a.components,
+            next_definition: a.next_definition,
+            next_component: a.next_component,
+            mates: a.mates,
+            next_mate: a.next_mate,
+            explode: a.explode,
+            next_explode: a.next_explode,
+            patterns: a.patterns,
+            next_pattern: a.next_pattern,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 struct DefinitionLegacy<F> {
     id: DefId,

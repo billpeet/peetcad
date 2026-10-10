@@ -1106,6 +1106,34 @@ pub fn edge_flange_panel(
                 out.committed |= scalar_field(ui, "ef_radius", r, ScalarKind::Length, params);
                 ui.end_row();
             }
+            ui.label("Relief").on_hover_text(
+                "What is cut where the flange is set back from an end of its edge. The body's unless one is chosen here.",
+            );
+            egui::ComboBox::from_id_salt("ef_relief")
+                .selected_text(e.relief.map_or("Body default", ReliefType::label))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut e.relief, None, "Body default");
+                    for r in ReliefType::ALL {
+                        ui.selectable_value(&mut e.relief, Some(r), r.label());
+                    }
+                });
+            ui.end_row();
+            if e.relief != Some(ReliefType::Tear) {
+                ui.label("Relief ratio").on_hover_text(
+                    "The relief's width, and how far it reaches past the bend, as a multiple of the thickness.",
+                );
+                let mut custom = e.relief_ratio.is_some();
+                if ui.checkbox(&mut custom, "Custom").changed() {
+                    e.relief_ratio = custom.then(|| Scalar::new(0.5));
+                }
+                ui.end_row();
+                if let Some(r) = &mut e.relief_ratio {
+                    ui.label("");
+                    out.committed |=
+                        scalar_field(ui, "ef_relief_ratio", r, ScalarKind::Number, params);
+                    ui.end_row();
+                }
+            }
         });
     ui.add_space(6.0);
     ui.weak(

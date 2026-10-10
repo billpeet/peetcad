@@ -42,7 +42,7 @@ its SolidWorks plane does, and its points are converted through the two planes' 
 | Sketch | `sketch` with its lines, arcs and circles where they are, ends that meet joined |
 | Reference plane | `plane`: an offset of a standard plane, where SolidWorks has it |
 | Base flange | `base_flange`, with the body's thickness, radius, bend deduction and relief |
-| Edge flange | `edge_flange`: length converted to the outer corner, position, angle, set-backs read off its outline sketch (negative where the outline runs past the edge) |
+| Edge flange | `edge_flange`: length converted to the outer corner, position, angle, set-backs read off its outline sketch (negative where the outline runs past the edge), its own relief where it has one |
 | Cut-extrude | `sheet_cut` on sheet metal, `cut` on a solid |
 | Boss-extrude | `extrude` |
 | Hole wizard | `sheet_cut` with circles on sheet metal, `hole` on a solid |

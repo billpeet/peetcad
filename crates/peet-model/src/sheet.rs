@@ -327,6 +327,26 @@ pub(crate) fn edge_flange_spec(
     })
 }
 
+/// An edge flange's own relief, evaluated: its type and its size as a multiple of the
+/// thickness, each the body's (`settings`) unless the flange has its own. `None` if it
+/// has neither.
+pub(crate) fn edge_flange_relief(
+    def: &EdgeFlangeFeature,
+    settings: &peet_sheetmetal::SheetSettings,
+    params: &Parameters,
+) -> Result<Option<(peet_sheetmetal::ReliefType, f64)>, String> {
+    if def.relief.is_none() && def.relief_ratio.is_none() {
+        return Ok(None);
+    }
+    let ratio = match &def.relief_ratio {
+        Some(r) => r
+            .evaluate(ScalarKind::Number, params)
+            .map_err(|m| format!("Relief ratio: {m}."))?,
+        None => settings.relief_ratio,
+    };
+    Ok(Some((def.relief.unwrap_or(settings.relief), ratio)))
+}
+
 /// An edge flange: adds a flange to the sheet metal body the edge is on.
 pub(crate) fn apply_edge_flange(
     feature: FeatureId,
@@ -357,8 +377,10 @@ pub(crate) fn apply_edge_flange(
         .edge_site(&body.solid, found.id)
         .map_err(FeatureError)?;
     let mut layout = sheet.layout.clone();
+    let relief =
+        edge_flange_relief(def, &layout.settings, &model.parameters).map_err(FeatureError)?;
     layout
-        .add_edge_flange(feature.0, &site, spec)
+        .add_edge_flange_relieved(feature.0, &site, spec, relief)
         .map_err(FeatureError)?;
     let (new, warning) = sheet_body(model, layout, body.origin, stamp(seed, found.body))?;
     let mut out = bodies.to_vec();

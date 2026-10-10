@@ -289,7 +289,9 @@ with their defaults' types):
   or `vertex`.
 - `edge_flange` and `hem` take `edges` to make one feature per edge. `offset_start` and
   `offset_end` set it back from the ends of its edge; a negative one runs it past that
-  end, with the bend staying on the edge.
+  end, with the bend staying on the edge. An `edge_flange` can have a `relief`
+  (`rectangular`, `obround`, `tear`) and a `relief_ratio` of its own for where it is set
+  back; without them, or with `null`, it uses the body's.
 - `corner` sets how flanges that run to one corner meet: `kind` (`butt`, `overlap`,
   `open`, `plain`), `gap`, and `relief`, what is cut from the blank where their bends meet
   (`rectangular` with `relief_size`, `tear`, `flush`: back to where the flanges end, or

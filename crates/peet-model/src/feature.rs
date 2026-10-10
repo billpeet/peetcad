@@ -381,6 +381,11 @@ pub struct EdgeFlangeFeature {
     pub flip: bool,
     /// Inner bend radius, if not the body's default.
     pub radius: Option<Scalar>,
+    /// The relief where the flange is set back from an end of its edge, if not the
+    /// body's.
+    pub relief: Option<ReliefType>,
+    /// That relief's size as a multiple of the thickness, if not the body's.
+    pub relief_ratio: Option<Scalar>,
 }
 
 impl EdgeFlangeFeature {
@@ -394,6 +399,8 @@ impl EdgeFlangeFeature {
             offset_end: Scalar::new(0.0),
             flip: false,
             radius: None,
+            relief: None,
+            relief_ratio: None,
         }
     }
 }
@@ -983,6 +990,7 @@ impl FeatureKind {
             Self::EdgeFlange(e) => {
                 let mut v = vec![&e.length, &e.angle, &e.offset_start, &e.offset_end];
                 v.extend(e.radius.as_ref());
+                v.extend(e.relief_ratio.as_ref());
                 v
             }
             Self::SheetCut(_) | Self::Mirror(_) => Vec::new(),
@@ -1082,6 +1090,9 @@ macro_rules! slots {
                     ];
                     if let Some(r) = & $($m)? e.radius {
                         v.push(("radius", Length, r));
+                    }
+                    if let Some(r) = & $($m)? e.relief_ratio {
+                        v.push(("relief_ratio", Number, r));
                     }
                     v
                 }
@@ -1330,7 +1341,7 @@ pub(crate) enum FeatureKindV9 {
     Point(PointDef),
     CoordSystem(CoordSystemDef),
     BaseFlange(Box<BaseFlangeFeature>),
-    EdgeFlange(Box<EdgeFlangeFeature>),
+    EdgeFlange(Box<EdgeFlangeFeatureV11>),
     SheetCut(Box<SheetCutFeature>),
     Hem(Box<HemFeature>),
     SketchedBend(Box<SketchedBendFeature>),
@@ -1361,7 +1372,7 @@ impl From<FeatureKindV9> for FeatureKind {
             FeatureKindV9::Point(v) => Self::Point(v),
             FeatureKindV9::CoordSystem(v) => Self::CoordSystem(v),
             FeatureKindV9::BaseFlange(v) => Self::BaseFlange(v),
-            FeatureKindV9::EdgeFlange(v) => Self::EdgeFlange(v),
+            FeatureKindV9::EdgeFlange(v) => Self::EdgeFlange(Box::new((*v).into())),
             FeatureKindV9::SheetCut(v) => Self::SheetCut(v),
             FeatureKindV9::Hem(v) => Self::Hem(v),
             FeatureKindV9::SketchedBend(v) => Self::SketchedBend(v),
@@ -1394,7 +1405,7 @@ impl From<FeatureKind> for FeatureKindV9 {
             FeatureKind::Point(v) => Self::Point(v),
             FeatureKind::CoordSystem(v) => Self::CoordSystem(v),
             FeatureKind::BaseFlange(v) => Self::BaseFlange(v),
-            FeatureKind::EdgeFlange(v) => Self::EdgeFlange(v),
+            FeatureKind::EdgeFlange(v) => Self::EdgeFlange(Box::new((&*v).into())),
             FeatureKind::SheetCut(v) => Self::SheetCut(v),
             FeatureKind::Hem(v) => Self::Hem(v),
             FeatureKind::SketchedBend(v) => Self::SketchedBend(v),
@@ -1413,6 +1424,187 @@ impl From<FeatureKind> for FeatureKindV9 {
             FeatureKind::Sweep(v) => Self::Sweep(v),
             FeatureKind::Loft(v) => Self::Loft(v),
             FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(v),
+        }
+    }
+}
+
+/// An edge flange as model schemas through 11 stored it: before a flange could have a
+/// relief of its own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct EdgeFlangeFeatureV11 {
+    edge: Option<EdgeRef>,
+    length: Scalar,
+    angle: Scalar,
+    position: FlangePosition,
+    offset_start: Scalar,
+    offset_end: Scalar,
+    flip: bool,
+    radius: Option<Scalar>,
+}
+
+impl From<EdgeFlangeFeatureV11> for EdgeFlangeFeature {
+    fn from(e: EdgeFlangeFeatureV11) -> Self {
+        Self {
+            edge: e.edge,
+            length: e.length,
+            angle: e.angle,
+            position: e.position,
+            offset_start: e.offset_start,
+            offset_end: e.offset_end,
+            flip: e.flip,
+            radius: e.radius,
+            relief: None,
+            relief_ratio: None,
+        }
+    }
+}
+
+impl From<&EdgeFlangeFeature> for EdgeFlangeFeatureV11 {
+    /// The old layout, which has no room for the flange's own relief.
+    fn from(e: &EdgeFlangeFeature) -> Self {
+        Self {
+            edge: e.edge.clone(),
+            length: e.length.clone(),
+            angle: e.angle.clone(),
+            position: e.position,
+            offset_start: e.offset_start.clone(),
+            offset_end: e.offset_end.clone(),
+            flip: e.flip,
+            radius: e.radius.clone(),
+        }
+    }
+}
+
+/// The feature kinds as model schemas 10 and 11 stored them. The variant order is frozen.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum FeatureKindV11 {
+    Sketch(Box<SketchFeature>),
+    Extrude(Box<ExtrudeFeature>),
+    Plane(PlaneDef),
+    Axis(AxisDef),
+    Point(PointDef),
+    CoordSystem(CoordSystemDef),
+    BaseFlange(Box<BaseFlangeFeature>),
+    EdgeFlange(Box<EdgeFlangeFeatureV11>),
+    SheetCut(Box<SheetCutFeature>),
+    Hem(Box<HemFeature>),
+    SketchedBend(Box<SketchedBendFeature>),
+    Jog(Box<JogFeature>),
+    MiterFlange(Box<MiterFlangeFeature>),
+    Corner(Box<CornerFeature>),
+    Form(Box<FormFeature>),
+    Pattern(Box<PatternFeature>),
+    Mirror(Box<MirrorFeature>),
+    Revolve(Box<RevolveFeature>),
+    Blend(Box<BlendFeature>),
+    Shell(Box<ShellFeature>),
+    Draft(Box<DraftFeature>),
+    Hole(Box<HoleFeature>),
+    Import(Box<ImportFeature>),
+    Sweep(Box<SweepFeature>),
+    Loft(Box<LoftFeature>),
+    ConvertToSheet(Box<ConvertToSheetFeature>),
+}
+
+impl From<FeatureKindV11> for FeatureKind {
+    fn from(k: FeatureKindV11) -> Self {
+        match k {
+            FeatureKindV11::Sketch(v) => Self::Sketch(v),
+            FeatureKindV11::Extrude(v) => Self::Extrude(v),
+            FeatureKindV11::Plane(v) => Self::Plane(v),
+            FeatureKindV11::Axis(v) => Self::Axis(v),
+            FeatureKindV11::Point(v) => Self::Point(v),
+            FeatureKindV11::CoordSystem(v) => Self::CoordSystem(v),
+            FeatureKindV11::BaseFlange(v) => Self::BaseFlange(v),
+            FeatureKindV11::EdgeFlange(v) => Self::EdgeFlange(Box::new((*v).into())),
+            FeatureKindV11::SheetCut(v) => Self::SheetCut(v),
+            FeatureKindV11::Hem(v) => Self::Hem(v),
+            FeatureKindV11::SketchedBend(v) => Self::SketchedBend(v),
+            FeatureKindV11::Jog(v) => Self::Jog(v),
+            FeatureKindV11::MiterFlange(v) => Self::MiterFlange(v),
+            FeatureKindV11::Corner(v) => Self::Corner(v),
+            FeatureKindV11::Form(v) => Self::Form(v),
+            FeatureKindV11::Pattern(v) => Self::Pattern(v),
+            FeatureKindV11::Mirror(v) => Self::Mirror(v),
+            FeatureKindV11::Revolve(v) => Self::Revolve(v),
+            FeatureKindV11::Blend(v) => Self::Blend(v),
+            FeatureKindV11::Shell(v) => Self::Shell(v),
+            FeatureKindV11::Draft(v) => Self::Draft(v),
+            FeatureKindV11::Hole(v) => Self::Hole(v),
+            FeatureKindV11::Import(v) => Self::Import(v),
+            FeatureKindV11::Sweep(v) => Self::Sweep(v),
+            FeatureKindV11::Loft(v) => Self::Loft(v),
+            FeatureKindV11::ConvertToSheet(v) => Self::ConvertToSheet(v),
+        }
+    }
+}
+
+impl From<FeatureKind> for FeatureKindV11 {
+    fn from(k: FeatureKind) -> Self {
+        match k {
+            FeatureKind::Sketch(v) => Self::Sketch(v),
+            FeatureKind::Extrude(v) => Self::Extrude(v),
+            FeatureKind::Plane(v) => Self::Plane(v),
+            FeatureKind::Axis(v) => Self::Axis(v),
+            FeatureKind::Point(v) => Self::Point(v),
+            FeatureKind::CoordSystem(v) => Self::CoordSystem(v),
+            FeatureKind::BaseFlange(v) => Self::BaseFlange(v),
+            FeatureKind::EdgeFlange(v) => Self::EdgeFlange(Box::new((&*v).into())),
+            FeatureKind::SheetCut(v) => Self::SheetCut(v),
+            FeatureKind::Hem(v) => Self::Hem(v),
+            FeatureKind::SketchedBend(v) => Self::SketchedBend(v),
+            FeatureKind::Jog(v) => Self::Jog(v),
+            FeatureKind::MiterFlange(v) => Self::MiterFlange(v),
+            FeatureKind::Corner(v) => Self::Corner(v),
+            FeatureKind::Form(v) => Self::Form(v),
+            FeatureKind::Pattern(v) => Self::Pattern(v),
+            FeatureKind::Mirror(v) => Self::Mirror(v),
+            FeatureKind::Revolve(v) => Self::Revolve(v),
+            FeatureKind::Blend(v) => Self::Blend(v),
+            FeatureKind::Shell(v) => Self::Shell(v),
+            FeatureKind::Draft(v) => Self::Draft(v),
+            FeatureKind::Hole(v) => Self::Hole(v),
+            FeatureKind::Import(v) => Self::Import(v),
+            FeatureKind::Sweep(v) => Self::Sweep(v),
+            FeatureKind::Loft(v) => Self::Loft(v),
+            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(v),
+        }
+    }
+}
+
+/// A feature as model schemas 10 and 11 stored it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeatureV11 {
+    id: FeatureId,
+    name: String,
+    suppressed: bool,
+    suppression_expression: Option<String>,
+    visible: bool,
+    kind: FeatureKindV11,
+}
+
+impl From<Feature> for FeatureV11 {
+    fn from(f: Feature) -> Self {
+        Self {
+            id: f.id,
+            name: f.name,
+            suppressed: f.suppressed,
+            suppression_expression: f.suppression_expression,
+            visible: f.visible,
+            kind: f.kind.into(),
+        }
+    }
+}
+
+impl From<FeatureV11> for Feature {
+    fn from(f: FeatureV11) -> Self {
+        Self {
+            id: f.id,
+            name: f.name,
+            suppressed: f.suppressed,
+            suppression_expression: f.suppression_expression,
+            visible: f.visible,
+            kind: f.kind.into(),
         }
     }
 }
@@ -1532,7 +1724,7 @@ pub(crate) enum FeatureKindV8 {
     Point(PointDef),
     CoordSystem(CoordSystemDef),
     BaseFlange(Box<BaseFlangeFeature>),
-    EdgeFlange(Box<EdgeFlangeFeature>),
+    EdgeFlange(Box<EdgeFlangeFeatureV11>),
     SheetCut(Box<SheetCutFeature>),
     Hem(Box<HemFeature>),
     SketchedBend(Box<SketchedBendFeature>),
@@ -1567,7 +1759,7 @@ impl From<FeatureKindV8> for FeatureKind {
             FeatureKindV8::Point(v) => Self::Point(v),
             FeatureKindV8::CoordSystem(v) => Self::CoordSystem(v),
             FeatureKindV8::BaseFlange(v) => Self::BaseFlange(v),
-            FeatureKindV8::EdgeFlange(v) => Self::EdgeFlange(v),
+            FeatureKindV8::EdgeFlange(v) => Self::EdgeFlange(Box::new((*v).into())),
             FeatureKindV8::SheetCut(v) => Self::SheetCut(v),
             FeatureKindV8::Hem(v) => Self::Hem(v),
             FeatureKindV8::SketchedBend(v) => Self::SketchedBend(v),
@@ -1603,7 +1795,7 @@ impl From<&FeatureKind> for FeatureKindV8 {
             FeatureKind::Point(v) => Self::Point(v.clone()),
             FeatureKind::CoordSystem(v) => Self::CoordSystem(v.clone()),
             FeatureKind::BaseFlange(v) => Self::BaseFlange(v.clone()),
-            FeatureKind::EdgeFlange(v) => Self::EdgeFlange(v.clone()),
+            FeatureKind::EdgeFlange(v) => Self::EdgeFlange(Box::new((&**v).into())),
             FeatureKind::SheetCut(v) => Self::SheetCut(v.clone()),
             FeatureKind::Hem(v) => Self::Hem(v.clone()),
             FeatureKind::SketchedBend(v) => Self::SketchedBend(v.clone()),

@@ -53,8 +53,11 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 ///   inside nested assembly definitions.
 /// - Model 11: user names for faces and edges. Schema 10 models, including nested
 ///   assembly definitions, are read as [`peet_model::ModelV10`] and converted.
+/// - Model 12: an edge flange can have a relief of its own (two more fields of the
+///   feature). Schema 11 models, including nested assembly definitions, are read as
+///   [`peet_model::ModelV11`] and converted; schemas 8 to 10 read the old flange too.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 11;
+pub const MODEL_SCHEMA: u16 = 12;
 /// The last model schema without configurations.
 const MODEL_SCHEMA_BEFORE_CONFIGURATIONS: u16 = 4;
 /// The last model schema without materials and assemblies.
@@ -188,6 +191,9 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
             .map(Model::from),
         Some(10) => r
             .read::<peet_model::ModelV10>(SectionKind::MODEL)?
+            .map(Model::from),
+        Some(11) => r
+            .read::<peet_model::ModelV11>(SectionKind::MODEL)?
             .map(Model::from),
         _ => r.read(SectionKind::MODEL)?,
     };
@@ -402,6 +408,29 @@ mod tests {
         w.section(SectionKind::MODEL, 10, &peet_model::ModelV10::of(&outer))
             .unwrap();
         assert_eq!(open(&w.finish()).unwrap().model, outer);
+    }
+
+    #[test]
+    fn schema_11_models_still_open() {
+        // A sheet metal part with an edge flange, on its own and inside an assembly, as
+        // schema 11 wrote it: before the flange had a relief of its own.
+        let (part, _) = peet_model::samples::enclosure();
+        assert!(
+            part.features()
+                .any(|f| matches!(f.kind, peet_model::FeatureKind::EdgeFlange(_)))
+        );
+        let mut assembly = Model::new_assembly();
+        let def = assembly.assembly_mut().unwrap().define(Arc::new(part.clone()));
+        assembly
+            .assembly_mut()
+            .unwrap()
+            .insert(def, peet_math::Frame::WORLD);
+        for model in [part, assembly] {
+            let mut w = Writer::new();
+            w.section(SectionKind::MODEL, 11, &peet_model::ModelV11::of(&model))
+                .unwrap();
+            assert_eq!(open(&w.finish()).unwrap().model, model);
+        }
     }
 
     #[test]

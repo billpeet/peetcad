@@ -927,7 +927,13 @@ impl Engine {
             FeatureKind::EdgeFlange(e) => match sheet::edge_flange_spec(e, &model.parameters) {
                 Err(m) => fail(m, Output::None),
                 Ok(spec) => {
-                    let values = (spec.length, spec.angle, spec.offsets, spec.radius);
+                    // The relief ratio as it evaluates now: the definition only holds its
+                    // expression.
+                    let ratio = e
+                        .relief_ratio
+                        .as_ref()
+                        .and_then(|r| r.evaluate(ScalarKind::Number, &model.parameters).ok());
+                    let values = (spec.length, spec.angle, spec.offsets, spec.radius, ratio);
                     let key = hash::of(&(4u8, id, &**e, run.body_key, values));
                     self.solid_feature(id, key, run, |bodies| {
                         sheet::apply_edge_flange(id, model, bodies, e, &spec, key)

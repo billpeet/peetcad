@@ -80,13 +80,13 @@ and a report each are in `C:\Users\marti\source\peetcad-imports\library`.
 
 | Result | Parts |
 |---|---|
-| Matches SolidWorks: volume, bounding box and flat size | 94 |
-| Same size and flat pattern, volume within 5% | 29 |
+| Matches SolidWorks: volume, bounding box and flat size | 106 |
+| Same size and flat pattern, volume within 5% | 17 |
 | Everything imported, but it differs | 20 |
 | A feature could not be imported | 52 |
 | Nothing built | 6 |
 
-Of the 94, the ones with break corners, hole wizard slots or mirrored flanges match
+Of the 106, the ones with break corners, hole wizard slots or mirrored flanges match
 because the importer stands in for those features with sheet metal cuts and separate
 flanges. They are the right shape and do not follow the part (P8, P25, P9 still stand).
 
@@ -141,7 +141,7 @@ not match either: what holds them back is the same features, not configurations.
 | P33 | **A base flange outline with two lines in line** is refused ("join them into one line"). | Peaked Angled Roof | Gap |
 | P34 | **"The sheet metal body came out invalid. This is a bug."** from a sheet metal cut. | Meter Bracket (Hinge Holes Left), skinny door Stay Slide and Laptop Bracket (corner cuts) | Bug |
 | P35 | **A flange whose length runs up to a vertex, one with its own outline that is not a rectangle, and one wider than its edge.** Wider than its edge is done: a negative `offset_start` or `offset_end` runs an edge flange or a hem past that end of its edge, with the bend staying on the edge. An outline that is not a rectangle is still a gap in PeetCAD; the importer stands in for it with a rectangular flange and a sheet metal cut of everything outside the outline, which does not follow the part. Up to a vertex: the importer uses the length the flange had. | Wider: the Floor parts are 0.005% from SolidWorks' volume where they were 0.06 to 0.09%. Outline: 11 parts have one; the cut is made in 9, bringing Flow Meter Moving Bracket from 0.75% to 0.03%, Laptop Shelf from 5.8% to 0.6% and the Schneider radio brackets from 0.1% to 0.01%. In 2 parts (Radio Bracket, and Flow Meter Fixed Bracket big hole at top) the flange is not where the outline is, so it is left a rectangle. 12 run up to a vertex | Partly done |
-| P36 | **A flange with its own relief.** SolidWorks' edge flange can have a relief type and ratio of its own; PeetCAD's uses the body's. Where a flange has a tear relief and the body's is rectangular, PeetCAD cuts notches SolidWorks doesn't (Top Bracket: two of 1 x 1.1 mm, 4.4 mm3). Needs a field on the edge flange, which is a change of the file format. | 58 flanges in 46 parts: 42 tear where the body's is rectangular, 8 with another ratio, 3 with a width and depth | Gap |
+| P36 | **A flange with its own relief.** Done: `edge_flange` takes `relief` (`rectangular`, `obround`, `tear`) and `relief_ratio` of its own, the body's without them. Two more fields of the feature, so the model schema is 12; schema 11 files are migrated on open. Where SolidWorks' flange had a tear relief and the body's is rectangular, PeetCAD cut notches SolidWorks doesn't (Top Bracket: two of 1 x 1.1 mm). A relief given as a width and a depth is not there: the importer uses the width for both. | 58 flanges in 46 parts. 12 more parts match SolidWorks (Top Bracket to 8 digits of volume, the Esc Surrounds, ElSteel Geartray, Floor, Wall Inner Vertical, the Schneider radio brackets). 3 flanges have a width and a depth | Done |
 
 **What looking into the near-misses found.** `tools/sw-import/diagnose.js` sets the area
 of an imported part's faces against SolidWorks', feature by feature. Of the 31 parts

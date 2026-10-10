@@ -476,6 +476,37 @@ fn flange_past_the_end_of_its_edge() {
 }
 
 #[test]
+fn a_flange_with_its_own_relief() {
+    // Set back 10 from both ends, bend outside so that no strip is trimmed from the plate.
+    // With the body's rectangular relief the plate is notched at each end of the bend;
+    // with a tear relief of the flange's own nothing is cut from it, and with a ratio of
+    // its own the notches are that much bigger.
+    let area = |relief: Option<(ReliefType, f64)>| {
+        let mut layout = plate_layout(settings(0.44));
+        let mut spec = flange(25.0, FlangePosition::BendOutside);
+        spec.offsets = [10.0, 10.0];
+        layout
+            .add_edge_flange_relieved(2, &top_edge(true), &spec, relief)
+            .unwrap();
+        let (_, body) = built(layout);
+        flat_area(&body)
+    };
+    let ratio = settings(0.44).relief_ratio;
+    let body_default = area(None);
+    let tear = area(Some((ReliefType::Tear, ratio)));
+    let wide = area(Some((ReliefType::Rectangular, 2.0 * ratio)));
+    // Two notches, each ratio·t wide and deep.
+    assert_close(tear - body_default, 2.0 * (ratio * T) * (ratio * T), 1e-9);
+    assert_close(tear - wide, 8.0 * (ratio * T) * (ratio * T), 1e-9);
+    let mut layout = plate_layout(settings(0.44));
+    let spec = flange(25.0, FlangePosition::BendOutside);
+    let e = layout
+        .add_edge_flange_relieved(2, &top_edge(true), &spec, Some((ReliefType::Tear, 0.0)))
+        .unwrap_err();
+    assert!(e.contains("ratio"), "{e}");
+}
+
+#[test]
 fn round_hole_in_a_flange() {
     let mut layout = plate_layout(settings(0.44));
     layout.add_cut(Area {

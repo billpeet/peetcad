@@ -13,7 +13,8 @@ use crate::assembly::Assembly;
 use crate::config::{Configurations, ConfigurationsV5};
 use crate::extrude::{Extrude, Operation};
 use crate::feature::{
-    ExtrudeFeature, Feature, FeatureId, FeatureKind, FeatureV8, FeatureV9, PlaneRef, SketchFeature,
+    ExtrudeFeature, Feature, FeatureId, FeatureKind, FeatureV8, FeatureV9, FeatureV11, PlaneRef,
+    SketchFeature,
     StdPlane,
 };
 use crate::material::Material;
@@ -106,7 +107,66 @@ pub type ModelV8 = ModelLegacy<FeatureV8>;
 /// A schema 9 model: sketch projections, with literal pattern counts and no suppression rules.
 pub type ModelV9 = ModelLegacy<FeatureV9>;
 /// A schema 10 model: projections and suppression rules, before user geometry names.
-pub type ModelV10 = ModelLegacy<Feature>;
+pub type ModelV10 = ModelLegacy<FeatureV11>;
+
+/// A schema 11 model: today's layout, with features as they were before an edge flange
+/// could have a relief of its own. The file format is not self-describing, so an older
+/// model is read as this and converted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelV11 {
+    name: String,
+    features: Vec<FeatureV11>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+    configurations: Configurations,
+    material: Option<Material>,
+    color: Option<[u8; 3]>,
+    assembly: Option<crate::assembly::AssemblyV11>,
+    geometry_names: BTreeMap<String, crate::naming::NamedGeometry>,
+}
+
+impl ModelV11 {
+    /// `m` as schema 11 saved it (a flange's own relief is lost), used to verify the
+    /// migration of parts and nested assemblies.
+    pub fn of(m: &Model) -> Self {
+        Self {
+            name: m.name.clone(),
+            features: m.features().cloned().map(FeatureV11::from).collect(),
+            parameters: m.parameters.clone(),
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters.clone(),
+            configurations: m.configurations.clone(),
+            material: m.material.clone(),
+            color: m.color,
+            assembly: m.assembly().map(crate::assembly::AssemblyV11::of),
+            geometry_names: m.geometry_names.clone(),
+        }
+    }
+}
+
+impl From<ModelV11> for Model {
+    fn from(m: ModelV11) -> Self {
+        Self {
+            name: m.name,
+            features: m.features.into_iter().map(|f| Arc::new(f.into())).collect(),
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            configurations: m.configurations,
+            material: m.material,
+            color: m.color,
+            assembly: m.assembly.map(|a| Arc::new(a.into())),
+            geometry_names: m.geometry_names,
+        }
+    }
+}
 
 impl<F: From<Feature>> ModelLegacy<F> {
     /// The old layout, used to verify migration of parts and nested assemblies.

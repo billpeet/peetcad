@@ -141,6 +141,24 @@ impl Layout {
         site: &EdgeSite,
         spec: &EdgeFlangeSpec,
     ) -> Result<(), String> {
+        self.add_edge_flange_relieved(owner, site, spec, None)
+    }
+
+    /// [`Self::add_edge_flange`] with a relief of the flange's own (its type, and its
+    /// size as a multiple of the thickness) where it is set back from the ends of its
+    /// edge, in place of the body's.
+    pub fn add_edge_flange_relieved(
+        &mut self,
+        owner: u32,
+        site: &EdgeSite,
+        spec: &EdgeFlangeSpec,
+        relief: Option<(ReliefType, f64)>,
+    ) -> Result<(), String> {
+        if let Some((_, ratio)) = relief
+            && !(ratio.is_finite() && ratio > 0.0)
+        {
+            return Err("The relief ratio must be greater than zero.".to_owned());
+        }
         let t = self.settings.thickness;
         let radius = spec.radius.unwrap_or(self.settings.radius);
         if !(radius.is_finite() && radius >= 0.0) {
@@ -167,7 +185,7 @@ impl Layout {
             up: site.top != spec.flip,
             flat: straight,
         }];
-        self.add_profile(owner, site, spec.offsets, trim, &segments, 0)
+        self.add_profile(owner, site, spec.offsets, trim, &segments, 0, relief)
             .map(|_| ())
     }
 
@@ -258,7 +276,7 @@ impl Layout {
             up: site.top != spec.flip,
             flat,
         }];
-        self.add_profile(owner, site, spec.offsets, trim, &segments, 0)
+        self.add_profile(owner, site, spec.offsets, trim, &segments, 0, None)
             .map(|_| ())
     }
 
@@ -273,6 +291,7 @@ impl Layout {
         trim: f64,
         segments: &[Segment],
         part_base: u32,
+        relief_override: Option<(ReliefType, f64)>,
     ) -> Result<usize, String> {
         // Hems end where their edge does; flanges are carried on to the face's corners.
         let carried = if segments.first().is_some_and(|s| !s.values.is_hem()) {
@@ -408,12 +427,14 @@ impl Layout {
             index,
         };
         let mut reliefs = Vec::new();
-        if self.settings.relief != ReliefType::Tear {
-            let rw = self.settings.relief_ratio * t;
-            let depth = trim + self.settings.relief_ratio * t;
+        let (relief_type, relief_ratio) =
+            relief_override.unwrap_or((self.settings.relief, self.settings.relief_ratio));
+        if relief_type != ReliefType::Tear {
+            let rw = relief_ratio * t;
+            let depth = trim + relief_ratio * t;
             if o0 > MIN_LENGTH {
                 reliefs.push(relief(
-                    self.settings.relief,
+                    relief_type,
                     site.a,
                     d,
                     inward,
@@ -424,7 +445,7 @@ impl Layout {
             }
             if o1 > MIN_LENGTH {
                 reliefs.push(relief(
-                    self.settings.relief,
+                    relief_type,
                     site.a,
                     d,
                     inward,
@@ -657,7 +678,7 @@ impl Layout {
                 if i == 0 { offsets[0] } else { 0.0 },
                 if i == last { offsets[1] } else { 0.0 },
             ];
-            self.add_profile(owner, site, off, trim, &segments, (i as u32) << 8)
+            self.add_profile(owner, site, off, trim, &segments, (i as u32) << 8, None)
                 .map_err(|m| format!("Edge {}: {m}", i + 1))?;
         }
         let me = self.attachments.len() - sites.len();

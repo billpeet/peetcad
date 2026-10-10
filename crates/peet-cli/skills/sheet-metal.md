@@ -108,6 +108,20 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
   from the same corner, their reliefs cut the corner of the sheet off: the corner is
   notched, which is normal. Flanges that run right to a corner (no offset) get a butt
   corner with a small gap; `corner` changes how those are treated.
+- The reliefs at a set-back flange's ends are the body's (the base flange's `relief`
+  and `relief_ratio`) unless the edge flange has its own: `"relief": "tear"` cuts
+  nothing, which is right when the bend is outside the sheet (`material_outside`,
+  `bend_outside`) and the body's rectangular relief would only notch it;
+  `"relief_ratio": 1` makes the slot one thickness wide and deep past the bend.
+  `null` goes back to the body's. Hems and miter flanges always use the body's.
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 150]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
+  {"op": "edge_flange", "name": "Lip", "length": 25, "position": "material_outside", "offset_start": 40, "offset_end": 40, "relief": "tear", "edges": [{"between": [[0, 0, 2], [200, 0, 2]]}]}
+  {"op": "edge_flange", "name": "Tab", "length": 25, "offset_start": 60, "offset_end": 60, "relief": "obround", "relief_ratio": 1, "edges": [{"between": [[200, 150, 2], [0, 150, 2]]}]}
+  {"op": "bodies"}
+  ```
 - A **negative** offset runs an edge flange or a hem past that end of its edge, for one
   wider than the sheet it is bent from: `"offset_end": -12` ends it 12 beyond the
   edge. The bend stays on the edge and the flange overhangs it, with no relief. The
