@@ -81,9 +81,9 @@ and a report each are in `C:\Users\marti\source\peetcad-imports\library`.
 | Result | Parts |
 |---|---|
 | Matches SolidWorks: volume, bounding box and flat size | 93 |
-| Same size and flat pattern, volume within 5% | 27 |
-| Everything imported, but it differs | 16 |
-| A feature could not be imported | 59 |
+| Same size and flat pattern, volume within 5% | 29 |
+| Everything imported, but it differs | 20 |
+| A feature could not be imported | 53 |
 | Nothing built | 6 |
 
 Of the 93, the ones with break corners, hole wizard slots or mirrored flanges match
@@ -135,7 +135,7 @@ not match either: what holds them back is the same features, not configurations.
 |---|---|---|---|
 | P28 | **Corners where edge flanges meet.** Done, in two parts. (1) Between the pieces of one flange feature on several edges SolidWorks stops both short and ends each bend in line with its flange: `corner` with `open`, its gap over 1.414 and the new relief `flush` gives the same blank, edge for edge (a tray with four 23 mm flanges: 12 lines, the same vertices). (2) Between two flange features SolidWorks runs nothing on: the earlier flange ends where its own edge does. That is the new kind `plain` (PeetCAD's butt corner runs the earlier flange on to the later one's outer face when the later one stands outside its edge); with it Double Door Seal's volume and area are SolidWorks' to the last digit given. **Left:** SolidWorks trims the ends of the bends at a corner of kind (1) on a slant in the folded solid and writes its flat pattern with square ends, so its solid and its blank do not agree; PeetCAD's do, and the volume stays a few hundredths of a percent out. And `plain` is not what SolidWorks does where flanges are at an angle (the vent hoods): the importer keeps it only where it brings the flanges nearer. | The tray: volume 0.06% out where it was 2.5%. Double Door Seal: 0 where it was 4.3% | Done; angled flanges' corners to look into |
 | P29 | **A cut sketched on the sheet's edge face**, or on a plane that is not a face of the sheet. `sheet_cut` wants the sketch on a flange's top or bottom. | 4 parts (Cableway Cover Bracket LH and RH, Door, Louvre Filter Bracket) | Gap |
-| P30 | **A cut across a bend at an angle or with a curve.** Refused: only straight edges parallel or square to the bend cross it. | 11 parts (Wall Left, Wall Right, Gear tray, Mullion H and V, four Esc Surrounds, Meter Surround, Weather Shield Door) | Gap (the limit in the roadmap, now counted) |
+| P30 | **A cut across a bend at an angle or with a curve.** Done (`edeaf9c`): any edge of a sheet metal cut can cross a bend. One that crosses on a slant or as a curve folds to a freeform curve, with a ruled wall through the sheet; the blank is unchanged. A round hole on a bend and a triangle across one keep the blank's volume to 2 parts in 100,000 at K = 0.5. | None of the 11 parts is refused for it any more; they are held back by other things now | Done |
 | P31 | **An edge flange at an angle other than 90°** comes out about 0.1 mm from where SolidWorks has it. | Box Roof Top (0.105 mm), the vent hoods (0.131 mm); 35 flanges in the library are not square | Check: whose length convention |
 | P32 | **A bend deduction that makes the allowance negative** is refused. SolidWorks builds these. | 3 parts: Baffle (VSD), SS2 Vent Hood 250mm and 300mm | Gap |
 | P33 | **A base flange outline with two lines in line** is refused ("join them into one line"). | Peaked Angled Roof | Gap |
@@ -213,7 +213,7 @@ are in `C:\Users\marti\source\peetcad-imports`.
 
 | | Gap | Evidence | Mark |
 |---|---|---|---|
-| P7 | **Fold and unfold.** No feature pair to unfold, cut, and fold again. A sheet cut crosses a bend only parallel or square to it, and a round hole across a bend is refused. | 10 parts | Gap |
+| P7 | **Fold and unfold.** Not a gap: SolidWorks unfolds, cuts flat and folds again, and PeetCAD's sheet metal cut is made in the flat pattern to begin with. The importer treats Unfold and Fold as nothing to do and puts the cuts between them on the face that stays put. With P30 such a cut can have any shape. | 10 parts, all imported past their folds now | Not needed |
 | P8 | **Break corner.** `corner` is about where flanges meet; whether it or `fillet`/`chamfer` can round or clip a sheet's outline corner without losing the sheet body is not known. | 55 parts (68 features) | Gap: `fillet` turns the sheet into a plain solid |
 | P9 | **Patterns and mirrors of flanges.** Patterns copy extrusions, cuts, sheet cuts, forms, revolves and holes, not flanges, and a sheet metal copy must stay on its original's face. | 44 parts have linear patterns, 26 have mirrors; what they copy comes from the export | Check |
 | P10 | **Edge flange options.** One edge per flange; profile from a sketch exists. Whether every position, offset and relief the templates use has a match is not known. | 142 parts (309 flanges) | Check |
