@@ -1586,6 +1586,9 @@ pub fn corner_panel(
                             CornerRelief::Tear => {
                                 "Only what the two bends would share is removed."
                             }
+                            CornerRelief::Slanted => {
+                                "Nothing is cut from the face: each bend ends on a slant, from the face's corner to the end of its flange"
+                            }
                             CornerRelief::Flush => {
                                 "Cut back to where the two flanges end, so each bend ends in line with its flange."
                             }

@@ -1278,6 +1278,40 @@ fn flush_corner_relief_ends_with_the_flanges() {
 }
 
 #[test]
+fn slanted_corner_relief_keeps_the_face() {
+    // Open corners with a slanted relief: nothing is cut from the plate, and each bend
+    // ends on the line from the plate's corner to the end of its flange. So the blank has
+    // more in it than with a flush relief, and folding keeps its volume (K = 0.5).
+    let gap = R + 0.5;
+    let blank = |relief: CornerRelief| {
+        let mut layout = closed_box(settings(0.5), FlangePosition::MaterialInside, 20.0);
+        for c in &mut layout.corners {
+            c.spec = CornerSpec {
+                kind: CornerKind::Open,
+                gap,
+                relief,
+                relief_size: 1.0,
+            };
+        }
+        let (solid, body) = built(layout);
+        let flanges = box_flanges(&body);
+        let bottom = piece_bounds(&solid, &body, flanges[0]);
+        assert_close(bottom.max.x, W - T - gap, 1e-9);
+        let outer: Vec<_> = body.outline.iter().filter(|l| l.outer).collect();
+        assert_eq!(outer.len(), 1);
+        let flat = measure::volume(&body.flat);
+        assert_close(measure::volume(&solid), flat, flat * 2e-5);
+        (outer[0].edges.len(), flat_area(&body))
+    };
+    let (slanted_edges, slanted_area) = blank(CornerRelief::Slanted);
+    let (flush_edges, flush_area) = blank(CornerRelief::Flush);
+    // Each corner of the cross has two slanted edges where a flush one has a notch.
+    assert_eq!(flush_edges, 12);
+    assert_eq!(slanted_edges, 20);
+    assert!(slanted_area > flush_area);
+}
+
+#[test]
 fn a_plain_corner_runs_nothing_on() {
     // Bend outside: the flanges stand R + t outside the plate. A butt corner runs the
     // earlier flange on to the later one's outer face; a plain corner leaves it ending

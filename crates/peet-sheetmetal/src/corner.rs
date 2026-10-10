@@ -14,7 +14,9 @@
 //! region reaches past both bend zones and the strips the face gave up to them, plus a
 //! margin (`relief_size`, none for a tear relief). A *flush* relief reaches to where the
 //! two flanges end instead, so the bends end in line with their flanges and the corner
-//! of the flat pattern is one notch with one inside corner.
+//! of the flat pattern is one notch with one inside corner. A *slanted* relief leaves the
+//! face its corner and ends each bend on the line from that corner to the end of its
+//! flange, which folds to a freeform end.
 //!
 //! **Flange ends.** Each flange's end at the corner is extended a little and then cut
 //! back against a plane of the other flange, in the folded part:
@@ -73,16 +75,20 @@ pub enum CornerRelief {
     /// Back to where the two flanges end (and never less than a tear), so each bend ends
     /// in line with its flange.
     Flush,
+    /// Nothing is cut from the face: each bend ends on the line from the face's corner
+    /// (where the two bends start) to where its flange ends.
+    Slanted,
 }
 
 impl CornerRelief {
-    pub const ALL: [Self; 3] = [Self::Rectangular, Self::Tear, Self::Flush];
+    pub const ALL: [Self; 4] = [Self::Rectangular, Self::Tear, Self::Flush, Self::Slanted];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Rectangular => "Rectangular",
             Self::Tear => "Tear",
             Self::Flush => "Flush",
+            Self::Slanted => "Slanted",
         }
     }
 }
@@ -301,17 +307,20 @@ impl Layout {
             // The relief, cut from the face and both first bends.
             let (sa, sb) = (a.pieces[0], b.pieces[0]);
             let flush = match (c.spec.relief, planes_of.first()) {
-                (CornerRelief::Flush, Some(planes)) => Some([
+                (CornerRelief::Flush | CornerRelief::Slanted, Some(planes)) => Some([
                     self.end_reach(a, c.ends[0], &planes[0], c.at),
                     self.end_reach(b, c.ends[1], &planes[1], c.at),
                 ]),
                 _ => None,
             };
             if let Some(area) = self.corner_relief(c, ci, size, flush) {
-                out.cuts.push(Cut {
-                    area,
-                    pieces: vec![a.parent, sa, sb],
-                });
+                // A slanted relief only touches the face at its corner.
+                let pieces = if c.spec.relief == CornerRelief::Slanted {
+                    vec![sa, sb]
+                } else {
+                    vec![a.parent, sa, sb]
+                };
+                out.cuts.push(Cut { area, pieces });
             }
         }
         let grow = 2.0 * (self.max_radius() + t) + 4.0 * t + 1.0;
@@ -559,7 +568,7 @@ impl Layout {
         let (a, b) = (&self.attachments[ia], &self.attachments[ib]);
         let margin = match c.spec.relief {
             CornerRelief::Rectangular => c.spec.relief_size.max(0.0),
-            CornerRelief::Tear | CornerRelief::Flush => 0.0,
+            CornerRelief::Tear | CornerRelief::Flush | CornerRelief::Slanted => 0.0,
         };
         // Each edge's band: the trim and the bend strip, as distances into the face.
         let band = |att: &crate::flange::Attachment| -> [f64; 2] {
@@ -600,6 +609,49 @@ impl Layout {
                 reach_a = reach_a.max((p - c.at).dot(da));
                 reach_b = reach_b.max((p - c.at).dot(db));
             }
+        }
+        if c.spec.relief == CornerRelief::Slanted {
+            // The wedge between the two lines from the face's corner, each to the end of a
+            // flange on the far line of its bend. A flange that ends nearer the corner
+            // than the face does gets a square end there.
+            let far = |att: &crate::flange::Attachment| match self.pieces[att.pieces[0]].kind {
+                PieceKind::Bend(b) => att.trim - b.width(),
+                PieceKind::Flange => att.trim,
+            };
+            let apex = solve(a.trim, b.trim)?;
+            let outer = solve(far(a), far(b))?;
+            let ends = flush.unwrap_or([None, None]);
+            let fa = ends[0].unwrap_or(reach_a).max((apex - c.at).dot(da));
+            let fb = ends[1].unwrap_or(reach_b).max((apex - c.at).dot(db));
+            let pa = c.at + da * fa + ina * far(a);
+            let pb = c.at + db * fb + inb * far(b);
+            let tag = |i: u8| CurveTag::Generated {
+                owner: b.owner,
+                part: CORNER_PART + c.ends[1] as u32,
+                index: i + 4 * (index % 32) as u8,
+            };
+            let s = size;
+            let mut poly: Vec<(DVec2, CurveTag)> = vec![
+                (c.at + DVec2::new(-s, -s), tag(0)),
+                (c.at + DVec2::new(s, -s), tag(0)),
+                (c.at + DVec2::new(s, s), tag(0)),
+                (c.at + DVec2::new(-s, s), tag(0)),
+            ];
+            for (p, i) in [(pa, 1), (pb, 2)] {
+                let dir = p - apex;
+                if dir.length() <= MIN_LENGTH {
+                    return None;
+                }
+                let mut n = dir.perp().normalize();
+                if n.dot(outer - apex) < 0.0 {
+                    n = -n;
+                }
+                poly = clip(&poly, n, n.dot(apex), tag(i));
+            }
+            if poly.len() < 3 {
+                return None;
+            }
+            return Some(polygon_area(&poly));
         }
         let (mut ea, mut eb) = (reach_a + margin, reach_b + margin);
         if let Some([fa, fb]) = flush {

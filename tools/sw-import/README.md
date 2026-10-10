@@ -62,7 +62,8 @@ Each has the right shape but does not follow the part when it changes:
 **Corners** are set after each flange feature, as SolidWorks leaves them:
 
 - between the pieces of one flange feature on several edges, `corner` with `open`, the
-  feature's gap over 1.414 and `flush`;
+  feature's gap over 1.414 and `slanted`, which is what SolidWorks' folded part has
+  (its flat pattern has square ends there, which is `flush`);
 - between the new flanges and earlier ones, `corner` with `plain` and the bend radius,
   kept only if it brings the flanges' faces nearer SolidWorks' than PeetCAD's own corner
   does (it does not where flanges are at an angle).

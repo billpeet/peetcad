@@ -292,7 +292,8 @@ with their defaults' types):
   end, with the bend staying on the edge.
 - `corner` sets how flanges that run to one corner meet: `kind` (`butt`, `overlap`,
   `open`, `plain`), `gap`, and `relief`, what is cut from the blank where their bends meet
-  (`rectangular` with `relief_size`, `tear`, or `flush`: back to where the flanges end).
+  (`rectangular` with `relief_size`, `tear`, `flush`: back to where the flanges end, or
+  `slanted`: the face keeps its corner and each bend ends on a slant to its flange's end).
   It applies to the corners of `faces`, or to every corner there is when it is added.
 - `linear_pattern` becomes a grid with `direction2`, `spacing2`, `count2`; `"direction2":
   null` makes it a row again.

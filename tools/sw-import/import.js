@@ -601,7 +601,7 @@ function importPart(doc, dir) {
       if (ends[0]) picks.push({ at: ends[0].center.map(tidy), normal: ends[0].normal.map(tidy) });
     }
     if (picks.length === 0) return null;
-    const reply = peet.apply({ op: "corner", name, faces: picks, kind: "open", gap: tidy(Math.max(gap, 0) / Math.SQRT2), relief: "flush" });
+    const reply = peet.apply({ op: "corner", name, faces: picks, kind: "open", gap: tidy(Math.max(gap, 0) / Math.SQRT2), relief: "slanted" });
     if (!reply.ok) return null;
     const made = (reply.created || [])[0];
     if (!made || made.status === "failed") { peet.apply({ op: "delete", feature: name }); return null; }

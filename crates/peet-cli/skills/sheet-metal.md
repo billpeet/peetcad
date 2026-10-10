@@ -162,13 +162,27 @@ after the flanges it is about.
 - `gap` is how far a flange that stops short stays from the other's inside face.
 - `relief` is what is cut from the blank where the two bends meet: `rectangular` (a
   rectangle reaching `relief_size` past the bends), `tear` (only what the bends would
-  share) or `flush` (back to where the flanges end, so each bend ends in line with its
-  flange and the blank has one inside corner there, with no notch).
+  share), `flush` (back to where the flanges end, so each bend ends in line with its
+  flange and the blank has one inside corner there, with no notch) or `slanted`
+  (nothing is cut from the face: each bend ends on the line from the face's corner to
+  the end of its flange, so the bends' ends are freeform faces and the blank has two
+  short slanted edges at each corner).
 - **To match a part made in SolidWorks:** for the corners of one of its flange features
   on several edges, `open` with `flush` and its gap divided by 1.414 (SolidWorks
   measures the gap between the two flanges corner to corner, and both stop short); for
   a corner between two of its flange features, `plain` with the bend radius as the gap.
-  The blank is then the same, edge for edge.
+  The blank is then the same, edge for edge. SolidWorks' folded part is not quite its
+  blank folded: there the bends end on a slant and the face keeps its corner. `slanted`
+  in place of `flush` gives that solid (the same area, the volume within 0.003%), with
+  a blank that has the slants in it:
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [120, 80]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
+  {"op": "edge_flange", "name": "Wall", "length": 25, "edges": [{"between": [[0, 0, 2], [120, 0, 2]]}, {"between": [[120, 0, 2], [120, 80, 2]]}, {"between": [[120, 80, 2], [0, 80, 2]]}, {"between": [[0, 80, 2], [0, 0, 2]]}]}
+  {"op": "corner", "kind": "open", "gap": 0.7, "relief": "slanted"}
+  {"op": "bodies"}
+  ```
 - `flush` is never less than a tear, so with a gap smaller than the bend radius the
   bends still end before their flanges do.
 - Without `faces` it is every corner the part has when it is applied; corners made by
