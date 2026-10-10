@@ -108,6 +108,19 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
   from the same corner, their reliefs cut the corner of the sheet off: the corner is
   notched, which is normal. Flanges that run right to a corner (no offset) get a butt
   corner with a small gap; `corner` changes how those are treated.
+- A **negative** offset runs an edge flange or a hem past that end of its edge, for one
+  wider than the sheet it is bent from: `"offset_end": -12` ends it 12 beyond the
+  edge. The bend stays on the edge and the flange overhangs it, with no relief. The
+  start of an edge is the first point of its `between`; with `at`, try one end and
+  look at `bodies` (`min`, `max`) to see which way it went. The overhang must not
+  land on another flange: "The sheet overlaps itself" means it does.
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 150]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 1.5, "radius": 2}
+  {"op": "edge_flange", "name": "Wide", "length": 20, "offset_start": -12, "offset_end": 5, "edges": [{"between": [[200, 150, 1.5], [0, 150, 1.5]]}]}
+  {"op": "bodies"}
+  ```
 - `hem`: `kind` is `closed` (folded flat, the default), `open` (folded leaving `gap`),
   `teardrop` or `rolled` (these use `radius` and `angle`); `length` is the hem's length;
   `inside` (default true) keeps the fold's outside flush with the original edge, so the

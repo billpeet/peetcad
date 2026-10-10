@@ -446,6 +446,36 @@ fn slanted_cut_across_a_bend() {
 }
 
 #[test]
+fn flange_past_the_end_of_its_edge() {
+    // Set back 5 from the start of its edge and running 10 past the end: the bend is on
+    // the edge, from 5 to its end, and the flange is 10 wider than that.
+    let mut layout = plate_layout(settings(0.5));
+    let mut spec = flange(25.0, FlangePosition::MaterialInside);
+    spec.offsets = [5.0, -10.0];
+    layout.add_edge_flange(2, &top_edge(true), &spec).unwrap();
+    let (solid, body) = built(layout);
+    let b = bounds(&solid);
+    // The top edge runs from x = W to x = 0, so its end is at x = 0.
+    assert_close(b.min.x, -10.0, 1e-9);
+    assert_close(b.max.x, W, 1e-9);
+    assert_eq!(body.bend_lines.len(), 1);
+    // One blank, and folding keeps its volume (K = 0.5).
+    assert_eq!(body.outline.iter().filter(|l| l.outer).count(), 1);
+    let flat = measure::volume(&body.flat);
+    assert_close(measure::volume(&solid), flat, flat * 1e-9);
+    // The flange is the edge's length less the set-back plus the overrun; the bend is
+    // only the part on the edge.
+    let flanges: Vec<usize> = (0..body.layout.pieces.len())
+        .filter(|&i| body.layout.pieces[i].is_flange() && i > 0)
+        .collect();
+    let width = |i: usize| {
+        let p = piece_bounds(&solid, &body, i);
+        p.max.x - p.min.x
+    };
+    assert_close(width(flanges[0]), W - 5.0 + 10.0, 1e-9);
+}
+
+#[test]
 fn round_hole_in_a_flange() {
     let mut layout = plate_layout(settings(0.44));
     layout.add_cut(Area {

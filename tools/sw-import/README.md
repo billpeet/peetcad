@@ -42,13 +42,13 @@ its SolidWorks plane does, and its points are converted through the two planes' 
 | Sketch | `sketch` with its lines, arcs and circles where they are, ends that meet joined |
 | Reference plane | `plane`: an offset of a standard plane, where SolidWorks has it |
 | Base flange | `base_flange`, with the body's thickness, radius, bend deduction and relief |
-| Edge flange | `edge_flange`: length converted to the outer corner, position, angle, set-backs read off its outline sketch |
+| Edge flange | `edge_flange`: length converted to the outer corner, position, angle, set-backs read off its outline sketch (negative where the outline runs past the edge) |
 | Cut-extrude | `sheet_cut` on sheet metal, `cut` on a solid |
 | Boss-extrude | `extrude` |
 | Hole wizard | `sheet_cut` with circles on sheet metal, `hole` on a solid |
 | Linear pattern, mirror | `linear_pattern`, `mirror` |
 
-Three things PeetCAD has no feature for are stood in for, with a warning in the report.
+Four things PeetCAD has no feature for are stood in for, with a warning in the report.
 Each has the right shape but does not follow the part when it changes:
 
 - **Break corner, and a fillet on a sheet's corner:** a sheet metal cut of the shape
@@ -56,6 +56,8 @@ Each has the right shape but does not follow the part when it changes:
 - **A slot from the hole wizard:** a sheet metal cut of a slot, read off its round ends,
   on each face the feature has slots on.
 - **A mirrored flange:** a flange of its own on the edge across the mirror plane.
+- **A flange whose outline is not a rectangle:** a rectangular flange, and a sheet metal
+  cut of everything between the outline and a box around it.
 
 **Corners** are set after each flange feature, as SolidWorks leaves them:
 

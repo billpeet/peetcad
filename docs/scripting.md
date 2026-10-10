@@ -287,7 +287,9 @@ with their defaults' types):
   (halfway between).
 - `axis`: `edge`, `face` (a round face) or `a` + `b` (two planes). `point`: `x`, `y`, `z`
   or `vertex`.
-- `edge_flange` and `hem` take `edges` to make one feature per edge.
+- `edge_flange` and `hem` take `edges` to make one feature per edge. `offset_start` and
+  `offset_end` set it back from the ends of its edge; a negative one runs it past that
+  end, with the bend staying on the edge.
 - `corner` sets how flanges that run to one corner meet: `kind` (`butt`, `overlap`,
   `open`, `plain`), `gap`, and `relief`, what is cut from the blank where their bends meet
   (`rectangular` with `relief_size`, `tear`, or `flush`: back to where the flanges end).

@@ -756,6 +756,69 @@ function importPart(doc, dir) {
     record(f, "imported with a warning", `as a sheet metal cut of the corners' shape, which does not follow the part${problem ? "; some corners were left: " + problem : ""}`);
   }
 
+  /**
+   * Cuts a rectangular flange down to the outline SolidWorks has for it. What is cut is everything between
+   * the outline and a box a little larger than it, from the outline's foot (its line on the edge) outwards.
+   */
+  function cutToOutline(f, name, { sketch, foot }) {
+    const segments = sketch.sketch.segments.filter(g => !g.construction && g !== foot);
+    if (segments.some(g => !(g.type === "line" || (g.type === "arc" && !g.circle)) || !g.start || !g.end)) return { error: "its outline has more than lines and arcs" };
+    // The outline in order, from one end of the foot round to the other
+    const near = (a, b) => Math.hypot(a.x - b.x, a.y - b.y) < 1e-7;
+    const chain = [], left = [...segments];
+    let at = foot.start;
+    while (left.length) {
+      const k = left.findIndex(g => near(g.start, at) || near(g.end, at));
+      if (k < 0) return { error: "its outline is not one closed loop" };
+      const g = left.splice(k, 1)[0];
+      at = near(g.start, at) ? g.end : g.start;
+      chain.push(g);
+    }
+    if (!near(at, foot.end)) return { error: "its outline is not one closed loop" };
+    const sk = importSketch(sketch, { name: name + " sketch", needFace: true, draw: flat => {
+      const A = flat(foot.start), B = flat(foot.end);
+      const width = Math.hypot(B[0] - A[0], B[1] - A[1]);
+      const u = [(B[0] - A[0]) / width, (B[1] - A[1]) / width];
+      let v = [-u[1], u[0]];
+      const s_ = q => (q[0] - A[0]) * u[0] + (q[1] - A[1]) * u[1], h_ = q => (q[0] - A[0]) * v[0] + (q[1] - A[1]) * v[1];
+      const points = chain.flatMap(g => [flat(g.start), flat(g.end)]);
+      if (points.reduce((sum, q) => sum + h_(q), 0) < 0) v = [-v[0], -v[1]];
+      const margin = 0.5;
+      const lo = Math.min(0, ...points.map(s_)) - margin, hi = Math.max(width, ...points.map(s_)) + margin, top = Math.max(...points.map(h_)) + margin;
+      const out = (a, b) => [tidy(A[0] + u[0] * a + v[0] * b), tidy(A[1] + u[1] * a + v[1] * b)];
+      const items = [], ends = [];
+      chain.forEach((g, i) => {
+        const as = "o" + i;
+        if (g.type === "line") {
+          items.push({ type: "line", from: flat(g.start), to: flat(g.end), as });
+          ends.push([as + ".start", flat(g.start)], [as + ".end", flat(g.end)]);
+          return;
+        }
+        // PeetCAD's arcs run counter-clockwise: the order of the ends is the one that sweeps the arc's angle
+        const c = flat(g.center), a = flat(g.start), b = flat(g.end);
+        const turn = ((Math.atan2(b[1] - c[1], b[0] - c[0]) - Math.atan2(a[1] - c[1], a[0] - c[0])) % (2 * Math.PI) + 2 * Math.PI) % (2 * Math.PI);
+        const sweep = g.length / g.radius;
+        const [start, end] = Math.abs(turn - sweep) <= Math.abs(2 * Math.PI - turn - sweep) ? [a, b] : [b, a];
+        items.push({ type: "arc", center: c, start, end, as });
+        ends.push([as + ".start", start], [as + ".end", end]);
+      });
+      items.push({ type: "polyline", points: [B, out(hi, 0), out(hi, top), out(lo, top), out(lo, 0), A], as: "box" });
+      ends.push(["box.0.start", B], ["box.4.end", A]);
+      const groups = new Map();
+      for (const [label, q] of ends) {
+        const key = q.map(x => x.toFixed(4)).join(",");
+        if (!groups.has(key)) groups.set(key, []);
+        groups.get(key).push(label);
+      }
+      for (const labels of groups.values()) for (let i = 1; i < labels.length; i++) items.push({ type: "coincident", of: [labels[0], labels[i]] });
+      return items;
+    } });
+    if (sk.error) return { error: sk.error };
+    const reply = peet.apply({ op: "sheet_cut", sketch: sk.name, name });
+    if (!reply.ok) { peet.apply({ op: "delete", feature: sk.name }); return { error: reply.error }; }
+    return { sketch: sk.name, name: reply.created[0].name };
+  }
+
   const edgeSelector = e => ({ at: mid(mm(e.start), mm(e.end)).map(tidy) });
   const values = f => (f.definition && f.definition.values) || {};
 
@@ -881,7 +944,7 @@ function importPart(doc, dir) {
         if (far > 1e-3) notes.push(`its edge is ${far.toFixed(3)} mm from where SolidWorks has it`);
         const ops = found.map((edge, index) => {
           const s = edge.from, along = unit(sub(edge.to, edge.from)), whole = len(sub(edge.to, edge.from));
-          let offsets = {};
+          let offsets = {}, outline = null;
           // SolidWorks lists one outline per edge, in the edges' order. Failing that, each is tried.
           for (const p of profiles.length === found.length ? [profiles[index]] : profiles) {
             const sf = frameOf(p.sketch.modelToSketch);
@@ -895,17 +958,18 @@ function importPart(doc, dir) {
               if (len(sub(b, a)) < 1e-6 || Math.abs(dot(unit(sub(b, a)), along)) < 0.9999) continue;
               const away = len(sub(a, mul(along, dot(a, along))));
               if (away > (thickness || 0) + radius + Math.max(0.05, 2 * edge.away)) continue;
-              if (!foot || away < foot.away - 1e-6) foot = { away, on: [dot(a, along), dot(b, along)] };
+              if (!foot || away < foot.away - 1e-6) foot = { away, on: [dot(a, along), dot(b, along)], g };
             }
             if (!foot) continue;
             const on = foot.on;
             const start = Math.min(...on), end = whole - Math.max(...on);
-            if (start > 1e-3) offsets.offset_start = tidy(start);
-            if (end > 1e-3) offsets.offset_end = tidy(end);
-            if (p.sketch.segments.filter(g => !g.construction).length !== 4 || p.sketch.segments.some(g => g.type !== "line")) notes.push("its outline is not a rectangle: a rectangular flange is made");
+            // A foot that runs past an end of the edge is a flange wider than its edge: a negative offset.
+            if (Math.abs(start) > 1e-3) offsets.offset_start = tidy(start);
+            if (Math.abs(end) > 1e-3) offsets.offset_end = tidy(end);
+            if (p.sketch.segments.filter(g => !g.construction).length !== 4 || p.sketch.segments.some(g => g.type !== "line")) outline = { sketch: p, foot: foot.g };
             break;
           }
-          return { edge: { at: edge.middle.map(tidy) }, offsets };
+          return { edge: { at: edge.middle.map(tidy) }, offsets, outline };
         });
         const common = {
           op: "edge_flange", name: f.name, length: tidy(length), angle: tidy(angle), position,
@@ -921,6 +985,13 @@ function importPart(doc, dir) {
             if (!one.ok) built = one; else built.names.push(...one.names);
           });
         }
+        // An outline that is not a rectangle: the flange is cut to it
+        if (built.ok) ops.forEach((o, i) => {
+          if (!o.outline) return;
+          const cut = cutToOutline(f, f.name + (ops.length > 1 ? i + 1 : "") + " outline", o.outline);
+          if (cut.name) { built.names.push(cut.sketch, cut.name); notes.push("its outline is not a rectangle: a rectangular flange is made and cut to the outline, which does not follow the part"); }
+          else notes.push(`its outline is not a rectangle: a rectangular flange is made (${cut.error})`);
+        });
         if (built.ok && notes.length) built.warning = [...new Set(notes)].join("; ");
         const gap = (v.GapDistance || 0) * MM;
         if (built.ok) {

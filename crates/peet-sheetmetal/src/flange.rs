@@ -303,15 +303,20 @@ impl Layout {
         let t = self.settings.thickness;
         let len = site.a.distance(site.b);
         let [o0, o1] = offsets;
-        if !(o0.is_finite() && o1.is_finite()) || o0 < 0.0 || o1 < 0.0 {
-            return Err("The offsets from the ends of the edge can't be negative.".to_owned());
+        if !(o0.is_finite() && o1.is_finite()) {
+            return Err("The offsets from the ends of the edge must be lengths.".to_owned());
         }
-        let span = [o0, len - o1];
+        // A negative offset runs the flange past that end of its edge. The first bend
+        // stays on the edge, since there is no sheet to bend beyond it; the flange and
+        // whatever is bent from it are as wide as the flange.
+        let span = [o0.max(0.0), len - o1.max(0.0)];
         if span[1] - span[0] <= MIN_LENGTH {
             return Err(format!(
                 "The offsets ({o0:.3} + {o1:.3} mm) leave nothing of the {len:.3} mm edge."
             ));
         }
+        // The flange's extent along the edge, from where the first bend starts.
+        let wide = [o0 - span[0], len - o1 - span[0]];
         let d = (site.b - site.a) / len;
         let out = DVec2::new(d.y, -d.x); // right of the edge: away from the material
         let inward = -out;
@@ -328,13 +333,16 @@ impl Layout {
             let ba = seg.values.allowance;
             let bend_index = self.pieces.len();
             let has_flat = seg.flat > 0.0;
+            // The first bend is as long as its stretch of the edge, later ones as wide as
+            // the flange they are bent from.
+            let along = if k == 0 { [0.0, w] } else { wide };
             let bend = Bend {
                 parent: parent_index,
                 child: has_flat.then_some(bend_index + 1),
-                origin: origin + out * x,
+                origin: origin + d * along[0] + out * x,
                 along: d,
                 across: out,
-                length: w,
+                length: along[1] - along[0],
                 values: seg.values,
                 up: seg.up,
             };
@@ -350,7 +358,7 @@ impl Layout {
                     origin,
                     d,
                     out,
-                    [0.0, w],
+                    along,
                     [x, x + ba],
                     [
                         tag(wall::BEND_PARENT),
@@ -376,7 +384,7 @@ impl Layout {
                     origin,
                     d,
                     out,
-                    [0.0, w],
+                    wide,
                     [x, x + seg.flat],
                     [
                         tag(wall::FLANGE_FOLD),
