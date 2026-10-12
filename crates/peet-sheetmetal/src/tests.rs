@@ -486,7 +486,7 @@ fn a_flange_with_its_own_relief() {
         let mut spec = flange(25.0, FlangePosition::BendOutside);
         spec.offsets = [10.0, 10.0];
         layout
-            .add_edge_flange_relieved(2, &top_edge(true), &spec, relief)
+            .add_edge_flange_with(2, &top_edge(true), &spec, FlangeOwn { relief, model: None })
             .unwrap();
         let (_, body) = built(layout);
         flat_area(&body)
@@ -500,10 +500,38 @@ fn a_flange_with_its_own_relief() {
     assert_close(tear - wide, 8.0 * (ratio * T) * (ratio * T), 1e-9);
     let mut layout = plate_layout(settings(0.44));
     let spec = flange(25.0, FlangePosition::BendOutside);
+    let own = FlangeOwn {
+        relief: Some((ReliefType::Tear, 0.0)),
+        model: None,
+    };
     let e = layout
-        .add_edge_flange_relieved(2, &top_edge(true), &spec, Some((ReliefType::Tear, 0.0)))
+        .add_edge_flange_with(2, &top_edge(true), &spec, own)
         .unwrap_err();
     assert!(e.contains("ratio"), "{e}");
+}
+
+#[test]
+fn a_flange_with_its_own_bend_model() {
+    // The body's bends are worked out with a K-factor. A flange with a bend deduction of
+    // its own folds to the same part, from a blank that much shorter or longer.
+    let size = |model: Option<BendModel>| {
+        let mut layout = plate_layout(settings(0.44));
+        let spec = flange(25.0, FlangePosition::MaterialInside);
+        let own = FlangeOwn { relief: None, model };
+        layout.add_edge_flange_with(2, &top_edge(true), &spec, own).unwrap();
+        let (solid, body) = built(layout);
+        let allowance = body.layout.bends().next().unwrap().1.values.allowance;
+        (bounds(&solid), allowance)
+    };
+    let (plain, by_k) = size(None);
+    let deduction = 2.0 * (R + T) - by_k;
+    let (same, a) = size(Some(BendModel::Deduction(deduction)));
+    assert_close(a, by_k, 1e-12);
+    let (other, b) = size(Some(BendModel::Deduction(deduction - 0.5)));
+    assert_close(b, by_k + 0.5, 1e-12);
+    for folded in [same, other] {
+        assert!(folded.min.distance(plain.min) < 1e-9 && folded.max.distance(plain.max) < 1e-9);
+    }
 }
 
 #[test]

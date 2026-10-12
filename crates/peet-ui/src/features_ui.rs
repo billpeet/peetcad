@@ -786,6 +786,7 @@ pub fn reference_panel(
             | FeatureKind::Jog(_)
             | FeatureKind::MiterFlange(_)
             | FeatureKind::Corner(_)
+            | FeatureKind::BreakCorner(_)
             | FeatureKind::Form(_)
             | FeatureKind::Pattern(_)
             | FeatureKind::Mirror(_)
@@ -1105,6 +1106,18 @@ pub fn edge_flange_panel(
                 ui.label("");
                 out.committed |= scalar_field(ui, "ef_radius", r, ScalarKind::Length, params);
                 ui.end_row();
+            }
+            ui.label("Bend").on_hover_text(
+                "How the flat length of this flange's bend is worked out. The body's bend model unless one is set here.",
+            );
+            let mut custom = e.bend.is_some();
+            if ui.checkbox(&mut custom, "Custom").changed() {
+                e.bend = custom.then(|| BendModelDef::Deduction(Scalar::new(2.0)));
+                out.committed = true;
+            }
+            ui.end_row();
+            if let Some(b) = &mut e.bend {
+                bend_model_rows(ui, b, params, &mut out);
             }
             ui.label("Relief").on_hover_text(
                 "What is cut where the flange is set back from an end of its edge. The body's unless one is chosen here.",
@@ -1531,6 +1544,44 @@ pub fn miter_flange_panel(
         });
     ui.add_space(6.0);
     ui.weak("Draw the profile square to one of the edges, starting at that edge's top or bottom corner (sketch on the face at the end of the edge). Its lines are measured to the corners; a bend with the body's radius goes at each.");
+    out
+}
+
+/// Break corner: how the corners are broken and by how much. The corners themselves are
+/// picked through the operation.
+pub(crate) fn break_corner_panel(
+    ui: &mut Ui,
+    doc: &Document,
+    b: &mut peet_model::BreakCornerFeature,
+) -> PanelResult {
+    let mut out = PanelResult::default();
+    let params = &doc.model.parameters;
+    egui::Grid::new("break_corner_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Corners");
+            ui.label(match b.edges.len() {
+                1 => "1 corner".to_owned(),
+                n => format!("{n} corners"),
+            });
+            ui.end_row();
+            ui.label("Kind");
+            egui::ComboBox::from_id_salt("break_corner_kind")
+                .selected_text(b.kind.label())
+                .show_ui(ui, |ui| {
+                    for k in peet_sheetmetal::BreakKind::ALL {
+                        ui.selectable_value(&mut b.kind, k, k.label());
+                    }
+                });
+            ui.end_row();
+            ui.label(match b.kind {
+                peet_sheetmetal::BreakKind::Fillet => "Radius",
+                peet_sheetmetal::BreakKind::Chamfer => "Distance",
+            });
+            out.committed |= scalar_field(ui, "break_corner_size", &mut b.size, ScalarKind::Length, params);
+            ui.end_row();
+        });
     out
 }
 

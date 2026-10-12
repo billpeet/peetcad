@@ -122,6 +122,19 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
   {"op": "edge_flange", "name": "Tab", "length": 25, "offset_start": 60, "offset_end": 60, "relief": "obround", "relief_ratio": 1, "edges": [{"between": [[200, 150, 2], [0, 150, 2]]}]}
   {"op": "bodies"}
   ```
+- An edge flange's bend is worked out as the body's are unless it has a `bend` of its
+  own (`{"deduction": 3.5}`, or `k_factor` or `allowance`): for the one bend the press
+  brake makes differently, such as a bend at another angle. The folded part is the
+  same; the blank is that much longer or shorter. `null` goes back to the body's. "The
+  bend allowance works out at ... it must be greater than zero" on one flange means
+  the body's deduction is too big for that flange's angle or radius: give it its own.
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 150]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2, "bend": {"deduction": 3.3}}
+  {"op": "edge_flange", "name": "Hood", "length": 60, "angle": 105, "bend": {"deduction": 3.5}, "edges": [{"between": [[0, 0, 2], [200, 0, 2]]}]}
+  {"op": "bend_table"}
+  ```
 - A **negative** offset runs an edge flange or a hem past that end of its edge, for one
   wider than the sheet it is bent from: `"offset_end": -12` ends it 12 beyond the
   edge. The bend stays on the edge and the flange overhangs it, with no relief. The
@@ -206,10 +219,41 @@ after the flanges it is about.
 - "The part has no corners where two flanges meet": the flanges are set back from the
   corner (an `offset_start` or `offset_end`), or are on different faces. Nothing to do.
 
+## Breaking corners
+
+`break_corner` rounds or chamfers corners of the sheet's outline: of the plate, of a
+flange, of a cutout's edge with the outside. It works in the flat pattern, so the body
+stays sheet metal (`fillet` and `chamfer` turn it into a plain solid).
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 150]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Wall", "length": 40, "offset_start": 20, "offset_end": 20, "edges": [{"between": [[0, 0, 2], [200, 0, 2]]}]}
+{"op": "break_corner", "name": "Rounds", "size": 10, "edges": [{"between": [[0, 150, 0], [0, 150, 2]]}, {"between": [[200, 150, 0], [200, 150, 2]]}]}
+{"op": "break_corner", "name": "Nips", "kind": "chamfer", "size": 3, "edges": [{"at": [20, 1, 40]}, {"at": [180, 1, 40]}]}
+{"op": "bodies"}
+```
+
+- `edges` are the corners: each the short edge **through the sheet** where two straight
+  sides of a flat face meet, one sheet thickness long. `between` its two ends, or `at`
+  its middle, not an end, where other edges meet it (`peet edges` lists them; a corner edge has both ends at one place on
+  the face, a thickness apart). An edge along a face is not a corner.
+- `kind`: `fillet` (the default; `size` is the radius) or `chamfer` (`size` is the
+  distance along each side).
+- Only outside corners: an inside corner (of a notch) is refused, since rounding it
+  would add material. A corner next to a bend is not a corner of a flat face: break the
+  flange's far corners, or cut the shape with `sheet_cut`.
+- "The corner's sides are too short" gives the largest size that fits there. Two
+  corners at the ends of one side share it: their sizes together can't exceed it.
+- It follows the part: a flange made longer takes its broken corners with it.
+
 ## Cuts and forms
 
 - Use **`sheet_cut`**, with the sketch on a flat face of the sheet. It cuts in the flat
   pattern, so it can run across bends, and the body stays sheet metal.
+- It cuts every flange that has a face in the sketch's plane, not only the one the
+  sketch is on: holes drawn over two tabs or two lips that lie in one plane go through
+  both, in one `sheet_cut`.
 - **A cut across a bend:** draw it on the flat face as it lies in the blank, running
   past the face's edge. Past that edge the sketch is over the bend and then the flange,
   laid flat: a point `d` beyond the bend line in the sketch is `d` along the sheet in the

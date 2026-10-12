@@ -23,7 +23,17 @@ use crate::layout::{
     Area, Bend, CurveTag, Cut, Edge2, EdgeSite, Layout, MIN_LENGTH, Origin, Piece, PieceKind, rect,
     wall,
 };
-use crate::settings::{BendValues, FlangePosition, ReliefType};
+use crate::settings::{BendModel, BendValues, FlangePosition, ReliefType};
+
+/// What an edge flange has of its own in place of the body's settings.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct FlangeOwn {
+    /// The relief where the flange is set back from an end of its edge: its type, and
+    /// its size as a multiple of the thickness.
+    pub relief: Option<(ReliefType, f64)>,
+    /// How the flat length of the flange's bend is worked out.
+    pub model: Option<BendModel>,
+}
 
 /// An edge flange's values, evaluated.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -141,19 +151,19 @@ impl Layout {
         site: &EdgeSite,
         spec: &EdgeFlangeSpec,
     ) -> Result<(), String> {
-        self.add_edge_flange_relieved(owner, site, spec, None)
+        self.add_edge_flange_with(owner, site, spec, FlangeOwn::default())
     }
 
-    /// [`Self::add_edge_flange`] with a relief of the flange's own (its type, and its
-    /// size as a multiple of the thickness) where it is set back from the ends of its
-    /// edge, in place of the body's.
-    pub fn add_edge_flange_relieved(
+    /// [`Self::add_edge_flange`] with a relief or a bend model of the flange's own in
+    /// place of the body's.
+    pub fn add_edge_flange_with(
         &mut self,
         owner: u32,
         site: &EdgeSite,
         spec: &EdgeFlangeSpec,
-        relief: Option<(ReliefType, f64)>,
+        own: FlangeOwn,
     ) -> Result<(), String> {
+        let relief = own.relief;
         if let Some((_, ratio)) = relief
             && !(ratio.is_finite() && ratio > 0.0)
         {
@@ -167,7 +177,8 @@ impl Layout {
         if !spec.length.is_finite() {
             return Err("The length is not a number.".to_owned());
         }
-        let values = BendValues::new(self.settings.model, spec.angle.to_radians(), radius, t)?;
+        let model = own.model.unwrap_or(self.settings.model);
+        let values = BendValues::new(model, spec.angle.to_radians(), radius, t)?;
         let ossb = values.outside_setback();
         let straight = spec.length - ossb;
         if straight <= MIN_LENGTH {

@@ -549,11 +549,11 @@ function importPart(doc, dir) {
    * (PeetCAD's own corner runs the earlier flange on to the later one's outer face.) Every corner the new
    * flanges touch gets this; `corners` then sets the ones among the pieces of one feature.
    */
-  function plainCorners(name, flangeNames, bendRadius) {
+  function plainCorners(name, flangeNames, bendRadius, kind = "plain", relief = "flush") {
     const tops = (peet.ask({ op: "faces" }).faces || []).filter(face => face.surface === "plane"
       && (face.made_by || []).length === 1 && flangeNames.includes(face.made_by[0].feature) && face.made_by[0].side === "top");
     if (tops.length === 0) return null;
-    const reply = peet.apply({ op: "corner", name, faces: tops.map(face => ({ at: face.center.map(tidy), normal: face.normal.map(tidy) })), kind: "plain", gap: tidy(Math.max(bendRadius, 0.01)), relief: "flush" });
+    const reply = peet.apply({ op: "corner", name, faces: tops.map(face => ({ at: face.center.map(tidy), normal: face.normal.map(tidy) })), kind, gap: tidy(Math.max(bendRadius, 0.01)), relief });
     if (!reply.ok) return null;
     const made = (reply.created || [])[0];
     if (!made || made.status === "failed") { peet.apply({ op: "delete", feature: name }); return null; }
@@ -701,7 +701,67 @@ function importPart(doc, dir) {
    * metal into a plain solid, so the corner is cut off with a sheet metal cut shaped like what SolidWorks
    * removed, read off the round faces the feature left. The shape is right; it does not follow the part.
    */
+  /**
+   * A break corner as PeetCAD's own feature. The corners are found from the faces the feature left in
+   * SolidWorks' body: a round's axis is its radius over the cosine of half its sweep from the corner's edge
+   * through the sheet, and a chamfer's face is in front of it. False if a corner's edge is not in the part
+   * (the corner is not square, or the part differs there).
+   */
+  function breakCorners(f) {
+    if (!sheetBody() || !thickness) return false;
+    const edges = (peet.ask({ op: "edges" }).edges || []).filter(e => e.curve === "line" && e.from && e.to && Math.abs(len(sub(e.to, e.from)) - thickness) < 1e-3);
+    const groups = new Map();
+    const take = (kind, size, fits, near) => {
+      let best = null;
+      for (const e of edges) {
+        if (!fits(e)) continue;
+        const far = len(sub(e.middle, near));
+        if (!best || far < best.far) best = { e, far };
+      }
+      if (!best) return false;
+      const key = kind + "|" + size.toFixed(3);
+      if (!groups.has(key)) groups.set(key, { kind, size, edges: [] });
+      if (!groups.get(key).edges.includes(best.e)) groups.get(key).edges.push(best.e);
+      return true;
+    };
+    const faces = facesOf(f.name);
+    if (faces.length === 0) return false;
+    for (const face of faces) {
+      const middle = mid(mm(face.box.slice(0, 3)), mm(face.box.slice(3)));
+      if (face.cylinder) {
+        const axis = unit(face.cylinder.slice(3, 6)), on = mm(face.cylinder.slice(0, 3)), radius = face.cylinder[6] * MM;
+        const sweep = face.area * 1e6 / (radius * thickness);
+        if (!(sweep > 0.05 && sweep < Math.PI - 0.05)) return false;
+        const reach = radius / Math.cos(sweep / 2);
+        const fits = e => {
+          if (Math.abs(dot(unit(sub(e.to, e.from)), axis)) < 0.9999) return false;
+          const v = sub(e.middle, on);
+          return Math.abs(len(sub(v, mul(axis, dot(v, axis)))) - reach) < 0.02;
+        };
+        if (!take("fillet", radius, fits, middle)) return false;
+      } else if (face.plane && face.normal) {
+        // A chamfer's face is the sheet's thickness high and, on a square corner, its distance times
+        // root 2 long: the corner's edge is half that length in front of its middle.
+        const normal = unit(face.normal), length = face.area * 1e6 / thickness;
+        const front = [1, -1].map(side => add(middle, mul(normal, side * length / 2)));
+        const fits = e => Math.abs(dot(unit(sub(e.to, e.from)), normal)) < 1e-4 && front.some(q => len(sub(e.middle, q)) < 0.02);
+        if (!take("chamfer", length / Math.SQRT2, fits, middle)) return false;
+      } else return false;
+    }
+    const names = [];
+    let n = 0;
+    for (const g of groups.values()) {
+      const built = build(f, { op: "break_corner", name: f.name + (n++ ? " " + n : ""), kind: g.kind, size: tidy(g.size), edges: g.edges.map(e => ({ between: [e.from, e.to] })) });
+      if (!built.ok) { if (names.length) peet.apply({ op: "delete", features: names }); return false; }
+      names.push(...built.names);
+    }
+    made.set(f.name, names);
+    record(f, "imported");
+    return true;
+  }
+
   function roundCorners(f) {
+    if (breakCorners(f)) return;
     const rounds = facesOf(f.name).filter(face => face.cylinder);
     const flats = facesOf(f.name).filter(face => face.plane && face.normal);
     if (rounds.length + flats.length === 0) return record(f, "not supported", "none of its faces is left in SolidWorks' body to copy");
@@ -760,7 +820,7 @@ function importPart(doc, dir) {
    * Cuts a rectangular flange down to the outline SolidWorks has for it. What is cut is everything between
    * the outline and a box a little larger than it, from the outline's foot (its line on the edge) outwards.
    */
-  function cutToOutline(f, name, { sketch, foot }) {
+  function cutToOutline(f, name, { sketch, foot }, map = null) {
     const segments = sketch.sketch.segments.filter(g => !g.construction && g !== foot);
     if (segments.some(g => !(g.type === "line" || (g.type === "arc" && !g.circle)) || !g.start || !g.end)) return { error: "its outline has more than lines and arcs" };
     // The outline in order, from one end of the foot round to the other
@@ -817,9 +877,12 @@ function importPart(doc, dir) {
     // be on the edge of the face the flange is bent from as well, which is no place for a cut.
     const sf = frameOf(sketch.sketch.modelToSketch);
     const corners = chain.flatMap(g => [g.start, g.end]);
-    const middle = fromSketch(sf, { x: corners.reduce((t, q) => t + q.x, 0) / corners.length, y: corners.reduce((t, q) => t + q.y, 0) / corners.length });
-    let sk = sketchOnFace(name + " sketch", middle, sf.n, flat => draw(q => flat(fromSketch(sf, q))));
-    if (sk.error) sk = importSketch(sketch, { name: name + " sketch", needFace: true, draw });
+    // `map` moves the outline (to the other side of a mirror plane)
+    const place = q => map ? map(fromSketch(sf, q)) : fromSketch(sf, q);
+    const middle = place({ x: corners.reduce((t, q) => t + q.x, 0) / corners.length, y: corners.reduce((t, q) => t + q.y, 0) / corners.length });
+    const normal = map ? unit(sub(map(add(sf.o, sf.n)), map(sf.o))) : sf.n;
+    let sk = sketchOnFace(name + " sketch", middle, normal, flat => draw(q => flat(place(q))));
+    if (sk.error && !map) sk = importSketch(sketch, { name: name + " sketch", needFace: true, draw });
     if (sk.error) return { error: sk.error };
     const reply = peet.apply({ op: "sheet_cut", sketch: sk.name, name });
     if (!reply.ok) { peet.apply({ op: "delete", feature: sk.name }); return { error: reply.error }; }
@@ -969,11 +1032,21 @@ function importPart(doc, dir) {
             }
             if (!foot) continue;
             const on = foot.on;
-            const start = Math.min(...on), end = whole - Math.max(...on);
+            let start = Math.min(...on), end = whole - Math.max(...on);
+            // A rectangle is four lines, each along the edge or square to it. Anything else is cut to shape.
+            const drawn = p.sketch.segments.filter(g => !g.construction);
+            const square = g => { const d = unit(sub(fromSketch(sf, g.end), fromSketch(sf, g.start))), c = Math.abs(dot(d, along)); return c > 0.9999 || c < 1e-4; };
+            if (drawn.length !== 4 || drawn.some(g => g.type !== "line" || !g.start || !g.end || !square(g))) {
+              outline = { sketch: p, foot: foot.g };
+              // An outline that widens past an end of the edge its foot runs to: the flange is made that
+              // wide (it overhangs the edge from the bend on) and cut back to the outline.
+              const reach = drawn.flatMap(g => [g.start, g.end]).filter(Boolean).map(q => dot(sub(fromSketch(sf, q), s), along));
+              if (Math.abs(start) < 1e-3 && Math.min(...reach) < -1e-3) start = Math.min(...reach);
+              if (Math.abs(end) < 1e-3 && whole - Math.max(...reach) < -1e-3) end = whole - Math.max(...reach);
+            }
             // A foot that runs past an end of the edge is a flange wider than its edge: a negative offset.
             if (Math.abs(start) > 1e-3) offsets.offset_start = tidy(start);
             if (Math.abs(end) > 1e-3) offsets.offset_end = tidy(end);
-            if (p.sketch.segments.filter(g => !g.construction).length !== 4 || p.sketch.segments.some(g => g.type !== "line")) outline = { sketch: p, foot: foot.g };
             break;
           }
           return { edge: { at: edge.middle.map(tidy) }, offsets, outline };
@@ -996,6 +1069,8 @@ function importPart(doc, dir) {
           op: "edge_flange", name: f.name, length: tidy(length), angle: tidy(angle), position,
           ...(v.UseDefaultBendRadius === false ? { radius: tidy(Math.max(radius, 0.01)) } : {}),
           ...ownRelief,
+          // A bend allowance of the flange's own
+          ...(v.UseDefaultBendAllowance === false && v.GetCustomBendAllowance ? { bend: bendOf(v) } : {}),
         };
         let built;
         if (ops.length === 1) built = buildFlange(f, { ...common, edge: ops[0].edge, ...ops[0].offsets });
@@ -1025,13 +1100,20 @@ function importPart(doc, dir) {
           const before = flangeMismatch(sofar);
           const plain = plainCorners(f.name + " corners with others", flangeNames, radius);
           if (plain && flangeMismatch(sofar) < before - 1e-3) built.names.push(plain);
-          else if (plain) peet.apply({ op: "delete", feature: plain });
+          else {
+            if (plain) peet.apply({ op: "delete", feature: plain });
+            // Failing that, PeetCAD's own corner, without the rectangle its relief cuts from the face and
+            // the bends: SolidWorks cuts nothing at a corner that the bends do not share.
+            const butt = plainCorners(f.name + " corners with others", flangeNames, radius, "butt", "tear");
+            if (butt && flangeMismatch(sofar) <= before + 1e-3) built.names.push(butt);
+            else if (butt) peet.apply({ op: "delete", feature: butt });
+          }
           if (flangeNames.length === edges.length && edges.length > 1) {
             const corner = corners(f.name + " corners", gap, edges.map((e, i) => ({ name: flangeNames[i], start: mm(e.start), end: mm(e.end) })));
             if (corner) built.names.push(corner);
           }
         }
-        if (built.ok) flanges.set(f.name, { name: f.name, common, gap, pieces: edges.map((e, i) => ({ start: mm(e.start), end: mm(e.end), offsets: ops[i].offsets })) });
+        if (built.ok) flanges.set(f.name, { name: f.name, common, gap, pieces: edges.map((e, i) => ({ start: mm(e.start), end: mm(e.end), offsets: ops[i].offsets, outline: ops[i].outline })) });
         return finish(f, built);
       }
 
@@ -1135,7 +1217,22 @@ function importPart(doc, dir) {
       }
 
       case "BreakCorner": case "Fillet": {
-        if (!sheetBody()) return record(f, "not supported", null);
+        if (!sheetBody()) {
+          // On a solid: PeetCAD's fillet, on the edges SolidWorks rounded. An edge is picked by its ends, a
+          // round one by a point on it.
+          if (f.type !== "Fillet" || v.Type !== 0 || v.IsMultipleRadius || !(v.DefaultRadius > 0)) return record(f, "not supported", f.type === "Fillet" ? "a fillet that is not one radius along edges" : null);
+          const picks = [];
+          for (const e of v.Edges || []) {
+            if (e && e.start && e.end) picks.push({ between: [mm(e.start).map(tidy), mm(e.end).map(tidy)] });
+            else if (e && e.circle) {
+              const centre = mm(e.circle.slice(0, 3)), axis = unit(e.circle.slice(3, 6)), radius = e.circle[6] * MM;
+              const across = unit(cross(axis, Math.abs(axis[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]));
+              picks.push({ at: add(centre, mul(across, radius)).map(tidy) });
+            } else return record(f, "not supported", "a fillet on an edge that was not exported");
+          }
+          if (picks.length === 0) return record(f, "not supported", "a fillet of faces or loops");
+          return finish(f, build(f, { op: "fillet", name: f.name, size: tidy(v.DefaultRadius * MM), edges: picks, chain: v.PropagateToTangentFaces !== false }));
+        }
         return roundCorners(f);
       }
 
@@ -1217,6 +1314,11 @@ function importPart(doc, dir) {
           if (!built.ok) return record(f, names.length ? "imported in part" : "failed", built.message);
           names.push(...built.names);
           warning = "its flanges are made as flanges of their own, which do not follow the originals";
+          if (p.outline) {
+            const cut = cutToOutline(f, op.name + " outline", p.outline, across);
+            if (cut.name) names.push(cut.sketch, cut.name);
+            else warning += `; one is left a rectangle (${cut.error})`;
+          }
         }
         if (seeds.length) {
           const built = build(f, { op: "mirror", name: f.name, features: seeds, plane });

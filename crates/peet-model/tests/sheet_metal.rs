@@ -219,6 +219,88 @@ fn round_hole_across_a_bend() {
 }
 
 #[test]
+fn a_cut_goes_through_every_flange_in_its_plane() {
+    // A channel with a lip turned in from the top of each wall. The two lips lie in one
+    // plane and are far apart in the blank. A sketch on one lip with a hole over each
+    // cuts both.
+    let (mut p, _, _) = plate(100.0, 60.0);
+    for (y, inner) in [(60.0, 60.0 - T), (0.0, T)] {
+        let (_, e) = edge(&p, DVec3::new(0.0, y, T), DVec3::new(100.0, y, T));
+        edge_flange(&mut p, e, |f| f.length = Scalar::new(30.0));
+        p.rebuild();
+        let (_, e) = edge(&p, DVec3::new(0.0, inner, 30.0), DVec3::new(100.0, inner, 30.0));
+        edge_flange(&mut p, e, |f| f.length = Scalar::new(15.0));
+        p.rebuild();
+    }
+    p.assert_ok();
+    let lip = p.on_face(DVec3::Z, DVec3::new(50.0, 55.0, 30.0));
+    let holes = p.sketch(lip, |s| {
+        s.add_circle(DVec2::new(50.0, 53.0), 2.0);
+        s.add_circle(DVec2::new(50.0, 7.0), 2.0);
+    });
+    let cut = p.model.add_sheet_cut(holes);
+    p.rebuild();
+    p.assert_ok();
+    assert!(matches!(p.status(cut), Status::Ok));
+    let sheet = p.bodies()[0].sheet.as_ref().expect("still sheet metal");
+    assert_eq!(sheet.outline.iter().filter(|l| !l.outer).count(), 2);
+}
+
+#[test]
+fn corners_are_broken_and_follow_the_part() {
+    // A plate with a wall. The wall's two top corners are rounded and one corner of the
+    // plate is chamfered, each by the edge through the sheet at the corner.
+    let (mut p, _, _) = plate(100.0, 60.0);
+    let (_, e) = edge(&p, DVec3::new(0.0, 60.0, T), DVec3::new(100.0, 60.0, T));
+    let wall = edge_flange(&mut p, e, |f| f.length = Scalar::new(30.0));
+    p.rebuild();
+    p.assert_ok();
+    let before = p.volume();
+    let corners: Vec<_> = [0.0, 100.0]
+        .into_iter()
+        .map(|x| edge(&p, DVec3::new(x, 60.0 - T, 30.0), DVec3::new(x, 60.0, 30.0)).1)
+        .collect();
+    let rounds = p.model.add_break_corner(corners);
+    let FeatureKind::BreakCorner(def) = &mut p.model.feature_mut(rounds).unwrap().kind else {
+        unreachable!()
+    };
+    def.size = Scalar::new(5.0);
+    p.rebuild();
+    p.assert_ok();
+    let round = 25.0 - 25.0 * std::f64::consts::FRAC_PI_4;
+    assert_close(before - p.volume(), 2.0 * round * T);
+    let (_, e) = edge(&p, DVec3::new(0.0, 0.0, 0.0), DVec3::new(0.0, 0.0, T));
+    let chamfer = p.model.add_break_corner(vec![e]);
+    let FeatureKind::BreakCorner(def) = &mut p.model.feature_mut(chamfer).unwrap().kind else {
+        unreachable!()
+    };
+    def.kind = peet_sheetmetal::BreakKind::Chamfer;
+    def.size = Scalar::new(3.0);
+    p.rebuild();
+    p.assert_ok();
+    assert_close(before - p.volume(), (2.0 * round + 4.5) * T);
+    // Still sheet metal, with the rounds in its blank.
+    assert!(p.bodies()[0].sheet.is_some());
+    // The wall made taller: the rounds go up with it.
+    let FeatureKind::EdgeFlange(def) = &mut p.model.feature_mut(wall).unwrap().kind else {
+        unreachable!()
+    };
+    def.length = Scalar::new(45.0);
+    p.rebuild();
+    p.assert_ok();
+    assert!(matches!(p.status(rounds), Status::Ok));
+    let (_, hi) = bounds(&p);
+    assert_close(hi.z, 45.0);
+    // Two rounds that would overlap along the wall's top are refused.
+    let FeatureKind::BreakCorner(def) = &mut p.model.feature_mut(rounds).unwrap().kind else {
+        unreachable!()
+    };
+    def.size = Scalar::new(80.0);
+    p.rebuild();
+    assert!(matches!(p.status(rounds), Status::Failed(m) if m.contains("too short for both")));
+}
+
+#[test]
 fn open_profile_channel() {
     let mut p = Part::default();
     let sketch = p.sketch(TOP, |s| {

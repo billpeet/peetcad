@@ -933,7 +933,16 @@ impl Engine {
                         .relief_ratio
                         .as_ref()
                         .and_then(|r| r.evaluate(ScalarKind::Number, &model.parameters).ok());
-                    let values = (spec.length, spec.angle, spec.offsets, spec.radius, ratio);
+                    let bend = sheet::edge_flange_bend(e, &model.parameters)
+                        .ok()
+                        .flatten()
+                        .map(|b| match b {
+                            peet_sheetmetal::BendModel::KFactor(v) => (0u8, v),
+                            peet_sheetmetal::BendModel::Allowance(v) => (1u8, v),
+                            peet_sheetmetal::BendModel::Deduction(v) => (2u8, v),
+                        });
+                    let values =
+                        (spec.length, spec.angle, spec.offsets, spec.radius, ratio, bend);
                     let key = hash::of(&(4u8, id, &**e, run.body_key, values));
                     self.solid_feature(id, key, run, |bodies| {
                         sheet::apply_edge_flange(id, model, bodies, e, &spec, key)
@@ -1083,6 +1092,17 @@ impl Engine {
                     })
                 }
             },
+            FeatureKind::BreakCorner(b) => {
+                match ctx.scalar(&b.size, ScalarKind::Length, "Size") {
+                    Err(m) => fail(m, Output::None),
+                    Ok(size) => {
+                        let key = hash::of(&(23u8, id, &**b, run.body_key, size));
+                        self.solid_feature(id, key, run, |bodies| {
+                            sheet::apply_break_corner(id, model, bodies, b, size, key)
+                        })
+                    }
+                }
+            }
             FeatureKind::Form(f) => {
                 let inputs = (|| {
                     let (plane, sketch) = ctx.sketch_input(f.sketch)?;

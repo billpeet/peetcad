@@ -282,7 +282,7 @@ impl Icon {
             FeatureKind::SketchedBend(_) => Self::SketchedBend,
             FeatureKind::Jog(_) => Self::Jog,
             FeatureKind::MiterFlange(_) => Self::MiterFlange,
-            FeatureKind::Corner(_) => Self::Corner,
+            FeatureKind::Corner(_) | FeatureKind::BreakCorner(_) => Self::Corner,
             FeatureKind::Form(f) => match f.kind {
                 peet_sheetmetal::FormKind::Dimple => Self::Dimple,
                 peet_sheetmetal::FormKind::Emboss => Self::Emboss,

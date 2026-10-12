@@ -17,7 +17,8 @@ use crate::value::{HoleStandard, RevolveAxis};
 use peet_document::Document;
 use peet_model::feature::{AxisDef, CoordSystemDef, FeatureKind, PatternDef, PlaneDef, PointDef};
 use peet_model::{
-    AxisRef, BaseFlangeFeature, BendModelDef, CornerFeature, EdgeFlangeFeature, EdgeRef,
+    AxisRef, BaseFlangeFeature, BendModelDef, BreakCornerFeature, CornerFeature,
+    EdgeFlangeFeature, EdgeRef,
     EndCondition, ExtrudeFeature, FaceName, FaceRef, FeatureId, FormFeature, HemFeature,
     JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, Operation, PatternFeature,
     PlaneRef, PointRef, RegionSelection, Scalar, ScalarKind, SheetCutFeature, SheetSettingsDef,
@@ -29,7 +30,7 @@ use peet_model::{
 };
 use peet_sheetmetal::corner::{CornerKind, CornerRelief};
 use peet_sheetmetal::{
-    BendLinePosition, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
+    BendLinePosition, BreakKind, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -270,6 +271,7 @@ words!(
     JogDimension,
     CornerKind,
     CornerRelief,
+    BreakKind,
     FormKind,
     HoleKind,
     HoleFit
@@ -617,6 +619,42 @@ arg: |b, _| match b {
     BendModelDef::Allowance(s) => Bend::Allowance(input_of(s)),
     BendModelDef::Deduction(s) => Bend::Deduction(input_of(s)),
 });
+/// A bend model that falls back to the body's when absent.
+pub(crate) struct OptBend;
+
+impl Field for OptBend {
+    type Arg = Option<Bend>;
+    type Target = Option<BendModelDef>;
+    const NULLABLE: bool = true;
+    fn describe() -> String {
+        format!("{}, or null for the body's", BendF::describe())
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        if v.is_null() {
+            Ok(None)
+        } else {
+            BendF::parse(v).map(Some)
+        }
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        *target = match arg {
+            None => None,
+            Some(a) => {
+                let mut model = BendModelDef::KFactor(Scalar::new(0.44));
+                BendF::assign(a, &mut model, doc)?;
+                Some(model)
+            }
+        };
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target.as_ref().map_or(Value::Null, |t| BendF::read(t, doc))
+    }
+    fn arg(target: &Self::Target, doc: &Document) -> Option<Self::Arg> {
+        Some(target.as_ref().and_then(|t| BendF::arg(t, doc)))
+    }
+}
+
 reference_field!(RevolveAxisF, RevolveAxis, RevolveAxisRef, required: false, nullable: false,
 "sketch_x | sketch_y | {\"line\": id of a line of the sketch} | axis (default: the sketch's first construction line, else sketch_y)",
 parse: RevolveAxis::parse,
@@ -1037,7 +1075,7 @@ feature_args! {
 feature_args! {
     /// A flange with a bend on an edge of a sheet metal body.
     EdgeFlange: FeatureKind::EdgeFlange(f) => &mut **f,
-        EdgeFlangeFeature { edge, length, angle, position, offset_start, offset_end, flip, radius, relief, relief_ratio } => {
+        EdgeFlangeFeature { edge, length, angle, position, offset_start, offset_end, flip, radius, relief, relief_ratio, bend } => {
     /// `Some(None)`: to be picked afterwards.
     edge: Option<EdgeSel> as OptEdge = edge,
     length: Input as Length = length,
@@ -1053,6 +1091,9 @@ feature_args! {
     relief: Option<ReliefType> as OptChoice<ReliefType> = relief,
     /// That relief's size as a multiple of the thickness. `Some(None)` uses the body's.
     relief_ratio: Option<Input> as OptNumber = relief_ratio,
+    /// How the flat length of this flange's bend is worked out. `Some(None)` uses the
+    /// body's.
+    bend: Option<Bend> as OptBend = bend,
     }
 }
 
@@ -1106,6 +1147,16 @@ feature_args! {
     position: BendLinePosition as Choice<BendLinePosition> = position,
     flip: bool as Flag = flip,
     flip_fixed: bool as Flag = flip_fixed,
+    }
+}
+
+feature_args! {
+    /// Corners of a sheet metal body rounded or cut straight across.
+    BreakCorner: FeatureKind::BreakCorner(f) => &mut **f,
+        BreakCornerFeature { edges, kind, size } => {
+    edges: Vec<EdgeSel> as Edges = edges,
+    kind: BreakKind as Choice<BreakKind> = kind,
+    size: Input as Length = size,
     }
 }
 
@@ -1544,6 +1595,9 @@ feature_ops! {
     MiterFlange(MiterFlange) "miter_flange"
         "A flange with a sketched profile along several edges of one face."
         => Some(FeatureKind::MiterFlange(Box::new(MiterFlangeFeature::new(NO_SKETCH, Vec::new())))),
+    BreakCorner(BreakCorner) "break_corner"
+        "Round or chamfer corners of a sheet metal body: each the edge through the sheet where two sides of a flat face meet."
+        => Some(FeatureKind::BreakCorner(Box::new(BreakCornerFeature::new(Vec::new())))),
     Corner(Corner) "corner"
         "How the corners between flanges are treated (every corner if no faces are given)."
         => Some(FeatureKind::Corner(Box::new(CornerFeature::new(Vec::new())))),
@@ -1643,6 +1697,7 @@ fn word_of(kind: &FeatureKind) -> Option<&'static str> {
         FeatureKind::Jog(_) => "jog",
         FeatureKind::MiterFlange(_) => "miter_flange",
         FeatureKind::Corner(_) => "corner",
+        FeatureKind::BreakCorner(_) => "break_corner",
         FeatureKind::Form(_) => "dimple",
         FeatureKind::Pattern(p) => match p.def {
             PatternDef::Linear { .. } => "linear_pattern",

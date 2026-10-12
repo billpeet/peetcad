@@ -66,7 +66,7 @@ pub use diff::{Translation, apply_model, apply_model_scoped, diff, diff_scoped};
 pub use explode::{ExplodeChange, ExplodeSel};
 pub use export::export_bytes;
 pub use fields::{
-    AngledPlane, BaseFlange, Blend, CircularPattern, ConvertToSheet, CoordinateSystem,
+    AngledPlane, BaseFlange, Blend, BreakCorner, CircularPattern, ConvertToSheet, CoordinateSystem,
     CoordinatesPoint, Corner, CylinderAxis, Draft, EdgeAxis, EdgeFlange, Extrude, FeatureArgs,
     Form, Hem, Hole, Jog, LinearPattern, Loft, MidPlane, Mirror, MiterFlange, OffsetPlane,
     PlanesAxis, Revolve, SheetCut, Shell, SketchPlane, SketchedBend, Sweep, VertexPoint,

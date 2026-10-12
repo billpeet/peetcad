@@ -175,7 +175,138 @@ pub struct SheetBody {
     pub forms: Vec<FormMark>,
 }
 
+/// How a corner of the sheet is broken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum BreakKind {
+    /// Rounded, with a radius.
+    Fillet,
+    /// Cut straight across, the same distance along both sides.
+    Chamfer,
+}
+
+impl BreakKind {
+    pub const ALL: [Self; 2] = [Self::Fillet, Self::Chamfer];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fillet => "Fillet",
+            Self::Chamfer => "Chamfer",
+        }
+    }
+}
+
 impl SheetBody {
+    /// What breaking a corner of the sheet removes: the piece the corner is on, the
+    /// region in flat coordinates, and the stretch of each of the corner's two sides that
+    /// it takes (from the corner). `edge` is the corner's edge through the sheet (of the
+    /// folded solid), where two straight sides of a flat part of the sheet meet. `size` is
+    /// a fillet's radius or a chamfer's distance along each side.
+    pub fn corner_break(
+        &self,
+        solid: &Solid,
+        edge: EdgeId,
+        kind: BreakKind,
+        size: f64,
+        tag: impl Fn(u8) -> CurveTag,
+    ) -> Result<(usize, crate::Area, [[DVec2; 2]; 2]), String> {
+        const NOT_A_CORNER: &str = "Pick a corner of the sheet: the short edge through its thickness where two straight sides of a flat face meet.";
+        if !(size.is_finite() && size > crate::layout::MIN_LENGTH) {
+            return Err("The size must be greater than zero.".to_owned());
+        }
+        let e = solid
+            .edges
+            .get(edge.index())
+            .ok_or("The edge is not on this body.")?;
+        let ends = [e.start, e.end].map(|v| solid.vertices[v.index()].point);
+        let t = self.layout.settings.thickness;
+        let mut inside_corner = false;
+        for (index, piece) in self.layout.pieces.iter().enumerate() {
+            if !piece.is_flange() {
+                continue;
+            }
+            // Through this piece: the two ends are one point of it, at its two faces.
+            let local = ends.map(|p| piece.frame.to_local(p));
+            let through = (local[0].z - local[1].z).abs();
+            let level = local[0].z.min(local[1].z);
+            if local[0].truncate().distance(local[1].truncate()) > 1e-6
+                || (through - t).abs() > 1e-6
+                || level.abs() > 1e-6
+            {
+                continue;
+            }
+            let at = local[0].truncate();
+            for l in &self.outline {
+                let n = l.edges.len();
+                let ends_of = |k: usize| {
+                    let (curve, reversed) = &l.edges[k];
+                    let (a, b) = (curve.start(), curve.end());
+                    if *reversed { (b, a) } else { (a, b) }
+                };
+                for k in 0..n {
+                    let next = (k + 1) % n;
+                    let ((from, corner), (start, to)) = (ends_of(k), ends_of(next));
+                    if corner.distance(at) > 1e-6 || start.distance(at) > 1e-6 {
+                        continue;
+                    }
+                    let straight = |k: usize| matches!(l.edges[k].0, Curve::Line { .. });
+                    if !(straight(k) && straight(next)) {
+                        return Err(
+                            "Only a corner between two straight sides can be broken.".to_owned()
+                        );
+                    }
+                    // The outline has the sheet on its left, so the sheet's corner turns left.
+                    let (d1, d2) = ((at - from).normalize(), (to - at).normalize());
+                    let turn = d1.perp_dot(d2).atan2(d1.dot(d2));
+                    if turn <= 1e-6 {
+                        inside_corner = true;
+                        continue;
+                    }
+                    let along = match kind {
+                        BreakKind::Chamfer => size,
+                        BreakKind::Fillet => size * (turn / 2.0).tan(),
+                    };
+                    let room = from.distance(at).min(to.distance(at));
+                    if along > room + 1e-9 {
+                        return Err(format!(
+                            "The corner's sides are too short for that: at most {:.3} mm here.",
+                            match kind {
+                                BreakKind::Chamfer => room,
+                                BreakKind::Fillet => room / (turn / 2.0).tan(),
+                            }
+                        ));
+                    }
+                    let (a, b) = (at - d1 * along, at + d2 * along);
+                    let mut edges = vec![Edge2::line(a, at, tag(0)), Edge2::line(at, b, tag(1))];
+                    edges.push(match kind {
+                        BreakKind::Chamfer => Edge2::line(b, a, tag(2)),
+                        BreakKind::Fillet => {
+                            // The round touches both sides: its centre is `size` to the left
+                            // of each, and it runs counter-clockwise from `a` to `b`.
+                            let center = a + d1.perp() * size;
+                            let from_center = a - center;
+                            Edge2 {
+                                curve: Curve::Arc {
+                                    center,
+                                    radius: size,
+                                    start_angle: from_center.y.atan2(from_center.x),
+                                    sweep: turn,
+                                },
+                                reversed: true,
+                                tag: tag(2),
+                            }
+                        }
+                    });
+                    return Ok((index, crate::Area { loops: vec![edges] }, [[at, a], [at, b]]));
+                }
+            }
+        }
+        Err(if inside_corner {
+            "That is an inside corner: breaking it would add material.".to_owned()
+        } else {
+            NOT_A_CORNER.to_owned()
+        })
+    }
+
     /// Where an edge flange on `edge` (of the folded or flat solid) would go: the edge must
     /// be where the top or bottom face of a flange meets a straight wall of it.
     pub fn edge_site(&self, solid: &Solid, edge: EdgeId) -> Result<EdgeSite, String> {

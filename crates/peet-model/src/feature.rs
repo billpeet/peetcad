@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 
 use peet_sheetmetal::corner::{CornerKind, CornerRelief};
 use peet_sheetmetal::{
-    BendLinePosition, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
+    BendLinePosition, BreakKind, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
 };
 
 use crate::convert::ConvertToSheetFeature;
@@ -386,6 +386,8 @@ pub struct EdgeFlangeFeature {
     pub relief: Option<ReliefType>,
     /// That relief's size as a multiple of the thickness, if not the body's.
     pub relief_ratio: Option<Scalar>,
+    /// How the flat length of this flange's bend is worked out, if not as the body's.
+    pub bend: Option<BendModelDef>,
 }
 
 impl EdgeFlangeFeature {
@@ -401,6 +403,7 @@ impl EdgeFlangeFeature {
             radius: None,
             relief: None,
             relief_ratio: None,
+            bend: None,
         }
     }
 }
@@ -530,6 +533,27 @@ impl MiterFlangeFeature {
             gap: Scalar::new(0.1),
             offset_start: Scalar::new(0.0),
             offset_end: Scalar::new(0.0),
+        }
+    }
+}
+
+/// Corners of a sheet metal body broken: rounded or cut straight across.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BreakCornerFeature {
+    /// The corners: each the edge through the sheet where two straight sides of a flat
+    /// face meet.
+    pub edges: Vec<EdgeRef>,
+    pub kind: BreakKind,
+    /// A fillet's radius, or a chamfer's distance along each side.
+    pub size: Scalar,
+}
+
+impl BreakCornerFeature {
+    pub fn new(edges: Vec<EdgeRef>) -> Self {
+        Self {
+            edges,
+            kind: BreakKind::Fillet,
+            size: Scalar::new(2.0),
         }
     }
 }
@@ -676,6 +700,7 @@ pub enum FeatureKind {
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
     ConvertToSheet(Box<ConvertToSheetFeature>),
+    BreakCorner(Box<BreakCornerFeature>),
 }
 
 impl FeatureKind {
@@ -696,6 +721,7 @@ impl FeatureKind {
             Self::Jog(_) => "Jog",
             Self::MiterFlange(_) => "Miter flange",
             Self::Corner(_) => "Corner",
+            Self::BreakCorner(_) => "Break corner",
             Self::Form(f) => match f.kind {
                 FormKind::Dimple => "Dimple",
                 FormKind::Emboss => "Emboss",
@@ -742,6 +768,7 @@ impl FeatureKind {
             Self::Jog(_) => "Jog",
             Self::MiterFlange(_) => "Miter-Flange",
             Self::Corner(_) => "Corner",
+            Self::BreakCorner(_) => "Break-Corner",
             Self::Form(f) => match f.kind {
                 FormKind::Dimple => "Dimple",
                 FormKind::Emboss => "Emboss",
@@ -783,6 +810,7 @@ impl FeatureKind {
                 | Self::Jog(_)
                 | Self::MiterFlange(_)
                 | Self::Corner(_)
+                | Self::BreakCorner(_)
                 | Self::Form(_)
                 | Self::Pattern(_)
                 | Self::Mirror(_)
@@ -810,6 +838,7 @@ impl FeatureKind {
                 | Self::Jog(_)
                 | Self::MiterFlange(_)
                 | Self::Corner(_)
+                | Self::BreakCorner(_)
                 | Self::Form(_)
                 | Self::ConvertToSheet(_)
         )
@@ -913,6 +942,11 @@ impl FeatureKind {
                     out.extend(f.name.features());
                 }
             }
+            Self::BreakCorner(b) => {
+                for e in &b.edges {
+                    out.extend(e.features());
+                }
+            }
             Self::Form(f) => out.push(f.sketch),
             Self::Pattern(p) => {
                 out.extend(&p.seeds);
@@ -991,6 +1025,11 @@ impl FeatureKind {
                 let mut v = vec![&e.length, &e.angle, &e.offset_start, &e.offset_end];
                 v.extend(e.radius.as_ref());
                 v.extend(e.relief_ratio.as_ref());
+                v.extend(e.bend.as_ref().map(|b| match b {
+                    BendModelDef::KFactor(s)
+                    | BendModelDef::Allowance(s)
+                    | BendModelDef::Deduction(s) => s,
+                }));
                 v
             }
             Self::SheetCut(_) | Self::Mirror(_) => Vec::new(),
@@ -1014,6 +1053,7 @@ impl FeatureKind {
             }
             Self::MiterFlange(m) => vec![&m.gap, &m.offset_start, &m.offset_end],
             Self::Corner(c) => vec![&c.gap, &c.relief_size],
+            Self::BreakCorner(b) => vec![&b.size],
             Self::Form(f) => vec![&f.height],
             Self::Pattern(p) => match &p.def {
                 PatternDef::Linear { first, second } => {
@@ -1094,6 +1134,9 @@ macro_rules! slots {
                     if let Some(r) = & $($m)? e.relief_ratio {
                         v.push(("relief_ratio", Number, r));
                     }
+                    if let Some(b) = & $($m)? e.bend {
+                        v.push(bend!(b));
+                    }
                     v
                 }
                 Self::Hem(h) => {
@@ -1141,6 +1184,7 @@ macro_rules! slots {
                         ("relief_size", Length, & $($m)? c.relief_size),
                     ]
                 }
+                Self::BreakCorner(b) => vec![("size", Length, & $($m)? b.size)],
                 Self::Form(f) => vec![("height", Length, & $($m)? f.height)],
                 Self::Pattern(p) => match & $($m)? p.def {
                     PatternDef::Linear { first, second } => {
@@ -1361,6 +1405,7 @@ pub(crate) enum FeatureKindV9 {
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
     ConvertToSheet(Box<ConvertToSheetFeature>),
+    BreakCorner(Box<BreakCornerFeature>),
 }
 impl From<FeatureKindV9> for FeatureKind {
     fn from(k: FeatureKindV9) -> Self {
@@ -1391,6 +1436,7 @@ impl From<FeatureKindV9> for FeatureKind {
             FeatureKindV9::Sweep(v) => Self::Sweep(v),
             FeatureKindV9::Loft(v) => Self::Loft(v),
             FeatureKindV9::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKindV9::BreakCorner(v) => Self::BreakCorner(v),
         }
     }
 }
@@ -1424,6 +1470,7 @@ impl From<FeatureKind> for FeatureKindV9 {
             FeatureKind::Sweep(v) => Self::Sweep(v),
             FeatureKind::Loft(v) => Self::Loft(v),
             FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKind::BreakCorner(v) => Self::BreakCorner(v),
         }
     }
 }
@@ -1455,12 +1502,13 @@ impl From<EdgeFlangeFeatureV11> for EdgeFlangeFeature {
             radius: e.radius,
             relief: None,
             relief_ratio: None,
+            bend: None,
         }
     }
 }
 
 impl From<&EdgeFlangeFeature> for EdgeFlangeFeatureV11 {
-    /// The old layout, which has no room for the flange's own relief.
+    /// The old layout, which has no room for the flange's own relief and bend model.
     fn from(e: &EdgeFlangeFeature) -> Self {
         Self {
             edge: e.edge.clone(),
@@ -1504,6 +1552,7 @@ pub(crate) enum FeatureKindV11 {
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
     ConvertToSheet(Box<ConvertToSheetFeature>),
+    BreakCorner(Box<BreakCornerFeature>),
 }
 
 impl From<FeatureKindV11> for FeatureKind {
@@ -1535,6 +1584,7 @@ impl From<FeatureKindV11> for FeatureKind {
             FeatureKindV11::Sweep(v) => Self::Sweep(v),
             FeatureKindV11::Loft(v) => Self::Loft(v),
             FeatureKindV11::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKindV11::BreakCorner(v) => Self::BreakCorner(v),
         }
     }
 }
@@ -1568,6 +1618,7 @@ impl From<FeatureKind> for FeatureKindV11 {
             FeatureKind::Sweep(v) => Self::Sweep(v),
             FeatureKind::Loft(v) => Self::Loft(v),
             FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKind::BreakCorner(v) => Self::BreakCorner(v),
         }
     }
 }
@@ -1743,6 +1794,7 @@ pub(crate) enum FeatureKindV8 {
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
     ConvertToSheet(Box<ConvertToSheetFeature>),
+    BreakCorner(Box<BreakCornerFeature>),
 }
 impl From<FeatureKindV8> for FeatureKind {
     fn from(kind: FeatureKindV8) -> Self {
@@ -1778,6 +1830,7 @@ impl From<FeatureKindV8> for FeatureKind {
             FeatureKindV8::Sweep(v) => Self::Sweep(v),
             FeatureKindV8::Loft(v) => Self::Loft(v),
             FeatureKindV8::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKindV8::BreakCorner(v) => Self::BreakCorner(v),
         }
     }
 }
@@ -1814,6 +1867,7 @@ impl From<&FeatureKind> for FeatureKindV8 {
             FeatureKind::Sweep(v) => Self::Sweep(v.clone()),
             FeatureKind::Loft(v) => Self::Loft(v.clone()),
             FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(v.clone()),
+            FeatureKind::BreakCorner(v) => Self::BreakCorner(v.clone()),
         }
     }
 }

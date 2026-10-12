@@ -58,7 +58,8 @@ pub use extrude::{
     EndCondition, Extrude, ExtrudeInput, Operation, RegionSelection, apply_extrude, default_regions,
 };
 pub use feature::{
-    Axis, AxisDef, AxisRef, BaseFlangeFeature, BendModelDef, CoordSystemDef, CornerFeature,
+    Axis, AxisDef, AxisRef, BaseFlangeFeature, BendModelDef, BreakCornerFeature, CoordSystemDef,
+    CornerFeature,
     EdgeFlangeFeature, ExtrudeFeature, Feature, FeatureId, FeatureKind, FormFeature, HemFeature,
     JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, PatternDef, PatternFeature,
     PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind, SheetCutFeature, SheetSettingsDef,

@@ -637,6 +637,11 @@ impl Layout {
         })
     }
 
+    /// Cuts `area` (in flat coordinates) out of the pieces `pieces` only.
+    pub fn add_cut_on(&mut self, area: Area, pieces: Vec<usize>) {
+        self.cuts.push(Cut { area, pieces });
+    }
+
     /// Cuts `area` (in flat coordinates) out of every piece that exists now.
     pub fn add_cut(&mut self, area: Area) {
         self.cuts.push(Cut {

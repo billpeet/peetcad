@@ -280,7 +280,7 @@ with their defaults' types):
 
 `extrude`, `cut`, `revolve`, `cut_revolve`, `sweep`, `cut_sweep`, `loft`, `cut_loft`,
 `hole`, `fillet`, `chamfer`, `shell`, `draft`, `convert_to_sheet`, `plane`, `axis`, `point`, `coordinate_system`, `base_flange`,
-`edge_flange`, `sheet_cut`, `hem`, `sketched_bend`, `jog`, `miter_flange`, `corner`,
+`edge_flange`, `sheet_cut`, `hem`, `sketched_bend`, `jog`, `miter_flange`, `corner`, `break_corner`,
 `dimple`, `emboss`, `louver`, `linear_pattern`, `circular_pattern`, `mirror`.
 
 - `plane`: `from` + `distance` (offset), `from` + `about` + `angle` (angled), or `a` + `b`
@@ -291,7 +291,13 @@ with their defaults' types):
   `offset_end` set it back from the ends of its edge; a negative one runs it past that
   end, with the bend staying on the edge. An `edge_flange` can have a `relief`
   (`rectangular`, `obround`, `tear`) and a `relief_ratio` of its own for where it is set
-  back; without them, or with `null`, it uses the body's.
+  back, and a `bend` of its own (as the base flange's); without them, or with `null`,
+  it uses the body's.
+- `sheet_cut` cuts every flange with a face in its sketch's plane, each through its own
+  place in the flat pattern.
+- `break_corner` rounds (`kind` `fillet`, the default) or chamfers (`chamfer`) corners of a
+  sheet metal body by `size`. `edges` are the corners: the edges through the sheet where
+  two straight sides of a flat face meet. The body stays sheet metal.
 - `corner` sets how flanges that run to one corner meet: `kind` (`butt`, `overlap`,
   `open`, `plain`), `gap`, and `relief`, what is cut from the blank where their bends meet
   (`rectangular` with `relief_size`, `tear`, `flush`: back to where the flanges end, or

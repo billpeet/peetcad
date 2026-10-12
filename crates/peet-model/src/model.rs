@@ -686,6 +686,13 @@ impl Model {
         id
     }
 
+    /// Adds a break corner on `edges`, the corners of a sheet metal body.
+    pub fn add_break_corner(&mut self, edges: Vec<crate::naming::EdgeRef>) -> FeatureId {
+        self.add(FeatureKind::BreakCorner(Box::new(
+            crate::feature::BreakCornerFeature::new(edges),
+        )))
+    }
+
     /// Adds a corner treatment for the corners at `faces` (every corner if empty).
     pub fn add_corner(&mut self, faces: Vec<crate::naming::FaceRef>) -> FeatureId {
         self.add(FeatureKind::Corner(Box::new(

@@ -2803,6 +2803,7 @@ impl PeetApp {
                 r
             }
             FeatureKind::Corner(c) => features_ui::corner_panel(ui, &self.doc, c, picking),
+            FeatureKind::BreakCorner(b) => features_ui::break_corner_panel(ui, &self.doc, b),
             FeatureKind::ConvertToSheet(c) => features_ui::convert_panel(ui, &self.doc, c, picking),
             FeatureKind::Form(f) => {
                 let r = features_ui::form_panel(ui, &self.doc, f);
