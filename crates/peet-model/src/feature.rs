@@ -388,6 +388,9 @@ pub struct EdgeFlangeFeature {
     pub relief_ratio: Option<Scalar>,
     /// How the flat length of this flange's bend is worked out, if not as the body's.
     pub bend: Option<BendModelDef>,
+    /// How far out from its edge the flange is set (SolidWorks' position offset): the
+    /// sheet runs on that far flat before the bend. Negative sets it in.
+    pub position_offset: Scalar,
 }
 
 impl EdgeFlangeFeature {
@@ -404,6 +407,7 @@ impl EdgeFlangeFeature {
             relief: None,
             relief_ratio: None,
             bend: None,
+            position_offset: Scalar::new(0.0),
         }
     }
 }
@@ -1559,6 +1563,7 @@ impl From<EdgeFlangeFeatureV11> for EdgeFlangeFeature {
             relief: None,
             relief_ratio: None,
             bend: None,
+            position_offset: Scalar::new(0.0),
         }
     }
 }

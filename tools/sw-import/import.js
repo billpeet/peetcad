@@ -1260,7 +1260,9 @@ function importPart(doc, dir) {
         // corner too. For other angles it is not, and the flange comes out a little long or short.
         if (v.OffsetDimType === 3 && Math.abs(v.BendAngle - Math.PI / 2) > 1e-6) notes.push("its length is measured to the bend's tangent, which is only the same as PeetCAD's at 90 degrees");
         if (v.OffsetType !== 1) notes.push("its length is up to a vertex in SolidWorks: the distance it had is used");
-        if (v.UsePositionOffset && v.PositionOffsetDistance > 0) notes.push(`SolidWorks sets it ${tidy(v.PositionOffsetDistance * MM)} mm out from its edge, which PeetCAD's edge flange has no way to do: it is on the edge`);
+        // SolidWorks' position offset: the flange set out from its edge (in, reversed)
+        const setOut = v.UsePositionOffset && v.PositionOffsetDistance > 0 ? tidy(v.PositionOffsetDistance * MM * (v.ReversePositionOffset ? -1 : 1)) : 0;
+        if (setOut && v.PositionOffsetType !== 1) notes.push(`its position offset is up to something (type ${v.PositionOffsetType}): the distance it had is used`);
         // Its own sketch is the flange's outline. One narrower than the edge sets the flange back from the ends.
         const profiles = (f.sub || []).filter(c => SKETCH.test(c.type) && c.sketch && !c.sketch.error);
         // Every edge is found before any flange is added: a flange changes the ends of its neighbours
@@ -1334,6 +1336,7 @@ function importPart(doc, dir) {
         }
         const common = {
           op: "edge_flange", name: f.name, length: tidy(length), angle: tidy(angle), position,
+          ...(setOut ? { position_offset: setOut } : {}),
           ...(v.UseDefaultBendRadius === false ? { radius: tidy(Math.max(radius, 0.01)) } : {}),
           ...ownRelief,
           // A bend allowance of the flange's own

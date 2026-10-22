@@ -292,7 +292,8 @@ with their defaults' types):
   end, with the bend staying on the edge. An `edge_flange` can have a `relief`
   (`rectangular`, `obround`, `tear`) and a `relief_ratio` of its own for where it is set
   back, and a `bend` of its own (as the base flange's); without them, or with `null`,
-  it uses the body's. `position` is SolidWorks': at an angle other than 90 a
+  it uses the body's. `position_offset` sets the flange out from its edge, the sheet
+  running on flat to the bend (negative: in). `position` is SolidWorks': at an angle other than 90 a
   `material_inside` flange's outer face goes through the edge on the far face of the
   sheet, `t / tan(angle)` back from where the outer faces meet.
 - `sheet_cut` cuts every flange with a face in its sketch's plane, each through its own
@@ -304,7 +305,8 @@ with their defaults' types):
   default `end`, `sheet`, is through its own sheet only.
 - `break_corner` rounds (`kind` `fillet`, the default) or chamfers (`chamfer`) corners of a
   sheet metal body by `size`. `edges` are the corners: the edges through the sheet where
-  two straight sides of a flat face meet. The body stays sheet metal.
+  two straight sides of a flat face meet. The body stays sheet metal. An inside corner
+  gains the sheet an outside one loses.
 - `corner` sets how flanges that run to one corner meet: `kind` (`butt`, `overlap`,
   `open`, `plain`), `gap`, and `relief`, what is cut from the blank where their bends meet
   (`rectangular` with `relief_size`, `tear`, `flush`: back to where the flanges end, or

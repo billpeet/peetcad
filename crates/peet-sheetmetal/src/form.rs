@@ -269,8 +269,7 @@ impl Layout {
         }
         // Clear of the face's edges, its trims, cuts and other forms by a thickness.
         let material = |q: DVec2| {
-            p.outline.contains(q)
-                && !p.trims.iter().any(|a| a.contains(q))
+            p.covers(q)
                 && !self
                     .cuts
                     .iter()

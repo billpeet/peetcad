@@ -33,6 +33,9 @@ pub struct FlangeOwn {
     pub relief: Option<(ReliefType, f64)>,
     /// How the flat length of the flange's bend is worked out.
     pub model: Option<BendModel>,
+    /// How far out from its edge the flange is set, as SolidWorks' position offset does:
+    /// the sheet runs on that far flat before the bend. Negative sets it in.
+    pub set_out: f64,
 }
 
 /// An edge flange's values, evaluated.
@@ -164,6 +167,9 @@ impl Layout {
         own: FlangeOwn,
     ) -> Result<(), String> {
         let relief = own.relief;
+        if !own.set_out.is_finite() {
+            return Err("The offset from the edge is not a number.".to_owned());
+        }
         if let Some((_, ratio)) = relief
             && !(ratio.is_finite() && ratio > 0.0)
         {
@@ -190,7 +196,7 @@ impl Layout {
             FlangePosition::MaterialInside => ossb + material_inside_extra(spec.angle.to_radians(), t),
             FlangePosition::MaterialOutside => values.inside_setback(),
             FlangePosition::BendOutside => 0.0,
-        };
+        } - own.set_out;
         let segments = [Segment {
             values,
             up: site.top != spec.flip,
@@ -398,6 +404,7 @@ impl Layout {
                     ],
                 ),
                 trims: Vec::new(),
+                adds: Vec::new(),
                 frame,
             });
             new_pieces.push(bend_index);
@@ -424,6 +431,7 @@ impl Layout {
                     ],
                 ),
                 trims: Vec::new(),
+                adds: Vec::new(),
                 frame,
             });
             new_pieces.push(parent_index);
@@ -465,6 +473,22 @@ impl Layout {
                     |i| tag(wall::RELIEF_END + i),
                 ));
             }
+        }
+        if trim < -MIN_LENGTH {
+            let strip = rect(
+                site.a,
+                d,
+                inward,
+                [span[0], span[1]],
+                [trim, 0.0],
+                [
+                    tag(wall::TRIM),
+                    tag(wall::TRIM + 1),
+                    tag(wall::TRIM + 2),
+                    tag(wall::TRIM + 3),
+                ],
+            );
+            self.pieces[site.piece].adds.push(strip);
         }
         if trim > MIN_LENGTH {
             let trim_area = rect(

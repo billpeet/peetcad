@@ -763,6 +763,7 @@ impl<'a> Recognizer<'a> {
             kind: PieceKind::Flange,
             outline: self.wall_outline(&base, &frame, 0, &mut tags)?,
             trims: Vec::new(),
+            adds: Vec::new(),
             frame,
         });
         for &f in &base {
@@ -906,6 +907,7 @@ impl<'a> Recognizer<'a> {
                     kind: PieceKind::Bend(bend),
                     outline: Area { loops },
                     trims: Vec::new(),
+                    adds: Vec::new(),
                     frame,
                 });
                 for &f in &geom.faces {
@@ -926,6 +928,7 @@ impl<'a> Recognizer<'a> {
                     kind: PieceKind::Flange,
                     outline: self.wall_outline(&children, &child_frame, child, &mut tags)?,
                     trims: Vec::new(),
+                    adds: Vec::new(),
                     frame: child_frame,
                 });
                 for &f in &children {

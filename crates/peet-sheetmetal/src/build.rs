@@ -196,9 +196,11 @@ impl BreakKind {
 }
 
 impl SheetBody {
-    /// What breaking a corner of the sheet removes: the piece the corner is on, the
-    /// region in flat coordinates, and the stretch of each of the corner's two sides that
-    /// it takes (from the corner). `edge` is the corner's edge through the sheet (of the
+    /// What breaking a corner of the sheet changes: the piece the corner is on, the
+    /// region in flat coordinates, the stretch of each of the corner's two sides that it
+    /// takes (from the corner), and whether the region is added to the sheet. An outside
+    /// corner loses the region; an inside corner (of a notch) gains it, as a fillet on an
+    /// inside corner does in SolidWorks. `edge` is the corner's edge through the sheet (of the
     /// folded solid), where two straight sides of a flat part of the sheet meet. `size` is
     /// a fillet's radius or a chamfer's distance along each side.
     pub fn corner_break(
@@ -208,7 +210,7 @@ impl SheetBody {
         kind: BreakKind,
         size: f64,
         tag: impl Fn(u8) -> CurveTag,
-    ) -> Result<(usize, crate::Area, [[DVec2; 2]; 2]), String> {
+    ) -> Result<(usize, crate::Area, [[DVec2; 2]; 2], bool), String> {
         const NOT_A_CORNER: &str = "Pick a corner of the sheet: the short edge through its thickness where two straight sides of a flat face meet.";
         if !(size.is_finite() && size > crate::layout::MIN_LENGTH) {
             return Err("The size must be greater than zero.".to_owned());
@@ -219,7 +221,6 @@ impl SheetBody {
             .ok_or("The edge is not on this body.")?;
         let ends = [e.start, e.end].map(|v| solid.vertices[v.index()].point);
         let t = self.layout.settings.thickness;
-        let mut inside_corner = false;
         for (index, piece) in self.layout.pieces.iter().enumerate() {
             if !piece.is_flange() {
                 continue;
@@ -254,13 +255,15 @@ impl SheetBody {
                             "Only a corner between two straight sides can be broken.".to_owned()
                         );
                     }
-                    // The outline has the sheet on its left, so the sheet's corner turns left.
+                    // The outline has the sheet on its left, so an outside corner turns left
+                    // and an inside one right.
                     let (d1, d2) = ((at - from).normalize(), (to - at).normalize());
-                    let turn = d1.perp_dot(d2).atan2(d1.dot(d2));
-                    if turn <= 1e-6 {
-                        inside_corner = true;
+                    let signed = d1.perp_dot(d2).atan2(d1.dot(d2));
+                    if signed.abs() <= 1e-6 {
                         continue;
                     }
+                    let inside = signed < 0.0;
+                    let turn = signed.abs();
                     let along = match kind {
                         BreakKind::Chamfer => size,
                         BreakKind::Fillet => size * (turn / 2.0).tan(),
@@ -280,31 +283,38 @@ impl SheetBody {
                     edges.push(match kind {
                         BreakKind::Chamfer => Edge2::line(b, a, tag(2)),
                         BreakKind::Fillet => {
-                            // The round touches both sides: its centre is `size` to the left
-                            // of each, and it runs counter-clockwise from `a` to `b`.
-                            let center = a + d1.perp() * size;
-                            let from_center = a - center;
+                            // The round touches both sides: its centre is `size` from each, on
+                            // the sheet's side of an outside corner (running counter-clockwise
+                            // from `a` to `b`) and the notch's side of an inside one (running
+                            // counter-clockwise from `b` to `a`).
+                            let center = if inside {
+                                a - d1.perp() * size
+                            } else {
+                                a + d1.perp() * size
+                            };
+                            let start = if inside { b } else { a } - center;
                             Edge2 {
                                 curve: Curve::Arc {
                                     center,
                                     radius: size,
-                                    start_angle: from_center.y.atan2(from_center.x),
+                                    start_angle: start.y.atan2(start.x),
                                     sweep: turn,
                                 },
-                                reversed: true,
+                                reversed: !inside,
                                 tag: tag(2),
                             }
                         }
                     });
-                    return Ok((index, crate::Area { loops: vec![edges] }, [[at, a], [at, b]]));
+                    return Ok((
+                        index,
+                        crate::Area { loops: vec![edges] },
+                        [[at, a], [at, b]],
+                        inside,
+                    ));
                 }
             }
         }
-        Err(if inside_corner {
-            "That is an inside corner: breaking it would add material.".to_owned()
-        } else {
-            NOT_A_CORNER.to_owned()
-        })
+        Err(NOT_A_CORNER.to_owned())
     }
 
     /// Where an edge flange on `edge` (of the folded or flat solid) would go: the edge must
@@ -788,6 +798,7 @@ impl Flat {
         }
         for p in &layout.pieces {
             p.trims.iter().flat_map(|t| t.edges()).for_each(&mut add);
+            p.adds.iter().flat_map(|a| a.edges()).for_each(&mut add);
         }
         for c in &layout.cuts {
             c.area.edges().for_each(&mut add);
@@ -810,7 +821,7 @@ impl Flat {
             };
             let mut owner: Option<usize> = None;
             for (pi, piece) in layout.pieces.iter().enumerate() {
-                if !piece.outline.contains(p) || piece.trims.iter().any(|t| t.contains(p)) {
+                if !piece.covers(p) {
                     continue;
                 }
                 if layout

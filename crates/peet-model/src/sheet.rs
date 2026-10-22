@@ -409,6 +409,7 @@ pub(crate) fn apply_edge_flange(
     let own = peet_sheetmetal::FlangeOwn {
         relief,
         model: edge_flange_bend(def, &model.parameters).map_err(FeatureError)?,
+        set_out: edge_flange_position_offset(def, &model.parameters).map_err(FeatureError)?,
     };
     layout
         .add_edge_flange_with(feature.0, &site, spec, own)
@@ -518,6 +519,16 @@ pub(crate) fn apply_sheet_cut(
     let mut out = bodies.to_vec();
     out[found.body] = Arc::new(new);
     Ok((out, warning))
+}
+
+/// How far out from its edge an edge flange is set, evaluated.
+pub(crate) fn edge_flange_position_offset(
+    def: &EdgeFlangeFeature,
+    params: &Parameters,
+) -> Result<f64, String> {
+    def.position_offset
+        .evaluate(ScalarKind::Length, params)
+        .map_err(|m| format!("Position offset: {m}."))
 }
 
 /// How far a sheet metal cut reaches along the way into the sheet from the face its sketch
@@ -870,7 +881,7 @@ fn sketch_lines(sketch: &Sketch) -> Vec<(u32, DVec2, DVec2)> {
 /// The flange whose material holds a point of the flat pattern.
 fn flange_at(layout: &Layout, p: DVec2) -> Option<usize> {
     layout.pieces.iter().position(|pc| {
-        pc.is_flange() && pc.outline.contains(p) && !pc.trims.iter().any(|t| t.contains(p))
+        pc.is_flange() && pc.covers(p)
     })
 }
 
@@ -1178,8 +1189,12 @@ pub(crate) fn apply_break_corner(
         }
     }
     let mut layout = bodies[index].sheet.as_ref().expect("checked").layout.clone();
-    for (piece, area, _) in cuts {
-        layout.add_cut_on(area, vec![piece]);
+    for (piece, area, _, adds) in cuts {
+        if adds {
+            layout.pieces[piece].adds.push(area);
+        } else {
+            layout.add_cut_on(area, vec![piece]);
+        }
     }
     rebuild_sheet(model, bodies, index, layout, seed)
 }

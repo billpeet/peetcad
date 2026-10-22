@@ -941,8 +941,10 @@ impl Engine {
                             peet_sheetmetal::BendModel::Allowance(v) => (1u8, v),
                             peet_sheetmetal::BendModel::Deduction(v) => (2u8, v),
                         });
+                    let set_out =
+                        sheet::edge_flange_position_offset(e, &model.parameters).ok();
                     let values =
-                        (spec.length, spec.angle, spec.offsets, spec.radius, ratio, bend);
+                        (spec.length, spec.angle, spec.offsets, spec.radius, ratio, bend, set_out);
                     let key = hash::of(&(4u8, id, &**e, run.body_key, values));
                     self.solid_feature(id, key, run, |bodies| {
                         sheet::apply_edge_flange(id, model, bodies, e, &spec, key)

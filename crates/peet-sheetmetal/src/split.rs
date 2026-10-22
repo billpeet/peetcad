@@ -396,6 +396,7 @@ impl Layout {
             kind: PieceKind::Bend(bend),
             outline: parent.outline.clone(),
             trims: bend_trims,
+            adds: parent.adds.clone(),
             frame: parent.frame,
         });
         self.pieces.push(Piece {
@@ -403,6 +404,7 @@ impl Layout {
             kind: PieceKind::Flange,
             outline: parent.outline.clone(),
             trims: child_trims,
+            adds: parent.adds.clone(),
             frame: child_frame,
         });
         self.pieces[piece].trims.push(after_start);

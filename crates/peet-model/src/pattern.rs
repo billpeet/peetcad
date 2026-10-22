@@ -474,7 +474,7 @@ fn flange_holding(
         }
     };
     layout.pieces.iter().position(|pc| {
-        pc.is_flange() && pc.outline.contains(c) && !pc.trims.iter().any(|t| t.contains(c))
+        pc.is_flange() && pc.covers(c)
     })
 }
 

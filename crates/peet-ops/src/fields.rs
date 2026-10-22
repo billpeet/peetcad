@@ -1076,7 +1076,7 @@ feature_args! {
 feature_args! {
     /// A flange with a bend on an edge of a sheet metal body.
     EdgeFlange: FeatureKind::EdgeFlange(f) => &mut **f,
-        EdgeFlangeFeature { edge, length, angle, position, offset_start, offset_end, flip, radius, relief, relief_ratio, bend } => {
+        EdgeFlangeFeature { edge, length, angle, position, offset_start, offset_end, flip, radius, relief, relief_ratio, bend, position_offset } => {
     /// `Some(None)`: to be picked afterwards.
     edge: Option<EdgeSel> as OptEdge = edge,
     length: Input as Length = length,
@@ -1095,6 +1095,8 @@ feature_args! {
     /// How the flat length of this flange's bend is worked out. `Some(None)` uses the
     /// body's.
     bend: Option<Bend> as OptBend = bend,
+    /// How far out from its edge the flange is set (SolidWorks' position offset).
+    position_offset: Input as Length = position_offset,
     }
 }
 

@@ -486,7 +486,7 @@ fn a_flange_with_its_own_relief() {
         let mut spec = flange(25.0, FlangePosition::BendOutside);
         spec.offsets = [10.0, 10.0];
         layout
-            .add_edge_flange_with(2, &top_edge(true), &spec, FlangeOwn { relief, model: None })
+            .add_edge_flange_with(2, &top_edge(true), &spec, FlangeOwn { relief, ..Default::default() })
             .unwrap();
         let (_, body) = built(layout);
         flat_area(&body)
@@ -502,7 +502,7 @@ fn a_flange_with_its_own_relief() {
     let spec = flange(25.0, FlangePosition::BendOutside);
     let own = FlangeOwn {
         relief: Some((ReliefType::Tear, 0.0)),
-        model: None,
+        ..Default::default()
     };
     let e = layout
         .add_edge_flange_with(2, &top_edge(true), &spec, own)
@@ -517,7 +517,7 @@ fn a_flange_with_its_own_bend_model() {
     let size = |model: Option<BendModel>| {
         let mut layout = plate_layout(settings(0.44));
         let spec = flange(25.0, FlangePosition::MaterialInside);
-        let own = FlangeOwn { relief: None, model };
+        let own = FlangeOwn { model, ..Default::default() };
         layout.add_edge_flange_with(2, &top_edge(true), &spec, own).unwrap();
         let (solid, body) = built(layout);
         let allowance = body.layout.bends().next().unwrap().1.values.allowance;
@@ -1830,5 +1830,29 @@ fn material_inside_at_an_angle() {
             expected,
             1e-6,
         );
+    }
+}
+
+#[test]
+fn a_flange_set_out_from_its_edge() {
+    // SolidWorks' position offset: the sheet runs on flat past the edge before the bend.
+    for (position, y_max) in [
+        (FlangePosition::MaterialInside, H),
+        (FlangePosition::BendOutside, H + R + T),
+    ] {
+        for set_out in [0.0, 7.0, -3.0] {
+            let mut layout = plate_layout(settings(0.5));
+            let own = FlangeOwn {
+                set_out,
+                ..Default::default()
+            };
+            layout
+                .add_edge_flange_with(2, &top_edge(true), &flange(15.0, position), own)
+                .unwrap();
+            let (solid, body) = built(layout);
+            assert_close(bounds(&solid).max.y, y_max + set_out, 1e-9);
+            // K = 0.5 keeps the volume: the blank is the folded part laid flat.
+            assert_close(measure::volume(&solid), measure::volume(&body.flat), 1e-6);
+        }
     }
 }

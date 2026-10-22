@@ -104,6 +104,17 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
   `material_outside`, `bend_outside`). They mean what they mean in SolidWorks: at an
   angle other than 90, a `material_inside` flange's outer face goes through the edge on
   the far face of the sheet, so a shallow flange is set well back from the edge.
+- `position_offset` sets the whole flange out from its edge (SolidWorks' "Offset" in a
+  flange's position): the sheet runs on flat that far past the edge before the bend.
+  Negative sets it in. It adds to `position`, so a `bend_outside` flange set out 7 bends
+  7 beyond where it otherwise would.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "edge_flange", "length": 20, "position": "bend_outside", "position_offset": 7, "edge": {"between": [[0, 60, 2], [100, 60, 2]]}}
+```
+
 - `offset_start` and `offset_end` set a flange back from the two ends of its edge, with
   a relief at each end: a wall on a 180 edge with both offsets 5 has a bend 170 long
   (`bend_table` gives each bend's `length`). Where two flanges are set back a little
@@ -242,9 +253,15 @@ stays sheet metal (`fillet` and `chamfer` turn it into a plain solid).
   the face, a thickness apart). An edge along a face is not a corner.
 - `kind`: `fillet` (the default; `size` is the radius) or `chamfer` (`size` is the
   distance along each side).
-- Only outside corners: an inside corner (of a notch) is refused, since rounding it
-  would add material. A corner next to a bend is not a corner of a flat face: break the
-  flange's far corners, or cut the shape with `sheet_cut`.
+- An outside corner loses sheet; an inside corner (of a notch or an L) gains it, as a
+  fillet there does in SolidWorks. A corner next to a bend is not a corner of a flat
+  face: break the flange's far corners, or cut the shape with `sheet_cut`.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "polyline", "closed": true, "points": [[0, 0], [100, 0], [100, 30], [50, 30], [50, 60], [0, 60]]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "break_corner", "size": 5, "edges": [{"between": [[50, 30, 0], [50, 30, 2]]}, {"between": [[100, 0, 0], [100, 0, 2]]}]}
+```
 - "The corner's sides are too short" gives the largest size that fits there. Two
   corners at the ends of one side share it: their sizes together can't exceed it.
 - It follows the part: a flange made longer takes its broken corners with it.

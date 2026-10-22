@@ -333,6 +333,9 @@ pub struct Piece {
     pub outline: Area,
     /// Parts of the outline given up (to a bend that starts inside the flange).
     pub trims: Vec<Area>,
+    /// Sheet added to the outline (a flange set out from its edge, a rounded inside
+    /// corner). Trims take from it too.
+    pub adds: Vec<Area>,
     /// Model from flat: where this flange is (for a bend, its parent's placement).
     pub frame: Frame,
 }
@@ -347,6 +350,12 @@ impl Piece {
 
     pub fn is_flange(&self) -> bool {
         matches!(self.kind, PieceKind::Flange)
+    }
+
+    /// Whether the piece has sheet at `p` (flat coordinates), before cuts.
+    pub fn covers(&self, p: DVec2) -> bool {
+        (self.outline.contains(p) || self.adds.iter().any(|a| a.contains(p)))
+            && !self.trims.iter().any(|t| t.contains(p))
     }
 }
 
@@ -470,6 +479,7 @@ impl Layout {
                 kind: PieceKind::Flange,
                 outline: Area::from_regions(regions, owner),
                 trims: Vec::new(),
+                adds: Vec::new(),
                 frame,
             }],
             cuts: Vec::new(),
@@ -592,6 +602,7 @@ impl Layout {
                 kind: PieceKind::Flange,
                 outline: rect(o, u, v, [x, x + flat_len[i]], y, tags),
                 trims: Vec::new(),
+                adds: Vec::new(),
                 frame,
             });
             x += flat_len[i];
@@ -622,6 +633,7 @@ impl Layout {
                 kind: PieceKind::Bend(bend),
                 outline: rect(o, u, v, [x, x + values.allowance], y, tags),
                 trims: Vec::new(),
+                adds: Vec::new(),
                 frame,
             });
             frame = frame.compose(&bend.fold_frame());
