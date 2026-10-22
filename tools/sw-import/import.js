@@ -24,6 +24,8 @@ const repo = path.resolve(__dirname, "..", "..");
 const peetExe = option("--peet")
   || [path.join(repo, "target", "release", "peet.exe"), path.join(repo, "target", "debug", "peet.exe"), "peet"].find(p => p === "peet" || fs.existsSync(p));
 const only = option("--only");
+/** How many parts to import at once, each in a process of its own. */
+const jobs = Math.max(1, parseInt(option("--jobs") || "1", 10));
 const flag = name => { const i = args.indexOf(name); if (i >= 0) args.splice(i, 1); return i >= 0; };
 /** Without them a part is the right shape and can't be driven. Leaving them out is much quicker. */
 const relations = !flag("--no-relations");
@@ -54,6 +56,13 @@ function frameOf(a) {
   const o = mul(add(add(mul(x, a[9]), mul(y, a[10])), mul(n, a[11])), -MM);
   return { x, y, n, o };
 }
+/**
+ * A reference plane's transform, which runs the other way: from the plane to the model. Its rows are the
+ * plane's axes and its normal, then its origin, in the model.
+ */
+function planeFrameOf(a) {
+  return { x: [a[0], a[1], a[2]], y: [a[3], a[4], a[5]], n: [a[6], a[7], a[8]], o: mm([a[9], a[10], a[11]]) };
+}
 const fromSketch = (f, p) => add(add(add(f.o, mul(f.x, p.x * MM)), mul(f.y, p.y * MM)), mul(f.n, (p.z || 0) * MM));
 const samePlane = (a, b) => Math.abs(Math.abs(dot(a.n, b.n)) - 1) < 1e-7 && Math.abs(dot(sub(a.o, b.o), b.n)) < 1e-4;
 /** A sketch point's place as a key: two points a tenth of a micron apart are one. */
@@ -83,6 +92,62 @@ function withBlocks(sketch) {
 }
 /** How far, in mm, an edge or a face may be from where SolidWorks has it and still be taken for the same one. */
 const NEAR = 2;
+
+/** Points along a sketch segment, in its sketch's coordinates: an arc's ends and points round it. */
+function pointsAlong(g) {
+  if (g.type !== "arc" || !g.center || g.circle) return [g.start, g.end].filter(Boolean);
+  const c = g.center, r = g.radius;
+  const a0 = Math.atan2(g.start.y - c.y, g.start.x - c.x), a1 = Math.atan2(g.end.y - c.y, g.end.x - c.x);
+  // Counter-clockwise from start to end when the arc runs that way, else clockwise
+  let sweep = a1 - a0;
+  if (g.direction === 1) { while (sweep <= 0) sweep += 2 * Math.PI; } else { while (sweep >= 0) sweep -= 2 * Math.PI; }
+  return Array.from({ length: 33 }, (_, i) => ({ x: c.x + r * Math.cos(a0 + sweep * i / 32), y: c.y + r * Math.sin(a0 + sweep * i / 32) }));
+}
+
+/** Whether a sketch's lines and arcs leave an end that meets no other: an open profile, not an outline. */
+function isOpen(segments) {
+  const ends = new Map();
+  for (const g of segments) {
+    if (g.type === "arc" && g.circle) continue;
+    if (!g.start || !g.end) continue;
+    for (const p of [g.start, g.end]) ends.set(spot(p), (ends.get(spot(p)) || 0) + 1);
+  }
+  return ends.size > 0 && [...ends.values()].some(n => n === 1);
+}
+
+/**
+ * The lines of an open profile with each run of lines that are in line, end to end, made one line. Only for
+ * profiles of lines alone: anything else is left as it is.
+ */
+function joinInLine(segments) {
+  if (segments.some(g => g.type !== "line" || !g.start || !g.end)) return segments;
+  const lines = segments.map(g => ({ start: g.start, end: g.end }));
+  const dir = g => { const dx = g.end.x - g.start.x, dy = g.end.y - g.start.y, l = Math.hypot(dx, dy); return [dx / l, dy / l]; };
+  for (let joined = true; joined;) {
+    joined = false;
+    for (let i = 0; i < lines.length && !joined; i++) {
+      for (let j = 0; j < lines.length && !joined; j++) {
+        if (i === j) continue;
+        // a then b, end to end, each turned round as needed
+        const turn = g => ({ start: g.end, end: g.start });
+        const meet = spot(lines[i].end) === spot(lines[j].start) || spot(lines[i].end) === spot(lines[j].end);
+        const a = meet ? lines[i] : turn(lines[i]);
+        const b = spot(lines[j].start) === spot(a.end) ? lines[j] : turn(lines[j]);
+        if (spot(b.start) !== spot(a.end)) continue;
+        // Only where no third segment meets them there
+        if (lines.some((g, k) => k !== i && k !== j && (spot(g.start) === spot(a.end) || spot(g.end) === spot(a.end)))) continue;
+        // In line by PeetCAD's measure: a bend of under a microradian
+        const [ax, ay] = dir(a), [bx, by] = dir(b);
+        if (Math.atan2(Math.abs(ax * by - ay * bx), ax * bx + ay * by) >= 1e-6) continue;
+        const bb = b;
+        lines[i] = { start: a.start, end: bb.end };
+        lines.splice(j, 1);
+        joined = true;
+      }
+    }
+  }
+  return lines.length < segments.length ? lines.map(g => ({ type: "line", ...g })) : segments;
+}
 
 /** The standard plane that lies where this frame does, if one does. */
 function standardPlane(f) {
@@ -145,6 +210,7 @@ function importPart(doc, dir) {
   const made = new Map();       // SolidWorks feature name -> names of the PeetCAD features that stand for it
   const planeFrames = new Map(); // SolidWorks plane name -> where it is
   const flanges = new Map();     // SolidWorks edge flange name -> what it was made with, for mirroring it
+  const miters = new Map();      // SolidWorks mitre flange name -> what it was made with, for mirroring it
   const promoted = new Map();    // "D1@Sketch1" -> the parameter that sketch dimension now follows
   const formulas = new Set();    // the sketch dimensions (full names) whose value is a formula
   const asleep = new Set();      // SolidWorks features imported and then suppressed in every configuration
@@ -209,7 +275,11 @@ function importPart(doc, dir) {
    * Adds a SolidWorks sketch's geometry to the part. `draw`, if given, makes the items in place of the
    * sketch's own lines and arcs (a hole's circles at the sketch's points).
    */
-  function importSketch(f, { name = f.name, needFace = false, draw = null } = {}) {
+  /**
+   * `onFace`, if given, is the one place to put the sketch: a face parallel to it anywhere along its normal,
+   * the sketch projected onto it.
+   */
+  function importSketch(f, { name = f.name, needFace = false, draw = null, onFace = null } = {}) {
     const s = withBlocks(f.sketch);
     if (!s || s.error) return { error: "the sketch was not exported" };
     if (s.is3D) return { error: "a 3D sketch" };
@@ -218,14 +288,14 @@ function importPart(doc, dir) {
     // millimetre away). The nearest one within reach is taken, the sketch is projected onto it, and the
     // report says how far off it was.
     let on = null, pf = null, away = Infinity;
-    for (const candidate of placements(s, sf, needFace)) {
+    for (const candidate of onFace ? [onFace] : placements(s, sf, needFace)) {
       const plane = probe(candidate);
       if (!plane || Math.abs(dot(plane.n, sf.n)) < 0.9999) continue;
       const d = Math.abs(dot(sub(plane.o, sf.o), sf.n));
       if (d < away) { on = candidate; pf = plane; away = d; }
       if (d < 1e-4) break;
     }
-    if (!on || away > NEAR) return { error: needFace ? "no flat face of the part lies where the sketch does" : "no plane or face lies where the sketch does" };
+    if (!on || (away > NEAR && !onFace)) return { error: needFace ? "no flat face of the part lies where the sketch does" : "no plane or face lies where the sketch does" };
 
     const toPeet = p => { const d = sub(fromSketch(sf, p), pf.o); return [tidy(dot(d, pf.x)), tidy(dot(d, pf.y))]; };
     const sameHand = dot(cross(pf.x, pf.y), cross(sf.x, sf.y)) > 0;
@@ -577,6 +647,45 @@ function importPart(doc, dir) {
     return off;
   }
 
+  /**
+   * How much of the area of a SolidWorks feature's flat faces lies in planes that PeetCAD's features have
+   * faces in, facing the same way: 1 when every one of its planes is there. Unlike an area, it is not upset
+   * when later features take a face away in one program and not the other.
+   */
+  function planesMatched(swName, peetNames) {
+    const ours = (peet.ask({ op: "faces" }).faces || []).filter(x => x.surface === "plane" && x.normal && x.center && (x.made_by || []).some(m => peetNames.includes(m.feature)));
+    let all = 0, found = 0;
+    for (const face of facesOf(swName)) {
+      if (!face.plane || !face.normal) continue;
+      const n = unit(face.normal), offset = dot(n, mm(face.plane.slice(3, 6)));
+      all += face.area;
+      if (ours.some(x => dot(n, x.normal) > 0.9999 && Math.abs(dot(n, x.center) - offset) < 1e-3)) found += face.area;
+    }
+    return all ? found / all : 0;
+  }
+
+  /**
+   * The corners a new flange feature makes with the flanges (edge and mitre) made before it. A plain corner
+   * is what SolidWorks leaves between two flange features in the parts looked at, but not in all of them
+   * (flanges at an angle differ), so it is kept only where it brings the flanges nearer SolidWorks' than
+   * PeetCAD's own corner does. Failing that, PeetCAD's own corner, without the rectangle its relief cuts
+   * from the face and the bends: SolidWorks cuts nothing at a corner that the bends do not share. Returns
+   * the corner feature's name, if one was kept.
+   */
+  function cornersWithOthers(swName, flangeNames, radius) {
+    const earlier = [...flanges.keys(), ...miters.keys()].filter(n => n !== swName);
+    const sofar = [...earlier.map(n => [n, made.get(n) || []]), [swName, flangeNames]];
+    const before = flangeMismatch(sofar);
+    const name = swName + " corners with others";
+    const plain = plainCorners(name, flangeNames, radius);
+    if (plain && flangeMismatch(sofar) < before - 1e-3) return plain;
+    if (plain) peet.apply({ op: "delete", feature: plain });
+    const butt = plainCorners(name, flangeNames, radius, "butt", "tear");
+    if (butt && flangeMismatch(sofar) <= before + 1e-3) return butt;
+    if (butt) peet.apply({ op: "delete", feature: butt });
+    return null;
+  }
+
   function corners(name, gap, pieces) {
     const picks = [];
     const faces = () => peet.ask({ op: "faces" }).faces || [];
@@ -820,7 +929,7 @@ function importPart(doc, dir) {
    * Cuts a rectangular flange down to the outline SolidWorks has for it. What is cut is everything between
    * the outline and a box a little larger than it, from the outline's foot (its line on the edge) outwards.
    */
-  function cutToOutline(f, name, { sketch, foot }, map = null) {
+  function cutToOutline(f, name, { sketch, foot, above = 0 }, map = null) {
     const segments = sketch.sketch.segments.filter(g => !g.construction && g !== foot);
     if (segments.some(g => !(g.type === "line" || (g.type === "arc" && !g.circle)) || !g.start || !g.end)) return { error: "its outline has more than lines and arcs" };
     // The outline in order, from one end of the foot round to the other
@@ -844,7 +953,10 @@ function importPart(doc, dir) {
       const points = chain.flatMap(g => [flat(g.start), flat(g.end)]);
       if (points.reduce((sum, q) => sum + h_(q), 0) < 0) v = [-v[0], -v[1]];
       const margin = 0.5;
-      const lo = Math.min(0, ...points.map(s_)) - margin, hi = Math.max(width, ...points.map(s_)) + margin, top = Math.max(...points.map(h_)) + margin;
+      // Round the arcs too, and past the flange's end where it was made longer than the outline
+      const round = chain.flatMap(pointsAlong).map(q => flat(q));
+      const lo = Math.min(0, ...points.map(s_), ...round.map(s_)) - margin, hi = Math.max(width, ...points.map(s_), ...round.map(s_)) + margin;
+      const top = Math.max(...points.map(h_), ...round.map(h_), above) + margin;
       const out = (a, b) => [tidy(A[0] + u[0] * a + v[0] * b), tidy(A[1] + u[1] * a + v[1] * b)];
       const items = [], ends = [];
       chain.forEach((g, i) => {
@@ -890,6 +1002,192 @@ function importPart(doc, dir) {
   }
 
   const edgeSelector = e => ({ at: mid(mm(e.start), mm(e.end)).map(tidy) });
+  /**
+   * A base flange from an open profile: a bent strip as deep as SolidWorks' first distance, to one side or
+   * both (end condition 5, the mid plane). Lines in line are joined first: SolidWorks takes a bend of
+   * nothing between them, PeetCAD refuses one. Which side of the profile the sheet is on and which way the
+   * depth goes are not in the definition: each way is tried, and the one kept whose faces lie where the base
+   * flange's faces do in SolidWorks' body.
+   */
+  function openBaseFlange(f, v, op, drawn) {
+    const symmetric = v.D1OffsetType === 5;
+    const depth = (v.D1OffsetDistance || 0) * MM;
+    if (!(depth > 0)) return { ok: false, message: "an open profile with no depth" };
+    let sketch = op.sketch;
+    const joined = joinInLine(drawn);
+    if (joined.length < drawn.length) {
+      const sk = importSketch(sketchOf(f), {
+        name: f.name + " profile",
+        draw: toPeet => {
+          const items = [], ends = new Map();
+          joined.forEach((g, i) => {
+            items.push({ type: "line", from: toPeet(g.start), to: toPeet(g.end), as: "j" + i });
+            for (const [k, p] of [["start", g.start], ["end", g.end]]) {
+              const key = spot(p);
+              if (!ends.has(key)) ends.set(key, []);
+              ends.get(key).push(`j${i}.${k}`);
+            }
+          });
+          for (const labels of ends.values()) for (let i = 1; i < labels.length; i++) items.push({ type: "coincident", of: [labels[0], labels[i]] });
+          return items;
+        },
+      });
+      if (sk.error) return { ok: false, message: sk.error };
+      sketch = sk.name;
+      report.notes.push(`${f.name}'s profile has lines in line, joined into one in ${sk.name}.`);
+    }
+    const wanted = facesOf(f.name).filter(face => face.plane).map(face => {
+      const n = unit(face.plane.slice(0, 3));
+      return { n, offset: dot(n, mm(face.plane.slice(3, 6))) };
+    });
+    const score = () => {
+      const faces = (peet.ask({ op: "faces" }).faces || []).filter(x => x.surface === "plane" && x.normal);
+      return wanted.filter(w => faces.some(x => Math.abs(dot(w.n, x.normal)) > 0.9999 && Math.abs(dot(w.n, x.center) - w.offset) < 1e-3)).length;
+    };
+    let best = null;
+    const mark = peet.script.length;
+    for (const reverse of [op.reverse, !op.reverse]) {
+      for (const flip_depth of symmetric ? [false] : [false, true]) {
+        const tried = { ...op, sketch, reverse, depth: tidy(depth), ...(symmetric ? { symmetric: true } : { flip_depth }) };
+        const built = build(f, tried);
+        if (!built.ok) { if (!best) best = { built }; continue; }
+        const s = score();
+        peet.apply({ op: "delete", features: built.names });
+        if (!best || !best.op || s > best.score) best = { op: tried, score: s };
+      }
+    }
+    // The tries leave the part as it was: they are no part of the script
+    peet.script.length = mark;
+    return best.op ? build(f, best.op) : best.built;
+  }
+
+  /**
+   * A cut through more than one flange. PeetCAD's sheet metal cut goes through the flanges with a face in its
+   * sketch's plane; SolidWorks' cut-extrude goes on through the flanges behind them, parallel to the sketch,
+   * as deep as it reaches. Each flange where SolidWorks' body has walls of this cut through it, and that is
+   * not the one already cut, gets a sheet metal cut of the same sketch, projected onto its face.
+   */
+  function cutThrough(f, first, { source = sketchOf(f), draw = null } = {}) {
+    if (!source || !thickness) return [];
+    const sf = frameOf(source.sketch.modelToSketch);
+    const level = p => dot(sub(p, sf.o), sf.n);
+    const sheetFaces = () => (peet.ask({ op: "faces" }).faces || []).filter(x => x.surface === "plane" && x.normal && x.center
+      && Math.abs(dot(x.normal, sf.n)) > 0.9999 && (x.made_by || []).some(m => m.side === "top" || m.side === "bottom"));
+    // The first cut went through the flanges with a face in its sketch's plane
+    const done = level(first.o);
+    // The middles of the sheets SolidWorks' walls of this cut go through: a wall's middle is half a thickness
+    // from either face of its flange
+    const walls = facesOf(f.name).filter(face => face.box).map(face => level(mid(mm(face.box.slice(0, 3)), mm(face.box.slice(3)))));
+    const targets = new Map();
+    for (const x of sheetFaces()) {
+      const l = level(x.center);
+      const inside = l + (dot(x.normal, sf.n) > 0 ? -1 : 1) * thickness / 2;
+      if (!walls.some(w => Math.abs(w - inside) < 1e-3)) continue;
+      // Not the flange the first cut is on (its walls are within a thickness of its sketch's plane)
+      if (Math.abs(inside - done) <= thickness / 2 + 1e-3) continue;
+      const key = inside.toFixed(3);
+      if (!targets.has(key)) targets.set(key, inside);
+    }
+    const names = [];
+    let n = 0;
+    for (const inside of targets.values()) {
+      const x = sheetFaces().find(y => Math.abs(level(y.center) + (dot(y.normal, sf.n) > 0 ? -1 : 1) * thickness / 2 - inside) < 1e-3);
+      if (!x) continue;
+      const name = `${f.name} through ${++n}`;
+      const sk = importSketch(source, { name: name + " sketch", needFace: true, draw, onFace: { body: x.body, index: x.index } });
+      if (sk.error) continue;
+      const built = build(f, { op: "sheet_cut", sketch: sk.name, name });
+      if (!built.ok) { peet.apply({ op: "delete", feature: sk.name }); continue; }
+      // Only the cuts: a pattern or mirror of this feature copies them, and can't copy a sketch
+      names.push(...built.names);
+    }
+    return names;
+  }
+
+  /**
+   * A cut across flanges square to its sketch. SolidWorks' cut-extrude goes through anything in its way,
+   * so it trims the ends of flanges that stand up from the face it is sketched on; PeetCAD's sheet metal
+   * cut goes only through flanges parallel to its sketch. Each such flange where SolidWorks' body has walls
+   * of this cut gets a sheet metal cut on its own face: where the sketch's outline crosses the flange's
+   * middle, as deep as SolidWorks' walls in it reach.
+   */
+  function cutAcross(f) {
+    const source = sketchOf(f);
+    if (!source || !thickness) return [];
+    const segs = source.sketch.segments.filter(g => !g.construction && (g.type === "line" || g.type === "arc") && g.start && g.end);
+    if (segs.length === 0) return [];
+    const sf = frameOf(source.sketch.modelToSketch);
+    const walls = facesOf(f.name).filter(face => face.box);
+    const corners = face => { const lo = mm(face.box.slice(0, 3)), hi = mm(face.box.slice(3)); return [0, 1, 2, 3, 4, 5, 6, 7].map(i => [i & 1 ? hi[0] : lo[0], i & 2 ? hi[1] : lo[1], i & 4 ? hi[2] : lo[2]]); };
+    const tops = () => (peet.ask({ op: "faces" }).faces || []).filter(x => x.surface === "plane" && x.normal && x.center
+      && Math.abs(dot(x.normal, sf.n)) < 1e-6 && (x.made_by || []).some(m => m.side === "top"));
+    // The flanges to cut: each by its normal and the level of its middle along it
+    const targets = [];
+    for (const x of tops()) {
+      const m = x.normal, middle = dot(x.center, m) - thickness / 2;
+      // A wall through this flange spans its middle and is no thicker than the sheet and its bends (one
+      // where the cut crosses the flange's end runs on into the bend)
+      const bend = (sheet ? sheet.BendRadius : 0) * MM;
+      const inside = walls.filter(w => {
+        const across = corners(w).map(p => dot(p, m)), lo = Math.min(...across), hi = Math.max(...across);
+        return lo <= middle + 1e-3 && hi >= middle - 1e-3 && hi - lo <= thickness + 2 * bend + 0.01;
+      });
+      if (inside.length === 0 || targets.some(t => dot(t.m, m) > 0.9999 && Math.abs(t.middle - middle) < 1e-3)) continue;
+      const along = inside.flatMap(corners).map(p => dot(sub(p, sf.o), sf.n));
+      targets.push({ m, middle, depth: [Math.min(...along) - 0.01, Math.max(...along) + 0.01] });
+    }
+    const names = [];
+    let n = 0;
+    for (const t of targets) {
+      // The flange's middle crosses the sketch's plane in a line: where the outline is on either side of it
+      const ms = [dot(t.m, sf.x), dot(t.m, sf.y)], us = [-ms[1], ms[0]];
+      const c = t.middle - dot(sf.o, t.m);
+      const crossings = [];
+      for (const g of segs) {
+        const pts = pointsAlong(g).map(p => [p.x * MM, p.y * MM]);
+        for (let i = 0; i + 1 < pts.length; i++) {
+          const [a, b] = [pts[i], pts[i + 1]];
+          const da = ms[0] * a[0] + ms[1] * a[1] - c, db = ms[0] * b[0] + ms[1] * b[1] - c;
+          if ((da > 0) === (db > 0)) continue;
+          const k = da / (da - db), q = [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k];
+          crossings.push(us[0] * q[0] + us[1] * q[1]);
+        }
+      }
+      crossings.sort((a, b) => a - b);
+      if (crossings.length < 2 || crossings.length % 2) continue;
+      const face = tops().find(x => dot(x.normal, t.m) > 0.9999 && Math.abs(dot(x.center, t.m) - thickness / 2 - t.middle) < 1e-3);
+      if (!face) continue;
+      const on = { body: face.body, index: face.index };
+      const pf = probe(on);
+      if (!pf) continue;
+      const at = (s, k) => {
+        const q = [us[0] * s + ms[0] * c, us[1] * s + ms[1] * c];
+        const p = add(add(add(sf.o, mul(sf.x, q[0])), mul(sf.y, q[1])), add(mul(sf.n, k), mul(t.m, thickness / 2)));
+        const d = sub(p, pf.o);
+        return [tidy(dot(d, pf.x)), tidy(dot(d, pf.y))];
+      };
+      const draw = [];
+      for (let i = 0; i + 1 < crossings.length; i += 2) {
+        const [s0, s1] = [crossings[i], crossings[i + 1]], [k0, k1] = t.depth;
+        draw.push({ type: "polyline", points: [at(s0, k0), at(s1, k0), at(s1, k1), at(s0, k1)], closed: true });
+      }
+      const name = `${f.name} across ${++n}`;
+      const reply = peet.apply({ op: "sketch", on, name: name + " sketch", draw });
+      if (!reply.ok) continue;
+      const sketch = reply.created[0].name;
+      const built = build(f, { op: "sheet_cut", sketch, name });
+      if (!built.ok) { peet.apply({ op: "delete", feature: sketch }); continue; }
+      names.push(...built.names);
+    }
+    return names;
+  }
+
+  function throughToo(f, built, through) {
+    if (!through.length) return;
+    built.names.push(...through);
+    built.warning = [built.warning, "it goes on through other flanges, which get sheet metal cuts of their own that do not follow the first's sketch"].filter(Boolean).join("; ");
+  }
+
   const values = f => (f.definition && f.definition.values) || {};
 
   function bendOf(v) {
@@ -933,7 +1231,7 @@ function importPart(doc, dir) {
 
     if (f.type === "RefPlane") {
       if (!f.planeTransform) return;
-      const pf = frameOf(f.planeTransform);
+      const pf = planeFrameOf(f.planeTransform);
       planeFrames.set(f.name, pf);
       const standard = standardPlane(pf);
       if (standard) { planes.set(f.name, standard); return; }
@@ -944,13 +1242,15 @@ function importPart(doc, dir) {
       if (!axis) return record(f, "not supported", "a plane that is not square to an axis");
       const from = { x: "right", y: "front", z: "top" }[axis];
       const distance = Math.abs(dot(pf.o, AXES[axis]));
+      // PeetCAD trims the spaces off a name ("Hood Zenith ")
+      const name = f.name.trim();
       for (const flip of [false, true]) {
-        const op = { op: "plane", from, distance: tidy(distance), flip, name: f.name };
+        const op = { op: "plane", from, distance: tidy(distance), flip, name };
         const tried = peet.apply(op);
         if (!tried.ok) return record(f, "failed", tried.error);
-        const where = probe(f.name);
-        if (where && samePlane(where, pf)) { planes.set(f.name, f.name); return record(f, "imported", "as a fixed offset plane"); }
-        peet.apply({ op: "delete", feature: f.name });
+        const where = probe(name);
+        if (where && samePlane(where, pf)) { planes.set(f.name, name); return record(f, "imported", "as a fixed offset plane"); }
+        peet.apply({ op: "delete", feature: name });
       }
       return record(f, "failed", "the plane did not come out where SolidWorks has it");
     }
@@ -982,11 +1282,14 @@ function importPart(doc, dir) {
           if (Math.abs(Math.abs(offset) - thickness) < 1e-3) side = Math.sign(offset);
         }
         const direction = mul(sf.n, side);
-        return finish(f, build(f, {
+        const op = {
           op: "base_flange", sketch: sk.name, name: f.name, thickness: tidy(thickness), radius: tidy(radius), bend: bendOf(settings),
           ...(relief ? { relief } : {}), ...(settings.ReliefRatio ? { relief_ratio: settings.ReliefRatio } : {}),
           reverse: dot(direction, sk.frame.n) < 0,
-        }));
+        };
+        const drawn = sketchOf(f).sketch.segments.filter(g => !g.construction);
+        if (!isOpen(drawn)) return finish(f, build(f, op));
+        return finish(f, openBaseFlange(f, v, op, drawn));
       }
 
       case "EdgeFlange": {
@@ -1005,6 +1308,7 @@ function importPart(doc, dir) {
         // corner too. For other angles it is not, and the flange comes out a little long or short.
         if (v.OffsetDimType === 3 && Math.abs(v.BendAngle - Math.PI / 2) > 1e-6) notes.push("its length is measured to the bend's tangent, which is only the same as PeetCAD's at 90 degrees");
         if (v.OffsetType !== 1) notes.push("its length is up to a vertex in SolidWorks: the distance it had is used");
+        if (v.UsePositionOffset && v.PositionOffsetDistance > 0) notes.push(`SolidWorks sets it ${tidy(v.PositionOffsetDistance * MM)} mm out from its edge, which PeetCAD's edge flange has no way to do: it is on the edge`);
         // Its own sketch is the flange's outline. One narrower than the edge sets the flange back from the ends.
         const profiles = (f.sub || []).filter(c => SKETCH.test(c.type) && c.sketch && !c.sketch.error);
         // Every edge is found before any flange is added: a flange changes the ends of its neighbours
@@ -1037,7 +1341,10 @@ function importPart(doc, dir) {
             const drawn = p.sketch.segments.filter(g => !g.construction);
             const square = g => { const d = unit(sub(fromSketch(sf, g.end), fromSketch(sf, g.start))), c = Math.abs(dot(d, along)); return c > 0.9999 || c < 1e-4; };
             if (drawn.length !== 4 || drawn.some(g => g.type !== "line" || !g.start || !g.end || !square(g))) {
-              outline = { sketch: p, foot: foot.g };
+              // How far the outline rises from its foot, which the flange has to reach before it is cut to it
+              const fa = fromSketch(sf, foot.g.start), fu = unit(sub(fromSketch(sf, foot.g.end), fa));
+              const rise = Math.max(...drawn.flatMap(pointsAlong).map(q => { const d = sub(fromSketch(sf, q), fa); return len(sub(d, mul(fu, dot(d, fu)))); }));
+              outline = { sketch: p, foot: foot.g, rise };
               // An outline that widens past an end of the edge its foot runs to: the flange is made that
               // wide (it overhangs the edge from the bend on) and cut back to the outline.
               const reach = drawn.flatMap(g => [g.start, g.end]).filter(Boolean).map(q => dot(sub(fromSketch(sf, q), s), along));
@@ -1048,6 +1355,14 @@ function importPart(doc, dir) {
             if (Math.abs(start) > 1e-3) offsets.offset_start = tidy(start);
             if (Math.abs(end) > 1e-3) offsets.offset_end = tidy(end);
             break;
+          }
+          // An outline taller than the flange: the flange is made taller (by more than it can need, the cut
+          // takes the rest), so that there is sheet to cut the outline from
+          // (A flange's end is its length less the sheet's thickness from the face its outline is drawn from.)
+          if (outline && outline.rise > length - (thickness || 0) + 0.01) {
+            offsets.length = tidy(outline.rise + 2 * ((thickness || 0) + radius) + 1);
+            outline.above = offsets.length;
+            notes.push("its outline reaches further than its length: the flange is made long enough and cut to the outline");
           }
           return { edge: { at: edge.middle.map(tidy) }, offsets, outline };
         });
@@ -1086,34 +1401,94 @@ function importPart(doc, dir) {
         if (built.ok) ops.forEach((o, i) => {
           if (!o.outline) return;
           const cut = cutToOutline(f, f.name + (ops.length > 1 ? i + 1 : "") + " outline", o.outline);
-          if (cut.name) { built.names.push(cut.sketch, cut.name); notes.push("its outline is not a rectangle: a rectangular flange is made and cut to the outline, which does not follow the part"); }
-          else notes.push(`its outline is not a rectangle: a rectangular flange is made (${cut.error})`);
+          if (cut.name) { built.names.push(cut.sketch, cut.name); notes.push("its outline is not a rectangle: a rectangular flange is made and cut to the outline, which does not follow the part"); return; }
+          notes.push(`its outline is not a rectangle: a rectangular flange is made (${cut.error})`);
+          // Made longer for an outline it could not then be cut to: back to its own length
+          if (o.offsets.length !== undefined) peet.apply({ op: "edit", feature: ops.length > 1 ? f.name + (i + 1) : f.name, length: common.length });
         });
         if (built.ok && notes.length) built.warning = [...new Set(notes)].join("; ");
         const gap = (v.GapDistance || 0) * MM;
         if (built.ok) {
           const flangeNames = [...built.names];
-          // A plain corner is what SolidWorks leaves between two flange features in the parts looked at,
-          // but not in all of them (flanges at an angle differ), so it is kept only where it brings the
-          // flanges nearer SolidWorks' than PeetCAD's own corner does.
-          const sofar = [...[...flanges.keys()].map(n => [n, made.get(n) || []]), [f.name, flangeNames]];
-          const before = flangeMismatch(sofar);
-          const plain = plainCorners(f.name + " corners with others", flangeNames, radius);
-          if (plain && flangeMismatch(sofar) < before - 1e-3) built.names.push(plain);
-          else {
-            if (plain) peet.apply({ op: "delete", feature: plain });
-            // Failing that, PeetCAD's own corner, without the rectangle its relief cuts from the face and
-            // the bends: SolidWorks cuts nothing at a corner that the bends do not share.
-            const butt = plainCorners(f.name + " corners with others", flangeNames, radius, "butt", "tear");
-            if (butt && flangeMismatch(sofar) <= before + 1e-3) built.names.push(butt);
-            else if (butt) peet.apply({ op: "delete", feature: butt });
-          }
+          const others = cornersWithOthers(f.name, flangeNames, radius);
+          if (others) built.names.push(others);
           if (flangeNames.length === edges.length && edges.length > 1) {
             const corner = corners(f.name + " corners", gap, edges.map((e, i) => ({ name: flangeNames[i], start: mm(e.start), end: mm(e.end) })));
             if (corner) built.names.push(corner);
           }
         }
         if (built.ok) flanges.set(f.name, { name: f.name, common, gap, pieces: edges.map((e, i) => ({ start: mm(e.start), end: mm(e.end), offsets: ops[i].offsets, outline: ops[i].outline })) });
+        return finish(f, built);
+      }
+
+      case "SMMiteredFlange": {
+        // A profile run along a chain of edges. PeetCAD's profile starts at the top or bottom corner of the
+        // edge and is that face of the sheet carried on, measured to the virtual sharps: SolidWorks' is
+        // drawn the same way, from the edge's end, on a plane square to it.
+        const edges = (v.Edges || []).filter(e => e && e.start && e.end);
+        if (edges.length === 0) return record(f, "failed", "its edges were not exported");
+        const sk = useSketch(f);
+        if (sk.error) return record(f, "failed", sk.error);
+        const found = edges.map(e => findEdge(mm(e.start), mm(e.end)));
+        if (found.some(e => !e)) return record(f, "failed", `no edge of the part is within ${NEAR} mm of where SolidWorks has the flange's edge`);
+        if (v.UseDefaultBendRadius === false && sheet && Math.abs(v.BendRadius - sheet.BendRadius) > 1e-9) return record(f, "not supported", "a mitre flange with a bend radius of its own");
+        if (v.UseDefaultBendAllowance === false) return record(f, "not supported", "a mitre flange with a bend allowance of its own");
+        const op = {
+          op: "miter_flange", name: f.name, sketch: sk.name, edges: found.map(e => ({ at: e.middle.map(tidy) })),
+          gap: tidy((v.GapDistance || 0) * MM),
+          ...(v.StartOffset ? { offset_start: tidy(v.StartOffset * MM) } : {}), ...(v.EndOffset ? { offset_end: tidy(v.EndOffset * MM) } : {}),
+        };
+        // Which side of the profile the sheet is on: PeetCAD's follows from the corner of the edge the
+        // profile starts at, SolidWorks' from the flange's position. The profile is tried as drawn and
+        // moved a thickness each way across the sketch, so that it starts at the edge's other corner, and
+        // the one kept whose flat faces come nearest SolidWorks'.
+        const source = sketchOf(f);
+        const lines = source.sketch.segments.filter(g => !g.construction);
+        // Each shift moves the whole profile, or only one end of it: SolidWorks' profile can start at the
+        // corner the sheet is not on, a thickness from PeetCAD's.
+        const shifts = [[0, 0, null]];
+        if (thickness && lines.every(g => g.type === "line" && g.start && g.end)) {
+          const d = thickness / MM;
+          const count = new Map();
+          for (const g of lines) for (const p of [g.start, g.end]) count.set(spot(p), (count.get(spot(p)) || 0) + 1);
+          const ends = [...count.entries()].filter(([, n]) => n === 1).map(([k]) => k);
+          for (const only of [null, ...ends]) shifts.push([d, 0, only], [-d, 0, only], [0, d, only], [0, -d, only]);
+        }
+        const moved = ([dx, dy, only], name) => importSketch(source, {
+          name,
+          draw: toPeet => {
+            const at = p => only && spot(p) !== only ? toPeet(p) : toPeet({ x: p.x + dx, y: p.y + dy });
+            const items = lines.map((g, i) => ({ type: "line", from: at(g.start), to: at(g.end), as: "m" + i }));
+            lines.forEach((g, i) => lines.forEach((h, j) => { if (j > i && spot(g.end) === spot(h.start)) items.push({ type: "coincident", of: [`m${i}.end`, `m${j}.start`] }); }));
+            return items;
+          },
+        });
+        const mark = peet.script.length;
+        let best = null;
+        for (const shift of shifts) {
+          const s = shift === shifts[0] ? sk : moved(shift, f.name + " profile");
+          if (s.error) continue;
+          const tried = build(f, { ...op, sketch: s.name });
+          if (tried.ok) {
+            const off = flangeMismatch([[f.name, tried.names]]), planes = planesMatched(f.name, tried.names);
+            if (!best || best.failed || planes > best.planes + 1e-6 || (planes > best.planes - 1e-6 && off < best.off - 1e-6)) best = { shift, off, planes };
+            peet.apply({ op: "delete", features: tried.names });
+          } else if (!best) best = { failed: tried };
+          if (s !== sk) peet.apply({ op: "delete", feature: s.name });
+          peet.script.length = mark;
+          if (best && best.planes > 1 - 1e-6 && best.off < 1) break;
+        }
+        if (!best || best.failed) return finish(f, best ? best.failed : { ok: false, message: "it can't be built" });
+        const s = best.shift === shifts[0] ? sk : moved(best.shift, f.name + " profile");
+        const built = build(f, { ...op, sketch: s.name });
+        if (built.ok) {
+          if (s !== sk) built.names.push(s.name);
+          if (best.planes < 1 - 1e-3) built.warning = `${(100 * (1 - best.planes)).toFixed(0)}% of its flat faces by area are in no plane PeetCAD's flange has`;
+          const others = cornersWithOthers(f.name, built.names.filter(n => n !== s.name), (sheet ? sheet.BendRadius : 0) * MM);
+          if (others) built.names.push(others);
+          miters.set(f.name, { op, source, lines, shift: best.shift, edges });
+          if (best.shift !== shifts[0]) report.notes.push(`${f.name}'s profile is moved a thickness across its sketch (${s.name}), so that the sheet is on the side of it that SolidWorks has.`);
+        }
         return finish(f, built);
       }
 
@@ -1141,6 +1516,9 @@ function importPart(doc, dir) {
           const built = extrude();
           return built.unsupported ? record(f, "not supported", built.message) : finish(f, built);
         }
+        // A cut of nothing but text: an etched or cut-out label
+        const drawnIn = (sketchOf(f) && sketchOf(f).sketch && sketchOf(f).sketch.segments || []).filter(g => !g.construction);
+        if (drawnIn.length && drawnIn.every(g => g.type === "text")) return record(f, "not supported", "a cut of sketch text, which PeetCAD sketches don't have");
         const sheetPart = sheetBody();
         const end = v["GetEndCondition(true)"];
         const depth = (v["GetDepth(true)"] || 0) * MM;
@@ -1149,12 +1527,14 @@ function importPart(doc, dir) {
             return record(f, "not supported", `a cut ${tidy(depth)} mm deep into ${tidy(thickness)} mm sheet (an etch): sheet metal cuts go through`);
           const sk = useSketch(f);
           let built = sk.error ? { ok: false, message: sk.error } : build(f, { op: "sheet_cut", sketch: sk.name, name: f.name });
+          let used = sk;
           if (!built.ok && sketchOf(f)) {
             // A sheet metal cut's sketch has to be on a face of the sheet. One on a plane is put on the face there.
             const moved = useSketch(f, { name: f.name + " sketch", needFace: true });
-            if (!moved.error) built = build(f, { op: "sheet_cut", sketch: moved.name, name: f.name });
+            if (!moved.error) { built = build(f, { op: "sheet_cut", sketch: moved.name, name: f.name }); used = moved; }
             if (!built.ok && !moved.error) peet.apply({ op: "delete", feature: moved.name });
           }
+          if (built.ok && used.frame) throughToo(f, built, [...cutThrough(f, used.frame), ...cutAcross(f)]);
           return finish(f, built);
         }
         const sk = useSketch(f);
@@ -1245,10 +1625,12 @@ function importPart(doc, dir) {
         const diameter = (v.ThruHoleDiameter || v.HoleDiameter || v.Diameter || 0) * MM;
         if (!diameter || points.length === 0) return record(f, "failed", "its size or its positions were not exported");
         if (sheetBody()) {
-          const sk = importSketch(where, { name: f.name + " sketch", needFace: true, draw: toPeet => points.map(p => ({ type: "circle", center: toPeet(p), radius: tidy(diameter / 2) })) });
+          const draw = toPeet => points.map(p => ({ type: "circle", center: toPeet(p), radius: tidy(diameter / 2) }));
+          const sk = importSketch(where, { name: f.name + " sketch", needFace: true, draw });
           if (sk.error) return record(f, "failed", sk.error);
           const built = build(f, { op: "sheet_cut", sketch: sk.name, name: f.name });
           if (!built.ok) peet.apply({ op: "delete", feature: sk.name });
+          else throughToo(f, built, cutThrough(f, sk.frame, { source: where, draw }));
           return finish(f, built);
         }
         const sk = importSketch(where, { name: f.name + " sketch", draw: toPeet => points.map(p => ({ type: "point", at: toPeet(p) })) });
@@ -1270,17 +1652,47 @@ function importPart(doc, dir) {
           seeds.push(...made.get(p.name));
         }
         if (seeds.length === 0) return record(f, "not supported", "a pattern of faces or bodies");
-        const direction = (axis, reversed) => {
-          if (!axis || !axis.start || !axis.end) return null;
-          const d = mul(unit(sub(mm(axis.end), mm(axis.start))), reversed ? -1 : 1);
-          const k = ["x", "y", "z"].find(k => Math.abs(Math.abs(dot(d, AXES[k])) - 1) < 1e-9);
-          return k ? { axis: k, flip: dot(d, AXES[k]) < 0 } : { axis: edgeSelector(axis), flip: !!reversed };
+        // The way the copies go, read off SolidWorks' body: from a face of what is copied to the same face of
+        // a copy, a whole number of spacings away. `along`, if known, only settles which way.
+        const seen = (spacing, along) => {
+          const originals = (v.PatternFeatureArray || []).flatMap(p => facesOf(p.name));
+          const votes = new Map();
+          for (const c of facesOf(f.name)) for (const o of originals) {
+            if (c.surface !== o.surface || Math.abs(c.area - o.area) > 1e-9 + 1e-6 * o.area) continue;
+            const delta = sub(mid(mm(c.box.slice(0, 3)), mm(c.box.slice(3))), mid(mm(o.box.slice(0, 3)), mm(o.box.slice(3))));
+            const k = Math.round(len(delta) / spacing);
+            if (k < 1 || Math.abs(len(delta) - k * spacing) > 1e-3) continue;
+            const d = unit(delta);
+            if (along && Math.abs(Math.abs(dot(d, along)) - 1) > 1e-6) continue;
+            const key = d.map(x => x.toFixed(4)).join(",");
+            votes.set(key, { d, n: ((votes.get(key) || {}).n || 0) + 1 });
+          }
+          const best = [...votes.values()].sort((a, b) => b.n - a.n)[0];
+          return best ? best.d : null;
         };
-        const first = direction(v.D1Axis, v.D1ReverseDirection);
+        const direction = (axis, reversed, spacing, alone) => {
+          let d = null;
+          if (axis && axis.start && axis.end) d = mul(unit(sub(mm(axis.end), mm(axis.start))), reversed ? -1 : 1);
+          else if (axis && axis.kind === "face" && axis.normal) {
+            // Along a flat face's normal
+            d = mul(unit(axis.normal), reversed ? -1 : 1);
+            const way = seen(spacing * MM, d);
+            if (way) d = way;
+          } else if (alone) d = seen(spacing * MM, null);
+          if (!d) return null;
+          const k = ["x", "y", "z"].find(k => Math.abs(Math.abs(dot(d, AXES[k])) - 1) < 1e-9);
+          if (k) return { axis: k, flip: dot(d, AXES[k]) < 0 };
+          if (axis && axis.start && axis.end) return { axis: edgeSelector(axis), flip: !!reversed };
+          // Any straight edge of the part that way
+          const edge = (peet.ask({ op: "edges" }).edges || []).find(e => e.curve === "line" && len(sub(e.to, e.from)) > 1e-6 && Math.abs(Math.abs(dot(unit(sub(e.to, e.from)), d)) - 1) < 1e-9);
+          return edge ? { axis: { between: [edge.from, edge.to] }, flip: dot(unit(sub(edge.to, edge.from)), d) < 0 } : null;
+        };
+        const grid = (v.D2TotalInstances || 1) > 1;
+        const first = direction(v.D1Axis, v.D1ReverseDirection, v.D1Spacing, !grid);
         if (!first) return record(f, "failed", "its direction was not exported");
         const op = { op: "linear_pattern", name: f.name, features: seeds, direction: first.axis, flip: first.flip, spacing: tidy(v.D1Spacing * MM), count: v.D1TotalInstances };
         if ((v.D2TotalInstances || 1) > 1) {
-          const second = direction(v.D2Axis, v.D2ReverseDirection);
+          const second = direction(v.D2Axis, v.D2ReverseDirection, v.D2Spacing, false);
           if (!second) return record(f, "failed", "its second direction was not exported");
           Object.assign(op, { direction2: second.axis, flip2: second.flip, spacing2: tidy(v.D2Spacing * MM), count2: v.D2TotalInstances });
         }
@@ -1288,13 +1700,14 @@ function importPart(doc, dir) {
       }
 
       case "MirrorPattern": {
-        const seeds = [], bent = [];
+        const seeds = [], bent = [], mitred = [];
         for (const p of v.PatternFeatureArray || []) {
           if (p && flanges.has(p.name)) { bent.push(flanges.get(p.name)); continue; }
+          if (p && miters.has(p.name)) { mitred.push(miters.get(p.name)); continue; }
           if (!p || !made.has(p.name)) return record(f, "failed", `what it mirrors (${p ? p.name : "nothing"}) was not imported`);
           seeds.push(...made.get(p.name));
         }
-        if (seeds.length + bent.length === 0) return record(f, "not supported", "a mirror of faces or bodies");
+        if (seeds.length + bent.length + mitred.length === 0) return record(f, "not supported", "a mirror of faces or bodies");
         const plane = v.Plane && planes.get(v.Plane.name);
         const where = v.Plane && planeFrames.get(v.Plane.name);
         if (!plane || !where) return record(f, "failed", "its mirror plane was not imported");
@@ -1319,6 +1732,31 @@ function importPart(doc, dir) {
             if (cut.name) names.push(cut.sketch, cut.name);
             else warning += `; one is left a rectangle (${cut.error})`;
           }
+        }
+        // A mitre flange likewise: its profile, moved across the plane, along the edges across it
+        for (const [i, m] of mitred.entries()) {
+          const name = `${f.name} mitre${i + 1}`;
+          const edges = m.edges.map(e => findEdge(across(mm(e.start)), across(mm(e.end))));
+          if (edges.some(e => !e)) return record(f, names.length ? "imported in part" : "failed", "the edges across the mirror plane were not found for a mitre flange it mirrors");
+          const sf = frameOf(m.source.sketch.modelToSketch);
+          const [dx, dy, only] = m.shift;
+          const model = p => across(fromSketch(sf, only && spot(p) !== only ? p : { x: p.x + dx, y: p.y + dy }));
+          // On the face across the plane from the one the profile is drawn on, picked by a point inside it
+          const on = m.source.sketch.on;
+          const inside = on && on.point ? across(mm(on.point)) : model(m.lines[0].start);
+          const normal = unit(sub(across(add(sf.o, sf.n)), across(sf.o)));
+          const sk = sketchOnFace(name + " profile", inside, normal, flat => {
+            const items = m.lines.map((g, k) => ({ type: "line", from: flat(model(g.start)), to: flat(model(g.end)), as: "m" + k }));
+            m.lines.forEach((g, k) => m.lines.forEach((h, j) => { if (j > k && spot(g.end) === spot(h.start)) items.push({ type: "coincident", of: [`m${k}.end`, `m${j}.start`] }); }));
+            return items;
+          });
+          if (sk.error) return record(f, names.length ? "imported in part" : "failed", "the mirrored mitre flange's profile: " + sk.error);
+          const built = build(f, { ...m.op, name, sketch: sk.name, edges: edges.map(e => ({ at: e.middle.map(tidy) })) });
+          if (!built.ok) { peet.apply({ op: "delete", feature: sk.name }); return record(f, names.length ? "imported in part" : "failed", built.message); }
+          names.push(sk.name, ...built.names);
+          const others = cornersWithOthers(f.name, built.names, (sheet ? sheet.BendRadius : 0) * MM);
+          if (others) names.push(others);
+          warning = "its flanges are made as flanges of their own, which do not follow the originals";
         }
         if (seeds.length) {
           const built = build(f, { op: "mirror", name: f.name, features: seeds, plane });
@@ -1604,8 +2042,33 @@ const files = fs.statSync(input).isDirectory()
   ? fs.readdirSync(input).filter(f => f.endsWith(".swx.json")).sort().map(f => path.join(input, f))
   : [input];
 const summary = [];
-for (const file of files) {
-  if (only && !path.basename(file).toLowerCase().includes(only.toLowerCase())) continue;
+const chosen = files.filter(file => !only || path.basename(file).toLowerCase().includes(only.toLowerCase()));
+if (jobs > 1 && chosen.length > 1) {
+  // Each part in a process of its own, then the reports they wrote are read back for the summary
+  const { spawn } = require("child_process");
+  const queue = [...chosen];
+  const pass = [...(relations ? [] : ["--no-relations"]), "--peet", peetExe];
+  const next = () => {
+    const file = queue.shift();
+    if (!file) return Promise.resolve();
+    return new Promise(done => {
+      const child = spawn(process.execPath, [__filename, file, outDir, ...pass], { stdio: ["ignore", "pipe", "inherit"] });
+      child.stdout.on("data", d => process.stdout.write(d));
+      child.on("close", done);
+    }).then(next);
+  };
+  Promise.all(Array.from({ length: jobs }, next)).then(() => {
+    for (const file of chosen) {
+      const doc = JSON.parse(fs.readFileSync(file, "utf8"));
+      if (doc.documentType !== "part") continue;
+      const at = path.join(outDir, doc.name + ".report.json");
+      summary.push(fs.existsSync(at) ? JSON.parse(fs.readFileSync(at, "utf8"))
+        : { name: doc.name, verdict: "the importer failed", error: "it wrote no report", features: [] });
+    }
+    writeSummary();
+  });
+} else {
+for (const file of chosen) {
   const doc = JSON.parse(fs.readFileSync(file, "utf8"));
   if (doc.documentType !== "part") continue;
   doc.__file = file;
@@ -1623,7 +2086,10 @@ for (const file of files) {
   const left = report.features.filter(x => x.result === "not supported" || x.result === "failed");
   console.log(`${report.verdict.padEnd(32)} ${report.name}${left.length ? "   [" + [...new Set(left.map(x => x.type))].join(", ") + "]" : ""}`);
 }
-if (files.length > 1) {
+writeSummary();
+}
+function writeSummary() {
+  if (files.length <= 1) return;
   fs.writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary.map(r => ({
     name: r.name, verdict: r.verdict, seconds: r.seconds, difference: r.difference, error: r.error,
     left: r.features.filter(x => x.result === "not supported" || x.result === "failed").map(x => ({ type: x.type, name: x.name, result: x.result, message: x.message })),

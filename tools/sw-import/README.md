@@ -4,7 +4,7 @@ Rebuilds SolidWorks parts in PeetCAD from their exports (`tools/sw-export`), and
 close each came out.
 
 ```
-node tools/sw-import/import.js <export.swx.json | folder of exports> <output folder> [--peet <peet>] [--only <text>]
+node tools/sw-import/import.js <export.swx.json | folder of exports> <output folder> [--peet <peet>] [--only <text>] [--jobs <n>]
 node tools/sw-import/summarise.js <output folder> [--parts]
 ```
 
@@ -19,7 +19,12 @@ For each part it writes:
 A folder of exports also gets `summary.json`. `summarise.js` counts the verdicts and the
 reasons features were left out. `diagnose.js <export> <part.peet>` says where one part
 differs: the area of its flat faces against SolidWorks', feature by feature. `--only` takes the parts whose file name contains the
-text. It uses `target/release/peet.exe` if there is one, then the debug build.
+text. `--jobs` imports that many parts at once, each in a process of its own: the library takes about half an hour with 16,
+most of it Gear tray. It uses `target/release/peet.exe` if there is one, then the debug build; give a copy with `--peet`
+for a long run, or a build in the meantime can't replace it.
+
+The library's export is on SolidWorks-PC in `C:UserswillAppDataLocalPeetSwExportout-all`, and a copy (without
+STEP files) in `peetcad-importsexportsout-all`. Keep copies out of `%TEMP%`, which Windows empties.
 
 It is a tool for the migration, not a feature of PeetCAD: the export is SolidWorks' own
 feature data under SolidWorks' own names, and an importer inside `peet` would tie
@@ -40,26 +45,37 @@ its SolidWorks plane does, and its points are converted through the two planes' 
 | SolidWorks | PeetCAD |
 |---|---|
 | Sketch | `sketch` with its lines, arcs and circles where they are, ends that meet joined |
-| Reference plane | `plane`: an offset of a standard plane, where SolidWorks has it |
-| Base flange | `base_flange`, with the body's thickness, radius, bend deduction and relief |
+| Reference plane | `plane`: an offset of a standard plane, where SolidWorks has it (its transform runs from the plane to the model, the other way from a sketch's) |
+| Base flange | `base_flange`, with the body's thickness, radius, bend deduction and relief. From an open profile: as deep as SolidWorks has it, to both sides for its mid-plane end condition, with lines that are in line joined; which side the sheet is on is tried both ways and the one kept whose faces are where SolidWorks' are |
 | Edge flange | `edge_flange`: length converted to the outer corner, position, angle, set-backs read off its outline sketch (negative where the outline runs past the edge), its own relief and bend allowance where it has them |
-| Cut-extrude | `sheet_cut` on sheet metal, `cut` on a solid |
+| Mitre flange | `miter_flange` on the same edges with the same gap and offsets. The profile is tried as drawn and with it, or its start, moved a thickness across the sketch: PeetCAD puts the sheet on the side of the profile that follows from the corner of the edge it starts at, SolidWorks from the flange's position. The one kept has its flat faces in the most planes SolidWorks' has |
+| Cut-extrude | `sheet_cut` on sheet metal, `cut` on a solid. A cut of nothing but text is left out (P5) |
 | Boss-extrude | `extrude` |
 | Hole wizard | `sheet_cut` with circles on sheet metal, `hole` on a solid |
-| Linear pattern, mirror | `linear_pattern`, `mirror` |
+| Linear pattern, mirror | `linear_pattern`, `mirror`. A pattern along a flat face goes along its normal; one whose direction was not exported goes the way SolidWorks' body has the copies from the original |
+| Break corner | `break_corner`, where the corner's edge is in the part |
 
-Four things PeetCAD has no feature for are stood in for, with a warning in the report.
-Each has the right shape but does not follow the part when it changes:
+These are stood in for, with a warning in the report. Each has the right shape but does
+not follow the part when it changes:
 
-- **Break corner, and a fillet on a sheet's corner:** a sheet metal cut of the shape
-  SolidWorks removed, read off the faces the feature left in SolidWorks' body.
+- **A break corner whose edge is not found, and a fillet on a sheet's corner:** a sheet
+  metal cut of the shape SolidWorks removed, read off the faces the feature left in
+  SolidWorks' body.
+- **A cut through more than one flange.** SolidWorks' cut-extrude goes through whatever
+  is in its way; PeetCAD's sheet metal cut goes through the flanges in its sketch's plane.
+  Each other flange where SolidWorks' body has walls of the cut gets a sheet metal cut of
+  its own: of the same sketch, projected, on a flange parallel to it (and for a hole
+  wizard hole); of the band where the sketch's outline crosses the flange, on one square
+  to it (a cut that trims the ends of the flanges standing up from its face).
 - **A slot from the hole wizard:** a sheet metal cut of a slot, read off its round ends,
   on each face the feature has slots on.
-- **A mirrored flange:** a flange of its own on the edge across the mirror plane.
+- **A mirrored flange:** a flange of its own on the edge across the mirror plane. A
+  mirrored mitre flange likewise, with its profile moved across the plane.
 - **A flange whose outline is not a rectangle:** a rectangular flange, and a sheet metal
-  cut of everything between the outline and a box around it.
+  cut of everything between the outline and a box around it. Where the outline reaches
+  further than the flange's length (a round top), the flange is made long enough first.
 
-**Corners** are set after each flange feature, as SolidWorks leaves them:
+**Corners** are set after each flange feature (edge or mitre), as SolidWorks leaves them:
 
 - between the pieces of one flange feature on several edges, `corner` with `open`, the
   feature's gap over 1.414 and `slanted`, which is what SolidWorks' folded part has
@@ -104,7 +120,10 @@ quicker and enough to check shapes.
 
 - **Sizes of features** (a flange's length, a pattern's count) that differ between
   configurations or are set by an equation, except a linear pattern's.
-- **Sketched bends, mitre flanges, corner reliefs**, which PeetCAD has.
+- **Sketched bends**, which PeetCAD has; **corner reliefs**, whose definition the export
+  does not have.
+- **An edge flange set out from its edge** (SolidWorks' position offset): it is made on
+  the edge, with a warning. PeetCAD has no such option (P39).
 - **Reference planes that follow** what they were defined from: they are fixed offsets.
 - **Checking a suppressed feature.** It is built without anything to compare it with.
 - Assemblies.
