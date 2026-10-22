@@ -155,6 +155,9 @@ pub struct BendValues {
     pub allowance: f64,
 }
 
+/// The inner radius a bend of radius 0 is given (see [`BendValues::new`]).
+pub const SHARP_RADIUS: f64 = 1e-4;
+
 impl BendValues {
     /// Works out the allowance of a bend from the bend model.
     pub fn new(model: BendModel, angle: f64, radius: f64, thickness: f64) -> Result<Self, String> {
@@ -190,6 +193,10 @@ impl BendValues {
     }
 
     fn make(model: BendModel, angle: f64, radius: f64, thickness: f64) -> Result<Self, String> {
+        // A sharp bend, as SolidWorks allows: the folded part needs an inner face to bend
+        // round, so it is given the least radius that has one. That moves the setbacks by
+        // under a tenth of a micron.
+        let radius = radius.max(SHARP_RADIUS);
         let ossb = (radius + thickness) * (angle / 2.0).tan();
         let allowance = match model {
             BendModel::KFactor(k) => angle * (radius + k * thickness),

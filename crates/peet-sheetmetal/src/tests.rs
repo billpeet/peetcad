@@ -1856,3 +1856,20 @@ fn a_flange_set_out_from_its_edge() {
         }
     }
 }
+
+#[test]
+fn a_sharp_bend() {
+    // A bend radius of 0, as SolidWorks allows: the body is built, and its blank is the
+    // one a radius of 0 gives, to well within a micron.
+    let mut s = settings(0.5);
+    s.radius = 0.0;
+    let mut layout = plate_layout(s);
+    layout
+        .add_edge_flange(2, &top_edge(true), &flange(20.0, FlangePosition::MaterialInside))
+        .unwrap();
+    let (_, body) = built(layout);
+    let v = BendValues::new(BendModel::KFactor(0.5), FRAC_PI_2, 0.0, T).unwrap();
+    let blank = (body.flat_bounds().1 - body.flat_bounds().0).y;
+    assert_close(blank, H - v.outside_setback() + v.allowance + 20.0 - v.outside_setback(), 1e-6);
+    assert_close(v.outside_setback(), T, 1e-3);
+}

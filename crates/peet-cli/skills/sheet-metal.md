@@ -24,7 +24,8 @@ features. It always has an exact **flat pattern**, which is what the DXF export 
 - From a **closed** sketch: a flat plate, `thickness` thick, on the sketch plane.
 - From an **open** chain of connected lines: a bent profile, with a bend at every
   corner, extruded by `depth`.
-- `thickness`, `radius` (the default inner bend radius) and `bend` (`{"k_factor":
+- `thickness`, `radius` (the default inner bend radius; 0 is a sharp bend, as in
+  SolidWorks) and `bend` (`{"k_factor":
   0.44}`, or an `allowance` or `deduction`) apply to the whole body. Defaults: 1.5 mm,
   1.5 mm, K 0.44. Or take them from the material tables: `peet materials`, then
   `{"op": "apply_material", "material": ..., "gauge": ...}`. That also makes it the

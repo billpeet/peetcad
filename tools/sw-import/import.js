@@ -1080,25 +1080,14 @@ function importPart(doc, dir) {
   }
 
   /**
-   * PeetCAD can't fold a bend of no radius yet, so one of 0 in SolidWorks is made 0.01 mm (P41). With a
-   * deduction that changes nothing in the flat pattern; with an allowance or a K-factor each bend comes out
-   * 2 r tan(angle / 2) short, which the flange's own allowance makes up.
-   */
-  function zeroRadiusBend(v, radius) {
-    if (radius >= 0.01 || !thickness) return {};
-    const model = v.UseDefaultBendAllowance === false && v.GetCustomBendAllowance ? bendOf(v) : sheet ? bendOf(sheet) : null;
-    if (!model || model.deduction !== undefined) return {};
-    const allowance = model.allowance !== undefined ? model.allowance : v.BendAngle * model.k_factor * thickness;
-    return { bend: { allowance: tidy(allowance + 2 * 0.01 * Math.tan(v.BendAngle / 2)) } };
-  }
-
-  /**
    * How far past its own sheet a SolidWorks cut-extrude or hole reaches, as `sheet_cut` fields: null for
-   * one that goes through its own sheet only. Through next stops at the far face of the first sheet. Up to
-   * a vertex or a surface (or an offset from one) is as deep as SolidWorks' walls of the cut reach.
+   * one that goes through its own sheet only. Through next, and up to a vertex or a surface (or an offset
+   * from one), are as deep as SolidWorks' walls of the cut reach.
    */
   function reachOf(end, depth, both) {
-    if (end === 2) return null;
+    // Through next: as far as a surface that covers the whole profile, which is the far face of the
+    // sheet for a hole and past the sides for a notch across a channel
+    if (end === 2) return { end: "blind", upTo: true, next: true, ...(both ? { both: true } : {}) };
     if (end === 0 && depth <= (thickness || 0) + 1e-6) return null;
     if (end === 0) return { end: "blind", depth: tidy(depth), ...(both ? { both: true } : {}) };
     if (end === 6) return { end: "blind", depth: tidy(depth / 2), both: true };
@@ -1115,10 +1104,12 @@ function importPart(doc, dir) {
   function sheetCut(f, sketch, reach, frame) {
     const op = { op: "sheet_cut", sketch, name: f.name };
     if (!reach) return build(f, op);
-    let { warning, upTo, ...fields } = reach;
+    let { warning, upTo, next, ...fields } = reach;
     if (upTo) {
       // As deep as the walls go from the sketch's plane, either way
       const reach = facesOf(f.name).filter(face => face.box).flatMap(face => [mm(face.box.slice(0, 3)), mm(face.box.slice(3))]).map(p => Math.abs(dot(sub(p, frame.o), frame.n)));
+      // Through next that goes no further than its own sheet is the plain cut
+      if (next && (!reach.length || Math.max(...reach) <= (thickness || 0) + 1e-3)) return build(f, op);
       if (reach.length) fields.depth = tidy(Math.max(...reach) + 0.01);
       else { fields = { end: "through_all", ...(fields.both ? { both: true } : {}) }; warning = "SolidWorks' cut goes up to a surface, and none of its walls is in SolidWorks' body to say where: it is cut through all"; }
     }
@@ -1222,7 +1213,6 @@ function importPart(doc, dir) {
         const settings = sheet || v;
         thickness = (v.Thickness || settings.Thickness) * MM;
         let radius = (settings.BendRadius || v.BendRadius || 0) * MM;
-        if (radius < 0.01) { radius = 0.01; report.notes.push("The bend radius is 0 in SolidWorks; 0.01 mm is used."); }
         const relief = { 1: "rectangular", 2: "tear", 3: "obround" }[settings.AutoReliefType];
         // Which side of the sketch plane the sheet is on is read off the faces the base flange has in
         // SolidWorks' body: the one that is not on the sketch plane is a thickness away, on that side.
@@ -1337,11 +1327,10 @@ function importPart(doc, dir) {
         const common = {
           op: "edge_flange", name: f.name, length: tidy(length), angle: tidy(angle), position,
           ...(setOut ? { position_offset: setOut } : {}),
-          ...(v.UseDefaultBendRadius === false ? { radius: tidy(Math.max(radius, 0.01)) } : {}),
+          ...(v.UseDefaultBendRadius === false ? { radius: tidy(radius) } : {}),
           ...ownRelief,
           // A bend allowance of the flange's own
           ...(v.UseDefaultBendAllowance === false && v.GetCustomBendAllowance ? { bend: bendOf(v) } : {}),
-          ...zeroRadiusBend(v, radius),
         };
         let built;
         if (ops.length === 1) built = buildFlange(f, { ...common, edge: ops[0].edge, ...ops[0].offsets });
