@@ -447,3 +447,44 @@ fn sample_enclosure_builds() {
         b.max
     );
 }
+
+#[test]
+fn a_cut_through_the_flanges_in_its_way() {
+    // A channel: flanges up from the plate's two long edges. A notch sketched on the plate
+    // at one end, going up through everything (as SolidWorks' cut-extrude does), trims
+    // the ends of both sides as well as the plate's.
+    let notched = |end: peet_model::SheetCutEnd, depth: f64| {
+        let (mut p, _, _) = plate(100.0, 60.0);
+        for (a, b) in [
+            (DVec3::new(0.0, 0.0, T), DVec3::new(100.0, 0.0, T)),
+            (DVec3::new(100.0, 60.0, T), DVec3::new(0.0, 60.0, T)),
+        ] {
+            let (_, e) = edge(&p, a, b);
+            edge_flange(&mut p, e, |f| f.length = Scalar::new(20.0));
+            p.rebuild();
+            p.assert_ok();
+        }
+        let top = p.on_face(DVec3::Z, DVec3::new(50.0, 30.0, T));
+        let notch = p.sketch(top, |s| {
+            shapes::rectangle(s, DVec2::new(-5.0, -5.0), DVec2::new(10.0, 65.0));
+        });
+        let cut = p.model.add_sheet_cut(notch);
+        let FeatureKind::SheetCut(def) = &mut p.model.feature_mut(cut).unwrap().kind else {
+            unreachable!()
+        };
+        def.end = end;
+        def.depth = Scalar::new(depth);
+        def.reverse = true;
+        p.rebuild();
+        p.assert_ok();
+        bounds(&p)
+    };
+    let (lo, _) = notched(peet_model::SheetCutEnd::ThroughAll, 0.0);
+    assert_close(lo.x, 10.0);
+    // Only as far as a depth: the sides' tops are left at the end.
+    let (lo, _) = notched(peet_model::SheetCutEnd::Blind, 8.0);
+    assert!(lo.x < 1.0, "{lo}");
+    // Through its own sheet only, as before.
+    let (lo, _) = notched(peet_model::SheetCutEnd::Sheet, 0.0);
+    assert!(lo.x < 1.0, "{lo}");
+}

@@ -1809,3 +1809,26 @@ fn cut_that_grazes_an_edge() {
     assert_close(measure::volume(&solid), W * H * T, 1e-6);
     assert_eq!(body.outline.len(), 1);
 }
+
+#[test]
+fn material_inside_at_an_angle() {
+    // SolidWorks' material inside at an angle: the flange's outer face goes through the
+    // original edge on the far face of the sheet. Bend outside starts the bend at the
+    // edge, so the two differ by the outside setback and t / tan(angle) along the face.
+    for angle in [30.0_f64, 60.0, 90.0, 120.0] {
+        let max_y = |position| {
+            let mut layout = plate_layout(settings(0.44));
+            let mut spec = flange(20.0, position);
+            spec.angle = angle;
+            layout.add_edge_flange(2, &top_edge(true), &spec).unwrap();
+            bounds(&built(layout).0).max.y
+        };
+        let a = angle.to_radians();
+        let expected = (R + T) * (a / 2.0).tan() + T / a.tan();
+        assert_close(
+            max_y(FlangePosition::BendOutside) - max_y(FlangePosition::MaterialInside),
+            expected,
+            1e-6,
+        );
+    }
+}

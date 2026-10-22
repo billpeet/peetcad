@@ -21,7 +21,7 @@ use peet_model::{
     EdgeFlangeFeature, EdgeRef,
     EndCondition, ExtrudeFeature, FaceName, FaceRef, FeatureId, FormFeature, HemFeature,
     JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, Operation, PatternFeature,
-    PlaneRef, PointRef, RegionSelection, Scalar, ScalarKind, SheetCutFeature, SheetSettingsDef,
+    PlaneRef, PointRef, RegionSelection, Scalar, ScalarKind, SheetCutEnd, SheetCutFeature, SheetSettingsDef,
     SketchFeature, SketchedBendFeature, StdAxis, StdPlane, VertexRef,
 };
 use peet_model::{
@@ -264,6 +264,7 @@ macro_rules! words {
 }
 
 words!(
+    SheetCutEnd,
     ReliefType,
     FlangePosition,
     HemKind,
@@ -1099,8 +1100,13 @@ feature_args! {
 
 feature_args! {
     /// A cut through a sheet metal body, made in the flat pattern.
-    SheetCut: FeatureKind::SheetCut(f) => &mut **f, SheetCutFeature { sketch } => {
+    SheetCut: FeatureKind::SheetCut(f) => &mut **f, SheetCutFeature { sketch, end, depth, reverse, both } => {
     sketch: FeatureSel as SketchF = sketch,
+    /// How far it reaches past the sheet it is drawn on.
+    end: SheetCutEnd as Choice<SheetCutEnd> = end,
+    depth: Input as Length = depth,
+    reverse: bool as Flag = reverse,
+    both: bool as Flag = both,
     }
 }
 
@@ -1582,7 +1588,7 @@ feature_ops! {
         => Some(FeatureKind::EdgeFlange(Box::new(EdgeFlangeFeature::new(None)))),
     SheetCut(SheetCut) "sheet_cut"
         "Cut a sketch through the sheet it is drawn on, in the flat pattern."
-        => Some(FeatureKind::SheetCut(Box::new(SheetCutFeature { sketch: NO_SKETCH }))),
+        => Some(FeatureKind::SheetCut(Box::new(SheetCutFeature::new(NO_SKETCH)))),
     Hem(Hem) "hem"
         "Fold an edge of a sheet metal body back over itself ('edges' makes one per edge)."
         => Some(FeatureKind::Hem(Box::new(HemFeature::new(None)))),

@@ -62,7 +62,8 @@ pub use feature::{
     CornerFeature,
     EdgeFlangeFeature, ExtrudeFeature, Feature, FeatureId, FeatureKind, FormFeature, HemFeature,
     JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, PatternDef, PatternFeature,
-    PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind, SheetCutFeature, SheetSettingsDef,
+    PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind, SheetCutEnd, SheetCutFeature,
+    SheetSettingsDef,
     SketchFeature, SketchedBendFeature, StdAxis, StdPlane,
 };
 pub use history::History;

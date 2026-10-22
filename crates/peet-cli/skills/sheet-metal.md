@@ -101,7 +101,9 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
   are numbered: `Wall1`, `Wall2`, …
 - `length` is measured on the **outside**, from the outer corner to the flange's end.
   `position` says where the bend sits relative to the edge (`material_inside`,
-  `material_outside`, `bend_outside`).
+  `material_outside`, `bend_outside`). They mean what they mean in SolidWorks: at an
+  angle other than 90, a `material_inside` flange's outer face goes through the edge on
+  the far face of the sheet, so a shallow flange is set well back from the edge.
 - `offset_start` and `offset_end` set a flange back from the two ends of its edge, with
   a relief at each end: a wall on a 180 edge with both offsets 5 has a bend 170 long
   (`bend_table` gives each bend's `length`). Where two flanges are set back a little
@@ -254,6 +256,23 @@ stays sheet metal (`fillet` and `chamfer` turn it into a plain solid).
 - It cuts every flange that has a face in the sketch's plane, not only the one the
   sketch is on: holes drawn over two tabs or two lips that lie in one plane go through
   both, in one `sheet_cut`.
+- **A cut through more than its own sheet**, as SolidWorks' cut-extrude goes: `end`
+  `through_all`, or `blind` with a `depth` from the sketch's face. It goes into the
+  sheet from that face (`reverse` the other way, `both` both ways) and cuts every flange
+  in its reach: one parallel to the sketch if the reach takes in its whole thickness,
+  and one square to it where the sketch's outline crosses it, on across the bend at its
+  end if the reach goes past it. That is how to notch the ends of a channel's sides from
+  its base, or put one hole through both sides of a U. Flanges at other angles are left.
+  The default `end` is `sheet`: its own sheet and the flanges in its sketch's plane.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Side", "length": 20, "edges": [{"between": [[0, 0, 2], [100, 0, 2]]}, {"between": [[100, 60, 2], [0, 60, 2]]}]}
+{"op": "sketch", "name": "Notch", "on": {"at": [50, 30, 2], "normal": [0, 0, 1]}, "draw": [{"type": "rectangle", "from": [-5, -5], "to": [10, 65]}]}
+{"op": "sheet_cut", "sketch": "Notch", "end": "through_all", "reverse": true}
+```
+
 - **A cut across a bend:** draw it on the flat face as it lies in the blank, running
   past the face's edge. Past that edge the sketch is over the bend and then the flange,
   laid flat: a point `d` beyond the bend line in the sketch is `d` along the sheet in the

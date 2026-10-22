@@ -67,7 +67,8 @@ impl ReliefType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FlangePosition {
     /// The flange's outer face is flush with the original edge: the part keeps its
-    /// outside size (the usual choice for enclosures).
+    /// outside size (the usual choice for enclosures). At an angle other than 90° the
+    /// outer face goes through the edge on the sheet's far face, as in SolidWorks.
     MaterialInside,
     /// The flange's inner face is flush with the original edge.
     MaterialOutside,

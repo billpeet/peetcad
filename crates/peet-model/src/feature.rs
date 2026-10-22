@@ -413,6 +413,62 @@ impl EdgeFlangeFeature {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SheetCutFeature {
     pub sketch: FeatureId,
+    /// How far the cut reaches past the sheet it is drawn on.
+    pub end: SheetCutEnd,
+    /// For [`SheetCutEnd::Blind`]: how far, from the face the sketch is on.
+    pub depth: Scalar,
+    /// Away from the sheet, not into it.
+    pub reverse: bool,
+    /// As far the other way too.
+    pub both: bool,
+}
+
+impl SheetCutFeature {
+    pub fn new(sketch: FeatureId) -> Self {
+        Self {
+            sketch,
+            end: SheetCutEnd::Sheet,
+            depth: Scalar::new(10.0),
+            reverse: false,
+            both: false,
+        }
+    }
+}
+
+/// How far a sheet metal cut reaches, as SolidWorks' cut-extrude end conditions do. A
+/// cut goes square through each flange it reaches: through flanges parallel to its sketch
+/// that lie wholly within its reach, and across flanges square to it, and on across a bend at the end of one that the reach goes past.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SheetCutEnd {
+    /// Through the sheet the sketch is on, and the flanges with a face in its plane.
+    Sheet,
+    /// As far as the depth from the sketch's face.
+    Blind,
+    /// Through every flange in its way.
+    ThroughAll,
+}
+
+impl SheetCutEnd {
+    pub const ALL: [Self; 3] = [Self::Sheet, Self::Blind, Self::ThroughAll];
+}
+
+/// A sheet metal cut as model schemas through 11 stored it: through its own sheet only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SheetCutFeatureV11 {
+    sketch: FeatureId,
+}
+
+impl From<SheetCutFeatureV11> for SheetCutFeature {
+    fn from(c: SheetCutFeatureV11) -> Self {
+        Self::new(c.sketch)
+    }
+}
+
+impl From<&SheetCutFeature> for SheetCutFeatureV11 {
+    /// The old layout, which has no room for a reach past the sheet.
+    fn from(c: &SheetCutFeature) -> Self {
+        Self { sketch: c.sketch }
+    }
 }
 
 /// A hem on an edge of a sheet metal body: the edge folded back over the sheet.
@@ -1386,7 +1442,7 @@ pub(crate) enum FeatureKindV9 {
     CoordSystem(CoordSystemDef),
     BaseFlange(Box<BaseFlangeFeature>),
     EdgeFlange(Box<EdgeFlangeFeatureV11>),
-    SheetCut(Box<SheetCutFeature>),
+    SheetCut(Box<SheetCutFeatureV11>),
     Hem(Box<HemFeature>),
     SketchedBend(Box<SketchedBendFeature>),
     Jog(Box<JogFeature>),
@@ -1418,7 +1474,7 @@ impl From<FeatureKindV9> for FeatureKind {
             FeatureKindV9::CoordSystem(v) => Self::CoordSystem(v),
             FeatureKindV9::BaseFlange(v) => Self::BaseFlange(v),
             FeatureKindV9::EdgeFlange(v) => Self::EdgeFlange(Box::new((*v).into())),
-            FeatureKindV9::SheetCut(v) => Self::SheetCut(v),
+            FeatureKindV9::SheetCut(v) => Self::SheetCut(Box::new((*v).into())),
             FeatureKindV9::Hem(v) => Self::Hem(v),
             FeatureKindV9::SketchedBend(v) => Self::SketchedBend(v),
             FeatureKindV9::Jog(v) => Self::Jog(v),
@@ -1452,7 +1508,7 @@ impl From<FeatureKind> for FeatureKindV9 {
             FeatureKind::CoordSystem(v) => Self::CoordSystem(v),
             FeatureKind::BaseFlange(v) => Self::BaseFlange(v),
             FeatureKind::EdgeFlange(v) => Self::EdgeFlange(Box::new((&*v).into())),
-            FeatureKind::SheetCut(v) => Self::SheetCut(v),
+            FeatureKind::SheetCut(v) => Self::SheetCut(Box::new((&*v).into())),
             FeatureKind::Hem(v) => Self::Hem(v),
             FeatureKind::SketchedBend(v) => Self::SketchedBend(v),
             FeatureKind::Jog(v) => Self::Jog(v),
@@ -1534,7 +1590,7 @@ pub(crate) enum FeatureKindV11 {
     CoordSystem(CoordSystemDef),
     BaseFlange(Box<BaseFlangeFeature>),
     EdgeFlange(Box<EdgeFlangeFeatureV11>),
-    SheetCut(Box<SheetCutFeature>),
+    SheetCut(Box<SheetCutFeatureV11>),
     Hem(Box<HemFeature>),
     SketchedBend(Box<SketchedBendFeature>),
     Jog(Box<JogFeature>),
@@ -1566,7 +1622,7 @@ impl From<FeatureKindV11> for FeatureKind {
             FeatureKindV11::CoordSystem(v) => Self::CoordSystem(v),
             FeatureKindV11::BaseFlange(v) => Self::BaseFlange(v),
             FeatureKindV11::EdgeFlange(v) => Self::EdgeFlange(Box::new((*v).into())),
-            FeatureKindV11::SheetCut(v) => Self::SheetCut(v),
+            FeatureKindV11::SheetCut(v) => Self::SheetCut(Box::new((*v).into())),
             FeatureKindV11::Hem(v) => Self::Hem(v),
             FeatureKindV11::SketchedBend(v) => Self::SketchedBend(v),
             FeatureKindV11::Jog(v) => Self::Jog(v),
@@ -1600,7 +1656,7 @@ impl From<FeatureKind> for FeatureKindV11 {
             FeatureKind::CoordSystem(v) => Self::CoordSystem(v),
             FeatureKind::BaseFlange(v) => Self::BaseFlange(v),
             FeatureKind::EdgeFlange(v) => Self::EdgeFlange(Box::new((&*v).into())),
-            FeatureKind::SheetCut(v) => Self::SheetCut(v),
+            FeatureKind::SheetCut(v) => Self::SheetCut(Box::new((&*v).into())),
             FeatureKind::Hem(v) => Self::Hem(v),
             FeatureKind::SketchedBend(v) => Self::SketchedBend(v),
             FeatureKind::Jog(v) => Self::Jog(v),
@@ -1776,7 +1832,7 @@ pub(crate) enum FeatureKindV8 {
     CoordSystem(CoordSystemDef),
     BaseFlange(Box<BaseFlangeFeature>),
     EdgeFlange(Box<EdgeFlangeFeatureV11>),
-    SheetCut(Box<SheetCutFeature>),
+    SheetCut(Box<SheetCutFeatureV11>),
     Hem(Box<HemFeature>),
     SketchedBend(Box<SketchedBendFeature>),
     Jog(Box<JogFeature>),
@@ -1812,7 +1868,7 @@ impl From<FeatureKindV8> for FeatureKind {
             FeatureKindV8::CoordSystem(v) => Self::CoordSystem(v),
             FeatureKindV8::BaseFlange(v) => Self::BaseFlange(v),
             FeatureKindV8::EdgeFlange(v) => Self::EdgeFlange(Box::new((*v).into())),
-            FeatureKindV8::SheetCut(v) => Self::SheetCut(v),
+            FeatureKindV8::SheetCut(v) => Self::SheetCut(Box::new((*v).into())),
             FeatureKindV8::Hem(v) => Self::Hem(v),
             FeatureKindV8::SketchedBend(v) => Self::SketchedBend(v),
             FeatureKindV8::Jog(v) => Self::Jog(v),
@@ -1849,7 +1905,7 @@ impl From<&FeatureKind> for FeatureKindV8 {
             FeatureKind::CoordSystem(v) => Self::CoordSystem(v.clone()),
             FeatureKind::BaseFlange(v) => Self::BaseFlange(v.clone()),
             FeatureKind::EdgeFlange(v) => Self::EdgeFlange(Box::new((&**v).into())),
-            FeatureKind::SheetCut(v) => Self::SheetCut(v.clone()),
+            FeatureKind::SheetCut(v) => Self::SheetCut(Box::new((&**v).into())),
             FeatureKind::Hem(v) => Self::Hem(v.clone()),
             FeatureKind::SketchedBend(v) => Self::SketchedBend(v.clone()),
             FeatureKind::Jog(v) => Self::Jog(v.clone()),

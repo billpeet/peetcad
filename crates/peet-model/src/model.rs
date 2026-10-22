@@ -642,7 +642,7 @@ impl Model {
     /// hidden.
     pub fn add_sheet_cut(&mut self, sketch: FeatureId) -> FeatureId {
         let id = self.add(FeatureKind::SheetCut(Box::new(
-            crate::feature::SheetCutFeature { sketch },
+            crate::feature::SheetCutFeature::new(sketch),
         )));
         self.hide(sketch);
         id

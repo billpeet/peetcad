@@ -187,7 +187,7 @@ impl Layout {
             ));
         }
         let trim = match spec.position {
-            FlangePosition::MaterialInside => ossb,
+            FlangePosition::MaterialInside => ossb + material_inside_extra(spec.angle.to_radians(), t),
             FlangePosition::MaterialOutside => values.inside_setback(),
             FlangePosition::BendOutside => 0.0,
         };
@@ -699,6 +699,19 @@ impl Layout {
             }
         }
         Ok(())
+    }
+}
+
+/// How much further back than the outer virtual sharp a material-inside flange at
+/// `angle` (radians) sets its bend, as SolidWorks does: the flange's outer face goes
+/// through the original edge on the far face of the sheet, which at an angle is
+/// `t / tan(angle)` along the face from where the outer faces meet. Nothing at 90°;
+/// negative past it.
+pub(crate) fn material_inside_extra(angle: f64, t: f64) -> f64 {
+    if angle > 1e-6 && angle < PI - 1e-6 {
+        t / angle.tan()
+    } else {
+        0.0
     }
 }
 

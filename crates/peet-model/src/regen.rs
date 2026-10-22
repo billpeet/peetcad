@@ -949,15 +949,18 @@ impl Engine {
                     })
                 }
             },
-            FeatureKind::SheetCut(c) => match ctx.sketch_input(c.sketch) {
+            FeatureKind::SheetCut(c) => match ctx
+                .sketch_input(c.sketch)
+                .and_then(|input| Ok((input, sheet::sheet_cut_reach(c, &model.parameters)?)))
+            {
                 Err(m) => fail(m, Output::None),
-                Ok((plane, sketch)) => {
+                Ok(((plane, sketch), reach)) => {
                     let face = match model.sketch(c.sketch).map(|s| &s.plane) {
                         Some(PlaneRef::Face(f)) => Some(f.clone()),
                         _ => None,
                     };
                     let sketch_key = run.out_keys.get(&c.sketch).copied().unwrap_or(0);
-                    let key = hash::of(&(5u8, id, sketch_key, run.body_key, &face));
+                    let key = hash::of(&(5u8, id, sketch_key, run.body_key, &face, &**c, reach));
                     self.solid_feature(id, key, run, |bodies| {
                         sheet::apply_sheet_cut(
                             id,
@@ -966,6 +969,7 @@ impl Engine {
                             face.as_ref(),
                             &plane,
                             sketch,
+                            reach,
                             key,
                         )
                     })
@@ -1864,6 +1868,7 @@ impl<'m> Ctx<'m, '_> {
                         plane,
                         sketch,
                         face: sheet::sketch_face_ref(self.model, c.sketch),
+                        reach: sheet::sheet_cut_reach(c, &self.model.parameters)?,
                     }
                 }
                 FeatureKind::Revolve(r) => {

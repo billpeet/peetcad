@@ -686,6 +686,24 @@ function importPart(doc, dir) {
     return null;
   }
 
+  /**
+   * How much of the area of a SolidWorks feature's flat faces PeetCAD's features have a face for in the
+   * same place: in the same plane, facing the same way, with a point of it inside the SolidWorks face's
+   * box. Unlike `planesMatched`, it tells apart a cut's walls in two flanges, which are in the same planes.
+   */
+  function wallsMatched(swName, peetNames) {
+    const ours = (peet.ask({ op: "faces" }).faces || []).filter(x => x.surface === "plane" && x.normal && x.center && (x.made_by || []).some(m => peetNames.includes(m.feature)));
+    let all = 0, found = 0;
+    for (const face of facesOf(swName)) {
+      if (!face.plane || !face.normal || !face.box) continue;
+      const n = unit(face.normal), offset = dot(n, mm(face.plane.slice(3, 6)));
+      const lo = mm(face.box.slice(0, 3)).map(v => v - 0.5), hi = mm(face.box.slice(3)).map(v => v + 0.5);
+      all += face.area;
+      if (ours.some(x => dot(n, x.normal) > 0.9999 && Math.abs(dot(n, x.center) - offset) < 1e-3 && x.center.every((v, k) => v >= lo[k] && v <= hi[k]))) found += face.area;
+    }
+    return all ? found / all : 0;
+  }
+
   function corners(name, gap, pieces) {
     const picks = [];
     const faces = () => peet.ask({ op: "faces" }).faces || [];
@@ -1062,130 +1080,64 @@ function importPart(doc, dir) {
   }
 
   /**
-   * A cut through more than one flange. PeetCAD's sheet metal cut goes through the flanges with a face in its
-   * sketch's plane; SolidWorks' cut-extrude goes on through the flanges behind them, parallel to the sketch,
-   * as deep as it reaches. Each flange where SolidWorks' body has walls of this cut through it, and that is
-   * not the one already cut, gets a sheet metal cut of the same sketch, projected onto its face.
+   * PeetCAD can't fold a bend of no radius yet, so one of 0 in SolidWorks is made 0.01 mm (P41). With a
+   * deduction that changes nothing in the flat pattern; with an allowance or a K-factor each bend comes out
+   * 2 r tan(angle / 2) short, which the flange's own allowance makes up.
    */
-  function cutThrough(f, first, { source = sketchOf(f), draw = null } = {}) {
-    if (!source || !thickness) return [];
-    const sf = frameOf(source.sketch.modelToSketch);
-    const level = p => dot(sub(p, sf.o), sf.n);
-    const sheetFaces = () => (peet.ask({ op: "faces" }).faces || []).filter(x => x.surface === "plane" && x.normal && x.center
-      && Math.abs(dot(x.normal, sf.n)) > 0.9999 && (x.made_by || []).some(m => m.side === "top" || m.side === "bottom"));
-    // The first cut went through the flanges with a face in its sketch's plane
-    const done = level(first.o);
-    // The middles of the sheets SolidWorks' walls of this cut go through: a wall's middle is half a thickness
-    // from either face of its flange
-    const walls = facesOf(f.name).filter(face => face.box).map(face => level(mid(mm(face.box.slice(0, 3)), mm(face.box.slice(3)))));
-    const targets = new Map();
-    for (const x of sheetFaces()) {
-      const l = level(x.center);
-      const inside = l + (dot(x.normal, sf.n) > 0 ? -1 : 1) * thickness / 2;
-      if (!walls.some(w => Math.abs(w - inside) < 1e-3)) continue;
-      // Not the flange the first cut is on (its walls are within a thickness of its sketch's plane)
-      if (Math.abs(inside - done) <= thickness / 2 + 1e-3) continue;
-      const key = inside.toFixed(3);
-      if (!targets.has(key)) targets.set(key, inside);
-    }
-    const names = [];
-    let n = 0;
-    for (const inside of targets.values()) {
-      const x = sheetFaces().find(y => Math.abs(level(y.center) + (dot(y.normal, sf.n) > 0 ? -1 : 1) * thickness / 2 - inside) < 1e-3);
-      if (!x) continue;
-      const name = `${f.name} through ${++n}`;
-      const sk = importSketch(source, { name: name + " sketch", needFace: true, draw, onFace: { body: x.body, index: x.index } });
-      if (sk.error) continue;
-      const built = build(f, { op: "sheet_cut", sketch: sk.name, name });
-      if (!built.ok) { peet.apply({ op: "delete", feature: sk.name }); continue; }
-      // Only the cuts: a pattern or mirror of this feature copies them, and can't copy a sketch
-      names.push(...built.names);
-    }
-    return names;
+  function zeroRadiusBend(v, radius) {
+    if (radius >= 0.01 || !thickness) return {};
+    const model = v.UseDefaultBendAllowance === false && v.GetCustomBendAllowance ? bendOf(v) : sheet ? bendOf(sheet) : null;
+    if (!model || model.deduction !== undefined) return {};
+    const allowance = model.allowance !== undefined ? model.allowance : v.BendAngle * model.k_factor * thickness;
+    return { bend: { allowance: tidy(allowance + 2 * 0.01 * Math.tan(v.BendAngle / 2)) } };
   }
 
   /**
-   * A cut across flanges square to its sketch. SolidWorks' cut-extrude goes through anything in its way,
-   * so it trims the ends of flanges that stand up from the face it is sketched on; PeetCAD's sheet metal
-   * cut goes only through flanges parallel to its sketch. Each such flange where SolidWorks' body has walls
-   * of this cut gets a sheet metal cut on its own face: where the sketch's outline crosses the flange's
-   * middle, as deep as SolidWorks' walls in it reach.
+   * How far past its own sheet a SolidWorks cut-extrude or hole reaches, as `sheet_cut` fields: null for
+   * one that goes through its own sheet only. Through next stops at the far face of the first sheet. Up to
+   * a vertex or a surface (or an offset from one) is as deep as SolidWorks' walls of the cut reach.
    */
-  function cutAcross(f) {
-    const source = sketchOf(f);
-    if (!source || !thickness) return [];
-    const segs = source.sketch.segments.filter(g => !g.construction && (g.type === "line" || g.type === "arc") && g.start && g.end);
-    if (segs.length === 0) return [];
-    const sf = frameOf(source.sketch.modelToSketch);
-    const walls = facesOf(f.name).filter(face => face.box);
-    const corners = face => { const lo = mm(face.box.slice(0, 3)), hi = mm(face.box.slice(3)); return [0, 1, 2, 3, 4, 5, 6, 7].map(i => [i & 1 ? hi[0] : lo[0], i & 2 ? hi[1] : lo[1], i & 4 ? hi[2] : lo[2]]); };
-    const tops = () => (peet.ask({ op: "faces" }).faces || []).filter(x => x.surface === "plane" && x.normal && x.center
-      && Math.abs(dot(x.normal, sf.n)) < 1e-6 && (x.made_by || []).some(m => m.side === "top"));
-    // The flanges to cut: each by its normal and the level of its middle along it
-    const targets = [];
-    for (const x of tops()) {
-      const m = x.normal, middle = dot(x.center, m) - thickness / 2;
-      // A wall through this flange spans its middle and is no thicker than the sheet and its bends (one
-      // where the cut crosses the flange's end runs on into the bend)
-      const bend = (sheet ? sheet.BendRadius : 0) * MM;
-      const inside = walls.filter(w => {
-        const across = corners(w).map(p => dot(p, m)), lo = Math.min(...across), hi = Math.max(...across);
-        return lo <= middle + 1e-3 && hi >= middle - 1e-3 && hi - lo <= thickness + 2 * bend + 0.01;
-      });
-      if (inside.length === 0 || targets.some(t => dot(t.m, m) > 0.9999 && Math.abs(t.middle - middle) < 1e-3)) continue;
-      const along = inside.flatMap(corners).map(p => dot(sub(p, sf.o), sf.n));
-      targets.push({ m, middle, depth: [Math.min(...along) - 0.01, Math.max(...along) + 0.01] });
-    }
-    const names = [];
-    let n = 0;
-    for (const t of targets) {
-      // The flange's middle crosses the sketch's plane in a line: where the outline is on either side of it
-      const ms = [dot(t.m, sf.x), dot(t.m, sf.y)], us = [-ms[1], ms[0]];
-      const c = t.middle - dot(sf.o, t.m);
-      const crossings = [];
-      for (const g of segs) {
-        const pts = pointsAlong(g).map(p => [p.x * MM, p.y * MM]);
-        for (let i = 0; i + 1 < pts.length; i++) {
-          const [a, b] = [pts[i], pts[i + 1]];
-          const da = ms[0] * a[0] + ms[1] * a[1] - c, db = ms[0] * b[0] + ms[1] * b[1] - c;
-          if ((da > 0) === (db > 0)) continue;
-          const k = da / (da - db), q = [a[0] + (b[0] - a[0]) * k, a[1] + (b[1] - a[1]) * k];
-          crossings.push(us[0] * q[0] + us[1] * q[1]);
-        }
-      }
-      crossings.sort((a, b) => a - b);
-      if (crossings.length < 2 || crossings.length % 2) continue;
-      const face = tops().find(x => dot(x.normal, t.m) > 0.9999 && Math.abs(dot(x.center, t.m) - thickness / 2 - t.middle) < 1e-3);
-      if (!face) continue;
-      const on = { body: face.body, index: face.index };
-      const pf = probe(on);
-      if (!pf) continue;
-      const at = (s, k) => {
-        const q = [us[0] * s + ms[0] * c, us[1] * s + ms[1] * c];
-        const p = add(add(add(sf.o, mul(sf.x, q[0])), mul(sf.y, q[1])), add(mul(sf.n, k), mul(t.m, thickness / 2)));
-        const d = sub(p, pf.o);
-        return [tidy(dot(d, pf.x)), tidy(dot(d, pf.y))];
-      };
-      const draw = [];
-      for (let i = 0; i + 1 < crossings.length; i += 2) {
-        const [s0, s1] = [crossings[i], crossings[i + 1]], [k0, k1] = t.depth;
-        draw.push({ type: "polyline", points: [at(s0, k0), at(s1, k0), at(s1, k1), at(s0, k1)], closed: true });
-      }
-      const name = `${f.name} across ${++n}`;
-      const reply = peet.apply({ op: "sketch", on, name: name + " sketch", draw });
-      if (!reply.ok) continue;
-      const sketch = reply.created[0].name;
-      const built = build(f, { op: "sheet_cut", sketch, name });
-      if (!built.ok) { peet.apply({ op: "delete", feature: sketch }); continue; }
-      names.push(...built.names);
-    }
-    return names;
+  function reachOf(end, depth, both) {
+    if (end === 2) return null;
+    if (end === 0 && depth <= (thickness || 0) + 1e-6) return null;
+    if (end === 0) return { end: "blind", depth: tidy(depth), ...(both ? { both: true } : {}) };
+    if (end === 6) return { end: "blind", depth: tidy(depth / 2), both: true };
+    if ([3, 4, 5].includes(end)) return { end: "blind", upTo: true, ...(both ? { both: true } : {}) };
+    return { end: "through_all", ...(both ? { both: true } : {}), ...(end !== 1 ? { warning: `SolidWorks' end condition ${end} is cut through all` } : {}) };
   }
 
-  function throughToo(f, built, through) {
-    if (!through.length) return;
-    built.names.push(...through);
-    built.warning = [built.warning, "it goes on through other flanges, which get sheet metal cuts of their own that do not follow the first's sketch"].filter(Boolean).join("; ");
+  /**
+   * A sheet metal cut, as far past its own sheet as `reach` says. Which way is into the sheet is not in
+   * SolidWorks' definition in a form that can be read off directly: each way is tried, and the one kept
+   * that makes the most of SolidWorks' walls of the cut where they are, and then whose faces come
+   * nearest SolidWorks' in area.
+   */
+  function sheetCut(f, sketch, reach, frame) {
+    const op = { op: "sheet_cut", sketch, name: f.name };
+    if (!reach) return build(f, op);
+    let { warning, upTo, ...fields } = reach;
+    if (upTo) {
+      // As deep as the walls go from the sketch's plane, either way
+      const reach = facesOf(f.name).filter(face => face.box).flatMap(face => [mm(face.box.slice(0, 3)), mm(face.box.slice(3))]).map(p => Math.abs(dot(sub(p, frame.o), frame.n)));
+      if (reach.length) fields.depth = tidy(Math.max(...reach) + 0.01);
+      else { fields = { end: "through_all", ...(fields.both ? { both: true } : {}) }; warning = "SolidWorks' cut goes up to a surface, and none of its walls is in SolidWorks' body to say where: it is cut through all"; }
+    }
+    const theirs = facesOf(f.name).reduce((sum, face) => sum + face.area * 1e6, 0);
+    const mark = peet.script.length;
+    let best = null;
+    for (const reverse of [false, true]) {
+      const tried = build(f, { ...op, ...fields, ...(reverse ? { reverse } : {}) });
+      if (!tried.ok) { if (!best) best = { failed: tried }; continue; }
+      const ours = (peet.ask({ op: "faces" }).faces || []).filter(x => (x.made_by || []).some(m => tried.names.includes(m.feature))).reduce((sum, x) => sum + x.area_mm2, 0);
+      const off = Math.abs(ours - theirs), planes = wallsMatched(f.name, tried.names);
+      peet.apply({ op: "delete", features: tried.names });
+      if (!best || best.failed || planes > best.planes + 1e-6 || (planes > best.planes - 1e-6 && off < best.off - 1e-6)) best = { reverse, off, planes };
+    }
+    peet.script.length = mark;
+    if (best.failed) return best.failed;
+    const built = build(f, { ...op, ...fields, ...(best.reverse ? { reverse: true } : {}) });
+    if (built.ok && warning) built.warning = warning;
+    return built;
   }
 
   const values = f => (f.definition && f.definition.values) || {};
@@ -1386,6 +1338,7 @@ function importPart(doc, dir) {
           ...ownRelief,
           // A bend allowance of the flange's own
           ...(v.UseDefaultBendAllowance === false && v.GetCustomBendAllowance ? { bend: bendOf(v) } : {}),
+          ...zeroRadiusBend(v, radius),
         };
         let built;
         if (ops.length === 1) built = buildFlange(f, { ...common, edge: ops[0].edge, ...ops[0].offsets });
@@ -1525,16 +1478,15 @@ function importPart(doc, dir) {
         if (sheetPart) {
           if (end === 0 && !v.LinkToThickness && thickness && depth < thickness - 1e-6)
             return record(f, "not supported", `a cut ${tidy(depth)} mm deep into ${tidy(thickness)} mm sheet (an etch): sheet metal cuts go through`);
+          const reach = reachOf(end, depth, v.BothDirections);
           const sk = useSketch(f);
-          let built = sk.error ? { ok: false, message: sk.error } : build(f, { op: "sheet_cut", sketch: sk.name, name: f.name });
-          let used = sk;
+          let built = sk.error ? { ok: false, message: sk.error } : sheetCut(f, sk.name, reach, sk.frame);
           if (!built.ok && sketchOf(f)) {
             // A sheet metal cut's sketch has to be on a face of the sheet. One on a plane is put on the face there.
             const moved = useSketch(f, { name: f.name + " sketch", needFace: true });
-            if (!moved.error) { built = build(f, { op: "sheet_cut", sketch: moved.name, name: f.name }); used = moved; }
+            if (!moved.error) built = sheetCut(f, moved.name, reach, moved.frame);
             if (!built.ok && !moved.error) peet.apply({ op: "delete", feature: moved.name });
           }
-          if (built.ok && used.frame) throughToo(f, built, [...cutThrough(f, used.frame), ...cutAcross(f)]);
           return finish(f, built);
         }
         const sk = useSketch(f);
@@ -1628,9 +1580,9 @@ function importPart(doc, dir) {
           const draw = toPeet => points.map(p => ({ type: "circle", center: toPeet(p), radius: tidy(diameter / 2) }));
           const sk = importSketch(where, { name: f.name + " sketch", needFace: true, draw });
           if (sk.error) return record(f, "failed", sk.error);
-          const built = build(f, { op: "sheet_cut", sketch: sk.name, name: f.name });
+          const reach = reachOf(v.EndCondition, (v.HoleDepth || v.ThruHoleDepth || 0) * MM, false);
+          const built = sheetCut(f, sk.name, reach, sk.frame);
           if (!built.ok) peet.apply({ op: "delete", feature: sk.name });
-          else throughToo(f, built, cutThrough(f, sk.frame, { source: where, draw }));
           return finish(f, built);
         }
         const sk = importSketch(where, { name: f.name + " sketch", draw: toPeet => points.map(p => ({ type: "point", at: toPeet(p) })) });

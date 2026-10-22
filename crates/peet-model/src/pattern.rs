@@ -126,6 +126,8 @@ pub(crate) enum Seed<'a> {
         plane: Plane,
         sketch: &'a Sketch,
         face: Option<FaceRef>,
+        /// How far past its own sheet the cut reaches (see [`crate::sheet::sheet_cut_reach`]).
+        reach: Option<(f64, f64)>,
     },
     Form {
         plane: Plane,
@@ -340,6 +342,7 @@ fn sheet_copies(
             plane,
             sketch,
             face,
+            ..
         }
         | Seed::Form {
             plane,
@@ -371,7 +374,7 @@ fn sheet_copies(
                 .truncate()
         };
         match seed {
-            Seed::SheetCut { .. } => {
+            Seed::SheetCut { reach, .. } => {
                 let profile = find_regions(sketch);
                 let regions: Vec<_> = default_regions(&profile)
                     .into_iter()
@@ -393,6 +396,26 @@ fn sheet_copies(
                         other => other,
                     });
                 layout.add_cut(area);
+                // As far past its own sheet as the original goes
+                if let Some(span) = *reach {
+                    let mut done = vec![false; layout.pieces.len()];
+                    done[on.piece] = true;
+                    let into = m.vector(on.frame.z_axis() * if on.top { -1.0 } else { 1.0 });
+                    let world = |p: peet_math::DVec2| m.point(plane.from_plane_coords(p));
+                    let beyond =
+                        crate::sheet::cut_beyond(&layout, &done, &world, into, span, &regions, feature.0);
+                    for (area, pieces) in beyond {
+                        let area = area.retagged(|t| match t {
+                            CurveTag::Generated { owner, part, index } => CurveTag::Generated {
+                                owner,
+                                part: part ^ (copy << 16),
+                                index,
+                            },
+                            other => other,
+                        });
+                        layout.add_cut_on(area, pieces);
+                    }
+                }
                 made += 1;
             }
             Seed::Form { def, height, .. } => {
