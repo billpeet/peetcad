@@ -1786,3 +1786,26 @@ fn sketched_bend_carries_forms() {
     let err = through.add_sketched_bend(2, 0, 0, line, &spec).unwrap_err();
     assert!(err.contains("dimple"), "{err}");
 }
+
+#[test]
+fn cut_that_grazes_an_edge() {
+    // A cut that reaches three microns into the plate across its bottom edge, as an imported
+    // cut drawn a hair off the edge it was meant to stop at does (P34). Its two sides inside
+    // the plate are a few microns long, and the walls through the sheet along them would
+    // enclose no area: they are left out and the notch with them.
+    let mut layout = plate_layout(settings(0.5));
+    layout.add_cut(Area::polygon(
+        &[
+            DVec2::new(45.0, -5.0),
+            DVec2::new(55.0, -5.0),
+            DVec2::new(50.0, 3e-6),
+        ],
+        |i| CurveTag::Sketch {
+            owner: 3,
+            entity: i as u32,
+        },
+    ));
+    let (solid, body) = built(layout);
+    assert_close(measure::volume(&solid), W * H * T, 1e-6);
+    assert_eq!(body.outline.len(), 1);
+}

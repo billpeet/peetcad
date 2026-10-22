@@ -685,6 +685,65 @@ fn close(a: DVec2, b: DVec2) -> bool {
     a.distance(b) <= SAME_POINT
 }
 
+/// The flat pattern's edges without boundary edges shorter than [`SAME_POINT`], each one's
+/// two vertex groups joined into one.
+///
+/// Two curves that nearly meet (a cut drawn a micron off an edge it is meant to run along,
+/// an arc that dips a micron past a line) cross the arrangement's own tolerance and leave a
+/// boundary edge a micron or so long. Its wall through the sheet encloses no area. The
+/// edges on either side of it end within [`SAME_POINT`] of the joined vertex, which is
+/// as close as the body's vertices are held to their curves.
+fn drop_short_edges(edges: Vec<FEdge>, faces: &mut [MFace], uf: &mut UnionFind) -> Vec<FEdge> {
+    let short: Vec<bool> = edges
+        .iter()
+        .map(|e| e.twin.is_none() && e.curve.length() < SAME_POINT)
+        .collect();
+    if !short.contains(&true) {
+        return edges;
+    }
+    let mut drop = vec![false; edges.len()];
+    for f in faces.iter() {
+        for l in &f.loops {
+            // A loop of nothing but short edges is left whole: it is a face of its own,
+            // which validation reports.
+            if l.iter().filter(|&&e| !short[e]).count() >= 2 {
+                for &e in l.iter().filter(|&&e| short[e]) {
+                    drop[e] = true;
+                }
+            }
+        }
+    }
+    for (e, edge) in edges.iter().enumerate() {
+        if drop[e] {
+            uf.union(edge.start, edge.end);
+        }
+    }
+    let mut index = vec![usize::MAX; edges.len()];
+    let mut kept = Vec::with_capacity(edges.len());
+    for (e, edge) in edges.into_iter().enumerate() {
+        if !drop[e] {
+            index[e] = kept.len();
+            kept.push(edge);
+        }
+    }
+    for edge in &mut kept {
+        edge.start = uf.find(edge.start);
+        edge.twin = edge.twin.map(|t| index[t]);
+    }
+    for f in faces.iter_mut() {
+        for l in &mut f.loops {
+            l.retain(|&e| !drop[e]);
+            for e in l.iter_mut() {
+                *e = index[*e];
+            }
+            for k in 0..l.len() {
+                kept[l[k]].next = l[(k + 1) % l.len()];
+            }
+        }
+    }
+    kept
+}
+
 /// Whether the edge from `a` to `b` lies on the line through `o` along `dir`, within
 /// `0..=len` of it.
 fn on_line(a: DVec2, b: DVec2, o: DVec2, dir: DVec2, len: f64) -> bool {
@@ -1005,6 +1064,7 @@ impl Flat {
                 edges[e].twin = edge_of_half.get(&t).copied();
             }
         }
+        let mut edges = drop_short_edges(edges, &mut faces, &mut uf);
         // `end` must be the group of the following edge's start (merging skipped corners).
         for e in 0..edges.len() {
             let next = edges[e].next;
