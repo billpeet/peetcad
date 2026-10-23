@@ -1113,22 +1113,71 @@ function importPart(doc, dir) {
       if (reach.length) fields.depth = tidy(Math.max(...reach) + 0.01);
       else { fields = { end: "through_all", ...(fields.both ? { both: true } : {}) }; warning = "SolidWorks' cut goes up to a surface, and none of its walls is in SolidWorks' body to say where: it is cut through all"; }
     }
+    const built = nearest(f, [false, true].map(reverse => ({ ...op, ...fields, ...(reverse ? { reverse } : {}) })));
+    if (built.ok && warning) built.warning = warning;
+    return built;
+  }
+
+  /**
+   * Of several ways to build a feature, the one that comes out nearest SolidWorks': that makes the most of
+   * SolidWorks' flat faces of it where they are, and then whose faces come nearest SolidWorks' in area. Each
+   * is built and taken back again, and the tries are left out of the script.
+   */
+  function nearest(f, ops) {
     const theirs = facesOf(f.name).reduce((sum, face) => sum + face.area * 1e6, 0);
     const mark = peet.script.length;
     let best = null;
-    for (const reverse of [false, true]) {
-      const tried = build(f, { ...op, ...fields, ...(reverse ? { reverse } : {}) });
+    for (const op of ops) {
+      const tried = build(f, op);
       if (!tried.ok) { if (!best) best = { failed: tried }; continue; }
       const ours = (peet.ask({ op: "faces" }).faces || []).filter(x => (x.made_by || []).some(m => tried.names.includes(m.feature))).reduce((sum, x) => sum + x.area_mm2, 0);
       const off = Math.abs(ours - theirs), planes = wallsMatched(f.name, tried.names);
       peet.apply({ op: "delete", features: tried.names });
-      if (!best || best.failed || planes > best.planes + 1e-6 || (planes > best.planes - 1e-6 && off < best.off - 1e-6)) best = { reverse, off, planes };
+      if (!best || best.failed || planes > best.planes + 1e-6 || (planes > best.planes - 1e-6 && off < best.off - 1e-6)) best = { op, off, planes };
     }
     peet.script.length = mark;
-    if (best.failed) return best.failed;
-    const built = build(f, { ...op, ...fields, ...(best.reverse ? { reverse: true } : {}) });
-    if (built.ok && warning) built.warning = warning;
-    return built;
+    return best.failed ? best.failed : build(f, best.op);
+  }
+
+  /**
+   * A reference plane turned about one of the model's axes: a standard plane through that axis turned to
+   * it, then a plane offset from that one to where SolidWorks has it. Which standard plane, which way round
+   * and which side are tried until the plane comes out where SolidWorks' is. It is a fixed plane, as the
+   * offset planes are.
+   */
+  function turnedPlane(f, pf) {
+    const name = f.name.trim();
+    const about = ["x", "y", "z"].find(k => Math.abs(dot(pf.n, AXES[k])) < 1e-9);
+    if (!about) return record(f, "not supported", "a plane that is not square to a plane of the model");
+    const bases = { x: [["top", "z"], ["front", "y"]], y: [["top", "z"], ["right", "x"]], z: [["front", "y"], ["right", "x"]] }[about];
+    const distance = tidy(Math.abs(dot(pf.o, pf.n)));
+    const mark = peet.script.length;
+    for (const [base, normal] of bases) {
+      const turn = Math.acos(Math.min(1, Math.abs(dot(pf.n, AXES[normal])))) * 180 / Math.PI;
+      for (const angle of [turn, -turn, 180 - turn, turn - 180]) {
+        const turned = name + " turned";
+        if (!peet.apply({ op: "plane", from: base, about, angle: tidy(angle), name: turned }).ok) continue;
+        const at = probe(turned);
+        // (Replies give a turned normal to six places)
+        const parallel = q => q && Math.abs(Math.abs(dot(q.n, pf.n)) - 1) < 1e-5;
+        if (!parallel(at)) { peet.apply({ op: "delete", feature: turned }); continue; }
+        for (const flip of distance > 1e-9 ? [false, true] : [false]) {
+          if (!peet.apply({ op: "plane", from: turned, distance, flip, name }).ok) continue;
+          const where = probe(name);
+          if (parallel(where) && Math.abs(dot(sub(where.o, pf.o), pf.n)) < 1e-3) {
+            peet.script.length = mark;
+            peet.apply({ op: "plane", from: base, about, angle: tidy(angle), name: turned });
+            peet.apply({ op: "plane", from: turned, distance, flip, name });
+            planes.set(f.name, name);
+            return record(f, "imported", "as a fixed plane turned about an axis");
+          }
+          peet.apply({ op: "delete", feature: name });
+        }
+        peet.apply({ op: "delete", feature: turned });
+      }
+    }
+    peet.script.length = mark;
+    return record(f, "failed", "the plane did not come out where SolidWorks has it");
   }
 
   const values = f => (f.definition && f.definition.values) || {};
@@ -1182,7 +1231,7 @@ function importPart(doc, dir) {
       // A plane square to an axis is an offset of a standard plane. It is where SolidWorks has it, but it
       // no longer follows what it was defined from.
       const axis = ["x", "y", "z"].find(k => Math.abs(Math.abs(dot(pf.n, AXES[k])) - 1) < 1e-9);
-      if (!axis) return record(f, "not supported", "a plane that is not square to an axis");
+      if (!axis) return turnedPlane(f, pf);
       const from = { x: "right", y: "front", z: "top" }[axis];
       const distance = Math.abs(dot(pf.o, AXES[axis]));
       // PeetCAD trims the spaces off a name ("Hood Zenith ")
@@ -1449,13 +1498,26 @@ function importPart(doc, dir) {
           const sk = useSketch(f);
           if (sk.error) return { ok: false, message: sk.error };
           const end = v["GetEndCondition(true)"];
-          if (![0, 6].includes(end)) return { ok: false, unsupported: true, message: `an extrusion with end condition ${end}` };
+          if (![0, 3, 4, 5, 6].includes(end)) return { ok: false, unsupported: true, message: `an extrusion with end condition ${end}` };
           if (v.BothDirections && end !== 6) return { ok: false, unsupported: true, message: "an extrusion in both directions" };
-          const along = mul(frameOf(sketchOf(f).sketch.modelToSketch).n, v.ReverseDirection ? -1 : 1);
-          return build(f, {
-            op: "extrude", sketch: sk.name, name: f.name, depth: tidy(v["GetDepth(true)"] * MM),
+          const sf = frameOf(sketchOf(f).sketch.modelToSketch);
+          let along = mul(sf.n, v.ReverseDirection ? -1 : 1);
+          let depth = v["GetDepth(true)"] * MM;
+          if ([3, 4, 5].includes(end)) {
+            // Up to a vertex or a surface: as far as SolidWorks' faces of it go from the sketch's plane, on
+            // the side they are on
+            const levels = facesOf(f.name).filter(face => face.box).flatMap(face => [mm(face.box.slice(0, 3)), mm(face.box.slice(3))]).map(p => dot(sub(p, sf.o), sf.n));
+            if (!levels.length) return { ok: false, unsupported: true, message: `an extrusion up to something (end condition ${end}) whose faces are not in SolidWorks' body` };
+            const [lo, hi] = [Math.min(...levels), Math.max(...levels)];
+            along = hi >= -lo ? sf.n : mul(sf.n, -1);
+            depth = Math.max(hi, -lo);
+          }
+          const built = build(f, {
+            op: "extrude", sketch: sk.name, name: f.name, depth: tidy(depth),
             ...(end === 6 ? { end: "mid_plane" } : {}), reverse: dot(along, sk.frame.n) < 0,
           });
+          if (built.ok && [3, 4, 5].includes(end)) built.warning = [built.warning, `it goes up to something in SolidWorks (end condition ${end}): it is made as deep as it went there`].filter(Boolean).join("; ");
+          return built;
         };
         if (boss) {
           const built = extrude();
@@ -1485,10 +1547,8 @@ function importPart(doc, dir) {
         if (sk.error) return record(f, "failed", sk.error);
         const shape = end === 0 ? { end: "blind", depth: tidy(depth) } : end === 6 ? { end: "mid_plane", depth: tidy(depth) } : { end: "through_all" };
         let built;
-        for (const reverse of [false, true]) {
-          built = build(f, { op: "cut", sketch: sk.name, name: f.name, ...shape, reverse });
-          if (built.ok) break;
-        }
+        // Which way it goes: the way that cuts where SolidWorks' cut did
+        built = nearest(f, [false, true].map(reverse => ({ op: "cut", sketch: sk.name, name: f.name, ...shape, reverse })));
         if (built.ok && ![0, 1, 6, 9].includes(end)) built.warning = `SolidWorks' end condition ${end} is cut through all`;
         if (!built.ok && unsure) {
           const added = extrude();

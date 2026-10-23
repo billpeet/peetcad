@@ -508,13 +508,26 @@ pub(crate) fn apply_sheet_cut(
             layout.add_cut_on(area, pieces);
         }
     }
+    // A shape over sheet that an earlier cut has taken away already: SolidWorks keeps such a
+    // cut (a pattern of it can cut elsewhere), so it stays, with a warning.
+    let over_sheet = regions.iter().any(|r| {
+        let (lo, hi) = r.outer.bounds();
+        let c = (lo + hi) / 2.0;
+        r.contains(c) && layout.pieces[on_piece].covers(to_flat(c))
+    });
     let before = peet_kernel::validate::measure::volume(&body.solid);
-    let (new, warning) = sheet_body(model, layout, body.origin, stamp(seed, found.body))?;
+    let (new, mut warning) = sheet_body(model, layout, body.origin, stamp(seed, found.body))?;
     let after = peet_kernel::validate::measure::volume(&new.solid);
     if (before - after).abs() <= 1e-9 * before.abs().max(1.0) {
-        return Err(FeatureError(
-            "The cut doesn't remove any material: its shape is off the sheet.".to_owned(),
-        ));
+        if !over_sheet {
+            return Err(FeatureError(
+                "The cut doesn't remove any material: its shape is off the sheet.".to_owned(),
+            ));
+        }
+        warning.get_or_insert_with(|| {
+            "The cut removes nothing: an earlier cut has taken the sheet there away already."
+                .to_owned()
+        });
     }
     let mut out = bodies.to_vec();
     out[found.body] = Arc::new(new);
