@@ -272,6 +272,42 @@ fn rounded_profile_mixes_surfaces() {
 }
 
 #[test]
+fn spheres_and_tori_are_bounded_exactly() {
+    // The box of a ball, a ring and a puck with rounded rims is the shape's own, not a
+    // sampled one with a margin.
+    let exact = |s: &Solid, lo: DVec3, hi: DVec3| {
+        let b = s.bounds();
+        assert!(
+            b.min.abs_diff_eq(lo, 1e-9) && b.max.abs_diff_eq(hi, 1e-9),
+            "{b:?}"
+        );
+    };
+    exact(&ball(5.0), DVec3::splat(-5.0), DVec3::splat(5.0));
+    exact(
+        &ring(10.0, 3.0),
+        v3(-13.0, -13.0, -3.0),
+        v3(13.0, 13.0, 3.0),
+    );
+    let mut s = Sketch::new();
+    s.add_line(v2(0.0, 0.0), v2(8.0, 0.0));
+    s.add_arc(v2(8.0, 2.0), v2(8.0, 0.0), v2(10.0, 2.0));
+    s.add_line(v2(10.0, 2.0), v2(10.0, 4.0));
+    s.add_arc(v2(8.0, 4.0), v2(10.0, 4.0), v2(8.0, 6.0));
+    s.add_line(v2(8.0, 6.0), v2(0.0, 6.0));
+    s.add_line(v2(0.0, 6.0), v2(0.0, 0.0));
+    exact(
+        &full(&s, v2(4.0, 3.0)),
+        v3(-10.0, -10.0, 0.0),
+        v3(10.0, 10.0, 6.0),
+    );
+    // Part of a ring: a quarter turn of the tube, from +X towards +Y.
+    let mut s = Sketch::new();
+    s.add_circle(v2(10.0, 0.0), 3.0);
+    let quarter = turned(&s, v2(10.5, 0.5), 0.0, FRAC_PI_2);
+    exact(&quarter, v3(0.0, 0.0, -3.0), v3(13.0, 13.0, 3.0));
+}
+
+#[test]
 fn partial_turns() {
     let s = polygon(&[v2(2.0, 0.0), v2(5.0, 0.0), v2(5.0, 4.0), v2(2.0, 4.0)]);
     let quarter = turned(&s, v2(3.0, 2.0), 0.0, FRAC_PI_2);

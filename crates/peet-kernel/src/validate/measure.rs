@@ -14,7 +14,7 @@
 
 use std::f64::consts::FRAC_PI_8;
 
-use peet_math::{Aabb, DVec2, DVec3};
+use peet_math::{Aabb, DVec2, DVec3, Frame};
 
 use crate::Solid;
 use crate::geom::{Curve3, Surface, pole_exit};
@@ -290,31 +290,33 @@ fn integrand(
     }
 }
 
-/// Bounds of the part of a sphere or torus a face covers, beyond what its edges reach: a
-/// doubly curved face bulges out between its edges. Empty for other surfaces, whose faces
-/// stay within the bounds of their edges.
+///// Bounds of the part of a sphere, torus or freeform surface a face covers, beyond what its
+/// edges reach: a doubly curved face bulges out between its edges. Empty for other
+/// surfaces, whose faces stay within the bounds of their edges.
+///
+/// Over the face's part of its parameter rectangle: exact for a sphere or torus; for a
+/// freeform surface, sampled, with a margin for how far it can leave its samples' chords.
 pub(crate) fn bulge_bounds(solid: &Solid, face: FaceId) -> Aabb {
     const GRID: usize = 48;
     let f = solid.face(face);
     let mut b = Aabb::EMPTY;
-    // The radii the surface curves with around its axis and along its meridian.
-    let (around, along) = match &f.surface {
-        Surface::Sphere(s) => (s.radius, s.radius),
-        Surface::Torus(t) => (t.major + t.minor, t.minor),
+    let Some(&outer) = f.loops.first() else {
+        return b;
+    };
+    let m = loop_integrals(solid, outer, DVec3::ZERO);
+    let (lo, hi) = (
+        DVec2::new(m.theta_range.0, m.v_range.0),
+        DVec2::new(m.theta_range.1, m.v_range.1),
+    );
+    if !(lo.x <= hi.x && lo.y <= hi.y) {
+        return b;
+    }
+    match &f.surface {
+        Surface::Sphere(s) => revolved_bounds(&s.frame, 0.0, s.radius, lo, hi),
+        Surface::Torus(t) => revolved_bounds(&t.frame, t.major, t.minor, lo, hi),
         Surface::Nurbs(s) => {
             // Sampled over the face's part of the parameter rectangle; between samples
             // the surface leaves their chords by at most |S''| h² / 8.
-            let Some(&outer) = f.loops.first() else {
-                return b;
-            };
-            let m = loop_integrals(solid, outer, DVec3::ZERO);
-            let (lo, hi) = (
-                DVec2::new(m.theta_range.0, m.v_range.0),
-                DVec2::new(m.theta_range.1, m.v_range.1),
-            );
-            if !(lo.x <= hi.x && lo.y <= hi.y) {
-                return b;
-            }
             for i in 0..=GRID {
                 for j in 0..=GRID {
                     let at = DVec2::new(i as f64, j as f64) / GRID as f64;
@@ -324,39 +326,63 @@ pub(crate) fn bulge_bounds(solid: &Solid, face: FaceId) -> Aabb {
             let step = (hi - lo) / GRID as f64;
             let bend = s.bend();
             let margin = (bend.x * step.x * step.x + bend.y * step.y * step.y) / 8.0;
-            return Aabb {
+            Aabb {
                 min: b.min - DVec3::splat(margin),
                 max: b.max + DVec3::splat(margin),
-            };
+            }
         }
-        _ => return b,
-    };
-    let Some(&outer) = f.loops.first() else {
-        return b;
-    };
-    let m = loop_integrals(solid, outer, DVec3::ZERO);
-    let ((u0, u1), (v0, v1)) = (m.theta_range, m.v_range);
-    if !(u0 <= u1 && v0 <= v1) {
-        return b;
-    }
-    for i in 0..=GRID {
-        for j in 0..=GRID {
-            let f_ij = DVec2::new(i as f64, j as f64) / GRID as f64;
-            let uv = DVec2::new(u0 + (u1 - u0) * f_ij.x, v0 + (v1 - v0) * f_ij.y);
-            b.extend(f.surface.point(uv));
-        }
-    }
-    // Between the grid's points the surface leaves their chords by at most the sagitta
-    // in each direction.
-    let sagitta = |radius: f64, span: f64| radius * (1.0 - (0.5 * span / GRID as f64).cos());
-    let margin = sagitta(around, u1 - u0) + sagitta(along, v1 - v0);
-    Aabb {
-        min: b.min - DVec3::splat(margin),
-        max: b.max + DVec3::splat(margin),
+        _ => b,
     }
 }
 
-/// Area of a face (mm²): the outer loop's area minus its holes, from the loops' signed
+/// The exact bounds of a surface of revolution whose meridian is a circle of `radius`
+/// centred `offset` from the frame's Z axis (a sphere at 0, a torus at its major radius),
+/// over the parameters `lo..hi` (`u` around the axis, `v` around the meridian circle).
+///
+/// Its points are `o + ρ(v) (cos u X + sin u Y) + z(v) Z` with `ρ = offset + radius cos v`
+/// (not negative over a face) and `z = radius sin v`. In a direction `d` that is
+/// `d·o + ρ(v) g(u) + z(v) c`: the furthest `u` is the same for every `v` (an end of the
+/// range or where `g` peaks), and for it the furthest `v` is an end or where
+/// `g cos v + c sin v` peaks.
+fn revolved_bounds(frame: &Frame, offset: f64, radius: f64, lo: DVec2, hi: DVec2) -> Aabb {
+    use std::f64::consts::TAU;
+    // The parameters in [from, to] among an end and the angle `peak` plus whole turns.
+    let candidates = |from: f64, to: f64, peak: f64| {
+        let mut out = vec![from, to];
+        let k0 = ((from - peak) / TAU).ceil() as i64;
+        let mut k = k0;
+        while peak + k as f64 * TAU <= to && k < k0 + 4 {
+            out.push(peak + k as f64 * TAU);
+            k += 1;
+        }
+        out
+    };
+    let o = frame.origin;
+    let (x, y, z) = (frame.x_axis(), frame.y_axis(), frame.z_axis());
+    let furthest = |d: DVec3| -> f64 {
+        let (a, bb, c) = (d.dot(x), d.dot(y), d.dot(z));
+        let mut best = f64::NEG_INFINITY;
+        for u in candidates(lo.x, hi.x, bb.atan2(a)) {
+            let g = a * u.cos() + bb * u.sin();
+            for v in candidates(lo.y, hi.y, c.atan2(g)) {
+                let reach = (offset + radius * v.cos()) * g + radius * v.sin() * c;
+                best = best.max(reach);
+            }
+        }
+        d.dot(o) + best
+    };
+    let mut min = DVec3::ZERO;
+    let mut max = DVec3::ZERO;
+    for axis in 0..3 {
+        let mut d = DVec3::ZERO;
+        d[axis] = 1.0;
+        max[axis] = furthest(d);
+        min[axis] = -furthest(-d);
+    }
+    Aabb { min, max }
+}
+
+// Area of a face (mm²): the outer loop's area minus its holes, from the loops' signed
 /// parameter-space areas. Positive for a correctly oriented face.
 pub fn face_area(solid: &Solid, face: FaceId) -> f64 {
     let f = solid.face(face);
