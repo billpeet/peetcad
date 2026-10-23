@@ -322,6 +322,26 @@ stays sheet metal (`fillet` and `chamfer` turn it into a plain solid).
 {"op": "sheet_cut", "sketch": "Notch", "end": "through_all", "reverse": true}
 ```
 
+- **A cut sketched off the sheet's faces**, as SolidWorks' cut-extrude can be: on a plane
+  (`plane` first, where the cut starts), or on the sheet's edge, the face along a flange's
+  end that is as wide as the sheet is thick. Give it an `end` (`blind` with `depth`, or
+  `through_all`): it goes in against the sketch's normal (into the face, for an edge face;
+  `reverse` the other way) and cuts what its reach takes in, as above. A rectangle drawn
+  on a flange's end face and cut `blind` notches the flange edge-on, as deep as `depth`;
+  `through_all` takes the flange and its bend away there. With the default `end` it cuts
+  only flanges with a face in the sketch's plane, and fails if there are none.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Side", "length": 20, "edge": {"between": [[0, 0, 2], [100, 0, 2]]}}
+{"op": "sketch", "name": "Slot", "on": {"at": [50, 1, 20], "normal": [0, 0, 1]}, "draw": [{"type": "rectangle", "from": [40, -5], "to": [60, 5]}]}
+{"op": "sheet_cut", "sketch": "Slot", "end": "blind", "depth": 8}
+{"op": "plane", "from": "right", "distance": 90, "name": "End cut"}
+{"op": "sketch", "name": "Trim", "on": "End cut", "draw": [{"type": "rectangle", "from": [-5, -5], "to": [70, 30]}]}
+{"op": "sheet_cut", "sketch": "Trim", "end": "through_all", "reverse": true}
+```
+
 - **Mirrors and patterns of flanges.** `mirror`, `linear_pattern` and
   `circular_pattern` copy an `edge_flange` as SolidWorks does: each copy is the same
   flange on the edge the motion takes the original's edge to, bent the way the motion
