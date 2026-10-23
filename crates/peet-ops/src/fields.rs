@@ -563,25 +563,28 @@ reference_field!(OptPlane, Option<PlaneSel>, Option<PlaneRef>, required: true, n
     read: |p, doc| p.as_ref().map_or(Value::Null, |p| plane_out(p, doc)),
     arg: |p, _| p.clone().map(Into::into));
 reference_field!(EndF, End, EndCondition, required: false, nullable: false,
-"blind | mid_plane | through_all | {\"up_to\": plane}",
+"blind | mid_plane | through_all | through_next | {\"up_to\": plane}",
 parse: End::parse,
 assign: |a, doc| Ok(match a {
     End::Blind => EndCondition::Blind,
     End::MidPlane => EndCondition::Symmetric,
     End::ThroughAll => EndCondition::ThroughAll,
     End::UpTo(p) => EndCondition::UpTo(select::plane(doc, p)?.0),
+    End::ThroughNext => EndCondition::ThroughNext,
 }),
 read: |e, doc| match e {
     EndCondition::Blind => json!("blind"),
     EndCondition::Symmetric => json!("mid_plane"),
     EndCondition::ThroughAll => json!("through_all"),
     EndCondition::UpTo(p) => json!({ "up_to": plane_out(p, doc) }),
+    EndCondition::ThroughNext => json!("through_next"),
 },
 arg: |e, _| match e {
     EndCondition::Blind => End::Blind,
     EndCondition::Symmetric => End::MidPlane,
     EndCondition::ThroughAll => End::ThroughAll,
     EndCondition::UpTo(p) => End::UpTo(p.clone().into()),
+    EndCondition::ThroughNext => End::ThroughNext,
 });
 reference_field!(RegionsF, Regions, RegionSelection, required: false, nullable: false,
 "\"auto\", or a list of sketch points [x, y] inside the regions to use",

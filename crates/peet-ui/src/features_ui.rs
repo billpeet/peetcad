@@ -498,6 +498,7 @@ pub fn extrude_panel(
                         EndCondition::Blind,
                         EndCondition::Symmetric,
                         EndCondition::ThroughAll,
+                        EndCondition::ThroughNext,
                     ] {
                         let label = end.label();
                         if ui

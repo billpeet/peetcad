@@ -26,7 +26,18 @@ selectors`). `peet ops NAME` gives a feature's fields. Change one later with
   the sketch is on. `"reverse": true` turns either round. If a cut "doesn't reach any
   body", it went the wrong way or its sketch is not on the body.
 - `end`: `"blind"` (uses `depth`), `"mid_plane"` (`depth` split to both sides),
-  `"through_all"`, or `{"up_to": plane}`.
+  `"through_all"`, `"through_next"`, or `{"up_to": plane}`.
+- `"through_next"` is SolidWorks' "up to next": a `cut` goes on until it has come out of
+  the first material in its way, so holes through one wall of a channel stop there and
+  leave the wall across from it; an `extrude` goes until it meets material. If there is
+  nothing in its way it fails: reverse it, or use `through_all`.
+
+```jsonl
+{"op": "sketch", "on": "top", "name": "Channel", "draw": [{"type": "polyline", "closed": true, "points": [[0, 0], [60, 0], [60, 40], [54, 40], [54, 6], [6, 6], [6, 40], [0, 40]]}]}
+{"op": "extrude", "sketch": "Channel", "depth": 100}
+{"op": "sketch", "on": {"at": [0, 20, 50], "normal": [-1, 0, 0]}, "name": "Bolt holes", "draw": [{"type": "circle", "center": [20, -30], "radius": 4}, {"type": "circle", "center": [20, -70], "radius": 4}]}
+{"op": "cut", "sketch": "Bolt holes", "end": "through_next"}
+```
 - `operation`: `"add"` joins the bodies it touches (and is a new body if it touches
   none), `"new_body"` always makes a separate body, `"cut"` removes.
 - A sketch with several regions extrudes all the outer ones, with regions inside them as

@@ -27,6 +27,10 @@ pub enum EndCondition {
     ThroughAll,
     /// Up to a plane or planar face parallel to the sketch.
     UpTo(PlaneRef),
+    /// Up to the next surface in its way, as SolidWorks' "up to next": a cut goes on
+    /// until it has come out of the first material it meets, an extrusion until it meets
+    /// material.
+    ThroughNext,
 }
 
 impl EndCondition {
@@ -36,6 +40,7 @@ impl EndCondition {
             Self::Symmetric => "Mid-plane",
             Self::ThroughAll => "Through all",
             Self::UpTo(_) => "Up to face",
+            Self::ThroughNext => "Up to next",
         }
     }
 
@@ -216,6 +221,7 @@ fn range(input: &ExtrudeInput<'_>) -> Result<(f64, f64), FeatureError> {
             }
             (0.0, (target.origin() - plane.origin()).dot(plane.normal()))
         }
+        EndCondition::ThroughNext => (0.0, s * up_to_next(input, s)?),
     };
     if !near.is_finite() || !far.is_finite() {
         return Err(FeatureError("The depth is not a finite number.".to_owned()));
@@ -226,6 +232,99 @@ fn range(input: &ExtrudeInput<'_>) -> Result<(f64, f64), FeatureError> {
         ));
     }
     Ok((near, far))
+}
+
+/// How far an extrusion with [`EndCondition::ThroughNext`] goes along the way it goes
+/// (`s` along the sketch normal). Rays from points spread over the regions find the
+/// material in the way: a cut goes to where the first material each ray meets ends, the
+/// furthest of them, so that the whole profile is through it; an extrusion goes to where
+/// the nearest ray meets material.
+fn up_to_next(input: &ExtrudeInput<'_>, s: f64) -> Result<f64, FeatureError> {
+    let regions = selected_regions(input.sketch, &input.params.regions, input.mirror)?;
+    let plane = input.plane;
+    let dir = plane.normal() * s;
+    // Points spread over the regions: the centres of their triangles
+    let mut starts = Vec::new();
+    for r in &regions {
+        let (lo, hi) = r.outer.bounds();
+        let t = triangulate_region(r, (lo.distance(hi) * 1e-3).max(1e-6));
+        for tri in &t.triangles {
+            let [a, b, c] = tri.map(|i| t.points[i as usize]);
+            starts.push(plane.from_plane_coords((a + b + c) / 3.0));
+        }
+    }
+    let step = (starts.len() / 400).max(1);
+    let starts: Vec<DVec3> = starts.into_iter().step_by(step).collect();
+    let meshes: Vec<Vec<[DVec3; 3]>> = input
+        .bodies
+        .iter()
+        .filter_map(|b| peet_kernel::tessellate::tessellate(&b.solid, 0.01).ok())
+        .map(|m| m.triangles())
+        .collect();
+    let cut = input.params.operation == Operation::Cut;
+    let eps = tolerance::LINEAR;
+    let mut reach: Option<f64> = None;
+    for o in starts {
+        // The first material along this ray, of any body: where it starts and ends
+        let mut first: Option<(f64, f64)> = None;
+        for tris in &meshes {
+            let mut hits: Vec<f64> = tris.iter().filter_map(|t| ray_triangle(o, dir, t)).collect();
+            hits.sort_by(f64::total_cmp);
+            hits.dedup_by(|a, b| (*a - *b).abs() < 1e-7);
+            // Inside at the start if an odd number of crossings lie behind it (a crossing
+            // where it starts counts as behind: the sketch is on that face)
+            let behind = hits.iter().filter(|&&t| t <= eps).count();
+            let mut inside = behind % 2 == 1;
+            let mut from = if inside { Some(0.0) } else { None };
+            for &t in hits.iter().filter(|&&t| t > eps) {
+                if inside {
+                    let span = (from.unwrap_or(0.0), t);
+                    if first.is_none_or(|f| span.0 < f.0) {
+                        first = Some(span);
+                    }
+                    break;
+                }
+                inside = true;
+                from = Some(t);
+            }
+        }
+        if let Some((enter, exit)) = first {
+            let to = if cut { exit } else { enter };
+            reach = Some(match reach {
+                None => to,
+                Some(r) if cut => r.max(to),
+                Some(r) => r.min(to),
+            });
+        }
+    }
+    match reach {
+        Some(r) if r > tolerance::LINEAR => Ok(r),
+        _ => Err(FeatureError(
+            "Up to next: there is nothing in its way. Try reversing the direction.".to_owned(),
+        )),
+    }
+}
+
+/// Where the ray `o + t d` meets a triangle, if it does: `t`.
+fn ray_triangle(o: DVec3, d: DVec3, [a, b, c]: &[DVec3; 3]) -> Option<f64> {
+    let (e1, e2) = (*b - *a, *c - *a);
+    let p = d.cross(e2);
+    let det = e1.dot(p);
+    if det.abs() < 1e-14 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let q = o - *a;
+    let u = q.dot(p) * inv;
+    if !(-1e-12..=1.0 + 1e-12).contains(&u) {
+        return None;
+    }
+    let r = q.cross(e1);
+    let v = d.dot(r) * inv;
+    if v < -1e-12 || u + v > 1.0 + 1e-12 {
+        return None;
+    }
+    Some(e2.dot(r) * inv)
 }
 
 /// The regions of `sketch` a feature is made from.

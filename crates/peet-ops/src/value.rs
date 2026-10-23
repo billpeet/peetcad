@@ -627,6 +627,7 @@ pub enum End {
     MidPlane,
     ThroughAll,
     UpTo(PlaneSel),
+    ThroughNext,
 }
 
 impl End {
@@ -640,8 +641,9 @@ impl End {
             Some("blind") => Ok(Self::Blind),
             Some("mid_plane") => Ok(Self::MidPlane),
             Some("through_all") => Ok(Self::ThroughAll),
+            Some("through_next") => Ok(Self::ThroughNext),
             _ => Err(format!(
-                "expected blind, mid_plane, through_all or {{\"up_to\": plane}}, not {v}"
+                "expected blind, mid_plane, through_all, through_next or {{\"up_to\": plane}}, not {v}"
             )),
         }
     }

@@ -306,7 +306,14 @@ with their defaults' types):
   (`reverse` away from it, `both` both ways), through the flanges parallel to the sketch
   that lie wholly within the reach, and across the flanges square to it where the
   sketch's outline crosses them, on across the bend at the end of one it goes past. The
-  default `end`, `sheet`, is through its own sheet only.
+  default `end`, `sheet`, is through its own sheet only. Its sketch can also be on a plane
+  or on the sheet's edge (a face through the thickness): with a reach it then cuts from
+  there, against the sketch's normal, whatever its reach takes in; without one, only the
+  flanges with a face in the sketch's plane. Its copies in a pattern or a mirror cut each
+  flange with a face in their plane, and one that lands off the sheet is left out with a
+  warning.
+- `extrude` and `cut` take `end` `through_next`, SolidWorks' "up to next": a cut goes until
+  it comes out of the first material in its way, an extrusion until it meets material.
 - `linear_pattern`, `circular_pattern` and `mirror` copy edge flanges too: each copy is the
   same flange on the edge the copy's motion takes the original's edge to, set back from its
   ends the other way round for a mirror.
