@@ -67,6 +67,10 @@ const fromSketch = (f, p) => add(add(add(f.o, mul(f.x, p.x * MM)), mul(f.y, p.y 
 const samePlane = (a, b) => Math.abs(Math.abs(dot(a.n, b.n)) - 1) < 1e-7 && Math.abs(dot(sub(a.o, b.o), b.n)) < 1e-4;
 /** A sketch point's place as a key: two points a tenth of a micron apart are one. */
 const spot = p => `${Math.round(p.x * 1e7)},${Math.round(p.y * 1e7)}`;
+/** A sketch text's point: the sketch point with the text's id (SolidWorks lists it with the points). */
+const textPoint = (s, g) => s.points.find(p => p.id && p.id.join() === g.id.join()) || null;
+/** The fonts a text is fitted with, where the export does not say: SolidWorks' default and its styles. */
+const TEXT_FONTS = ["Century Gothic", "Century Gothic Bold", "Century Gothic Italic", "Century Gothic Bold Italic"];
 /**
  * A sketch with the segments of its blocks among its own. A block is a group of segments drawn once and
  * placed by a transform; PeetCAD sketches have no blocks, so each instance's segments are drawn where it puts
@@ -350,10 +354,21 @@ function importPart(doc, dir) {
           items.push({ type: "arc", center: toPeet(g.center), start: toPeet(start), end: toPeet(end), ...construction, as });
           ends.push([as + ".start", toPeet(start)], [as + ".end", toPeet(end)]);
           own.push({ g, as, turned: !ccw });
-        } else left.add(g.type);
+        } else if (g.type === "text" && sameHand) {
+          // Its point is the sketch point with the text's id. The export has no font, height or angle:
+          // they are fitted to SolidWorks' faces of the feature that uses the sketch, once it is drawn.
+          const at = textPoint(s, g) || { x: 0, y: 0 };
+          const string = g.text.replace(/<[^>]*>/g, "");
+          if (string !== g.text) report.notes.push(`${name}'s text ${JSON.stringify(g.text)} has formatting, left out: drawn as ${JSON.stringify(string)}.`);
+          // SolidWorks' x axis in the PeetCAD sketch: which way the text runs
+          const angle = Math.atan2(dot(sf.x, pf.y), dot(sf.x, pf.x)) * 180 / Math.PI;
+          items.push({ type: "text", at: toPeet(at), string, angle: tidy(angle), ...construction, as });
+          own.push({ g, as, turned: false, text: true });
+        } else left.add(g.type === "text" ? "text (mirrored, which PeetCAD's text can't be)" : g.type);
       });
       // Points drawn on their own, which relations and dimensions go to
       const used = new Set(s.segments.flatMap(g => ["start", "end", "center"].filter(k => g[k]).map(k => spot(g[k]))));
+      for (const g of s.segments) if (g.type === "text" && textPoint(s, g)) used.add(spot(textPoint(s, g)));
       s.points.forEach((p, i) => {
         if (used.has(spot(p)) || (Math.abs(p.x) < 1e-12 && Math.abs(p.y) < 1e-12)) return;
         used.add(spot(p));
@@ -379,8 +394,53 @@ function importPart(doc, dir) {
     if (away > 1e-4) report.notes.push(`${name} is on a face ${away.toFixed(3)} mm from where SolidWorks has it.`);
     const result = { name: reply.created[0].name, toPeet, frame: pf, partial, dimensions: new Map(), ids: new Map(), values: new Map((f.dimensions || []).map(d => [d.fullName, d.value])) };
     for (const o of own) { const d = (reply.drawn || []).find(x => x.as === o.as); if (d && o.g) result.ids.set(o.g.id.join("."), d.id); }
-    if (!draw && relations) relate(f, result, s, sf, own, reply.drawn || []);
+    for (const o of own) if (o.text) fitText(f, result, o.g, (reply.drawn || []).find(x => x.as === o.as));
+    if (!draw && relations) relate(f, result, s, sf, own.filter(o => !o.text), reply.drawn || []);
     return result;
+  }
+
+  /**
+   * Fits a text's font and height to SolidWorks' faces of the feature that uses its sketch (a cut of the
+   * text), which the export has and the text's own font and height are not. Each font that SolidWorks
+   * libraries use for text is tried at the height that makes the text as tall as those faces; the one whose
+   * outline's box is nearest theirs is kept. A text no feature uses keeps PeetCAD's default.
+   */
+  function fitText(f, sk, g, drawn) {
+    if (!drawn || !drawn.id) return;
+    const segments = (f.sketch.segments || []).filter(x => !x.construction);
+    if (segments.some(x => x.type !== "text")) return;
+    const faces = (f.children || []).flatMap(n => facesOf(n)).filter(face => face.box);
+    if (!faces.length) return;
+    const pf = sk.frame;
+    const lo = [Infinity, Infinity], hi = [-Infinity, -Infinity];
+    for (const face of faces) {
+      const [a, b] = [mm(face.box.slice(0, 3)), mm(face.box.slice(3))];
+      for (const corner of [0, 1, 2, 3, 4, 5, 6, 7].map(k => [k & 1 ? b[0] : a[0], k & 2 ? b[1] : a[1], k & 4 ? b[2] : a[2]])) {
+        const d = sub(corner, pf.o);
+        const q = [dot(d, pf.x), dot(d, pf.y)];
+        for (const i of [0, 1]) { lo[i] = Math.min(lo[i], q[i]); hi[i] = Math.max(hi[i], q[i]); }
+      }
+    }
+    const set = (font, height) => {
+      const reply = peet.apply({ op: "set_text", sketch: sk.name, text: drawn.id, font, height: tidy(height) });
+      return reply.ok && reply.text && reply.text.bounds ? reply.text : null;
+    };
+    let best = null;
+    for (const font of TEXT_FONTS) {
+      const trial = set(font, 10);
+      if (!trial) continue;
+      // The outline grows from the text's point in proportion to its height
+      const [tl, th] = trial.bounds;
+      const span = hi[1] - lo[1] >= hi[0] - lo[0] ? 1 : 0;
+      const height = 10 * (hi[span] - lo[span]) / (th[span] - tl[span]);
+      const t = height > 0 && isFinite(height) ? set(font, Math.round(height * 1e4) / 1e4) : null;
+      if (!t) continue;
+      const off = Math.max(...[0, 1].flatMap(i => [Math.abs(t.bounds[0][i] - lo[i]), Math.abs(t.bounds[1][i] - hi[i])]));
+      if (!best || off < best.off) best = { font, height: t.height, off, drawnIn: t.drawn_in };
+    }
+    if (!best) return;
+    set(best.font, best.height);
+    report.notes.push(`${sk.name}'s text ${JSON.stringify(g.text)}: ${best.font}${best.drawnIn ? ` (not installed: drawn in ${best.drawnIn})` : ""}, ${best.height} mm high, fitted to SolidWorks' faces of ${f.children.join(", ")} (its outline's box is ${best.off.toFixed(4)} mm from theirs): the export has no font or height.`);
   }
 
   /**
@@ -1667,9 +1727,6 @@ function importPart(doc, dir) {
           const built = extrude();
           return built.unsupported ? record(f, "not supported", built.message) : finish(f, built);
         }
-        // A cut of nothing but text: an etched or cut-out label
-        const drawnIn = (sketchOf(f) && sketchOf(f).sketch && sketchOf(f).sketch.segments || []).filter(g => !g.construction);
-        if (drawnIn.length && drawnIn.every(g => g.type === "text")) return record(f, "not supported", "a cut of sketch text, which PeetCAD sketches don't have");
         const sheetPart = sheetBody();
         const end = v["GetEndCondition(true)"];
         const depth = (v["GetDepth(true)"] || 0) * MM;
