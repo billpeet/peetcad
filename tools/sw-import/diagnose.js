@@ -32,7 +32,7 @@ const flangeOf = new Map();
 (function walk(list, parent) { for (const f of list || []) { names.add(f.name); if (parent && /Bend$/.test(f.type)) flangeOf.set(f.name, parent.name); walk(f.sub, f); } })(config.features, null);
 const owner = name => {
   if (names.has(name)) return name;
-  const trimmed = name.replace(/ (corners|sketch|flange\d*)$/, "");
+  const trimmed = name.replace(/ (corners( \d+)?|sketch|flange\d*)$/, "");
   if (names.has(trimmed)) return trimmed;
   const unnumbered = name.replace(/\d$/, "");
   return names.has(unnumbered) ? unnumbered : name;

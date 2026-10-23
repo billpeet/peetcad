@@ -459,6 +459,7 @@ impl Layout {
         part_base: u32,
         relief_override: Option<(ReliefType, f64)>,
     ) -> Result<usize, String> {
+        let original = *site;
         // Hems end where their edge does; flanges are carried on to the face's corners.
         let carried = if segments.first().is_some_and(|s| !s.values.is_hem()) {
             self.carried_to_corners(site, offsets)
@@ -588,7 +589,9 @@ impl Layout {
         }
 
         // Reliefs where the bend stops short of an end of the edge. They cut the parent
-        // (and whatever else was there), not the new flange.
+        // (and whatever else was there), not the new flange. A bend that lies wholly
+        // outside the parent (bend outside, or set out from the edge) takes nothing from
+        // it and needs none, as in SolidWorks.
         let tag = |index: u8| CurveTag::Generated {
             owner,
             part: part_base,
@@ -597,7 +600,7 @@ impl Layout {
         let mut reliefs = Vec::new();
         let (relief_type, relief_ratio) =
             relief_override.unwrap_or((self.settings.relief, self.settings.relief_ratio));
-        if relief_type != ReliefType::Tear {
+        if relief_type != ReliefType::Tear && trim > MIN_LENGTH {
             let rw = relief_ratio * t;
             let depth = trim + relief_ratio * t;
             if o0 > MIN_LENGTH {
@@ -623,6 +626,18 @@ impl Layout {
                 ));
             }
         }
+        let slants = if segments[0].values.is_hem() {
+            Vec::new()
+        } else {
+            self.slanted_bend_ends(
+                &original,
+                site,
+                offsets,
+                trim,
+                w,
+                segments[0].values.allowance,
+            )
+        };
         if trim < -MIN_LENGTH {
             let strip = rect(
                 site.a,
@@ -659,6 +674,15 @@ impl Layout {
         for area in reliefs.into_iter().flatten() {
             self.cuts.push(Cut::new(area, before.clone()));
         }
+        for (end, [p, q, r]) in slants {
+            let base = if end == 0 {
+                wall::RELIEF_START
+            } else {
+                wall::RELIEF_END
+            };
+            let area = Area::polygon(&[p, q, r], |i| tag(base + i as u8));
+            self.cuts.push(Cut::new(area, vec![new_pieces[0]]));
+        }
         self.attachments.push(Attachment {
             owner,
             parent: site.piece,
@@ -675,6 +699,102 @@ impl Layout {
 }
 
 impl Layout {
+    /// Whether piece `piece` has sheet at `p` (flat coordinates), after the cuts made so far.
+    fn sheet_at(&self, piece: usize, p: DVec2) -> bool {
+        self.pieces[piece].covers(p)
+            && !self
+                .cuts
+                .iter()
+                .any(|c| c.removes(piece, p))
+    }
+
+    /// The slanted ends of a flange's first bend, as SolidWorks makes them where the edge
+    /// ends at a corner of its face sharper than square and the bend starts inside the
+    /// face (`trim` deep): there the face is narrower than the edge, and the bend ends on
+    /// the line from the face's corner on the line where it starts to the end of its
+    /// flange, which folds to a freeform end. Each is the triangle cut from the bend at that
+    /// end (0: `site.a`, 1: `site.b`), in flat coordinates. Ends set back from the edge's
+    /// ends, carried on to a corner (`original` is the edge before that) or meeting
+    /// another flange are left square. `w` is the bend's length and `allowance` its width.
+    fn slanted_bend_ends(
+        &self,
+        original: &EdgeSite,
+        site: &EdgeSite,
+        offsets: [f64; 2],
+        trim: f64,
+        w: f64,
+        allowance: f64,
+    ) -> Vec<(usize, [DVec2; 3])> {
+        let mut out = Vec::new();
+        if trim <= MIN_LENGTH || allowance <= MIN_LENGTH {
+            return out;
+        }
+        let len = site.a.distance(site.b);
+        let d = (site.b - site.a) / len;
+        let out_dir = DVec2::new(d.y, -d.x);
+        let inward = -out_dir;
+        for end in 0..2 {
+            let (q, moved, away) = if end == 0 {
+                (site.a, original.a.distance(site.a) > MIN_LENGTH, d)
+            } else {
+                (site.b, original.b.distance(site.b) > MIN_LENGTH, -d)
+            };
+            if offsets[end].abs() > MIN_LENGTH || moved {
+                continue;
+            }
+            let meets = self.attachments.iter().any(|o| {
+                let od = o.along();
+                o.parent == site.piece
+                    && self.makes_corners(o)
+                    && [o.a + od * o.span[0], o.a + od * o.span[1]]
+                        .iter()
+                        .any(|p| p.distance(q) <= MIN_LENGTH)
+            });
+            if meets {
+                continue;
+            }
+            let sheet = |p: DVec2| self.sheet_at(site.piece, p);
+            // Along the line where the bend starts, from this end: where the sheet starts.
+            let line = |u: f64, depth: f64| q + away * u + inward * depth;
+            let eps = 1e-7 * (1.0 + len);
+            if sheet(line(eps, trim)) {
+                continue; // square, or wider than the edge: the bend ends square
+            }
+            let steps = 64;
+            let step = w / (2 * steps) as f64;
+            let Some(k) = (1..=steps).find(|&k| sheet(line(step * k as f64, trim))) else {
+                continue;
+            };
+            let (mut lo, mut hi) = (step * (k - 1) as f64, step * k as f64);
+            for _ in 0..60 {
+                let mid = (lo + hi) / 2.0;
+                if sheet(line(mid, trim)) {
+                    hi = mid;
+                } else {
+                    lo = mid;
+                }
+            }
+            let apex = hi;
+            // Only a straight side from the edge's end: halfway in, the sheet starts
+            // halfway along.
+            let tol = 1e-6 * (1.0 + apex);
+            if !(sheet(line(apex / 2.0 + tol, trim / 2.0))
+                && !sheet(line(apex / 2.0 - tol, trim / 2.0)))
+            {
+                continue;
+            }
+            out.push((
+                end,
+                [
+                    line(0.0, trim),
+                    line(apex, trim),
+                    q + out_dir * (allowance - trim),
+                ],
+            ));
+        }
+        out
+    }
+
     /// The edge carried on to the face's corners where it stops short of them.
     ///
     /// A flange that takes its bend out of the face (material inside) shortens the

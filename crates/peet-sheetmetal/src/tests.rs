@@ -527,28 +527,106 @@ fn flange_past_the_end_of_its_edge() {
 }
 
 #[test]
+fn a_bend_ends_on_a_slant_at_a_sharp_corner() {
+    // A right triangle with a flange on its long side, material outside: the bend starts
+    // inside the sheet, where the triangle is narrower than the side is long. Its ends
+    // run from the triangle's corners there to the ends of the flange, as SolidWorks
+    // makes them: the blank has no step at the ends of the bend, and folding keeps its
+    // volume (K = 0.5).
+    let mut sk = Sketch::new();
+    let pts = [DVec2::ZERO, DVec2::new(100.0, 0.0), DVec2::new(0.0, 100.0)];
+    for i in 0..3 {
+        sk.add_line(pts[i], pts[(i + 1) % 3]);
+    }
+    let regions = find_regions(&sk).regions;
+    let mut layout = Layout::plate(settings(0.5), 1, &Plane::TOP, &regions, false).unwrap();
+    let site = EdgeSite {
+        piece: 0,
+        a: pts[1],
+        b: pts[2],
+        top: true,
+    };
+    let own = FlangeOwn {
+        relief: Some((ReliefType::Tear, 0.5)),
+        ..Default::default()
+    };
+    layout
+        .add_edge_flange_with(
+            2,
+            &site,
+            &flange(20.0, FlangePosition::MaterialOutside),
+            own,
+        )
+        .unwrap();
+    let (solid, body) = built(layout);
+    let slanted = solid
+        .faces
+        .iter()
+        .filter(|f| matches!(f.surface, peet_kernel::geom::Surface::Nurbs(_)))
+        .count();
+    assert_eq!(slanted, 2);
+    // The blank's outline: the triangle's two short sides, two slanted bend ends and the
+    // flange's three sides; nothing else.
+    assert_eq!(body.outline.len(), 1);
+    assert_eq!(body.outline[0].edges.len(), 7);
+    assert_close(
+        measure::volume(&solid),
+        measure::volume(&body.flat),
+        2e-5 * measure::volume(&body.flat),
+    );
+}
+
+#[test]
 fn a_flange_with_its_own_relief() {
-    // Set back 10 from both ends, bend outside so that no strip is trimmed from the plate.
-    // With the body's rectangular relief the plate is notched at each end of the bend;
-    // with a tear relief of the flange's own nothing is cut from it, and with a ratio of
-    // its own the notches are that much bigger.
-    let area = |relief: Option<(ReliefType, f64)>| {
+    // Set back 10 from both ends, material outside, so that the bend takes a strip of
+    // the plate. With the body's rectangular relief the plate is notched at each end of
+    // the bend; with a tear relief of the flange's own nothing is cut from it, and with a
+    // ratio of its own the notches are that much bigger. Bend outside, the bend takes
+    // nothing from the plate and no relief is cut, as in SolidWorks.
+    let area = |relief: Option<(ReliefType, f64)>, position: FlangePosition| {
         let mut layout = plate_layout(settings(0.44));
-        let mut spec = flange(25.0, FlangePosition::BendOutside);
+        let mut spec = flange(25.0, position);
         spec.offsets = [10.0, 10.0];
         layout
-            .add_edge_flange_with(2, &top_edge(true), &spec, FlangeOwn { relief, ..Default::default() })
+            .add_edge_flange_with(
+                2,
+                &top_edge(true),
+                &spec,
+                FlangeOwn {
+                    relief,
+                    ..Default::default()
+                },
+            )
             .unwrap();
         let (_, body) = built(layout);
         flat_area(&body)
     };
-    let ratio = settings(0.44).relief_ratio;
-    let body_default = area(None);
-    let tear = area(Some((ReliefType::Tear, ratio)));
-    let wide = area(Some((ReliefType::Rectangular, 2.0 * ratio)));
-    // Two notches, each ratio·t wide and deep.
-    assert_close(tear - body_default, 2.0 * (ratio * T) * (ratio * T), 1e-9);
-    assert_close(tear - wide, 8.0 * (ratio * T) * (ratio * T), 1e-9);
+    let s = settings(0.44);
+    let ratio = s.relief_ratio;
+    let trim = BendValues::new(s.model, FRAC_PI_2, R, T)
+        .unwrap()
+        .inside_setback();
+    let inside = FlangePosition::MaterialOutside;
+    let body_default = area(None, inside);
+    let tear = area(Some((ReliefType::Tear, ratio)), inside);
+    let wide = area(Some((ReliefType::Rectangular, 2.0 * ratio)), inside);
+    // Two notches, each ratio·t wide and ratio·t past the strip the bend takes.
+    assert_close(
+        tear - body_default,
+        2.0 * (ratio * T) * (trim + ratio * T),
+        1e-9,
+    );
+    assert_close(
+        tear - wide,
+        2.0 * (2.0 * ratio * T) * (trim + 2.0 * ratio * T),
+        1e-9,
+    );
+    let outside = FlangePosition::BendOutside;
+    assert_close(
+        area(None, outside),
+        area(Some((ReliefType::Tear, ratio)), outside),
+        1e-9,
+    );
     let mut layout = plate_layout(settings(0.44));
     let spec = flange(25.0, FlangePosition::BendOutside);
     let own = FlangeOwn {

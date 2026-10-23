@@ -317,7 +317,11 @@ with their defaults' types):
   end, with the bend staying on the edge. An `edge_flange` can have a `relief`
   (`rectangular`, `obround`, `tear`) and a `relief_ratio` of its own for where it is set
   back, and a `bend` of its own (as the base flange's); without them, or with `null`,
-  it uses the body's. `outline` is a sketch of the flange's shape (on a plane turned about
+  it uses the body's. A flange whose bend lies outside the sheet (`bend_outside`, or set
+  out by `position_offset`) takes nothing from it and gets no relief, as in SolidWorks.
+  Where a flange's edge runs to a corner of its face sharper than square and its bend
+  starts inside the sheet, the bend ends on a slant from the face's corner to the
+  flange's end, as SolidWorks' does. `outline` is a sketch of the flange's shape (on a plane turned about
   the edge): the flange is as wide and as long as its region and cut to it, from its foot
   out. `up_to` (a vertex, a reference point or `"origin"`) runs the flange up to that point
   in place of its `length`, its end through the point square to the flange, as
@@ -351,10 +355,12 @@ with their defaults' types):
   the body's thickness, filling in what earlier cuts took.
 - `break_corner` rounds (`kind` `fillet`, the default) or chamfers (`chamfer`) corners of a
   sheet metal body by `size`. `edges` are the corners: the edges through the sheet where
-  two straight sides of a flat face meet. The body stays sheet metal. An inside corner
-  gains the sheet an outside one loses.
+  two straight sides of a flat face meet (for a fillet, also a straight side and an arc,
+  or two arcs: the round touches both). The body stays sheet metal. An inside corner,
+  of the outline or of a cutout, gains the sheet an outside one loses.
 - `corner` sets how flanges that run to one corner meet: `kind` (`butt`, `overlap`,
-  `open`, `plain`), `gap`, and `relief`, what is cut from the blank where their bends meet
+  `open`, `plain`), `gap` (for `open`, measured from each flange's inner face), and
+  `relief`, what is cut from the blank where their bends meet
   (`rectangular` with `relief_size`, `tear`, `flush`: back to where the flanges end, or
   `slanted`: the face keeps its corner and each bend ends on a slant to its flange's end;
   `circular` and `square`, SolidWorks' corner relief: `relief_size` across, centred where

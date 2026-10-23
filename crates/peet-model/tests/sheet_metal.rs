@@ -301,6 +301,80 @@ fn corners_are_broken_and_follow_the_part() {
 }
 
 #[test]
+fn an_inside_corner_of_a_cut_is_rounded() {
+    // A notch cut into the plate's edge has two inside corners. Rounding them gives the
+    // sheet back between each corner and its round, as SolidWorks' fillet does there,
+    // and a later cut over a round still takes it.
+    let (mut p, _, _) = plate(100.0, 60.0);
+    let top = p.on_face(DVec3::Z, DVec3::new(10.0, 10.0, T));
+    let notch = p.sketch(top.clone(), |s| {
+        shapes::rectangle(s, DVec2::new(40.0, 40.0), DVec2::new(60.0, 70.0));
+    });
+    p.model.add_sheet_cut(notch);
+    p.rebuild();
+    p.assert_ok();
+    let before = p.volume();
+    let corners: Vec<_> = [40.0, 60.0]
+        .into_iter()
+        .map(|x| edge(&p, DVec3::new(x, 40.0, 0.0), DVec3::new(x, 40.0, T)).1)
+        .collect();
+    let rounds = p.model.add_break_corner(corners);
+    let FeatureKind::BreakCorner(def) = &mut p.model.feature_mut(rounds).unwrap().kind else {
+        unreachable!()
+    };
+    def.size = Scalar::new(5.0);
+    p.rebuild();
+    p.assert_ok();
+    assert!(matches!(p.status(rounds), Status::Ok));
+    let round = 25.0 - 25.0 * std::f64::consts::FRAC_PI_4;
+    assert_close(p.volume() - before, 2.0 * round * T);
+    assert!(p.bodies()[0].sheet.is_some());
+    let over = p.sketch(top, |s| {
+        shapes::rectangle(s, DVec2::new(30.0, 30.0), DVec2::new(50.0, 50.0));
+    });
+    p.model.add_sheet_cut(over);
+    p.rebuild();
+    p.assert_ok();
+    assert_close(p.volume() - before, (round - 300.0) * T);
+}
+
+#[test]
+fn a_corner_between_a_side_and_an_arc_is_rounded() {
+    // A slot cut across the plate's edge: where its round end meets the edge the corner
+    // is between a straight side and an arc. A fillet rounds it, touching both.
+    let (mut p, _, _) = plate(100.0, 60.0);
+    let top = p.on_face(DVec3::Z, DVec3::new(10.0, 10.0, T));
+    let slot = p.sketch(top, |s| {
+        s.add_circle(DVec2::new(50.0, 55.0), 10.0);
+    });
+    p.model.add_sheet_cut(slot);
+    p.rebuild();
+    p.assert_ok();
+    let before = p.volume();
+    let x = 50.0 - 75f64.sqrt();
+    let (_, e) = edge(&p, DVec3::new(x, 60.0, 0.0), DVec3::new(x, 60.0, T));
+    let round = p.model.add_break_corner(vec![e]);
+    let FeatureKind::BreakCorner(def) = &mut p.model.feature_mut(round).unwrap().kind else {
+        unreachable!()
+    };
+    def.size = Scalar::new(3.0);
+    p.rebuild();
+    p.assert_ok();
+    assert!(matches!(p.status(round), Status::Ok));
+    let body = &p.bodies()[0];
+    assert!(body.sheet.is_some());
+    let rounds = body
+        .solid
+        .faces
+        .iter()
+        .filter(|f| matches!(&f.surface, Surface::Cylinder(c) if (c.radius - 3.0).abs() < 1e-9))
+        .count();
+    assert_eq!(rounds, 1);
+    // A 60° outside corner loses sheet.
+    assert!(p.volume() < before - 1e-3);
+}
+
+#[test]
 fn open_profile_channel() {
     let mut p = Part::default();
     let sketch = p.sketch(TOP, |s| {
@@ -465,7 +539,7 @@ fn a_cut_through_the_flanges_in_its_way() {
             p.assert_ok();
         }
         let top = p.on_face(DVec3::Z, DVec3::new(50.0, 30.0, T));
-        let notch = p.sketch(top, |s| {
+        let notch = p.sketch(top.clone(), |s| {
             shapes::rectangle(s, DVec2::new(-5.0, -5.0), DVec2::new(10.0, 65.0));
         });
         let cut = p.model.add_sheet_cut(notch);
