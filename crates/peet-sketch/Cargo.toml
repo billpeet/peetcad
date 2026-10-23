@@ -11,6 +11,7 @@ authors.workspace = true
 peet-math.workspace = true
 peet-solve.workspace = true
 serde.workspace = true
+skrifa.workspace = true
 
 [dev-dependencies]
 proptest = { version = "1", default-features = false, features = ["std"] }

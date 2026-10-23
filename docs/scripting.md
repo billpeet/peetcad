@@ -215,6 +215,7 @@ the geometry through later edits.
 | `sketch` | `on` (plane), `name`, `draw` |
 | `draw` | `sketch`, `draw` |
 | `set_dimension` | `sketch`, `name` (`"d1"`), `value`, `configurations` |
+| `set_text` | `sketch`, `text` (its id; left out: the sketch's only text), `string`, `font`, `height`, `angle`, `width`, `spacing`, `align` |
 
 A `draw` list holds items with a `type`:
 
@@ -231,6 +232,7 @@ A `draw` list holds items with a `type`:
 | `center_rectangle` | `center`, `corner` |
 | `slot` | `from`, `to`, `radius` |
 | `polygon` | `center`, `vertex`, `sides` |
+| `text` | `at`, `string`, `height`, `font`, `angle`, `width`, `spacing`, `align` (part `point`) |
 | `coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `tangent`, `equal`, `concentric`, `collinear`, `coradial`, `midpoint`, `symmetric`, `fix` | `of` (entities) |
 | `distance`, `doubled_distance`, `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle` | `of`, `value`, `name`, `driven` |
 | `fillet` | `corner`, `radius` |
@@ -244,7 +246,7 @@ A `draw` list holds items with a `type`:
 Geometry takes `as` (a label) and `construction`. An entity is an id, a label from the
 same list, or a part of one: `"a.start"`, `"a.end"`, `"c.center"`, `"r.bottom"`,
 `"p.2"` (a shape's curve by number), `"s.2"` (a spline's fit point by number, from 0),
-`"origin"`. Labels last for one operation; the reply and the `feature` query give the ids.
+`"t.point"` (a text's point), `"origin"`. Labels last for one operation; the reply and the `feature` query give the ids.
 
 `project` stores a persistent model reference and refreshes locked geometry before
 solving. It defaults to construction geometry. `convert: true` makes projected edges
@@ -271,6 +273,21 @@ be made `coincident` with the curve itself, only with its points. `trim`, `exten
 be extruded, revolved (the spline must stay clear of the axis) and lofted (a spline side
 joins lines and other splines, not arcs), and a spline can be a sweep's path; sheet metal
 features refuse it.
+
+A `text` is a string drawn in a font, as SolidWorks' sketch text is. Its glyph outlines
+are closed regions like any other, made of lines and arcs (within a micron), so `cut`,
+`extrude` and `sheet_cut` take them. `at` is its point, on the baseline: at the left end,
+the middle or the right end of each line for `align` `left` (default), `center` or
+`right`; the point takes relations and dimensions as `"t.point"`. `height` is a capital
+letter's height (default 5 mm), `angle` is in degrees from the sketch's x axis, `width`
+is a width factor and `spacing` a character spacing (both 1 by default). `font` names an
+installed TrueType or OpenType font, by family (`"Century Gothic"`, the default) or face
+(`"Century Gothic Bold"`); glyphs are hinted as SolidWorks draws them, so a SolidWorks
+part's text comes out the same. A font that isn't installed is replaced by the built-in
+Didact Gothic, with a warning. The outline is stored with the part, so it looks the same
+on a machine without the font. A line feed starts a new line below. `set_text` changes
+the string (SolidWorks' `SetSketchText`) or the style and draws the text again; the reply
+and the `feature` query give its `bounds`. A text is not mirrored by `mirror`.
 
 
 ### Features

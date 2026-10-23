@@ -66,7 +66,8 @@ pub fn mirror(
         let entity = sketch.entity(id).expect("checked above");
         let construction = entity.construction;
         let copy = match entity.geometry {
-            Geometry::Point { .. } => continue,
+            // A text is not mirrored: its glyphs would read backwards.
+            Geometry::Point { .. } | Geometry::Text { .. } => continue,
             Geometry::Line { start, end } => {
                 let copy =
                     sketch.add_line(m.reflect(sketch.point(start)), m.reflect(sketch.point(end)));

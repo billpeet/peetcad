@@ -302,6 +302,14 @@ pub enum Op {
         value: Input,
         configurations: Option<Configs>,
     },
+    /// Change a sketch text's string or style (SolidWorks' `SetSketchText`). `text` is
+    /// its entity id; without one, the sketch's only text.
+    SetText {
+        sketch: FeatureSel,
+        text: Option<u32>,
+        string: Option<String>,
+        style: sketch::TextStyle,
+    },
     /// Bind a user name to a persistent face reference.
     NameFace {
         face: FaceSel,
@@ -626,6 +634,7 @@ impl Op {
             Self::Sketch { .. } => "sketch",
             Self::Draw { .. } => "draw",
             Self::SetDimension { .. } => "set_dimension",
+            Self::SetText { .. } => "set_text",
             Self::NameFace { .. } => "name_face",
             Self::NameEdge { .. } => "name_edge",
             Self::DeleteName { .. } => "delete_name",
@@ -804,6 +813,11 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
         "set_dimension",
         "sketch, name, value, configurations (\"this\", \"all\", a name or a list of names; left out: this one if the dimension already differs between configurations, else all)",
         "Change a sketch dimension (\"d1\") to a number or an expression, in some configurations.",
+    ),
+    (
+        "set_text",
+        "sketch, text (its id; left out: the sketch's only text), string, font, height, angle, width, spacing, align",
+        "Change a sketch text's string (as SolidWorks' SetSketchText does) or its style, and draw it again.",
     ),
     (
         "edit",
@@ -1220,6 +1234,12 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             name: a.required("name", |v| text(v).map(str::to_owned))?,
             value: a.required("value", Input::parse)?,
             configurations: a.parsed("configurations", Configs::parse)?,
+        },
+        "set_text" => Op::SetText {
+            sketch: feature(a, "sketch")?,
+            text: a.parsed("text", integer)?,
+            string: a.string("string")?,
+            style: sketch::TextStyle::parse(a)?,
         },
         "edit" => {
             let target = feature(a, "feature")?;

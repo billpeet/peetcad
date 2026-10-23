@@ -29,7 +29,7 @@ use std::f64::consts::{PI, TAU};
 use peet_math::{DVec2, tolerance};
 
 use crate::curve::Curve;
-use crate::sketch::{EntityId, Sketch};
+use crate::sketch::{EntityId, EntityKind, Sketch};
 
 /// Points closer than this are the same vertex of the arrangement.
 const MERGE: f64 = tolerance::LINEAR;
@@ -153,12 +153,21 @@ pub struct Profile {
 
 /// Finds all closed regions formed by the sketch's non-construction curves. Crossing
 /// curves are split at their intersections, so overlapping shapes produce every minimal
-/// face (like contour selection in SolidWorks).
+/// face (like contour selection in SolidWorks). A text's glyph outlines are curves here,
+/// each under the text's id.
 pub fn find_regions(sketch: &Sketch) -> Profile {
     let inputs: Vec<(EntityId, Curve)> = sketch
         .entities()
-        .filter(|(_, e)| !e.construction && e.kind().is_curve())
-        .filter_map(|(id, _)| Some((id, sketch.curve(id)?)))
+        .filter(|(_, e)| !e.construction)
+        .flat_map(|(id, e)| {
+            match e.kind() {
+                EntityKind::Text => sketch.text_curves(id),
+                k if k.is_curve() => sketch.curve(id).into_iter().collect(),
+                _ => Vec::new(),
+            }
+            .into_iter()
+            .map(move |c| (id, c))
+        })
         .collect();
     regions_of_curves(&inputs)
 }

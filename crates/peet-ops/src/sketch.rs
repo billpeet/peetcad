@@ -1,7 +1,7 @@
 //! Drawing in a sketch: the items of a `draw` list.
 //!
 //! In JSON each item is an object with a `type`: geometry (`point`, `line`, `polyline`,
-//! `circle`, `arc`, `spline`, `rectangle`, `center_rectangle`, `slot`, `polygon`), a relation
+//! `circle`, `arc`, `spline`, `rectangle`, `center_rectangle`, `slot`, `polygon`, `text`), a relation
 //! (`coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `tangent`,
 //! `equal`, `concentric`, `midpoint`, `symmetric`, `fix`), a dimension (`distance`,
 //! `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle`) or
@@ -12,18 +12,22 @@
 //! label with `as`, and later items refer to entities by label, by id (as replies and the
 //! `feature` query give them) or by a part of one: `"a.start"`, `"a.end"`, `"c.center"`,
 //! `"r.bottom"`, `"r.top.end"`, `"s.2"` (a spline's fit point by number, from 0),
-//! `"origin"`.
+//! `"t.point"` (a text's point), `"origin"`.
 
 use std::collections::HashMap;
 
 use peet_document::Document;
 use peet_sketch::expr;
+use peet_sketch::expr::Units;
+use peet_sketch::text::{SketchText, TextAlign};
 use peet_sketch::{
     ConstraintId, ConstraintKind, EntityId, EntityKind, Geometry, Sketch, ops, shapes,
 };
 use serde_json::{Map, Value, json};
 
-use crate::args::{Args, boolean, coordinates, integer, list, mm2, number, text};
+use crate::args::{
+    Args, boolean, coordinates, integer, length_out, list, mm2, number, point2_out, round, text,
+};
 use crate::value::Input;
 
 /// A sketch entity: its id, or a path from a label or an id to a part of it
@@ -154,7 +158,7 @@ const MEASURES: [(Measure, &str, &str); 8] = [
     (Measure::Angle, "angle", "two lines"),
 ];
 
-const GEOMETRY: [(&str, &str); 11] = [
+const GEOMETRY: [(&str, &str); 12] = [
     (
         "project",
         "exactly one of edge, vertex, plane, face; convert: use the projected edge in profiles",
@@ -185,6 +189,10 @@ const GEOMETRY: [(&str, &str); 11] = [
         "from, to, radius: the two arc centres and half the width",
     ),
     ("polygon", "center, vertex, sides"),
+    (
+        "text",
+        "at, string, height, font, angle, width, spacing, align: glyph outlines that features          cut or extrude; part point (where it is)",
+    ),
 ];
 
 const EDITS: [(&str, &str); 8] = [
@@ -281,6 +289,12 @@ pub enum Draw {
         vertex: [f64; 2],
         sides: u32,
     },
+    /// A text with its point at `at`. Part: `point`.
+    Text {
+        at: [f64; 2],
+        string: String,
+        style: TextStyle,
+    },
     Relation {
         kind: Relation,
         of: Vec<Ent>,
@@ -370,6 +384,7 @@ impl Draw {
             Self::CenterRectangle { .. } => "center_rectangle",
             Self::Slot { .. } => "slot",
             Self::Polygon { .. } => "polygon",
+            Self::Text { .. } => "text",
             Self::Relation { kind, .. } => RELATIONS
                 .iter()
                 .find(|(k, ..)| k == kind)
@@ -478,6 +493,11 @@ impl DrawItem {
                     center: a.required("center", p2)?,
                     vertex: a.required("vertex", p2)?,
                     sides: a.required("sides", integer)?,
+                },
+                "text" => Draw::Text {
+                    at: a.required("at", p2)?,
+                    string: a.required("string", |v| text(v).map(str::to_owned))?,
+                    style: TextStyle::parse(a)?,
                 },
                 "fillet" => Draw::Fillet {
                     corner: a.required("corner", Ent::parse)?,
@@ -638,6 +658,10 @@ fn resolve(
             "start" => sketch.endpoints(current).map(|e| e.0),
             "end" => sketch.endpoints(current).map(|e| e.1),
             "center" => sketch.center(current),
+            "point" => match &sketch.entity(current).map(|e| &e.geometry) {
+                Some(Geometry::Text { anchor, .. }) => Some(*anchor),
+                _ => None,
+            },
             // A spline's fit point, by its number.
             _ => part.parse::<usize>().ok().and_then(|i| {
                 sketch
@@ -683,6 +707,7 @@ fn entity_out(sketch: &Sketch, id: EntityId) -> Value {
             "id": id.0, "type": "spline", "closed": closed,
             "points": points.iter().map(|p| p.0).collect::<Vec<u32>>(),
         }),
+        Geometry::Text { anchor, .. } => json!({ "id": id.0, "type": "text", "point": anchor.0 }),
     }
 }
 
@@ -737,6 +762,155 @@ fn measure(kind: Measure, of: &[EntityId]) -> Result<ConstraintKind, String> {
         }
         _ => return Err("it takes two entities in 'of'".to_owned()),
     })
+}
+
+/// A text's style as an operation gives it. A field left out keeps what the text has (a
+/// new text: Century Gothic, 5 mm high, level, aligned left).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TextStyle {
+    pub font: Option<String>,
+    /// The height of a capital letter, in document units.
+    pub height: Option<f64>,
+    /// Degrees, counter-clockwise from the sketch's x axis.
+    pub angle: Option<f64>,
+    pub width: Option<f64>,
+    pub spacing: Option<f64>,
+    pub align: Option<TextAlign>,
+}
+
+impl TextStyle {
+    pub(crate) fn parse(a: &mut Args) -> Result<Self, String> {
+        Ok(Self {
+            font: a.string("font")?,
+            height: a.parsed("height", number)?,
+            angle: a.parsed("angle", number)?,
+            width: a.parsed("width", number)?,
+            spacing: a.parsed("spacing", number)?,
+            align: a.parsed("align", |v| {
+                TextAlign::parse(text(v)?)
+                    .ok_or_else(|| format!("{v} is not left, center or right"))
+            })?,
+        })
+    }
+
+    fn apply(&self, t: &mut SketchText, units: &Units) {
+        if let Some(f) = &self.font {
+            t.font.clone_from(f);
+        }
+        if let Some(h) = self.height {
+            t.height = units.to_mm(h);
+        }
+        if let Some(a) = self.angle {
+            t.angle = a.to_radians();
+        }
+        if let Some(w) = self.width {
+            t.width = w;
+        }
+        if let Some(s) = self.spacing {
+            t.spacing = s;
+        }
+        if let Some(a) = self.align {
+            t.align = a;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// A text as replies and the `feature` query give it: its string, style, point and the
+/// box around its outline.
+pub(crate) fn text_out(sketch: &Sketch, id: EntityId, units: &Units) -> Value {
+    let (Some(t), Some(Geometry::Text { anchor, .. })) =
+        (sketch.text(id), sketch.entity(id).map(|e| &e.geometry))
+    else {
+        return json!({ "id": id.0 });
+    };
+    let mut lo = peet_math::DVec2::splat(f64::INFINITY);
+    let mut hi = -lo;
+    for c in sketch.text_curves(id) {
+        let (a, b) = c.bounds();
+        lo = lo.min(a);
+        hi = hi.max(b);
+    }
+    let mut out = json!({
+        "id": id.0, "type": "text", "string": t.string, "font": t.font,
+        "height": length_out(t.height, units), "angle": round(t.angle.to_degrees()),
+        "width": round(t.width), "spacing": round(t.spacing), "align": t.align.word(),
+        "point": anchor.0, "at": point2_out(sketch.point(*anchor), units),
+        "curves": t.outline.len(),
+    });
+    if t.drawn_in != t.font {
+        out["drawn_in"] = json!(t.drawn_in);
+    }
+    if lo.is_finite() {
+        out["bounds"] = json!([point2_out(lo, units), point2_out(hi, units)]);
+    }
+    out
+}
+
+/// Changes a text's string or style and draws it again (`set_text`). `which` is the text's
+/// entity id; without one, the sketch's only text.
+pub(crate) fn set_text(
+    sketch: &mut Sketch,
+    which: Option<u32>,
+    string: Option<&str>,
+    style: &TextStyle,
+    units: &Units,
+) -> Result<Value, String> {
+    let texts: Vec<EntityId> = sketch
+        .entities()
+        .filter(|(_, e)| e.kind() == EntityKind::Text)
+        .map(|(id, _)| id)
+        .collect();
+    let id = match which {
+        Some(n) if texts.contains(&EntityId(n)) => EntityId(n),
+        Some(n) => {
+            return Err(format!(
+                "Entity {n} is not a text of the sketch. Its texts are: {}.",
+                list_ids(&texts)
+            ));
+        }
+        None => match texts[..] {
+            [only] => only,
+            [] => return Err("The sketch has no text.".to_owned()),
+            _ => {
+                return Err(format!(
+                    "The sketch has more than one text: say which with 'text' ({}).",
+                    list_ids(&texts)
+                ));
+            }
+        },
+    };
+    if string.is_none() && style.is_empty() {
+        return Err(
+            "Give a 'string', or a style to change (font, height, angle, width, spacing, align)."
+                .to_owned(),
+        );
+    }
+    let mut t = sketch.text(id).cloned().expect("a text");
+    if let Some(s) = string {
+        s.clone_into(&mut t.string);
+    }
+    style.apply(&mut t, units);
+    let warning = t.layout()?;
+    *sketch.text_mut(id).expect("a text") = t;
+    let mut out = text_out(sketch, id, units);
+    if let Some(w) = warning {
+        out["warning"] = json!(w);
+    }
+    Ok(out)
+}
+
+fn list_ids(ids: &[EntityId]) -> String {
+    if ids.is_empty() {
+        return "(none)".to_owned();
+    }
+    ids.iter()
+        .map(|i| i.0.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Sets a dimension's value from a number (document units, or degrees) or an expression.
@@ -870,6 +1044,18 @@ fn one(
             let id = sketch
                 .add_spline(&through, *closed)
                 .map_err(|e| e.to_string())?;
+            Some(Named::Entity(id))
+        }
+        Draw::Text { at, string, style } => {
+            let mut t = SketchText::new(string);
+            style.apply(&mut t, units);
+            if let Some(warning) = t.layout()? {
+                reply.insert("warning".to_owned(), json!(warning));
+            }
+            let id = sketch.add_text(p(at), t);
+            if let Value::Object(m) = text_out(sketch, id, units) {
+                reply.extend(m);
+            }
             Some(Named::Entity(id))
         }
         Draw::Polyline { points, closed } => {

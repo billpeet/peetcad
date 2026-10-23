@@ -75,6 +75,38 @@ it returns to the first point (don't repeat it).
   lofts (against lines and other splines, not arcs), and a spline can be a sweep's path.
   Sheet metal features refuse it: flat patterns are lines and arcs.
 
+## Text
+
+`text` draws a string whose letters are closed shapes: `cut` or `sheet_cut` the sketch to
+etch or cut out a label, `extrude` it to emboss one. Put the sketch on the face first.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [80, 30]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "sketch", "on": {"feature": "Base-Flange1", "side": "top", "at": [40, 15, 2]}, "name": "Label", "draw": [{"type": "text", "at": [10, 10], "string": "B12", "height": 10, "as": "t"}, {"type": "horizontal_distance", "of": ["origin", "t.point"], "value": 10}]}
+{"op": "sheet_cut", "sketch": "Label"}
+{"op": "set_text", "sketch": "Label", "string": "B14", "font": "Century Gothic Bold"}
+{"op": "sketch", "on": "top", "name": "Block", "draw": [{"type": "rectangle", "from": [0, 50], "to": [60, 70]}]}
+{"op": "extrude", "sketch": "Block", "depth": 10}
+{"op": "sketch", "on": {"feature": "Extrude1", "side": "end"}, "name": "Etch", "draw": [{"type": "text", "at": [30, 58], "string": "TOP", "height": 5, "align": "center"}]}
+{"op": "cut", "sketch": "Etch", "depth": 0.5}
+```
+
+- `at` is the text's point, on the baseline: the left end of the line, or its middle or
+  right end with `"align": "center"` or `"right"`. Relate or dimension it as `"t.point"`.
+- `height` is the height of a capital letter. `angle` turns the text (degrees from the
+  sketch's x axis); `width` and `spacing` stretch the letters and the gaps (1 is as
+  designed). A `"\n"` in the string starts a line below.
+- `font` is an installed font's family (`"Century Gothic"`, the default) or face
+  (`"Century Gothic Bold"`). If it isn't installed, the reply has a `warning` and the
+  text is drawn in the built-in Didact Gothic: install the font, or name another.
+- The letters are lines and arcs, so sheet metal takes them. A cut through the sheet
+  leaves the islands inside letters like O and B as loose pieces, as SolidWorks does:
+  for a label that holds together, use a stencil font or cut partway into a solid.
+- `set_text` changes the string (FabSys' `SetSketchText`) or any style field; `text`
+  says which text by id if the sketch has more than one. Features made from the sketch
+  follow. The reply and `peet feature feature=SKETCH` give each text's `bounds`.
+
 ## Relations and dimensions
 
 - Relations and dimensions take `"of"`: a list of entities. `peet ops draw` says what

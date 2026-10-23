@@ -260,6 +260,7 @@ fn sketch_detail(doc: &Document, sketch: &Sketch) -> (Vec<Value>, Vec<Value>, Ve
                 "points": points.iter().map(|p| p.0).collect::<Vec<u32>>(),
                 "through": points.iter().map(|p| at(*p)).collect::<Vec<Value>>(),
             }),
+            Geometry::Text { .. } => crate::sketch::text_out(sketch, id, units),
         };
         if let Value::Object(m) = &mut v {
             m.insert("id".to_owned(), json!(id.0));

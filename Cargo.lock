@@ -2762,6 +2762,7 @@ dependencies = [
  "proptest",
  "ron",
  "serde",
+ "skrifa",
 ]
 
 [[package]]

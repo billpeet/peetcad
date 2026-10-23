@@ -654,16 +654,15 @@ impl Viewport {
                         if e.construction {
                             continue;
                         }
-                        let Some(curve) = s.sketch.curve(id) else {
-                            continue;
-                        };
-                        let pts = curve.tessellate(wpp * 0.5);
-                        for w in pts.windows(2) {
-                            lines.push((
-                                plane.from_plane_coords(w[0]),
-                                plane.from_plane_coords(w[1]),
-                                color,
-                            ));
+                        for curve in s.sketch.drawn_curves(id) {
+                            let pts = curve.tessellate(wpp * 0.5);
+                            for w in pts.windows(2) {
+                                lines.push((
+                                    plane.from_plane_coords(w[0]),
+                                    plane.from_plane_coords(w[1]),
+                                    color,
+                                ));
+                            }
                         }
                     }
                 }
