@@ -83,7 +83,7 @@ Run against SolidWorks 2026 on the whole template library (201 parts, 29 assembl
 all complete, in about 80 minutes, twice. The flat sizes in the DXF files agree with the
 flat-pattern configurations' bodies and with the bend deduction by hand.
 
-`formatVersion` is 3. What each version added:
+`formatVersion` is 4. What each version added:
 
 - **2:** a definition has its `Is…` methods (`IsBossFeature` is the only thing that tells a
   boss-extrude from a cut-extrude; a part's first extrude is `IsBaseExtrude`) and its
@@ -97,6 +97,18 @@ flat-pattern configurations' bodies and with the bend deduction by hand.
   dimensioned along x, along y or straight across. And the selections of suppressed
   features are read where SolidWorks allows it, so that a suppressed flange has its
   edges and a suppressed pattern its direction.
+- **4:** a library feature has `subFeatures`, the names of what is in it. The walk of the
+  tree meets those first, as features of their own just above it (with their sketches
+  and definitions), so they are written there and only named under it. A body has
+  `tightBox`, from its extreme points: `box` (GetBodyBox) can be loose by a hundredth of
+  a millimetre round a freeform face. A corner relief has `namedDimensions` if any of
+  `D1` to `D6` answers by name.
+
+A corner relief has no definition: the API has no data interface for one, only the calls
+that make one (`AddCornerReliefType`, `AddCornerReliefCorner`, `FinishCornerRelief`). Its
+shape is in the faces it leaves in the body (each face says which feature made it). A
+3D sketch's points and segments are in the model's coordinates (its `modelToSketch` is
+the identity).
 
 `tally.js` counts what a folder of exports uses: see
 [docs/solidworks-library-tally.md](../../docs/solidworks-library-tally.md).
@@ -107,6 +119,11 @@ entity); and the selections of some suppressed features, which SolidWorks will n
 give.
 
 Known behaviour:
+
+- **No desktop session, no SolidWorks.** With the account logged off, the scheduled task
+  never runs (result 267011, "has not run"); one that runs whether the account is logged
+  on or not (S4U) gets no SolidWorks (`CO_E_SERVER_EXEC_FAILURE` after two minutes), and
+  has no network credentials for the library's share anyway.
 
 - **Flat patterns.** On a document opened read-only, SolidWorks writes the whole DXF,
   then faults and closes the document. The exporter takes the file if it is there

@@ -24,7 +24,7 @@ using Json = Dictionary<string, object?>;
 internal static class Program
 {
     /// <summary>Raise this when the output changes shape, so the importer can tell exports apart.</summary>
-    private const int FormatVersion = 3;
+    private const int FormatVersion = 4;
     private const string FlatPatternSuffix = "SM-FLAT-PATTERN";
     private const int MaxRestarts = 5;
 
@@ -338,6 +338,9 @@ internal static class Program
         public Node(Feature feature) => Feature = feature;
         public Feature Feature { get; }
         public List<Node> Children { get; } = new();
+        /// <summary>Every sub-feature by name, those written elsewhere in the tree too.</summary>
+        public List<string> SubFeatures { get; } = new();
+        public bool SubFeaturesElsewhere { get; set; }
     }
 
     private static void AddNode(Feature feature, List<Node> into, HashSet<int> seen)
@@ -346,8 +349,14 @@ internal static class Program
             return;
         var node = new Node(feature);
         into.Add(node);
-        for (var child = (Feature?)feature.GetFirstSubFeature(); child != null; child = (Feature?)child.GetNextSubFeature())
+        for (var child = (Feature?)feature.GetFirstSubFeature(); child != null; child = (Feature?)child.GetNextSubFeature()) {
+            node.SubFeatures.Add(child.Name);
+            // The walk meets a library feature's contents before the library feature itself, as features of
+            // their own: they stay where they are, and the library feature lists them by name
+            if (seen.Contains(child.GetID()))
+                node.SubFeaturesElsewhere = true;
             AddNode(child, node.Children, seen);
+        }
     }
 
     private static Json DumpFeature(ModelDoc2 doc, Node node)
@@ -395,6 +404,23 @@ internal static class Program
         }
         if (dimensions.Count > 0)
             result["dimensions"] = dimensions;
+        else if (type == "CornerRelief") {
+            // A corner relief shows no dimensions and the API has no definition of one (only the calls that
+            // make one): its size may still be a dimension by name
+            var named = new List<Json>();
+            for (var i = 1; i <= 6; i++) {
+                var name = "D" + i;
+                if (Try(() => feature.Parameter(name)) is Dimension dimension)
+                    named.Add(new Json {
+                        ["fullName"] = dimension.FullName,
+                        ["name"] = name,
+                        ["value"] = First(Try(() => dimension.GetSystemValue3((int)swInConfigurationOpts_e.swThisConfiguration, null))),
+                        ["valueType"] = dimension.GetType()
+                    });
+            }
+            if (named.Count > 0)
+                result["namedDimensions"] = named;
+        }
 
         var specific = Try(() => feature.GetSpecificFeature2());
         if (specific is Sketch sketch)
@@ -411,6 +437,8 @@ internal static class Program
 
         if (node.Children.Count > 0)
             result["sub"] = node.Children.Select(c => DumpFeature(doc, c)).ToList();
+        if (node.SubFeaturesElsewhere)
+            result["subFeatures"] = node.SubFeatures;
         return result;
     }
 
@@ -668,6 +696,9 @@ internal static class Program
             ["name"] = body.Name,
             ["sheetMetal"] = body.IsSheetMetal(),
             ["box"] = body.GetBodyBox(),
+            // GetBodyBox can be loose (by up to a hundredth of a millimetre round a freeform face): the body's
+            // own extreme points along -x, -y, -z, +x, +y, +z give the tight one, in the box's order
+            ["tightBox"] = TightBox(body),
             ["volume"] = mass is { Length: > 3 } ? mass[3] : null,
             ["area"] = mass is { Length: > 4 } ? mass[4] : null,
             ["centreOfGravity"] = mass is { Length: > 2 } ? mass.Take(3).ToArray() : null,
@@ -676,6 +707,28 @@ internal static class Program
             // Every face is listed, since they are what a rebuilt part is compared with. Of the edges, the named ones.
             ["namedEdges"] = ArrayOf(body.GetEdges()).Cast<Edge>().Where(e => !string.IsNullOrWhiteSpace(doc.GetEntityName(e))).Select(Edge).ToList()
         };
+    }
+
+    private static double[]? TightBox(Body2 body)
+    {
+        var box = new double[6];
+        for (var axis = 0; axis < 3; axis++) {
+            foreach (var sign in new[] { -1.0, 1.0 }) {
+                var d = new double[3];
+                d[axis] = sign;
+                double x = 0, y = 0, z = 0;
+                var found = false;
+                try {
+                    found = body.GetExtremePoint(d[0], d[1], d[2], out x, out y, out z);
+                }
+                catch (Exception) {
+                }
+                if (!found)
+                    return null;
+                box[axis + (sign < 0 ? 0 : 3)] = new[] { x, y, z }[axis];
+            }
+        }
+        return box;
     }
 
     private static Json Face(Face2 face)
