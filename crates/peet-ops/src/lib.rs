@@ -245,7 +245,7 @@ fn check_copies(doc: &Document, kind: &FeatureKind) -> Result<(), String> {
     for id in seeds {
         if doc.feature(*id).is_some_and(|f| !f.kind.can_be_copied()) {
             return Err(format!(
-                "{} can't be copied: patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts and forms.",
+                "{} can't be copied: patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts, forms and edge flanges.",
                 doc.model.name_of(*id)
             ));
         }

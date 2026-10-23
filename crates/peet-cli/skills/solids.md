@@ -140,7 +140,8 @@ shell goes through the wall, one added before it is shelled with the body.
 ## Patterns and mirrors
 
 `linear_pattern`, `circular_pattern` and `mirror` copy **features**, by name, not
-bodies. They copy extrudes, cuts, revolves, holes, sheet metal cuts and forms; to repeat
+bodies. They copy extrudes, cuts, revolves, holes, sheet metal cuts, forms and edge
+flanges (see the `sheet-metal` skill); to repeat
 a fillet, fillet all the edges in one feature. `count` includes the original. A linear
 pattern becomes a grid with `direction2`, `spacing2`, `count2`.
 

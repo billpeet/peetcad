@@ -4,7 +4,8 @@
 //! feature built again from a moved (or reflected) sketch, so a copy of a cut is a cut,
 //! and a copy of a sheet metal cut or a form is made in the flat pattern like the
 //! original. The features that can be copied are extrusions (bosses and cuts), revolves,
-//! holes (a bolt circle is a circular pattern of one hole), sheet metal cuts and forms.
+//! holes (a bolt circle is a circular pattern of one hole), sheet metal cuts, forms and
+//! edge flanges.
 //!
 //! **Names.** Each copy is built as the pattern feature itself, and every face a copy
 //! makes also carries [`FaceRole::Instance`] with the copy's number, so the faces of
@@ -14,6 +15,11 @@
 //! sketch must land in the same plane (a pattern along the face, or a mirror square to
 //! it). A copy that can't be made (a cut that misses the part, a form that runs off the
 //! face) is left out with a warning, as long as one copy can be made.
+//!
+//! **Edge flange copies** go on the edge the motion takes the original's edge to, as
+//! SolidWorks' mirrors and patterns of flanges do: the same flange, set back the same from
+//! the edge's ends (the other way round for a mirror, which turns the edge round), bent
+//! to the side the motion takes the original's bend to.
 
 use std::sync::Arc;
 
@@ -122,6 +128,12 @@ pub(crate) enum Seed<'a> {
         def: &'a HoleFeature,
         sizes: HoleSizes,
     },
+    EdgeFlange {
+        /// The original flange, whose place in the flat pattern the copies are moved from.
+        original: FeatureId,
+        def: &'a crate::feature::EdgeFlangeFeature,
+        spec: peet_sheetmetal::EdgeFlangeSpec,
+    },
     SheetCut {
         plane: Plane,
         sketch: &'a Sketch,
@@ -148,7 +160,7 @@ pub(crate) fn apply_copies(
     feature: FeatureId,
     model: &Model,
     bodies: &[Arc<Body>],
-    seeds: &[(String, Seed<'_>)],
+    seeds: &[(String, Seed<'_>, usize)],
     motions: &[Motion],
     stamp: u64,
 ) -> Result<Applied, FeatureError> {
@@ -161,7 +173,12 @@ pub(crate) fn apply_copies(
     let mut made = 0;
     let mut skipped: Vec<String> = Vec::new();
     let mut warning = None;
-    for (si, (name, seed)) in seeds.iter().enumerate() {
+    // In the order they are in the model, as SolidWorks copies them: a flange on a copied
+    // flange is copied after it. Each keeps its number for its faces' names.
+    let mut order: Vec<usize> = (0..seeds.len()).collect();
+    order.sort_by_key(|&i| seeds[i].2);
+    for si in order {
+        let (name, seed, _) = &seeds[si];
         let key = crate::hash::combine(stamp, si as u64);
         let result = match seed {
             Seed::Extrude { .. } | Seed::Revolve { .. } | Seed::Hole { .. } => {
@@ -178,6 +195,24 @@ pub(crate) fn apply_copies(
                 made += ok;
                 Ok(())
             }
+            Seed::EdgeFlange { .. } => flange_copies(
+                feature,
+                model,
+                &bodies,
+                seed,
+                motions,
+                si,
+                key,
+                name,
+                &mut skipped,
+            )
+            .map(|(b, n, w)| {
+                bodies = b;
+                made += n;
+                if w.is_some() {
+                    warning = w;
+                }
+            }),
             Seed::SheetCut { .. } | Seed::Form { .. } => sheet_copies(
                 feature,
                 model,
@@ -289,7 +324,9 @@ fn solid_copy(
             })?;
             return Ok(out);
         }
-        Seed::SheetCut { .. } | Seed::Form { .. } => unreachable!("copied in the flat pattern"),
+        Seed::SheetCut { .. } | Seed::Form { .. } | Seed::EdgeFlange { .. } => {
+            unreachable!("copied in the flat pattern")
+        }
     };
     // Name the copy's faces apart from the other copies'.
     let instance = FaceName::new(feature, FaceRole::Instance(copy));
@@ -350,29 +387,53 @@ fn sheet_copies(
             face,
             ..
         } => (plane, *sketch, face.as_ref()),
-        Seed::Extrude { .. } | Seed::Revolve { .. } | Seed::Hole { .. } => unreachable!(),
+        Seed::Extrude { .. } | Seed::Revolve { .. } | Seed::Hole { .. } | Seed::EdgeFlange { .. } => {
+            unreachable!()
+        }
     };
     let on = sketch_face(model, bodies, face, "the copied feature")?;
     let mut layout = on.sheet.layout.clone();
     let mut made = 0;
     for (k, m) in motions.iter().enumerate() {
         let copy = copy_number(si, k + 1);
-        // The copy must stay in the plane of the face.
+        // The face the copy is on: the original's, if the copy stays in its plane. A copy of
+        // a sheet metal cut can go onto another flange's face instead, as SolidWorks' can (a
+        // mirror of a cut that shapes a flange shapes the flange across from it).
         let n = plane.normal();
         let moved_n = m.vector(n);
-        let off = (m.point(plane.origin()) - plane.origin()).dot(n);
-        if moved_n.cross(n).length() > 1e-9 || off.abs() > 1e-6 {
+        let moved_o = m.point(plane.origin());
+        let off = (moved_o - plane.origin()).dot(n);
+        let t = layout.settings.thickness;
+        let target = if moved_n.cross(n).length() <= 1e-9 && off.abs() <= 1e-6 {
+            Some((on.piece, on.frame, on.top))
+        } else if matches!(seed, Seed::SheetCut { .. }) {
+            layout.pieces.iter().enumerate().find_map(|(i, p)| {
+                let z = p.frame.z_axis();
+                let level = p.frame.to_local(moved_o).z;
+                (p.is_flange() && moved_n.cross(z).length() <= 1e-9)
+                    .then_some(())
+                    .and_then(|_| {
+                        if level.abs() <= 1e-6 {
+                            Some((i, p.frame, false))
+                        } else if (level - t).abs() <= 1e-6 {
+                            Some((i, p.frame, true))
+                        } else {
+                            None
+                        }
+                    })
+            })
+        } else {
+            None
+        };
+        let Some((piece, frame, top)) = target else {
             skipped.push(format!(
                 "copy {} of {name} (it leaves the plane of the face it is sketched on)",
                 k + 2
             ));
             continue;
-        }
-        let to_flat = |p: peet_math::DVec2| {
-            on.frame
-                .to_local(m.point(plane.from_plane_coords(p)))
-                .truncate()
         };
+        let to_flat =
+            |p: peet_math::DVec2| frame.to_local(m.point(plane.from_plane_coords(p))).truncate();
         match seed {
             Seed::SheetCut { reach, .. } => {
                 let profile = find_regions(sketch);
@@ -395,12 +456,17 @@ fn sheet_copies(
                         },
                         other => other,
                     });
-                layout.add_cut(area);
+                if piece == on.piece {
+                    layout.add_cut(area);
+                } else {
+                    layout.add_cut_on(area, vec![piece]);
+                }
                 // As far past its own sheet as the original goes
                 if let Some(span) = *reach {
                     let mut done = vec![false; layout.pieces.len()];
-                    done[on.piece] = true;
-                    let into = m.vector(on.frame.z_axis() * if on.top { -1.0 } else { 1.0 });
+                    done[piece] = true;
+                    // Into the sheet from the copy's face, which is the original's moved
+                    let into = frame.z_axis() * if top { -1.0 } else { 1.0 };
                     let world = |p: peet_math::DVec2| m.point(plane.from_plane_coords(p));
                     let beyond =
                         crate::sheet::cut_beyond(&layout, &done, &world, into, span, &regions, feature.0);
@@ -452,7 +518,9 @@ fn sheet_copies(
                     layout = before;
                 }
             }
-            Seed::Extrude { .. } | Seed::Revolve { .. } | Seed::Hole { .. } => unreachable!(),
+            Seed::Extrude { .. } | Seed::Revolve { .. } | Seed::Hole { .. } | Seed::EdgeFlange { .. } => {
+                unreachable!()
+            }
         }
     }
     if made == 0 {
@@ -513,4 +581,111 @@ mod tests {
                 .abs_diff_eq(DVec3::new(4.0, 0.0, 1.0), 1e-12)
         );
     }
+}
+
+/// Every copy of an edge flange, added to the flat pattern of the body the original is on
+/// and the body rebuilt once. Each copy goes on the edge the motion takes the original's
+/// edge to: an edge of a flange of the body, with the flange's material on one side.
+#[allow(clippy::too_many_arguments)]
+fn flange_copies(
+    feature: FeatureId,
+    model: &Model,
+    bodies: &[Arc<Body>],
+    seed: &Seed<'_>,
+    motions: &[Motion],
+    si: usize,
+    stamp: u64,
+    name: &str,
+    skipped: &mut Vec<String>,
+) -> Result<SheetCopies, FeatureError> {
+    let Seed::EdgeFlange {
+        original,
+        def,
+        spec,
+    } = seed
+    else {
+        unreachable!()
+    };
+    // The body the original is on, and the original's place in its flat pattern
+    let found = bodies.iter().enumerate().find_map(|(i, b)| {
+        let sheet = b.sheet.as_ref()?;
+        let at = sheet
+            .layout
+            .attachments
+            .iter()
+            .find(|a| a.owner == original.0)?;
+        Some((i, sheet, at.clone()))
+    });
+    let (index, sheet, at) = found.ok_or_else(|| {
+        FeatureError("the flange it copies is not on a sheet metal body".to_owned())
+    })?;
+    let mut layout = sheet.layout.clone();
+    let t = layout.settings.thickness;
+    let parent = &layout.pieces[at.parent];
+    // The original's bend: which way it goes, in the model
+    let up = at
+        .pieces
+        .first()
+        .and_then(|&b| layout.pieces[b].bend())
+        .map(|b| b.up)
+        .ok_or_else(|| FeatureError("the flange it copies has no bend".to_owned()))?;
+    let bend_way = parent.frame.z_axis() * if up { 1.0 } else { -1.0 };
+    // The edge's ends, through the middle of the sheet
+    let ends = [at.a, at.b].map(|p| parent.frame.to_world(p.extend(t / 2.0)));
+    let relief = crate::sheet::edge_flange_relief(def, &layout.settings, &model.parameters)
+        .map_err(FeatureError)?;
+    let own = peet_sheetmetal::FlangeOwn {
+        relief,
+        model: crate::sheet::edge_flange_bend(def, &model.parameters).map_err(FeatureError)?,
+        set_out: crate::sheet::edge_flange_position_offset(def, &model.parameters)
+            .map_err(FeatureError)?,
+    };
+    let mut made = 0;
+    for (k, m) in motions.iter().enumerate() {
+        let copy = copy_number(si, k + 1);
+        let moved = ends.map(|p| m.point(p));
+        // The flange whose middle the moved edge lies in, along its boundary
+        let target = layout.pieces.iter().enumerate().find_map(|(i, p)| {
+            if !p.is_flange() {
+                return None;
+            }
+            let local = moved.map(|q| p.frame.to_local(q));
+            if local.iter().any(|q| (q.z - t / 2.0).abs() > 1e-6) {
+                return None;
+            }
+            let (a, b) = (local[0].truncate(), local[1].truncate());
+            let d = (b - a).normalize_or_zero();
+            let mid = (a + b) / 2.0;
+            let left = p.covers(mid + d.perp() * 1e-3);
+            let right = p.covers(mid - d.perp() * 1e-3);
+            match (left, right) {
+                (true, false) => Some((i, a, b, false)),
+                (false, true) => Some((i, b, a, true)),
+                _ => None,
+            }
+        });
+        let Some((piece, a, b, turned)) = target else {
+            skipped.push(format!(
+                "copy {} of {name} (no edge of the sheet is where it would go)",
+                k + 2
+            ));
+            continue;
+        };
+        let way = m.vector(bend_way);
+        let top = (way.dot(layout.pieces[piece].frame.z_axis()) > 0.0) != spec.flip;
+        let site = peet_sheetmetal::EdgeSite { piece, a, b, top };
+        let mut copy_spec = *spec;
+        if turned {
+            copy_spec.offsets = [spec.offsets[1], spec.offsets[0]];
+        }
+        match layout.add_edge_flange_part(feature.0, copy << 4, &site, &copy_spec, own) {
+            Ok(()) => made += 1,
+            Err(e) => skipped.push(format!("copy {} of {name} ({e})", k + 2)),
+        }
+    }
+    if made == 0 {
+        return Ok((bodies.to_vec(), 0, None));
+    }
+    let (out, warning) = rebuild_sheet(model, bodies, index, layout, stamp)?;
+    Ok((out, made, warning))
 }

@@ -440,8 +440,9 @@ fn mirror_of_a_cut_with_an_arc() {
 #[test]
 fn copies_of_unsupported_features_fail_clearly() {
     let (mut p, _) = plate();
+    // A hem (edge flanges can be copied: see `a_flange_is_mirrored_and_patterned` in peet-ops)
     let e = edge(&p, DVec3::new(0.0, H, T), DVec3::new(W, H, T));
-    let f = p.model.add_edge_flange(Some(e));
+    let f = p.model.add_hem(Some(e));
     let pattern = p.model.add_pattern(
         vec![f],
         PatternDef::Linear {

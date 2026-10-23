@@ -166,6 +166,19 @@ impl Layout {
         spec: &EdgeFlangeSpec,
         own: FlangeOwn,
     ) -> Result<(), String> {
+        self.add_edge_flange_part(owner, 0, site, spec, own)
+    }
+
+    /// [`Self::add_edge_flange_with`] with its pieces numbered from `part_base`: a copy of
+    /// a flange, which needs names apart from the other copies'.
+    pub fn add_edge_flange_part(
+        &mut self,
+        owner: u32,
+        part_base: u32,
+        site: &EdgeSite,
+        spec: &EdgeFlangeSpec,
+        own: FlangeOwn,
+    ) -> Result<(), String> {
         let relief = own.relief;
         if !own.set_out.is_finite() {
             return Err("The offset from the edge is not a number.".to_owned());
@@ -202,7 +215,7 @@ impl Layout {
             up: site.top != spec.flip,
             flat: straight,
         }];
-        self.add_profile(owner, site, spec.offsets, trim, &segments, 0, relief)
+        self.add_profile(owner, site, spec.offsets, trim, &segments, part_base, relief)
             .map(|_| ())
     }
 

@@ -1835,7 +1835,8 @@ fn seed_key(model: &Model, seeds: &[FeatureId], out_keys: &HashMap<FeatureId, u6
 
 impl<'m> Ctx<'m, '_> {
     /// The copied features, resolved.
-    fn seeds(&self, ids: &[FeatureId]) -> Result<Vec<(String, pattern::Seed<'m>)>, String> {
+    /// Each with its place in the model, which the copies are built in the order of.
+    fn seeds(&self, ids: &[FeatureId]) -> Result<Vec<(String, pattern::Seed<'m>, usize)>, String> {
         if ids.is_empty() {
             return Err("Pick the features to copy.".to_owned());
         }
@@ -1864,6 +1865,11 @@ impl<'m> Ctx<'m, '_> {
                         up_to,
                     }
                 }
+                FeatureKind::EdgeFlange(e) => pattern::Seed::EdgeFlange {
+                    original: id,
+                    def: e,
+                    spec: sheet::edge_flange_spec(e, &self.model.parameters)?,
+                },
                 FeatureKind::SheetCut(c) => {
                     let (plane, sketch) = self.sketch_input(c.sketch)?;
                     pattern::Seed::SheetCut {
@@ -1907,12 +1913,12 @@ impl<'m> Ctx<'m, '_> {
                 }
                 other => {
                     return Err(format!(
-                        "{name} is a {}, which can't be copied: patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts and forms.",
+                        "{name} is a {}, which can't be copied: patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts, forms and edge flanges.",
                         other.type_name().to_lowercase()
                     ));
                 }
             };
-            out.push((name, seed));
+            out.push((name, seed, self.model.index_of(id).unwrap_or(usize::MAX)));
         }
         Ok(out)
     }

@@ -291,6 +291,22 @@ stays sheet metal (`fillet` and `chamfer` turn it into a plain solid).
 {"op": "sheet_cut", "sketch": "Notch", "end": "through_all", "reverse": true}
 ```
 
+- **Mirrors and patterns of flanges.** `mirror`, `linear_pattern` and
+  `circular_pattern` copy an `edge_flange` as SolidWorks does: each copy is the same
+  flange on the edge the motion takes the original's edge to, bent the way the motion
+  takes its bend. A mirror turns the edge round, so the copy's set-backs are the other
+  way round and it lies across from the original. A copy whose edge is not an edge of
+  the sheet (the edge it would go on has a flange already, or is not there) is left out
+  with a warning.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "edge_flange", "name": "Lip", "length": 20, "offset_start": 10, "offset_end": 60, "edge": {"between": [[0, 60, 2], [100, 60, 2]]}}
+{"op": "plane", "from": "front", "distance": 30, "flip": true, "name": "Middle"}
+{"op": "mirror", "features": ["Lip"], "plane": "Middle"}
+```
+
 - **A cut across a bend:** draw it on the flat face as it lies in the blank, running
   past the face's edge. Past that edge the sketch is over the bend and then the flange,
   laid flat: a point `d` beyond the bend line in the sketch is `d` along the sheet in the

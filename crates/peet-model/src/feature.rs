@@ -926,7 +926,12 @@ impl FeatureKind {
     pub fn can_be_copied(&self) -> bool {
         matches!(
             self,
-            Self::Extrude(_) | Self::SheetCut(_) | Self::Form(_) | Self::Revolve(_) | Self::Hole(_)
+            Self::Extrude(_)
+                | Self::SheetCut(_)
+                | Self::Form(_)
+                | Self::Revolve(_)
+                | Self::Hole(_)
+                | Self::EdgeFlange(_)
         )
     }
 

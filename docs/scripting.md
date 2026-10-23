@@ -303,6 +303,9 @@ with their defaults' types):
   that lie wholly within the reach, and across the flanges square to it where the
   sketch's outline crosses them, on across the bend at the end of one it goes past. The
   default `end`, `sheet`, is through its own sheet only.
+- `linear_pattern`, `circular_pattern` and `mirror` copy edge flanges too: each copy is the
+  same flange on the edge the copy's motion takes the original's edge to, set back from its
+  ends the other way round for a mirror.
 - `break_corner` rounds (`kind` `fillet`, the default) or chamfers (`chamfer`) corners of a
   sheet metal body by `size`. `edges` are the corners: the edges through the sheet where
   two straight sides of a flat face meet. The body stays sheet metal. An inside corner

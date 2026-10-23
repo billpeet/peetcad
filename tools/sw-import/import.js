@@ -1716,9 +1716,21 @@ function importPart(doc, dir) {
         const where = v.Plane && planeFrames.get(v.Plane.name);
         if (!plane || !where) return record(f, "failed", "its mirror plane was not imported");
         const names = [];
-        let warning = null;
-        // PeetCAD's mirror does not copy flanges, so a mirrored flange is made as a flange of its own on the
-        // edge across the plane. It is where the mirror puts it, but it no longer follows the original.
+        let warning = null, nativeFailed = null;
+        // PeetCAD's mirror copies edge flanges, and the sheet metal cuts that shape their outlines, as
+        // SolidWorks' does. Only if a copy can't be made (or for a mitre flange) is a mirrored flange made
+        // as a flange of its own on the edge across the plane, which no longer follows the original.
+        if (bent.length && !mitred.length) {
+          const kinds = new Set(["Edge flange", "Sheet metal cut"]);
+          const copied = bent.flatMap(b => made.get(b.name) || []).filter(n => kinds.has((peet.ask({ op: "feature", feature: n }).type || "")));
+          const built = build(f, { op: "mirror", name: f.name, features: [...seeds, ...copied], plane });
+          if (built.ok && !built.warning) {
+            made.set(f.name, built.names);
+            return record(f, "imported");
+          }
+          if (built.ok) peet.apply({ op: "delete", features: built.names });
+          nativeFailed = built.ok ? built.warning : built.message;
+        }
         const across = p => sub(p, mul(where.n, 2 * dot(sub(p, where.o), where.n)));
         const order = [...flanges.values()];
         bent.sort((a, b) => order.indexOf(a) - order.indexOf(b));
@@ -1730,7 +1742,7 @@ function importPart(doc, dir) {
           const built = buildFlange(f, op, "", p.alone && p.original ? across(p.original) : null);
           if (!built.ok) return record(f, names.length ? "imported in part" : "failed", built.message);
           names.push(...built.names);
-          warning = "its flanges are made as flanges of their own, which do not follow the originals";
+          warning = "its flanges are made as flanges of their own, which do not follow the originals" + (nativeFailed ? ` (PeetCAD's mirror: ${nativeFailed})` : "");
           if (p.outline) {
             const cut = cutToOutline(f, op.name + " outline", p.outline, across);
             if (cut.name) names.push(cut.sketch, cut.name);
