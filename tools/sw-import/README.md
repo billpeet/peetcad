@@ -46,8 +46,8 @@ its SolidWorks plane does, and its points are converted through the two planes' 
 |---|---|
 | Sketch | `sketch` with its lines, arcs and circles where they are, ends that meet joined |
 | Reference plane | `plane`: an offset of a standard plane, or of one turned about an axis, where SolidWorks has it (its transform runs from the plane to the model, the other way from a sketch's) |
-| Base flange | `base_flange`, with the body's thickness, radius (0 too), bend deduction and relief. From an open profile: as deep as SolidWorks has it, to both sides for its mid-plane end condition, with lines that are in line joined; which side the sheet is on is tried both ways and the one kept whose faces are where SolidWorks' are |
-| Edge flange | `edge_flange`: length converted to the outer corner, position (SolidWorks' meaning, which PeetCAD's has), position offset, angle, set-backs read off its outline sketch (negative where the outline runs past the edge), its own relief and bend allowance where it has them |
+| Base flange | `base_flange`, with the body's thickness, radius (0 too), bend deduction and relief, and each bend's own bend model from SolidWorks' sketched bends. From an open profile: as deep as SolidWorks has it, to both sides for its mid-plane end condition, with lines that are in line joined; which side the sheet is on is tried both ways and the one kept whose faces are where SolidWorks' are |
+| Edge flange | `edge_flange`: length converted to the outer corner, position (SolidWorks' meaning, which PeetCAD's has), position offset, angle, set-backs read off its outline sketch (negative where the outline runs past the edge), its own relief and bend allowance where it has them. An outline that is not a rectangle is its `outline`, drawn on a plane turned about the edge to where SolidWorks' profile sketch is |
 | Mitre flange | `miter_flange` on the same edges with the same gap and offsets. The profile is tried as drawn and with it, or its start, moved a thickness across the sketch: PeetCAD puts the sheet on the side of the profile that follows from the corner of the edge it starts at, SolidWorks from the flange's position. The one kept has its flat faces in the most planes SolidWorks' has |
 | Cut-extrude | `sheet_cut` on sheet metal, with SolidWorks' end condition as its `end`, `depth` and `both`: through next and up to a surface or a vertex as deep as SolidWorks' walls of the cut reach. `cut` on a solid. Which way either goes is the way that makes SolidWorks' walls where they are. A cut of nothing but text is left out (P5) |
 | Boss-extrude | `extrude`; up to a surface or a vertex, as deep as SolidWorks' faces of it go |
@@ -67,7 +67,8 @@ not follow the part when it changes:
 - **A mirrored flange PeetCAD's mirror can't copy** (a mitre flange, or one whose edge
   across the plane is not there yet): a flange of its own on the edge across the plane,
   a mitre flange with its profile moved across the plane.
-- **A flange whose outline is not a rectangle:** a rectangular flange, and a sheet metal
+- **A flange whose outline can't be its own** (no plane can be put where the profile is,
+  or the outline is not where the flange is): a rectangular flange, and a sheet metal
   cut of everything between the outline and a box around it. Where the outline reaches
   further than the flange's length (a round top), the flange is made long enough first.
 
