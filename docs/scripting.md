@@ -317,7 +317,9 @@ with their defaults' types):
 - `corner` sets how flanges that run to one corner meet: `kind` (`butt`, `overlap`,
   `open`, `plain`), `gap`, and `relief`, what is cut from the blank where their bends meet
   (`rectangular` with `relief_size`, `tear`, `flush`: back to where the flanges end, or
-  `slanted`: the face keeps its corner and each bend ends on a slant to its flange's end).
+  `slanted`: the face keeps its corner and each bend ends on a slant to its flange's end;
+  `circular` and `square`, SolidWorks' corner relief: `relief_size` across, centred where
+  the flanges' ends meet in the blank, cut from the face, the bends and the flanges).
   It applies to the corners of `faces`, or to every corner there is when it is added.
 - `linear_pattern` becomes a grid with `direction2`, `spacing2`, `count2`; `"direction2":
   null` makes it a row again.

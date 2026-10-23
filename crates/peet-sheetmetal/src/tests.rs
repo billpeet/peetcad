@@ -1371,6 +1371,37 @@ fn slanted_corner_relief_keeps_the_face() {
 }
 
 #[test]
+fn circular_and_square_reliefs_are_centred_where_the_flanges_end() {
+    // Open corners, the flanges stopping well short of the corner: a flush relief cuts the
+    // blank back to the corner of the two flanges' ends. A circular or square relief is
+    // centred there, so it takes three quarters of its shape more from the face, the
+    // bends and the flanges at each of the four corners. Folding keeps the volume.
+    let gap = R + T + 4.0;
+    let size = 4.0;
+    let blank = |relief: CornerRelief| {
+        let mut layout = closed_box(settings(0.5), FlangePosition::MaterialInside, 20.0);
+        for c in &mut layout.corners {
+            c.spec = CornerSpec {
+                kind: CornerKind::Open,
+                gap,
+                relief,
+                relief_size: size,
+            };
+        }
+        let (solid, body) = built(layout);
+        let flat = measure::volume(&body.flat);
+        assert_close(measure::volume(&solid), flat, flat * 2e-5);
+        flat_area(&body)
+    };
+    let flush = blank(CornerRelief::Flush);
+    let square = blank(CornerRelief::Square);
+    let circular = blank(CornerRelief::Circular);
+    assert_close(flush - square, 4.0 * 0.75 * size * size, 1e-6);
+    let disc = std::f64::consts::PI * size * size / 4.0;
+    assert_close(flush - circular, 4.0 * 0.75 * disc, 1e-3);
+}
+
+#[test]
 fn a_plain_corner_runs_nothing_on() {
     // Bend outside: the flanges stand R + t outside the plate. A butt corner runs the
     // earlier flange on to the later one's outer face; a plain corner leaves it ending

@@ -257,6 +257,22 @@ after the flanges it is about.
   ```
 - `flush` is never less than a tear, so with a gap smaller than the bend radius the
   bends still end before their flanges do.
+- `circular` and `square` are SolidWorks' corner relief feature: a circle, or a square
+  with its sides along the two edges, `relief_size` across, centred where the two
+  flanges' ends meet in the blank, cut from the face, both bends and both flanges. They
+  change only the relief, so give the corner the `kind` and `gap` it had. Use one where
+  the part needs a drilled or punched hole at each corner. Outside the shape the blank
+  is cut as `flush` cuts it, so no bend runs past its flange. To bring a SolidWorks
+  Corner Relief over, apply it to the same corners after the flange's own `corner`:
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [120, 80]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
+  {"op": "edge_flange", "name": "Wall", "length": 25, "edges": [{"between": [[0, 0, 2], [120, 0, 2]]}, {"between": [[120, 0, 2], [120, 80, 2]]}, {"between": [[120, 80, 2], [0, 80, 2]]}, {"between": [[0, 80, 2], [0, 0, 2]]}]}
+  {"op": "corner", "kind": "open", "gap": 0.7, "relief": "slanted"}
+  {"op": "corner", "name": "Corner Relief1", "kind": "open", "gap": 0.7, "relief": "circular", "relief_size": 6}
+  {"op": "bodies"}
+  ```
 - Without `faces` it is every corner the part has when it is applied; corners made by
   flanges added later keep the default. `faces` picks corners: the end face of a flange
   at a corner picks that corner, a flange's top or bottom face picks the corners at both
