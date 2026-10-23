@@ -47,7 +47,7 @@ pub use gauge::{CsvError, GaugeEntry, GaugeTable, MaterialLibrary};
 pub use layout::{
     Area, Bend, ChainLine, CurveTag, Cut, Edge2, EdgeSite, Layout, Origin, Piece, PieceKind,
 };
-pub use recognize::{Recognized, recognize, recognize_layout};
+pub use recognize::{Recognized, recognize, recognize_at, recognize_layout};
 pub use report::{BendRow, Report};
 pub use settings::{BendModel, BendValues, FlangePosition, ReliefType, SheetSettings};
 pub use split::{BendLinePosition, JogDimension, JogSpec, SketchedBendSpec, Split};

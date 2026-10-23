@@ -536,6 +536,17 @@ fn flat_faces_along_a_ring() {
     let whole = 2.0 * PI * PI * major * minor * minor;
     let torus = ring(major, minor);
     assert!((volume(&torus) - whole).abs() < 1e-6 * whole);
+    // Its bounds are exact, as far as the ring reaches.
+    let bounds = torus.bounds();
+    let reach = v(major + minor, major + minor, minor);
+    assert!(
+        (bounds.max - reach).abs().max_element() < 1e-9,
+        "{bounds:?}"
+    );
+    assert!(
+        (bounds.min + reach).abs().max_element() < 1e-9,
+        "{bounds:?}"
+    );
     for c in [8.0, 11.5] {
         let slab = cuboid(v(-20.0, c, -5.0), v(20.0, 20.0, 5.0));
         let (left, _) = run(&torus, &slab, BooleanOp::Subtract);

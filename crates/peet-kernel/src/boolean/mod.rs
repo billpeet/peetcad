@@ -335,6 +335,16 @@ impl<'a> Work<'a> {
                     }
                     Ssi::Curves(curves) => {
                         for c in curves {
+                            // A traced curve along an edge of both faces is where they
+                            // only meet, end to end (a sweep starting on the end face of
+                            // a rod at a slant): each solid has that edge already, and the
+                            // faces there are imprinted on each other exactly.
+                            if matches!(c, Curve3::Nurbs(_))
+                                && along_edges(&c, fa)
+                                && along_edges(&c, fb)
+                            {
+                                continue;
+                            }
                             let span = match (c.domain(), line_range(&c, &grow(&overlap, LINEAR))) {
                                 // A freeform curve has ends of its own.
                                 (Some((lo, hi)), _) | (None, Some((lo, hi))) => {
@@ -656,6 +666,20 @@ fn unique_edge(
     candidates.push(id);
     edges.push(piece);
     (id, true)
+}
+
+/// Whether the whole of a curve (with ends of its own) lies on the edges of `face`.
+fn along_edges(c: &Curve3, face: &FaceGeom) -> bool {
+    let Some((lo, hi)) = c.domain() else {
+        return false;
+    };
+    const SAMPLES: usize = 16;
+    (0..=SAMPLES).all(|i| {
+        let p = c.point(lo + (hi - lo) * i as f64 / SAMPLES as f64);
+        face.edges
+            .iter()
+            .any(|e| bounded_distance(&e.curve, e.t0, e.t1, p).0 <= 10.0 * LINEAR)
+    })
 }
 
 /// What to tell the user when two faces cross in a curve the kernel can't represent.

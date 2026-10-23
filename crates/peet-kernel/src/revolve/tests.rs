@@ -555,16 +555,19 @@ fn ring_cut_by_planes() {
     let plate = cuboid(v3(-14.0, -14.0, -5.0), v3(14.0, 14.0, -3.0));
     let s = run(&plate, &r, BooleanOp::Union);
     assert_close(measure::volume(&s), 28.0 * 28.0 * 2.0 + volume);
-    // At a slant: not representable.
+    // At a slant: the curves have no closed form and are traced.
     let frame = Frame {
         origin: DVec3::ZERO,
         rotation: DQuat::from_rotation_y(0.3),
     };
     let slab = crate::transform::solid(&top, &frame);
-    assert!(matches!(
-        boolean(&r, &slab, BooleanOp::Subtract),
-        Err(KernelError::Unsupported(_))
-    ));
+    let s = run(&r, &slab, BooleanOp::Subtract);
+    let rest = run(&r, &slab, BooleanOp::Intersect);
+    let whole = measure::volume(&s) + measure::volume(&rest);
+    assert!(
+        (whole - volume).abs() < 1e-4 * volume,
+        "{whole} instead of {volume}"
+    );
 }
 
 #[test]

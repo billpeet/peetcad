@@ -55,6 +55,17 @@ flat pattern and takes flanges. Use it on a shelled solid or on a body from
   largest flat face of the only body.
 - The thickness and the bend radii are read from the solid; `bend` (K-factor, allowance
   or deduction) says how its bends unfold.
+- `thickness` makes a flat body sheet of another thickness, hanging from `face` into the
+  solid, as SolidWorks' Convert to Sheet Metal does with the thickness it is given (a
+  3 mm plate converted at 2 mm keeps its top face and loses a millimetre underneath). A
+  body with bends can only be converted at the thickness it has.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [70, 210]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 3}
+{"op": "convert_to_sheet", "face": {"normal": [0, 0, 1]}, "thickness": 2}
+{"op": "bodies"}
+```
 - A solid that is not one thickness, or whose bends are sharp corners, fails to build
   and says what it found: fix the solid, or model the part with `base_flange` and
   flanges.

@@ -31,6 +31,24 @@ selectors`). `peet ops NAME` gives a feature's fields. Change one later with
   none), `"new_body"` always makes a separate body, `"cut"` removes.
 - A sketch with several regions extrudes all the outer ones, with regions inside them as
   holes. `regions` picks others: a list of sketch points, one inside each region wanted.
+  Regions picked side by side are extruded as one shape.
+- `draft` leans the walls by that many degrees from the direction of extrusion, pivoting
+  on the sketch plane: what is added or removed narrows as it goes
+  (`"draft_outward": true` widens it). A draft too steep for the depth fails to build;
+  it can't be used with `mid_plane`.
+- `"flip_side": true` on a cut removes everything **outside** its regions within its
+  reach instead of inside. With a draft, the material removed still narrows, so the
+  regions grow with depth: that is how a bolt head's corners are chamfered.
+
+```jsonl
+{"op": "sketch", "on": "right", "draw": [{"type": "polygon", "center": [0, 0], "vertex": [0, 7.5], "sides": 6}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5.3}
+{"op": "sketch", "on": {"feature": "Extrude1", "side": "end"}, "name": "Chamfer", "draw": [{"type": "circle", "center": [0, 0], "radius": 6.5}]}
+{"op": "cut", "sketch": "Chamfer", "end": "through_all", "flip_side": true, "draft": 60}
+{"op": "sketch", "on": "top", "name": "Boss", "draw": [{"type": "rectangle", "from": [20, -5], "to": [30, 5]}]}
+{"op": "extrude", "sketch": "Boss", "depth": 10, "draft": 5}
+{"op": "bodies"}
+```
 
 ## Revolve
 
@@ -45,6 +63,19 @@ draw the profile on one side of a construction centreline. `axis` can also be
 `sweep` takes two sketches: `profile` (closed regions) and `path` (connected lines and
 arcs in another sketch, starting on the profile's plane and square to it). A corner
 between two straight pieces of the path is mitred. `cut_sweep` removes the same shape.
+
+- The profile can also sit **part way along** a straight piece of the path, square to
+  it: the path is swept both ways from it, end to end.
+- A path that leaves the profile's plane **at a slant** carries the profile along as
+  drawn, without turning it (a slanted cylinder from a circle). Such a path, like a
+  spline, can't have corners.
+
+```jsonl
+{"op": "sketch", "on": "top", "name": "Section", "draw": [{"type": "circle", "center": [0, 0], "radius": 3}]}
+{"op": "sketch", "on": "front", "name": "Rod", "draw": [{"type": "polyline", "points": [[0, 10], [0, 0], [0, -40], [20, -40]]}]}
+{"op": "sweep", "profile": "Section", "path": "Rod"}
+{"op": "bodies"}
+```
 
 The path can be a **spline** (see the sketching skill), for a pipe or a handle that
 curves freely:

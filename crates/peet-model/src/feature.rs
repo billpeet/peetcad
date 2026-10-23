@@ -17,7 +17,7 @@ use peet_sheetmetal::{
 
 use crate::convert::ConvertToSheetFeature;
 use crate::dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
-use crate::extrude::Extrude;
+use crate::extrude::{EndCondition, Extrude, Operation, RegionSelection};
 use crate::hole::HoleFeature;
 use crate::import::ImportFeature;
 use crate::loft::LoftFeature;
@@ -283,6 +283,89 @@ pub struct SketchFeature {
 pub struct ExtrudeFeature {
     pub sketch: FeatureId,
     pub params: Extrude,
+}
+
+/// An extrusion as model schemas through 11 stored it: before its side could be flipped and
+/// its walls drafted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ExtrudeFeatureV11 {
+    sketch: FeatureId,
+    params: ExtrudeV11,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct ExtrudeV11 {
+    end: EndCondition,
+    depth: Scalar,
+    reverse: bool,
+    operation: Operation,
+    regions: RegionSelection,
+}
+
+impl From<ExtrudeFeatureV11> for ExtrudeFeature {
+    fn from(e: ExtrudeFeatureV11) -> Self {
+        let old = e.params;
+        let mut params = Extrude::new(old.operation);
+        params.end = old.end;
+        params.depth = old.depth;
+        params.reverse = old.reverse;
+        params.regions = old.regions;
+        Self {
+            sketch: e.sketch,
+            params,
+        }
+    }
+}
+
+impl From<&ExtrudeFeature> for ExtrudeFeatureV11 {
+    /// The old layout, which has no room for a flipped side or a draft.
+    fn from(e: &ExtrudeFeature) -> Self {
+        let p = &e.params;
+        Self {
+            sketch: e.sketch,
+            params: ExtrudeV11 {
+                end: p.end.clone(),
+                depth: p.depth.clone(),
+                reverse: p.reverse,
+                operation: p.operation,
+                regions: p.regions.clone(),
+            },
+        }
+    }
+}
+
+/// A conversion to sheet metal as model schemas through 11 stored it: before it could
+/// be given a thickness of its own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ConvertToSheetFeatureV11 {
+    face: Option<FaceRef>,
+    model: BendModelDef,
+    relief: ReliefType,
+    relief_ratio: Scalar,
+}
+
+impl From<ConvertToSheetFeatureV11> for ConvertToSheetFeature {
+    fn from(c: ConvertToSheetFeatureV11) -> Self {
+        Self {
+            face: c.face,
+            model: c.model,
+            relief: c.relief,
+            relief_ratio: c.relief_ratio,
+            thickness: None,
+        }
+    }
+}
+
+impl From<&ConvertToSheetFeature> for ConvertToSheetFeatureV11 {
+    /// The old layout, which has no room for a thickness of its own.
+    fn from(c: &ConvertToSheetFeature) -> Self {
+        Self {
+            face: c.face.clone(),
+            model: c.model.clone(),
+            relief: c.relief,
+            relief_ratio: c.relief_ratio.clone(),
+        }
+    }
 }
 
 /// How a sheet metal body works out the flat length of its bends, as entered.
@@ -1126,7 +1209,7 @@ impl FeatureKind {
     pub fn scalars(&self) -> Vec<&Scalar> {
         match self {
             Self::Sketch(_) | Self::Axis(_) | Self::CoordSystem(_) => Vec::new(),
-            Self::Extrude(e) => vec![&e.params.depth],
+            Self::Extrude(e) => vec![&e.params.depth, &e.params.draft],
             Self::Plane(PlaneDef::Offset { distance, .. }) => vec![distance],
             Self::Plane(PlaneDef::Angled { angle, .. }) => vec![angle],
             Self::Plane(PlaneDef::Midplane { .. }) => Vec::new(),
@@ -1225,7 +1308,10 @@ macro_rules! slots {
                 };
             }
             match self {
-                Self::Extrude(e) => vec![("depth", Length, & $($m)? e.params.depth)],
+                Self::Extrude(e) => vec![
+                    ("depth", Length, & $($m)? e.params.depth),
+                    ("draft", Angle, & $($m)? e.params.draft),
+                ],
                 Self::Plane(PlaneDef::Offset { distance, .. }) => {
                     vec![("distance", Length, distance)]
                 }
@@ -1339,10 +1425,14 @@ macro_rules! slots {
                 }
                 Self::ConvertToSheet(c) => {
                     let c = & $($m)? **c;
-                    vec![
+                    let mut v = vec![
                         bend!(& $($m)? c.model),
                         ("relief_ratio", Number, & $($m)? c.relief_ratio),
-                    ]
+                    ];
+                    if let Some(t) = & $($m)? c.thickness {
+                        v.push(("thickness", Length, t));
+                    }
+                    v
                 }
                 Self::SheetCut(c) => vec![("depth", Length, & $($m)? c.depth)],
                 Self::Sketch(_)
@@ -1503,7 +1593,7 @@ impl From<PatternFeature> for PatternFeatureV9 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum FeatureKindV9 {
     Sketch(Box<SketchFeature>),
-    Extrude(Box<ExtrudeFeature>),
+    Extrude(Box<ExtrudeFeatureV11>),
     Plane(PlaneDef),
     Axis(AxisDef),
     Point(PointDef),
@@ -1528,14 +1618,14 @@ pub(crate) enum FeatureKindV9 {
     Import(Box<ImportFeature>),
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
-    ConvertToSheet(Box<ConvertToSheetFeature>),
+    ConvertToSheet(Box<ConvertToSheetFeatureV11>),
     BreakCorner(Box<BreakCornerFeature>),
 }
 impl From<FeatureKindV9> for FeatureKind {
     fn from(k: FeatureKindV9) -> Self {
         match k {
             FeatureKindV9::Sketch(v) => Self::Sketch(v),
-            FeatureKindV9::Extrude(v) => Self::Extrude(v),
+            FeatureKindV9::Extrude(v) => Self::Extrude(Box::new((*v).into())),
             FeatureKindV9::Plane(v) => Self::Plane(v),
             FeatureKindV9::Axis(v) => Self::Axis(v),
             FeatureKindV9::Point(v) => Self::Point(v),
@@ -1559,7 +1649,7 @@ impl From<FeatureKindV9> for FeatureKind {
             FeatureKindV9::Import(v) => Self::Import(v),
             FeatureKindV9::Sweep(v) => Self::Sweep(v),
             FeatureKindV9::Loft(v) => Self::Loft(v),
-            FeatureKindV9::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKindV9::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((*v).into())),
             FeatureKindV9::BreakCorner(v) => Self::BreakCorner(v),
         }
     }
@@ -1569,7 +1659,7 @@ impl From<FeatureKind> for FeatureKindV9 {
     fn from(k: FeatureKind) -> Self {
         match k {
             FeatureKind::Sketch(v) => Self::Sketch(v),
-            FeatureKind::Extrude(v) => Self::Extrude(v),
+            FeatureKind::Extrude(v) => Self::Extrude(Box::new((&*v).into())),
             FeatureKind::Plane(v) => Self::Plane(v),
             FeatureKind::Axis(v) => Self::Axis(v),
             FeatureKind::Point(v) => Self::Point(v),
@@ -1593,7 +1683,7 @@ impl From<FeatureKind> for FeatureKindV9 {
             FeatureKind::Import(v) => Self::Import(v),
             FeatureKind::Sweep(v) => Self::Sweep(v),
             FeatureKind::Loft(v) => Self::Loft(v),
-            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((&*v).into())),
             FeatureKind::BreakCorner(v) => Self::BreakCorner(v),
         }
     }
@@ -1653,7 +1743,7 @@ impl From<&EdgeFlangeFeature> for EdgeFlangeFeatureV11 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum FeatureKindV11 {
     Sketch(Box<SketchFeature>),
-    Extrude(Box<ExtrudeFeature>),
+    Extrude(Box<ExtrudeFeatureV11>),
     Plane(PlaneDef),
     Axis(AxisDef),
     Point(PointDef),
@@ -1677,7 +1767,7 @@ pub(crate) enum FeatureKindV11 {
     Import(Box<ImportFeature>),
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
-    ConvertToSheet(Box<ConvertToSheetFeature>),
+    ConvertToSheet(Box<ConvertToSheetFeatureV11>),
     BreakCorner(Box<BreakCornerFeature>),
 }
 
@@ -1685,7 +1775,7 @@ impl From<FeatureKindV11> for FeatureKind {
     fn from(k: FeatureKindV11) -> Self {
         match k {
             FeatureKindV11::Sketch(v) => Self::Sketch(v),
-            FeatureKindV11::Extrude(v) => Self::Extrude(v),
+            FeatureKindV11::Extrude(v) => Self::Extrude(Box::new((*v).into())),
             FeatureKindV11::Plane(v) => Self::Plane(v),
             FeatureKindV11::Axis(v) => Self::Axis(v),
             FeatureKindV11::Point(v) => Self::Point(v),
@@ -1709,7 +1799,7 @@ impl From<FeatureKindV11> for FeatureKind {
             FeatureKindV11::Import(v) => Self::Import(v),
             FeatureKindV11::Sweep(v) => Self::Sweep(v),
             FeatureKindV11::Loft(v) => Self::Loft(v),
-            FeatureKindV11::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKindV11::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((*v).into())),
             FeatureKindV11::BreakCorner(v) => Self::BreakCorner(v),
         }
     }
@@ -1719,7 +1809,7 @@ impl From<FeatureKind> for FeatureKindV11 {
     fn from(k: FeatureKind) -> Self {
         match k {
             FeatureKind::Sketch(v) => Self::Sketch(v),
-            FeatureKind::Extrude(v) => Self::Extrude(v),
+            FeatureKind::Extrude(v) => Self::Extrude(Box::new((&*v).into())),
             FeatureKind::Plane(v) => Self::Plane(v),
             FeatureKind::Axis(v) => Self::Axis(v),
             FeatureKind::Point(v) => Self::Point(v),
@@ -1743,7 +1833,7 @@ impl From<FeatureKind> for FeatureKindV11 {
             FeatureKind::Import(v) => Self::Import(v),
             FeatureKind::Sweep(v) => Self::Sweep(v),
             FeatureKind::Loft(v) => Self::Loft(v),
-            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((&*v).into())),
             FeatureKind::BreakCorner(v) => Self::BreakCorner(v),
         }
     }
@@ -1895,7 +1985,7 @@ pub(crate) struct SketchFeatureV8 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum FeatureKindV8 {
     Sketch(Box<SketchFeatureV8>),
-    Extrude(Box<ExtrudeFeature>),
+    Extrude(Box<ExtrudeFeatureV11>),
     Plane(PlaneDef),
     Axis(AxisDef),
     Point(PointDef),
@@ -1919,7 +2009,7 @@ pub(crate) enum FeatureKindV8 {
     Import(Box<ImportFeature>),
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
-    ConvertToSheet(Box<ConvertToSheetFeature>),
+    ConvertToSheet(Box<ConvertToSheetFeatureV11>),
     BreakCorner(Box<BreakCornerFeature>),
 }
 impl From<FeatureKindV8> for FeatureKind {
@@ -1931,7 +2021,7 @@ impl From<FeatureKindV8> for FeatureKind {
                 sketch: s.sketch,
                 projections: Vec::new(),
             })),
-            FeatureKindV8::Extrude(v) => Self::Extrude(v),
+            FeatureKindV8::Extrude(v) => Self::Extrude(Box::new((*v).into())),
             FeatureKindV8::Plane(v) => Self::Plane(v),
             FeatureKindV8::Axis(v) => Self::Axis(v),
             FeatureKindV8::Point(v) => Self::Point(v),
@@ -1955,7 +2045,7 @@ impl From<FeatureKindV8> for FeatureKind {
             FeatureKindV8::Import(v) => Self::Import(v),
             FeatureKindV8::Sweep(v) => Self::Sweep(v),
             FeatureKindV8::Loft(v) => Self::Loft(v),
-            FeatureKindV8::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKindV8::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((*v).into())),
             FeatureKindV8::BreakCorner(v) => Self::BreakCorner(v),
         }
     }
@@ -1968,7 +2058,7 @@ impl From<&FeatureKind> for FeatureKindV8 {
                 placement: s.placement,
                 sketch: s.sketch.clone(),
             })),
-            FeatureKind::Extrude(v) => Self::Extrude(v.clone()),
+            FeatureKind::Extrude(v) => Self::Extrude(Box::new((&**v).into())),
             FeatureKind::Plane(v) => Self::Plane(v.clone()),
             FeatureKind::Axis(v) => Self::Axis(v.clone()),
             FeatureKind::Point(v) => Self::Point(v.clone()),
@@ -1992,7 +2082,7 @@ impl From<&FeatureKind> for FeatureKindV8 {
             FeatureKind::Import(v) => Self::Import(v.clone()),
             FeatureKind::Sweep(v) => Self::Sweep(v.clone()),
             FeatureKind::Loft(v) => Self::Loft(v.clone()),
-            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(v.clone()),
+            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((&**v).into())),
             FeatureKind::BreakCorner(v) => Self::BreakCorner(v.clone()),
         }
     }

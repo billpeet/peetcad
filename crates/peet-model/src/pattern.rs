@@ -113,6 +113,7 @@ pub(crate) enum Seed<'a> {
         sketch: &'a Sketch,
         params: &'a Extrude,
         depth: f64,
+        draft: f64,
         up_to: Option<Plane>,
     },
     Revolve {
@@ -273,6 +274,7 @@ fn solid_copy(
             sketch,
             params,
             depth,
+            draft,
             up_to,
         } => apply_extrude(&ExtrudeInput {
             feature,
@@ -281,6 +283,7 @@ fn solid_copy(
             sketch,
             params,
             depth: *depth,
+            draft: *draft,
             up_to: up_to.and_then(|p| motion.plane(&p)),
             stamp,
             mirror: motion.is_mirror(),

@@ -24,13 +24,15 @@ const repo = path.resolve(__dirname, "..", "..");
 const peetExe = option("--peet")
   || [path.join(repo, "target", "release", "peet.exe"), path.join(repo, "target", "debug", "peet.exe"), "peet"].find(p => p === "peet" || fs.existsSync(p));
 const only = option("--only");
+/** A folder of SolidWorks' STEP files of the parts (out-all's), for parts nothing can be built of. */
+const stepDir = option("--step");
 /** How many parts to import at once, each in a process of its own. */
 const jobs = Math.max(1, parseInt(option("--jobs") || "1", 10));
 const flag = name => { const i = args.indexOf(name); if (i >= 0) args.splice(i, 1); return i >= 0; };
 /** Without them a part is the right shape and can't be driven. Leaving them out is much quicker. */
 const relations = !flag("--no-relations");
 if (args.length !== 2) {
-  console.error("Usage: node import.js <export.swx.json | folder of exports> <output folder> [--peet <peet executable>] [--only <text>]");
+  console.error("Usage: node import.js <export.swx.json | folder of exports> <output folder> [--peet <peet executable>] [--only <text>] [--step <folder of STEP files>]");
   process.exit(2);
 }
 const [input, outDir] = args.map(a => path.resolve(a));
@@ -242,6 +244,7 @@ function importPart(doc, dir) {
   const promoted = new Map();    // "D1@Sketch1" -> the parameter that sketch dimension now follows
   const formulas = new Set();    // the sketch dimensions (full names) whose value is a formula
   const asleep = new Set();      // SolidWorks features imported and then suppressed in every configuration
+  const rejoined = new Map();    // SolidWorks CombineBodies name -> the Split whose pieces it joins again
   let unfolded = null;           // between an Unfold and its Fold: the face that stays where it is
   let sheet = null;             // the sheet metal settings in force
   let thickness = null;
@@ -1649,6 +1652,9 @@ function importPart(doc, dir) {
         // A part's first extrude is a "base extrude", which IsBossFeature does not count as a boss
         const boss = f.type === "Extrusion" || f.type === "Boss" || (f.type === "ICE" && (says ? v.IsBossFeature || v.IsBaseExtrude === true : /^Boss|^Extrude/i.test(f.name)));
         const unsure = !says && f.type === "ICE" && !/^Boss|^Extrude|^Cut/i.test(f.name);
+        // Walls drafted as they are extruded, which way the draft leans
+        const drafting = v["GetDraftWhileExtruding(true)"] && v["GetDraftAngle(true)"] > 0
+          ? { draft: tidy(v["GetDraftAngle(true)"] * 180 / Math.PI), ...(v["GetDraftOutward(true)"] ? { draft_outward: true } : {}) } : {};
         const extrude = () => {
           const sk = useSketch(f);
           if (sk.error) return { ok: false, message: sk.error };
@@ -1660,11 +1666,12 @@ function importPart(doc, dir) {
           const sf = frameOf(sketchOf(f).sketch.modelToSketch);
           let along = mul(sf.n, v.ReverseDirection ? -1 : 1);
           let depth = v["GetDepth(true)"] * MM;
+          if (evenly && drafting.draft) return { ok: false, unsupported: true, message: "an extrusion drafted both ways" };
           if (evenly) return build(f, { op: "extrude", sketch: sk.name, name: f.name, depth: tidy(2 * depth), end: "mid_plane" });
           // Up to a flat face parallel to the sketch, which SolidWorks names: up to that face, as SolidWorks has it
           const target = upToFace(end, v, sf);
           if (target) {
-            const built = build(f, { op: "extrude", sketch: sk.name, name: f.name, end: { up_to: target } });
+            const built = build(f, { op: "extrude", sketch: sk.name, name: f.name, end: { up_to: target }, ...drafting });
             if (built.ok) return built;
           }
           const vertex = end === 5 && v["GetVertex(true)"] && v["GetVertex(true)"].point;
@@ -1672,7 +1679,7 @@ function importPart(doc, dir) {
             // Up to a vertex: as far as the vertex SolidWorks names is from the sketch's plane
             const level = dot(sub(mm(vertex), sf.o), sf.n);
             if (Math.abs(level) > 1e-6) {
-              const built = build(f, { op: "extrude", sketch: sk.name, name: f.name, depth: tidy(Math.abs(level)), reverse: level * dot(sf.n, sk.frame.n) < 0 });
+              const built = build(f, { op: "extrude", sketch: sk.name, name: f.name, depth: tidy(Math.abs(level)), reverse: level * dot(sf.n, sk.frame.n) < 0, ...drafting });
               if (built.ok) built.warning = [built.warning, "it goes up to a vertex in SolidWorks: it is made as deep as the vertex is"].filter(Boolean).join("; ");
               return built;
             }
@@ -1688,7 +1695,7 @@ function importPart(doc, dir) {
           }
           const built = build(f, {
             op: "extrude", sketch: sk.name, name: f.name, depth: tidy(depth),
-            ...(end === 6 ? { end: "mid_plane" } : {}), reverse: dot(along, sk.frame.n) < 0,
+            ...(end === 6 ? { end: "mid_plane" } : {}), reverse: dot(along, sk.frame.n) < 0, ...drafting,
           });
           if (built.ok && [3, 4, 5].includes(end)) built.warning = [built.warning, `it goes up to something in SolidWorks (end condition ${end}): it is made as deep as it went there`].filter(Boolean).join("; ");
           return built;
@@ -1720,12 +1727,14 @@ function importPart(doc, dir) {
         const sk = useSketch(f);
         if (sk.error) return record(f, "failed", sk.error);
         const target = upToFace(end, v, frameOf(sketchOf(f).sketch.modelToSketch));
-        const shape = end === 0 ? { end: "blind", depth: tidy(depth) } : end === 6 ? { end: "mid_plane", depth: tidy(depth) } : target ? { end: { up_to: target } } : { end: "through_all" };
+        // The side of the sketch that is cut away: outside it where SolidWorks flips it
+        const side = { ...drafting, ...(v.FlipSideToCut ? { flip_side: true } : {}) };
+        const shape = { ...(end === 0 ? { end: "blind", depth: tidy(depth) } : end === 6 ? { end: "mid_plane", depth: tidy(depth) } : target ? { end: { up_to: target } } : { end: "through_all" }), ...side };
         let built;
         // Which way it goes: the way that cuts where SolidWorks' cut did
         built = nearest(f, [false, true].map(reverse => ({ op: "cut", sketch: sk.name, name: f.name, ...shape, reverse })));
         let upTo = !!target;
-        if (!built.ok && target) { upTo = false; built = nearest(f, [false, true].map(reverse => ({ op: "cut", sketch: sk.name, name: f.name, end: "through_all", reverse }))); }
+        if (!built.ok && target) { upTo = false; built = nearest(f, [false, true].map(reverse => ({ op: "cut", sketch: sk.name, name: f.name, end: "through_all", ...side, reverse }))); }
         if (built.ok && ![0, 1, 6, 9].includes(end) && !upTo) built.warning = `SolidWorks' end condition ${end} is cut through all`;
         if (!built.ok && unsure) {
           const added = extrude();
@@ -1854,6 +1863,53 @@ function importPart(doc, dir) {
           return record(f, "not supported", "an axis along a line that is not on two of the model's planes");
         }
         return record(f, "not supported", `an axis of kind ${v.Type}`);
+      }
+
+      case "SolidToSheetMetal": {
+        // The solid becomes sheet metal of the thickness, bend radius and bend model of the sheet metal
+        // feature that goes with it, hanging from its fixed face into the solid
+        const settings = (f.parents || []).map(p => byName.get(p)).find(p => p && p.type === "SheetMetal");
+        const sv = settings ? values(settings) : {};
+        const fixed = sv.FixedReference;
+        if (!fixed || fixed.surface !== "plane" || !fixed.normal || !fixed.point) return record(f, "not supported", "a conversion whose fixed face is not a flat face");
+        if (!sheet) sheet = sv;
+        thickness = sv.Thickness * MM;
+        const op = {
+          op: "convert_to_sheet", name: f.name, face: { at: mm(fixed.point).map(tidy), normal: fixed.normal.map(tidy) },
+          bend: bendOf(sv), thickness: tidy(thickness),
+        };
+        return finish(f, build(f, op));
+      }
+
+      case "Sweep": case "SweepCut": {
+        // A profile sketch carried along a path sketch, which SolidWorks names
+        const own = name => {
+          const source = name && byName.get(name);
+          if (!source || !SKETCH.test(source.type)) return { error: "a sweep of something other than a sketch, or along it" };
+          if (sketches.has(source.name)) return sketches.get(source.name);
+          const imported = importSketch(source);
+          if (!imported.error) sketches.set(source.name, imported);
+          return imported;
+        };
+        const profile = own(v.Profile && v.Profile.name), along = own(v.Path && v.Path.name);
+        if (profile.error || along.error) return record(f, "failed", profile.error || along.error);
+        return finish(f, build(f, { op: f.type === "SweepCut" ? "cut_sweep" : "sweep", name: f.name, profile: profile.name, path: along.name }));
+      }
+
+      // A body split in pieces that are joined again later: PeetCAD keeps one body, and what is done in
+      // between is done to all of it, which is the same where it stays within the piece it was made on
+      case "Split": {
+        const piece = b => b && typeof b.name === "string" && b.name.startsWith(f.name + "[");
+        const combine = [...byName.values()].find(c => c.type === "CombineBodies" && !c.suppressed && (values(c).BodiesToCombine || []).some(piece));
+        if (!combine) return record(f, "not supported", "a split into bodies that are not joined again");
+        rejoined.set(combine.name, f.name);
+        made.set(f.name, []);
+        return record(f, "imported with a warning", `nothing to do: ${combine.name} joins its pieces again; what is between is made on the whole body`);
+      }
+      case "CombineBodies": {
+        if (!rejoined.has(f.name)) return record(f, "not supported", "a combination of bodies");
+        made.set(f.name, []);
+        return record(f, "imported", `nothing to do: it joins again what ${rejoined.get(f.name)} split`);
       }
 
       case "HoleWzd": {
@@ -2026,6 +2082,24 @@ function importPart(doc, dir) {
 
   for (const f of config.features) handle(f);
 
+  // ---- The STEP fallback ----
+  // A part nothing could be built of (a weldment, a body SolidWorks imported, a mirrored part) is
+  // SolidWorks' own body from its STEP file: the right shape, and nothing to drive.
+  let fallback = null;
+  if (stepDir && config.step && !(peet.ask({ op: "bodies" }).bodies || []).length) {
+    const file = path.join(path.resolve(stepDir), config.step);
+    const imported = fs.existsSync(file) && peet.apply({ op: "import_step", path: file });
+    if (imported && imported.ok) {
+      fallback = config.step;
+      report.fallback = { step: config.step };
+      report.notes.push(`Nothing could be built from SolidWorks' features, so the part is SolidWorks' own body from ${config.step}: it has the right shape and can't be driven.`);
+      if (config.flatDxf) {
+        const sheetMetal = peet.apply({ op: "convert_to_sheet" });
+        report.fallback.sheet_metal = sheetMetal.ok ? true : sheetMetal.error;
+      }
+    }
+  }
+
   // ---- Compare with SolidWorks ----
   const mass = peet.ask({ op: "mass" });
   const bodies = peet.ask({ op: "bodies" }).bodies || [];
@@ -2179,7 +2253,7 @@ function importPart(doc, dir) {
     // Each is added as a copy of the active one and made to agree with SolidWorks: the sketch dimensions
     // that differ, the features that are suppressed there, and the features that are live there and
     // suppressed in the active one, which are imported now, with that configuration shown.
-    const others = doc.configurations.filter(c => c !== config && !c.flatPattern);
+    const others = fallback ? [] : doc.configurations.filter(c => c !== config && !c.flatPattern);
     if (others.length) {
       report.configurations = [];
       if (config.name !== "Default") peet.apply({ op: "edit_configuration", configuration: "Default", name: config.name });
@@ -2299,7 +2373,7 @@ if (jobs > 1 && chosen.length > 1) {
   // Each part in a process of its own, then the reports they wrote are read back for the summary
   const { spawn } = require("child_process");
   const queue = [...chosen];
-  const pass = [...(relations ? [] : ["--no-relations"]), "--peet", peetExe];
+  const pass = [...(relations ? [] : ["--no-relations"]), "--peet", peetExe, ...(stepDir ? ["--step", stepDir] : [])];
   const next = () => {
     const file = queue.shift();
     if (!file) return Promise.resolve();

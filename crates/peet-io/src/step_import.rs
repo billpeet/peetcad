@@ -8,8 +8,9 @@
 //! are a `LINE`, `CIRCLE`, `ELLIPSE` or B-spline curve (also inside a `SURFACE_CURVE`,
 //! `SEAM_CURVE`, `INTERSECTION_CURVE` or `TRIMMED_CURVE`). Anything else on a face or an
 //! edge (offset and trimmed surfaces, edges given only as a `PCURVE`) is an error that
-//! names the entity. Surface bodies (`SHELL_BASED_SURFACE_MODEL`) and faceted bodies are
-//! skipped with a warning. Colours, layers, annotations and everything else in the file
+//! names the entity. A closed shell of a `SHELL_BASED_SURFACE_MODEL` bounds a solid and is
+//! read as one (SolidWorks writes a part with imported bodies so). Surface bodies (open
+//! shells, `FACE_BASED_SURFACE_MODEL`) and faceted bodies are skipped with a warning. Colours, layers, annotations and everything else in the file
 //! are ignored.
 //!
 //! **Freeform geometry.** B-splines come as `B_SPLINE_CURVE_WITH_KNOTS` and
@@ -272,11 +273,32 @@ pub fn read(text: &str) -> Result<StepImport> {
     let structure = Structure::read(&file);
     let mut warnings = Vec::new();
     let breps = file.ids_named(&["MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS"]);
-    let surface_models = file
-        .ids_named(&["SHELL_BASED_SURFACE_MODEL", "FACE_BASED_SURFACE_MODEL"])
-        .len();
+    // A closed shell of a surface model bounds a solid as a brep's does: SolidWorks writes
+    // the bodies of a part that has imported ones that way. Its open shells are surfaces.
+    let mut solids: Vec<(u32, Option<u32>)> = breps.iter().map(|&id| (id, None)).collect();
+    let mut surface_models = file.ids_named(&["FACE_BASED_SURFACE_MODEL"]).len();
+    for model in file.ids_named(&["SHELL_BASED_SURFACE_MODEL"]) {
+        let m = file.expect(model, &["SHELL_BASED_SURFACE_MODEL"], None)?;
+        for shell in m.refs(1)? {
+            let e = file.expect(
+                shell,
+                &[
+                    "CLOSED_SHELL",
+                    "ORIENTED_CLOSED_SHELL",
+                    "OPEN_SHELL",
+                    "ORIENTED_OPEN_SHELL",
+                ],
+                Some(&m),
+            )?;
+            if e.name().ends_with("CLOSED_SHELL") {
+                solids.push((model, Some(shell)));
+            } else {
+                surface_models += 1;
+            }
+        }
+    }
     let faceted = file.ids_named(&["FACETED_BREP"]).len();
-    if breps.is_empty() {
+    if solids.is_empty() {
         return Err(error(if surface_models > 0 {
             "This STEP file has only surface bodies (open or unstitched shells), which PeetCAD \
              can't import: it needs solids. Export the model as a solid (a manifold solid B-rep)."
@@ -312,7 +334,7 @@ pub fn read(text: &str) -> Result<StepImport> {
     let mut merged_vertices = 0;
     let mut turned_shells = 0;
     let mut bad_placements = 0;
-    for id in breps {
+    for (id, shell) in solids {
         let reps = structure.item_reps.get(&id).cloned().unwrap_or_default();
         let units = match reps.first() {
             Some(&rep) => structure.units(&file, rep),
@@ -325,9 +347,18 @@ pub fn read(text: &str) -> Result<StepImport> {
                 angle: 1.0,
             }
         });
-        let brep = file.expect(id, &["MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS"], None)?;
+        let brep = match shell {
+            None => file.expect(id, &["MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS"], None)?,
+            Some(shell) => file.expect(shell, &["CLOSED_SHELL", "ORIENTED_CLOSED_SHELL"], None)?,
+        };
         let mut builder = Builder::new(&file, units);
-        let built = builder.brep(&brep)?;
+        let built = match shell {
+            None => builder.brep(&brep)?,
+            Some(shell) => {
+                let model = file.expect(id, &["SHELL_BASED_SURFACE_MODEL"], None)?;
+                builder.closed_shell(shell, &model)?
+            }
+        };
         merged_vertices += builder.merged;
         turned_shells += usize::from(built.outer_was_inside_out);
 
@@ -2475,6 +2506,17 @@ impl<'a> Builder<'a> {
                 self.shell(void, brep)?;
             }
         }
+        self.built()
+    }
+
+    /// The solid a closed shell of a surface model bounds.
+    fn closed_shell(&mut self, id: u32, model: &Ent) -> Result<Built> {
+        self.shell(id, model)?;
+        self.built()
+    }
+
+    /// The solid the shells read so far bound: the first the outside, the others voids.
+    fn built(&mut self) -> Result<Built> {
         self.split_at_poles()?;
         for s in 0..self.shells.len() {
             // Cutting a face in two adds one to the shell: the count is not fixed.
