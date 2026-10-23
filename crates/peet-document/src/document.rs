@@ -786,6 +786,17 @@ pub fn sketch_bounds(plane: &Plane, sketch: &Sketch) -> Aabb {
             Some(c) => c.bounds(),
             None => match e.geometry {
                 peet_sketch::Geometry::Point { pos } => (pos, pos),
+                // A text's glyph outlines.
+                peet_sketch::Geometry::Text { .. } => {
+                    let curves = sketch.text_curves(id);
+                    if curves.is_empty() {
+                        continue;
+                    }
+                    curves.iter().map(|c| c.bounds()).fold(
+                        (peet_math::DVec2::INFINITY, peet_math::DVec2::NEG_INFINITY),
+                        |(lo, hi), (a, b)| (lo.min(a), hi.max(b)),
+                    )
+                }
                 _ => continue,
             },
         };

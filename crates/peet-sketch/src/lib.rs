@@ -12,6 +12,7 @@
 //! - [`shapes`]: rectangle, slot and polygon helpers
 //! - [`ops`]: trim, extend, offset, mirror and fillet
 //! - [`region`]: closed loop and region detection for features
+//! - [`text`]: sketch text, its glyph outlines as lines and arcs
 //! - [`triangulate`]: triangulation of regions, for shading profiles
 
 pub mod curve;
@@ -23,6 +24,7 @@ pub mod shapes;
 pub mod sketch;
 pub mod solver;
 pub mod spline;
+pub mod text;
 pub mod triangulate;
 
 pub use curve::{Curve, Intersection};

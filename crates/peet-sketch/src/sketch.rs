@@ -17,6 +17,7 @@ use peet_math::DVec2;
 use serde::{Deserialize, Serialize};
 
 use crate::curve::Curve;
+use crate::text::SketchText;
 
 /// Stable identifier of an entity within its sketch.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -59,6 +60,13 @@ pub enum Geometry {
         points: Vec<EntityId>,
         closed: bool,
     },
+    /// A text whose point is `anchor` (on the baseline: see [`crate::text`]). Its glyph
+    /// outlines are closed shapes for features ([`Sketch::text_curves`]); the solver
+    /// sees only the point.
+    Text {
+        anchor: EntityId,
+        text: Box<SketchText>,
+    },
 }
 
 impl Geometry {
@@ -70,6 +78,7 @@ impl Geometry {
             Self::Circle { center, .. } => vec![center],
             Self::Arc { center, start, end } => vec![center, start, end],
             Self::Spline { ref points, .. } => points.clone(),
+            Self::Text { anchor, .. } => vec![anchor],
         }
     }
 }
@@ -82,6 +91,7 @@ pub enum EntityKind {
     Circle,
     Arc,
     Spline,
+    Text,
 }
 
 impl EntityKind {
@@ -92,6 +102,7 @@ impl EntityKind {
             Self::Circle => "Circle",
             Self::Arc => "Arc",
             Self::Spline => "Spline",
+            Self::Text => "Text",
         }
     }
 
@@ -100,9 +111,10 @@ impl EntityKind {
         matches!(self, Self::Circle | Self::Arc)
     }
 
-    /// Lines, circles, arcs and splines.
+    /// Lines, circles, arcs and splines. A text is not one curve but many: see
+    /// [`Sketch::text_curves`].
     pub fn is_curve(self) -> bool {
-        !matches!(self, Self::Point)
+        !matches!(self, Self::Point | Self::Text)
     }
 
     /// Lines, circles and arcs: the curves with an equation the solver can hold a point
@@ -133,6 +145,7 @@ impl Entity {
             Geometry::Circle { .. } => EntityKind::Circle,
             Geometry::Arc { .. } => EntityKind::Arc,
             Geometry::Spline { .. } => EntityKind::Spline,
+            Geometry::Text { .. } => EntityKind::Text,
         }
     }
 }
@@ -473,7 +486,7 @@ impl Sketch {
                     .collect::<Option<Vec<DVec2>>>()?;
                 Some(Curve::spline_through(&through, closed))
             }
-            Geometry::Point { .. } => None,
+            Geometry::Point { .. } | Geometry::Text { .. } => None,
             Geometry::Line { start, end } => Some(Curve::Line {
                 a: self.try_point(start)?,
                 b: self.try_point(end)?,
@@ -672,6 +685,58 @@ impl Sketch {
             self.push_owned_point(*p, id, false);
         }
         Ok(id)
+    }
+
+    /// Adds a text with its point at `at`, the point owned by it. The text is drawn as it
+    /// comes: lay it out first ([`SketchText::layout`]).
+    pub fn add_text(&mut self, at: DVec2, text: SketchText) -> EntityId {
+        let id = EntityId(self.entities.len() as u32);
+        self.push_entity(Entity {
+            geometry: Geometry::Text {
+                anchor: EntityId(id.0 + 1),
+                text: Box::new(text),
+            },
+            construction: false,
+            owner: None,
+            locked: false,
+        });
+        self.push_owned_point(at, id, false);
+        id
+    }
+
+    /// A text's string, style and outline. `None` for other entities.
+    pub fn text(&self, id: EntityId) -> Option<&SketchText> {
+        match &self.entity(id)?.geometry {
+            Geometry::Text { text, .. } => Some(text),
+            _ => None,
+        }
+    }
+
+    pub fn text_mut(&mut self, id: EntityId) -> Option<&mut SketchText> {
+        match &mut self.entity_mut(id)?.geometry {
+            Geometry::Text { text, .. } => Some(text),
+            _ => None,
+        }
+    }
+
+    /// A text's glyph outlines where its point is, turned by its angle. Empty for other
+    /// entities.
+    pub fn text_curves(&self, id: EntityId) -> Vec<Curve> {
+        match self.entity(id).map(|e| &e.geometry) {
+            Some(Geometry::Text { anchor, text }) => match self.try_point(*anchor) {
+                Some(at) => text.curves(at).collect(),
+                None => Vec::new(),
+            },
+            _ => Vec::new(),
+        }
+    }
+
+    /// What an entity draws: its curve, or a text's glyph outlines. Empty for a point.
+    pub fn drawn_curves(&self, id: EntityId) -> Vec<Curve> {
+        match self.kind(id) {
+            Some(EntityKind::Text) => self.text_curves(id),
+            _ => self.curve(id).into_iter().collect(),
+        }
     }
 
     /// Marks an entity (and the points it owns) as construction geometry or not.
@@ -949,6 +1014,7 @@ impl Sketch {
                 swap(end);
             }
             Geometry::Spline { points, .. } => points.iter_mut().for_each(swap),
+            Geometry::Text { anchor, .. } => swap(anchor),
         }
         changed
     }

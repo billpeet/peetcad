@@ -1000,6 +1000,22 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.sketch = Some(id);
             format!("Edit {}", model.name_of(id))
         }
+        Op::SetText {
+            sketch,
+            text,
+            string,
+            style,
+        } => {
+            let id = sketch_id(doc, sketch)?;
+            let units = doc.model.parameters.units;
+            if let Some(s) = model.feature_mut(id).and_then(|f| f.sketch_mut()) {
+                let out = sketch::set_text(&mut s.sketch, *text, string.as_deref(), style, &units)?;
+                done.data.insert("text".to_owned(), out);
+            }
+            done.feature = Some(id);
+            done.sketch = Some(id);
+            format!("Edit {}", model.name_of(id))
+        }
         Op::NameFace { face, name } => {
             let target = select::face_ref(doc, face)?;
             model.name_geometry(name, peet_model::naming::NamedGeometry::Face(target))?;

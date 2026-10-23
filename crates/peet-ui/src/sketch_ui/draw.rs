@@ -135,24 +135,24 @@ impl SketchEditor {
 
         // Curves first, then points on top.
         for (id, e) in sketch.entities() {
-            let Some(curve) = sketch.curve(id) else {
-                continue;
-            };
             let base = self.entity_color(id, &pal);
             let (color, width) = match highlighted.get(&id) {
                 Some(c) => (*c, 2.6),
                 None => (base, 1.6),
             };
-            let pts: Vec<Pos2> = curve
-                .tessellate(tol)
-                .into_iter()
-                .map(|p| view.to_screen(p))
-                .collect();
-            let stroke = Stroke::new(width, color);
-            if e.construction {
-                painter.extend(Shape::dashed_line(&pts, stroke, 7.0, 4.0));
-            } else {
-                painter.add(Shape::line(pts, stroke));
+            // A text draws its glyph outlines.
+            for curve in sketch.drawn_curves(id) {
+                let pts: Vec<Pos2> = curve
+                    .tessellate(tol)
+                    .into_iter()
+                    .map(|p| view.to_screen(p))
+                    .collect();
+                let stroke = Stroke::new(width, color);
+                if e.construction {
+                    painter.extend(Shape::dashed_line(&pts, stroke, 7.0, 4.0));
+                } else {
+                    painter.add(Shape::line(pts, stroke));
+                }
             }
         }
         for (id, e) in sketch.entities() {
