@@ -267,12 +267,89 @@ pub(crate) fn selected_regions(
         .collect())
 }
 
+/// Whether two of the regions share a piece of an edge: regions picked side by side, as a
+/// slot and the bulge of an arc drawn across its end.
+pub(crate) fn regions_adjoin(regions: &[Region]) -> bool {
+    let pieces = |r: &Region| -> Vec<(peet_sketch::EntityId, DVec2, DVec2)> {
+        std::iter::once(&r.outer)
+            .chain(&r.holes)
+            .flat_map(|l| &l.edges)
+            .map(|e| (e.entity, e.curve.start(), e.curve.end()))
+            .collect()
+    };
+    let all: Vec<_> = regions.iter().map(pieces).collect();
+    let same = |a: DVec2, b: DVec2| a.distance(b) <= tolerance::LINEAR;
+    all.iter().enumerate().any(|(i, a)| {
+        all[i + 1..].iter().any(|b| {
+            a.iter().any(|&(ea, a0, a1)| {
+                b.iter().any(|&(eb, b0, b1)| {
+                    ea == eb && ((same(a0, b0) && same(a1, b1)) || (same(a0, b1) && same(a1, b0)))
+                })
+            })
+        })
+    })
+}
+
+/// The regions extruded from `from` to `to`, as one solid, and what each face is. Regions
+/// that share an edge are extruded one by one and joined, as SolidWorks extrudes the
+/// contours picked side by side as one shape: extruded together they would touch along
+/// a wall, which is no solid.
+fn extrude_joined(
+    plane: &Plane,
+    regions: &[Region],
+    from: f64,
+    to: f64,
+) -> Result<(Solid, Vec<ExtrudeFace>), FeatureError> {
+    if regions.len() < 2 || !regions_adjoin(regions) {
+        return Ok(extrude_traced(plane, regions, from, to)?);
+    }
+    let mut joined: Option<(Solid, Vec<ExtrudeFace>)> = None;
+    for (i, region) in regions.iter().enumerate() {
+        let (solid, faces) = extrude_traced(plane, std::slice::from_ref(region), from, to)?;
+        let faces: Vec<ExtrudeFace> = faces
+            .into_iter()
+            .map(|f| match f {
+                ExtrudeFace::Start { .. } => ExtrudeFace::Start { region: i },
+                ExtrudeFace::End { .. } => ExtrudeFace::End { region: i },
+                ExtrudeFace::Side {
+                    loop_index, edge, ..
+                } => ExtrudeFace::Side {
+                    region: i,
+                    loop_index,
+                    edge,
+                },
+            })
+            .collect();
+        joined = Some(match joined {
+            None => (solid, faces),
+            Some((so_far, so_far_faces)) => {
+                let traced = boolean_traced(&so_far, &solid, BooleanOp::Union)?;
+                // A face of the union is what the first of the faces it is made of was.
+                let faces = traced
+                    .sources
+                    .iter()
+                    .map(|list| {
+                        let s = list.first().expect("a face comes from a face");
+                        if s.solid == 0 {
+                            so_far_faces[s.face.index()]
+                        } else {
+                            faces[s.face.index()]
+                        }
+                    })
+                    .collect();
+                (traced.solid, faces)
+            }
+        });
+    }
+    Ok(joined.expect("there are regions"))
+}
+
 /// The extruded tool solid with its face names.
 fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> {
     let regions = selected_regions(input.sketch, &input.params.regions, input.mirror)?;
     let (near, far) = range(input)?;
     let (from, to) = (near.min(far), near.max(far));
-    let (solid, faces) = extrude_traced(input.plane, &regions, from, to)?;
+    let (solid, faces) = extrude_joined(input.plane, &regions, from, to)?;
     let names = faces
         .iter()
         .map(|f| {

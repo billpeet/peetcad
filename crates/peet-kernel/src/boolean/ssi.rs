@@ -53,7 +53,7 @@ pub(crate) fn intersect_in(
     found
 }
 
-/// The part of a cylinder or a cone near `region`, written exactly as a freeform
+/// The part of a cylinder or a cone near `region` (or a whole torus), written exactly as a freeform
 /// surface: a full turn between two circles, with its seam on the side away from the
 /// region. `None` for other surfaces, and for a cone whose tip is in reach.
 fn patch(surface: &Surface, region: &peet_math::Aabb) -> Option<NurbsSurface> {
@@ -66,6 +66,7 @@ fn patch(surface: &Surface, region: &peet_math::Aabb) -> Option<NurbsSurface> {
             let (r, slope) = (c.radius, c.half_angle.tan());
             (&c.frame, Box::new(move |z| r + z * slope))
         }
+        Surface::Torus(t) => return torus_patch(t, region),
         _ => return None,
     };
     let size = region.size().length();
@@ -110,6 +111,51 @@ fn patch(surface: &Surface, region: &peet_math::Aabb) -> Option<NurbsSurface> {
         )
     };
     NurbsSurface::skin(&[ring(z0), ring(z1)]).ok()
+}
+
+/// A whole torus written exactly as a freeform surface: the tube's circle (a rational
+/// quadratic) turned a full turn about the axis, the product of two rational circles.
+/// Both seams are on the side away from `region`. `None` for a torus whose tube reaches
+/// its axis (a spindle torus), which has no such form without a pinch.
+fn torus_patch(t: &Torus, region: &peet_math::Aabb) -> Option<NurbsSurface> {
+    if t.minor >= t.major - LINEAR {
+        return None;
+    }
+    let middle = t.frame.to_local(0.5 * (region.min + region.max));
+    // Round the axis, and round the tube from the tube's centre nearest the region.
+    let round = middle.y.atan2(middle.x) + PI;
+    let rho = middle.x.hypot(middle.y);
+    let tube = middle.z.atan2(rho - t.major) + PI;
+    let ring = NurbsCurve::arc(&Frame::WORLD, 1.0, round, std::f64::consts::TAU);
+    // The tube's circle in the (ρ, z) half-plane: x is ρ, y is z.
+    let section = NurbsCurve::arc(
+        &Frame {
+            origin: DVec3::new(t.major, 0.0, 0.0),
+            rotation: peet_math::DQuat::IDENTITY,
+        },
+        t.minor,
+        tube,
+        std::f64::consts::TAU,
+    );
+    let (rw, sw) = (ring.weights()?, section.weights()?);
+    let mut points =
+        Vec::with_capacity(ring.control_points().len() * section.control_points().len());
+    let mut weights = Vec::with_capacity(points.capacity());
+    for (c, cw) in ring.control_points().iter().zip(rw) {
+        for (q, qw) in section.control_points().iter().zip(sw) {
+            points.push(t.frame.to_world(DVec3::new(q.x * c.x, q.x * c.y, q.y)));
+            weights.push(cw * qw);
+        }
+    }
+    NurbsSurface::new(
+        2,
+        2,
+        ring.knots().to_vec(),
+        section.knots().to_vec(),
+        points,
+        Some(weights),
+    )
+    .ok()
 }
 
 thread_local! {
@@ -307,6 +353,11 @@ fn plane_torus(p: &Plane, t: &Torus) -> Ssi {
     let nh = n.cross(axis).length();
     // The torus reaches this far towards the plane.
     if h.abs() > t.major * nh + t.minor + LINEAR {
+        return Ssi::None;
+    }
+    // At its full reach a plane that is not square to the axis touches the torus in one
+    // point, which leaves no curve.
+    if nh > ANGULAR && h.abs() >= t.major * nh + t.minor - LINEAR {
         return Ssi::None;
     }
     if nh <= ANGULAR {

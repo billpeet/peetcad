@@ -1151,6 +1151,17 @@ function importPart(doc, dir) {
   }
 
   /**
+   * The face SolidWorks' extrusion goes up to (end condition 4), as a selector, if it is a flat face parallel
+   * to the sketch: PeetCAD's extrusion can go up to it and follow it.
+   */
+  function upToFace(end, v, sf) {
+    const face = end === 4 && v["GetFace(true)"];
+    if (!face || face.kind !== "face" || face.surface !== "plane" || !face.normal || !face.point) return null;
+    if (Math.abs(Math.abs(dot(unit(face.normal), sf.n)) - 1) > 1e-9) return null;
+    return { at: mm(face.point).map(tidy), normal: face.normal.map(tidy) };
+  }
+
+  /**
    * How far past its own sheet a SolidWorks cut-extrude or hole reaches, as `sheet_cut` fields: null for
    * one that goes through its own sheet only. Through next, and up to a vertex or a surface (or an offset
    * from one), are as deep as SolidWorks' walls of the cut reach.
@@ -1643,10 +1654,29 @@ function importPart(doc, dir) {
           if (sk.error) return { ok: false, message: sk.error };
           const end = v["GetEndCondition(true)"];
           if (![0, 3, 4, 5, 6].includes(end)) return { ok: false, unsupported: true, message: `an extrusion with end condition ${end}` };
-          if (v.BothDirections && end !== 6) return { ok: false, unsupported: true, message: "an extrusion in both directions" };
+          // Both ways by one depth each is a mid-plane extrusion twice as deep
+          const evenly = v.BothDirections && end === 0 && v["GetEndCondition(false)"] === 0 && Math.abs(v["GetDepth(true)"] - v["GetDepth(false)"]) < 1e-12;
+          if (v.BothDirections && end !== 6 && !evenly) return { ok: false, unsupported: true, message: "an extrusion in both directions" };
           const sf = frameOf(sketchOf(f).sketch.modelToSketch);
           let along = mul(sf.n, v.ReverseDirection ? -1 : 1);
           let depth = v["GetDepth(true)"] * MM;
+          if (evenly) return build(f, { op: "extrude", sketch: sk.name, name: f.name, depth: tidy(2 * depth), end: "mid_plane" });
+          // Up to a flat face parallel to the sketch, which SolidWorks names: up to that face, as SolidWorks has it
+          const target = upToFace(end, v, sf);
+          if (target) {
+            const built = build(f, { op: "extrude", sketch: sk.name, name: f.name, end: { up_to: target } });
+            if (built.ok) return built;
+          }
+          const vertex = end === 5 && v["GetVertex(true)"] && v["GetVertex(true)"].point;
+          if (vertex) {
+            // Up to a vertex: as far as the vertex SolidWorks names is from the sketch's plane
+            const level = dot(sub(mm(vertex), sf.o), sf.n);
+            if (Math.abs(level) > 1e-6) {
+              const built = build(f, { op: "extrude", sketch: sk.name, name: f.name, depth: tidy(Math.abs(level)), reverse: level * dot(sf.n, sk.frame.n) < 0 });
+              if (built.ok) built.warning = [built.warning, "it goes up to a vertex in SolidWorks: it is made as deep as the vertex is"].filter(Boolean).join("; ");
+              return built;
+            }
+          }
           if ([3, 4, 5].includes(end)) {
             // Up to a vertex or a surface: as far as SolidWorks' faces of it go from the sketch's plane, on
             // the side they are on
@@ -1689,11 +1719,14 @@ function importPart(doc, dir) {
         }
         const sk = useSketch(f);
         if (sk.error) return record(f, "failed", sk.error);
-        const shape = end === 0 ? { end: "blind", depth: tidy(depth) } : end === 6 ? { end: "mid_plane", depth: tidy(depth) } : { end: "through_all" };
+        const target = upToFace(end, v, frameOf(sketchOf(f).sketch.modelToSketch));
+        const shape = end === 0 ? { end: "blind", depth: tidy(depth) } : end === 6 ? { end: "mid_plane", depth: tidy(depth) } : target ? { end: { up_to: target } } : { end: "through_all" };
         let built;
         // Which way it goes: the way that cuts where SolidWorks' cut did
         built = nearest(f, [false, true].map(reverse => ({ op: "cut", sketch: sk.name, name: f.name, ...shape, reverse })));
-        if (built.ok && ![0, 1, 6, 9].includes(end)) built.warning = `SolidWorks' end condition ${end} is cut through all`;
+        let upTo = !!target;
+        if (!built.ok && target) { upTo = false; built = nearest(f, [false, true].map(reverse => ({ op: "cut", sketch: sk.name, name: f.name, end: "through_all", reverse }))); }
+        if (built.ok && ![0, 1, 6, 9].includes(end) && !upTo) built.warning = `SolidWorks' end condition ${end} is cut through all`;
         if (!built.ok && unsure) {
           const added = extrude();
           if (added.ok) return finish(f, added);
@@ -1762,6 +1795,65 @@ function importPart(doc, dir) {
           return finish(f, build(f, { op: "fillet", name: f.name, size: tidy(v.DefaultRadius * MM), edges: picks, chain: v.PropagateToTangentFaces !== false }));
         }
         return roundCorners(f);
+      }
+
+      case "Chamfer": {
+        if (sheetBody()) return record(f, "not supported", "a chamfer on sheet metal");
+        // Type 1 is an angle and a distance, 2 two distances. PeetCAD's chamfer sets back by one size on both
+        // faces, which is either at 45° or with the two distances the same.
+        const dims = new Map((f.dimensions || []).map(d => [d.name, d.value]));
+        const size = v.Type === 1 && Math.abs(v.EdgeChamferAngle - Math.PI / 4) < 1e-9 ? dims.get("D1")
+          : v.Type === 2 && dims.has("D1") && Math.abs(dims.get("D1") - dims.get("D2")) < 1e-12 ? dims.get("D1") : null;
+        if (!(size > 0)) return record(f, "not supported", "a chamfer whose set-backs differ, or at a vertex");
+        const picks = [];
+        for (const e of v.Edges || []) {
+          if (e && e.start && e.end) picks.push({ between: [mm(e.start).map(tidy), mm(e.end).map(tidy)] });
+          else if (e && e.circle) {
+            const centre = mm(e.circle.slice(0, 3)), axis = unit(e.circle.slice(3, 6)), radius = e.circle[6] * MM;
+            picks.push({ at: add(centre, mul(unit(cross(axis, Math.abs(axis[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0])), radius)).map(tidy) });
+          } else return record(f, "not supported", "a chamfer on an edge that was not exported");
+        }
+        // A face chamfers every edge round it: the edges of the part that lie on it
+        for (const face of v.Faces || []) {
+          if (!face || face.surface !== "plane" || !face.normal || !face.point) return record(f, "not supported", "a chamfer of a face that is not flat");
+          const lo = mm(face.box.slice(0, 3)), hi = mm(face.box.slice(3)), o = mm(face.point), n = unit(face.normal);
+          const on = p => Math.abs(dot(sub(p, o), n)) < 1e-3 && p.every((x, i) => x > lo[i] - 1e-3 && x < hi[i] + 1e-3);
+          for (const e of peet.ask({ op: "edges" }).edges || []) {
+            if ([e.from, e.middle, e.to].every(on)) picks.push(e.curve === "line" ? { between: [e.from, e.to] } : { at: e.middle });
+          }
+        }
+        if (picks.length === 0) return record(f, "failed", "no edge of the part is where SolidWorks' chamfer is");
+        return finish(f, build(f, { op: "chamfer", name: f.name, size: tidy(size * MM), edges: picks, chain: v.TangentPropagation !== false }));
+      }
+
+      case "RefAxis": {
+        // The export has an axis's kind and no more; what it is on is read off what it was made from.
+        // Type 3 is the axis of a round face, 0 a line.
+        const parents = (f.parents || []).map(p => byName.get(p)).filter(Boolean);
+        if (v.Type === 3) {
+          const from = parents.find(p => made.has(p.name));
+          const names = from ? made.get(from.name) : [];
+          const round = (peet.ask({ op: "faces" }).faces || []).filter(x => x.axis && (x.made_by || []).some(m => names.includes(m.feature)));
+          const line = x => [x.axis, x.center];
+          if (!round.length || round.some(x => { const [a, c] = line(x), [a0, c0] = line(round[0]); return Math.abs(Math.abs(dot(a, a0)) - 1) > 1e-9 || len(cross(sub(c, c0), a0)) > 1e-6; }))
+            return record(f, "not supported", "an axis of a round face, where what it was made from has no one axis");
+          return finish(f, build(f, { op: "axis", name: f.name, face: { body: round[0].body, index: round[0].index } }));
+        }
+        if (v.Type === 0) {
+          // The line a revolve of its sketch turns about, on two of the model's planes
+          const sketch = parents.find(p => SKETCH.test(p.type));
+          const axisOf = r => (values(r).Axis || {});
+          const used = sketch && [...byName.values()].filter(r => /Revolution|RevCut/.test(r.type) && axisOf(r).sketch === sketch.name).map(axisOf);
+          const g = used && used[0] && used[0].start && used[0].end ? used[0] : null;
+          if (g) {
+            const sf = frameOf(sketch.sketch.modelToSketch);
+            const p0 = fromSketch(sf, g.start), d = unit(sub(fromSketch(sf, g.end), p0));
+            const on = [["top", [0, 0, 1]], ["front", [0, 1, 0]], ["right", [1, 0, 0]]].filter(([, n]) => Math.abs(dot(n, d)) < 1e-9 && Math.abs(dot(n, p0)) < 1e-6).map(([name]) => name);
+            if (on.length >= 2) return finish(f, build(f, { op: "axis", name: f.name, a: on[0], b: on[1] }));
+          }
+          return record(f, "not supported", "an axis along a line that is not on two of the model's planes");
+        }
+        return record(f, "not supported", `an axis of kind ${v.Type}`);
       }
 
       case "HoleWzd": {
