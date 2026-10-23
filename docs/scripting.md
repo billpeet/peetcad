@@ -313,7 +313,9 @@ with their defaults' types):
   back, and a `bend` of its own (as the base flange's); without them, or with `null`,
   it uses the body's. `outline` is a sketch of the flange's shape (on a plane turned about
   the edge): the flange is as wide and as long as its region and cut to it, from its foot
-  out. `position_offset` sets the flange out from its edge, the sheet
+  out. `up_to` (a vertex, a reference point or `"origin"`) runs the flange up to that point
+  in place of its `length`, its end through the point square to the flange, as
+  SolidWorks' "Up To Vertex"; copies of it are as long as it came out. `position_offset` sets the flange out from its edge, the sheet
   running on flat to the bend (negative: in). `position` is SolidWorks': at an angle other than 90 a
   `material_inside` flange's outer face goes through the edge on the far face of the
   sheet, `t / tan(angle)` back from where the outer faces meet.

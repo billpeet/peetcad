@@ -146,6 +146,22 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
 {"op": "edge_flange", "length": 20, "position": "bend_outside", "position_offset": 7, "edge": {"between": [[0, 60, 2], [100, 60, 2]]}}
 ```
 
+- `up_to` runs a flange up to a point in place of its `length` (SolidWorks' "Up To
+  Vertex"): a vertex selector (`{"at": [x, y, z]}`), a reference point's name or
+  `"origin"`. The flange's end goes through the point, square to the flange, and follows
+  it when the part changes; `length` is kept but not used (`null` goes back to it). The
+  point need not be on the flange: here the side ends level with the top of the wall.
+  "The point it runs up to is behind the flange's bend" means it is on the other side
+  of the bend: flip the flange or pick another point.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "edge_flange", "name": "Wall", "length": 30, "edge": {"between": [[0, 0, 2], [100, 0, 2]]}}
+{"op": "edge_flange", "name": "Side", "length": 10, "up_to": {"at": [100, 0, 30]}, "edge": {"at": [100, 30, 2]}}
+{"op": "bodies"}
+```
+
 - `outline` shapes a flange to a sketch of its own, as SolidWorks' "Edit Flange
   Profile" does: a trapezoid, a tab with a round top, a flange wider at its tip. Draw it
   first, on a plane turned about the flange's edge by the flange's angle (from the face
@@ -213,8 +229,9 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
 - A **negative** offset runs an edge flange or a hem past that end of its edge, for one
   wider than the sheet it is bent from: `"offset_end": -12` ends it 12 beyond the
   edge. The bend stays on the edge and the flange overhangs it, with no relief. The
-  start of an edge is the first point of its `between`; with `at`, try one end and
-  look at `bodies` (`min`, `max`) to see which way it went. The overhang must not
+  start of an edge is the end from which the sheet is on your left, looking down on
+  the sheet's top face (the order of a `between` does not change it); if in doubt, try
+  one end and look at `bodies` (`min`, `max`) to see which way it went. The overhang must not
   land on another flange: "The sheet overlaps itself" means it does.
 
   ```jsonl

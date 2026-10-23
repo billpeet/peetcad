@@ -509,6 +509,7 @@ pub(crate) fn apply_edge_flange(
     def: &EdgeFlangeFeature,
     spec: &EdgeFlangeSpec,
     outline: Option<(Plane, &Sketch)>,
+    up_to: Option<peet_math::DVec3>,
     seed: u64,
 ) -> Result<Applied, FeatureError> {
     let edge = def.edge.as_ref().ok_or_else(|| {
@@ -539,6 +540,14 @@ pub(crate) fn apply_edge_flange(
         model: edge_flange_bend(def, &model.parameters).map_err(FeatureError)?,
         set_out: edge_flange_position_offset(def, &model.parameters).map_err(FeatureError)?,
     };
+    // Up to a point: as long as takes its end there
+    let mut spec = *spec;
+    if let Some(point) = up_to {
+        spec.length = layout
+            .edge_flange_length_to(feature.0, 0, &site, &spec, own, point)
+            .map_err(FeatureError)?;
+    }
+    let spec = &spec;
     match outline {
         None => layout.add_edge_flange_with(feature.0, &site, spec, own),
         Some((plane, sketch)) => {

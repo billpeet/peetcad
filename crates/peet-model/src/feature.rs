@@ -449,6 +449,9 @@ pub struct EdgeFlangeFeature {
     /// be the flange's (one turned about the edge by the flange's angle is): the region is
     /// projected onto the flange.
     pub outline: Option<FeatureId>,
+    /// A point the flange runs up to, in place of its length (SolidWorks' "up to
+    /// vertex"): its end goes through the point, square to the flange, and follows it.
+    pub up_to: Option<PointRef>,
 }
 
 impl EdgeFlangeFeature {
@@ -467,6 +470,7 @@ impl EdgeFlangeFeature {
             bend: None,
             position_offset: Scalar::new(0.0),
             outline: None,
+            up_to: None,
         }
     }
 }
@@ -1054,6 +1058,9 @@ impl FeatureKind {
                     out.extend(edge.features());
                 }
                 out.extend(e.outline);
+                if let Some(p) = &e.up_to {
+                    point_deps(p, &mut out);
+                }
             }
             Self::SheetCut(c) => out.push(c.sketch),
             Self::Hem(h) => {
@@ -1645,6 +1652,7 @@ impl From<EdgeFlangeFeatureV11> for EdgeFlangeFeature {
             bend: None,
             position_offset: Scalar::new(0.0),
             outline: None,
+            up_to: None,
         }
     }
 }

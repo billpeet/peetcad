@@ -219,6 +219,68 @@ impl Layout {
             .map(|_| ())
     }
 
+    /// The length that takes an edge flange up to `point` (in model coordinates), as
+    /// SolidWorks' "up to vertex" does: the flange's end goes through the point, square to
+    /// the flange. A trial flange of `spec`'s length shows where the flange goes; the end
+    /// moves as far as the point is beyond or short of the trial's.
+    pub fn edge_flange_length_to(
+        &self,
+        owner: u32,
+        part_base: u32,
+        site: &EdgeSite,
+        spec: &EdgeFlangeSpec,
+        own: FlangeOwn,
+        point: peet_math::DVec3,
+    ) -> Result<f64, String> {
+        let mut trial = self.clone();
+        trial.add_edge_flange_part(owner, part_base, site, spec, own)?;
+        let at = trial.attachments.last().ok_or("The flange was not made.")?;
+        let Some(&flat) = at.pieces.get(1) else {
+            return Err("The flange is all bend: it can't run up to a point.".to_owned());
+        };
+        let out = at.out();
+        let reach = |p: DVec2| (p - at.a).dot(out);
+        let tip = trial.pieces[flat]
+            .outline
+            .edges()
+            .flat_map(|e| [e.curve.start(), e.curve.end()])
+            .map(reach)
+            .fold(f64::NEG_INFINITY, f64::max);
+        let to = reach(trial.pieces[flat].frame.to_local(point).truncate());
+        let length = spec.length + (to - tip);
+        let bend = trial.pieces[at.pieces[0]]
+            .bend()
+            .map(|b| b.values.outside_setback());
+        if bend.is_some_and(|ossb| length - ossb <= MIN_LENGTH) {
+            return Err(
+                "The point it runs up to is behind the flange's bend: pick one further out."
+                    .to_owned(),
+            );
+        }
+        Ok(length)
+    }
+
+    /// The outside length of an edge flange already laid out ([`EdgeFlangeSpec::length`]):
+    /// its bend's outside setback and the length of its flat. `None` if it is not one
+    /// bend and a flat.
+    pub fn edge_flange_length(&self, attachment: usize) -> Option<f64> {
+        let at = self.attachments.get(attachment)?;
+        let [bend, flat] = at.pieces[..] else {
+            return None;
+        };
+        let ossb = self.pieces[bend].bend()?.values.outside_setback();
+        let out = at.out();
+        let reach: Vec<f64> = self.pieces[flat]
+            .outline
+            .edges()
+            .flat_map(|e| [e.curve.start(), e.curve.end()])
+            .map(|p| (p - at.a).dot(out))
+            .collect();
+        let lo = reach.iter().copied().fold(f64::INFINITY, f64::min);
+        let hi = reach.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        (hi > lo).then_some(ossb + hi - lo)
+    }
+
     /// An edge flange shaped to an outline of its own, as SolidWorks' flange profile
     /// shapes one. `outline` gives the outline in flat coordinates from the placement of
     /// the flange's flat (which does not depend on the flange's width or length). The
