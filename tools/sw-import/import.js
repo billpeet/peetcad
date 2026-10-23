@@ -242,6 +242,7 @@ function importPart(doc, dir) {
   const promoted = new Map();    // "D1@Sketch1" -> the parameter that sketch dimension now follows
   const formulas = new Set();    // the sketch dimensions (full names) whose value is a formula
   const asleep = new Set();      // SolidWorks features imported and then suppressed in every configuration
+  const cornerOps = new Map();   // PeetCAD corner feature name -> the operation that made it, for corner reliefs
   let unfolded = null;           // between an Unfold and its Fold: the face that stays where it is
   let sheet = null;             // the sheet metal settings in force
   let thickness = null;
@@ -651,10 +652,12 @@ function importPart(doc, dir) {
     const tops = (peet.ask({ op: "faces" }).faces || []).filter(face => face.surface === "plane"
       && (face.made_by || []).length === 1 && flangeNames.includes(face.made_by[0].feature) && face.made_by[0].side === "top");
     if (tops.length === 0) return null;
-    const reply = peet.apply({ op: "corner", name, faces: tops.map(face => ({ at: face.center.map(tidy), normal: face.normal.map(tidy) })), kind, gap: tidy(Math.max(bendRadius, 0.01)), relief });
+    const op = { op: "corner", name, faces: tops.map(face => ({ at: face.center.map(tidy), normal: face.normal.map(tidy) })), kind, gap: tidy(Math.max(bendRadius, 0.01)), relief };
+    const reply = peet.apply(op);
     if (!reply.ok) return null;
     const made = (reply.created || [])[0];
     if (!made || made.status === "failed") { peet.apply({ op: "delete", feature: name }); return null; }
+    cornerOps.set(made.name, op);
     return made.name;
   }
 
@@ -756,10 +759,12 @@ function importPart(doc, dir) {
       if (ends[0]) picks.push({ at: ends[0].center.map(tidy), normal: ends[0].normal.map(tidy) });
     }
     if (picks.length === 0) return null;
-    const reply = peet.apply({ op: "corner", name, faces: picks, kind: "open", gap: tidy(Math.max(gap, 0) / Math.SQRT2), relief: "slanted" });
+    const op = { op: "corner", name, faces: picks, kind: "open", gap: tidy(Math.max(gap, 0) / Math.SQRT2), relief: "slanted" };
+    const reply = peet.apply(op);
     if (!reply.ok) return null;
     const made = (reply.created || [])[0];
     if (!made || made.status === "failed") { peet.apply({ op: "delete", feature: name }); return null; }
+    cornerOps.set(made.name, op);
     return made.name;
   }
 
@@ -940,6 +945,149 @@ function importPart(doc, dir) {
     made.set(f.name, names);
     record(f, "imported");
     return true;
+  }
+
+  /**
+   * Hole wizard holes placed on a 3D sketch, whose points are in the model's coordinates and may be on
+   * several faces. Each is drilled into the flat face of SolidWorks' body it lies on, square to it, from a
+   * sketch on that face with the points in it: one sketch and one hole feature for each face.
+   */
+  function holesOn3D(f, v, points, diameter) {
+    const sf = frameOf(f.sub.find(c => c.sketch && c.sketch.is3D).sketch.modelToSketch);
+    const groups = new Map();
+    for (const p of points) {
+      const at = fromSketch(sf, p);
+      // The flat face it is on: in the face's plane and within its box
+      const face = (cur.bodies || []).flatMap(b => b.faces).find(x => x.plane && x.normal && x.box && x.feature !== f.name
+        && Math.abs(dot(unit(x.normal), sub(at, mm(x.plane.slice(3, 6))))) < 1e-3
+        && mm(x.box.slice(0, 3)).every((lo, k) => at[k] >= lo - 1e-3) && mm(x.box.slice(3)).every((hi, k) => at[k] <= hi + 1e-3));
+      if (!face) return record(f, "failed", "a point of its 3D sketch is on no flat face of SolidWorks' body");
+      const n = unit(face.normal), key = n.map(x => x.toFixed(6)).join(",") + "|" + dot(n, at).toFixed(4);
+      if (!groups.has(key)) groups.set(key, { n, points: [] });
+      groups.get(key).points.push(at);
+    }
+    const sheet = sheetBody();
+    const names = [];
+    let i = 0;
+    for (const g of groups.values()) {
+      const name = f.name + (i++ ? ` ${i}` : "");
+      const sk = sketchOnFace(name + " sketch", g.points[0], g.n, flat => g.points.map(q => sheet
+        ? { type: "circle", center: flat(q), radius: tidy(diameter / 2) } : { type: "point", at: flat(q) }));
+      if (sk.error) return record(f, names.length ? "imported in part" : "failed", sk.error);
+      let built;
+      if (sheet) built = build(f, { op: "sheet_cut", sketch: sk.name, name });
+      else for (const reverse of [false, true]) {
+        built = build(f, { op: "hole", sketch: sk.name, name, ...holeShape(f, v, diameter), reverse });
+        if (built.ok) break;
+      }
+      if (!built.ok) { peet.apply({ op: "delete", feature: sk.name }); return record(f, names.length ? "imported in part" : "failed", built.message); }
+      names.push(sk.name, ...built.names);
+    }
+    made.set(f.name, names);
+    record(f, "imported", "from its 3D sketch: each hole drilled square into the face its point is on");
+  }
+
+  /**
+   * A hole wizard hole's shape as PeetCAD's hole has it: its end, the drill's point and a countersink at its
+   * mouth. A blind hole whose bottom is a flat face of the hole's size in SolidWorks' body is flat-bottomed
+   * (a dowel hole), whatever drill angle its definition gives.
+   */
+  function holeShape(f, v, diameter) {
+    const blind = v.EndCondition === 0 && (v.HoleDepth || v.ThruHoleDepth);
+    const shape = { diameter: tidy(diameter), ...(blind ? { end: "blind", depth: tidy(blind * MM) } : { end: "through_all" }) };
+    const bottom = Math.PI * diameter * diameter / 4;
+    const flat = facesOf(f.name).some(face => face.surface === "plane" && Math.abs(face.area * 1e6 - bottom) < 1e-3 * bottom);
+    if (blind && (flat || v.DrillAngle > 0)) shape.tip_angle = flat ? 180 : tidy(v.DrillAngle * 180 / Math.PI);
+    if (v.NearSideCounterSink && v.NearCounterSinkDiameter * MM > diameter + 1e-6 && v.NearCounterSinkAngle > 0)
+      Object.assign(shape, { kind: "countersink", countersink_diameter: tidy(v.NearCounterSinkDiameter * MM), countersink_angle: tidy(v.NearCounterSinkAngle * 180 / Math.PI) });
+    return shape;
+  }
+
+  /**
+   * SolidWorks' Corner Relief: the corners of the flanges it is on get a circular or square relief. The
+   * API gives no definition of one, so its shape is read off the faces it left in SolidWorks' body: round
+   * faces are a circle's (their radius is its), flat ones a square's, whose size is found by making it once
+   * and moving its walls to where SolidWorks' are. It becomes a `corner` on the same corners as the ones the
+   * flanges were given, with the same kind and gap and its own relief.
+   */
+  function cornerRelief(f) {
+    const faces = facesOf(f.name);
+    if (!faces.length) return record(f, "not supported", "none of its faces is left in SolidWorks' body to read it from");
+    const exists = n => peet.ask({ op: "feature", feature: n }).ok;
+    const corners = [...cornerOps.entries()].filter(([n]) => (f.parents || []).some(p => n.startsWith(p + " corners")) && exists(n));
+    if (!corners.length) return record(f, "failed", "no corner of the flanges it is on was made in the part");
+    const rounds = faces.filter(face => face.cylinder);
+    const relief = rounds.length ? "circular" : "square";
+    const names = [];
+    const make = size => {
+      if (names.length) peet.apply({ op: "delete", features: names.splice(0) });
+      for (const [i, [, op]] of corners.entries()) {
+        const built = build(f, { ...op, name: f.name + (i ? ` ${i + 1}` : ""), relief, relief_size: tidy(size) });
+        if (!built.ok) return built;
+        names.push(...built.names);
+      }
+      return { ok: true };
+    };
+    let size;
+    if (rounds.length) {
+      // The commonest radius: a circle's faces in the face, the bends and the flanges are all of it
+      const radii = rounds.map(face => tidy(face.cylinder[6] * MM)).sort((a, b) => a - b);
+      size = 2 * radii[Math.floor(radii.length / 2)];
+      const built = make(size);
+      if (!built.ok) return record(f, "failed", built.message);
+    } else {
+      // A square's walls are flat and size / 2 from its centre: made at a first guess, each wall is out by
+      // half the difference
+      const walls = faces.filter(face => face.plane && face.normal && face.box);
+      if (!walls.length) return record(f, "not supported", "a corner relief with faces of no shape it has");
+      size = 2 * Math.max(...walls.map(face => Math.max(...sub(mm(face.box.slice(3)), mm(face.box.slice(0, 3))))));
+      const key = x => x.center.map(v => v.toFixed(4)).join(",");
+      const before = new Set((peet.ask({ op: "faces" }).faces || []).map(key));
+      for (let round = 0; round < 3; round++) {
+        const built = make(size);
+        if (!built.ok) return record(f, "failed", built.message);
+        const fresh = (peet.ask({ op: "faces" }).faces || []).filter(x => x.surface === "plane" && x.normal && !before.has(key(x)));
+        const deltas = [];
+        for (const face of walls) {
+          const n = unit(face.normal), at = mid(mm(face.box.slice(0, 3)), mm(face.box.slice(3)));
+          let best = null;
+          for (const x of fresh) if (dot(n, x.normal) > 0.9999 && (!best || len(sub(x.center, at)) < len(sub(best.center, at)))) best = x;
+          if (best && len(sub(best.center, at)) < size + 5) deltas.push(dot(n, sub(best.center, mm(face.plane.slice(3, 6)))));
+        }
+        if (!deltas.length) return record(f, "failed", "its walls did not come out where SolidWorks has them");
+        deltas.sort((a, b) => a - b);
+        const delta = deltas[Math.floor(deltas.length / 2)];
+        if (Math.abs(delta) < 1e-4) break;
+        size += 2 * delta;
+        if (size <= 0) return record(f, "failed", "its walls did not come out where SolidWorks has them");
+      }
+    }
+    made.set(f.name, names);
+    record(f, "imported", `as a ${relief} relief ${tidy(size)} mm across, read off its faces in SolidWorks' body (the export has no definition of a corner relief)`);
+  }
+
+  /**
+   * A library feature: what is in it comes just before it in the tree, as features of their own, and is
+   * imported as they are. Its members are the export's own list of them (`subFeatures`), or failing that
+   * the features just above it that it is made from, up to the sketch they start with.
+   */
+  function libraryFeature(f) {
+    let members = f.subFeatures;
+    if (!members) {
+      const parents = new Set(f.parents || []), list = cur.features, at = list.findIndex(x => x.name === f.name);
+      members = [];
+      for (let i = at - 1; i >= 0 && parents.has(list[i].name); i--) {
+        members.unshift(list[i].name);
+        if (SKETCH.test(list[i].type)) break;
+      }
+    }
+    if (!members.length) return record(f, "failed", "what is in it was not found");
+    // A sketch that is only drawn as part of the feature that uses it has no row of its own
+    const rowOf = n => [...report.features].reverse().find(x => x.name === n);
+    const left = members.filter(n => rowOf(n) ? !/^imported/.test(rowOf(n).result) : !SKETCH.test((byName.get(n) || {}).type || ""));
+    if (left.length) return record(f, "failed", `what is in it was not all imported: ${left.join(", ")}`);
+    made.set(f.name, members.flatMap(n => made.get(n) || []));
+    record(f, "imported", `as what is in it, imported where it is in the tree: ${members.join(", ")}`);
   }
 
   function roundCorners(f) {
@@ -1704,6 +1852,9 @@ function importPart(doc, dir) {
       // SolidWorks unfolds the part, cuts it flat and folds it again. PeetCAD's sheet metal cut is made in
       // the flat pattern to begin with, so there is nothing to unfold: the cuts in between are drawn on
       // the face that stays put, where SolidWorks has them once the part is laid flat.
+      case "CornerRelief": return cornerRelief(f);
+      case "LibraryFeature": return libraryFeature(f);
+
       case "UnFold":
         unfolded = v.FixedFace || {};
         return record(f, "imported", "nothing to do: a sheet metal cut is made in the flat pattern");
@@ -1772,6 +1923,7 @@ function importPart(doc, dir) {
         const points = where.sketch.points.filter(p => wanted.size === 0 || wanted.has(p.id.join(".")));
         const diameter = (v.ThruHoleDiameter || v.HoleDiameter || v.Diameter || 0) * MM;
         if (!diameter || points.length === 0) return record(f, "failed", "its size or its positions were not exported");
+        if (where.sketch.is3D) return holesOn3D(f, v, points, diameter);
         if (sheetBody()) {
           const draw = toPeet => points.map(p => ({ type: "circle", center: toPeet(p), radius: tidy(diameter / 2) }));
           const sk = importSketch(where, { name: f.name + " sketch", needFace: true, draw });
@@ -1783,10 +1935,9 @@ function importPart(doc, dir) {
         }
         const sk = importSketch(where, { name: f.name + " sketch", draw: toPeet => points.map(p => ({ type: "point", at: toPeet(p) })) });
         if (sk.error) return record(f, "failed", sk.error);
-        const blind = v.EndCondition === 0 && (v.HoleDepth || v.ThruHoleDepth);
         let built;
         for (const reverse of [false, true]) {
-          built = build(f, { op: "hole", sketch: sk.name, name: f.name, diameter: tidy(diameter), ...(blind ? { end: "blind", depth: tidy(blind * MM) } : { end: "through_all" }), reverse });
+          built = build(f, { op: "hole", sketch: sk.name, name: f.name, ...holeShape(f, v, diameter), reverse });
           if (built.ok) break;
         }
         if (!built.ok) peet.apply({ op: "delete", feature: sk.name });
@@ -1941,7 +2092,7 @@ function importPart(doc, dir) {
   const sw = config.bodies || [];
   const swVolume = sw.reduce((a, b) => a + b.volume, 0) * 1e9;
   const swArea = sw.reduce((a, b) => a + b.area, 0) * 1e6;
-  const swBox = sw.length ? [0, 1, 2].map(i => Math.min(...sw.map(b => b.box[i])) * MM).concat([3, 4, 5].map(i => Math.max(...sw.map(b => b.box[i])) * MM)) : null;
+  const swBox = sw.length ? [0, 1, 2].map(i => Math.min(...sw.map(b => (b.tightBox || b.box)[i])) * MM).concat([3, 4, 5].map(i => Math.max(...sw.map(b => (b.tightBox || b.box)[i])) * MM)) : null;
   const box = total.min ? [...total.min, ...total.max] : null;
   const boxOff = box && swBox ? Math.max(...box.map((x, i) => Math.abs(x - swBox[i]))) : null;
   const volumeOff = total.volume_mm3 && swVolume ? Math.abs(total.volume_mm3 - swVolume) / swVolume : null;
@@ -2167,7 +2318,7 @@ function importPart(doc, dir) {
         if (!entry || !peet.apply({ op: "configuration", configuration: other.name }).ok) continue;
         const now = (peet.ask({ op: "mass" }).total) || {};
         const volume = (other.bodies || []).reduce((sum, body) => sum + body.volume, 0) * 1e9;
-        const theirBox = (other.bodies || []).length ? [0, 1, 2].map(i => Math.min(...other.bodies.map(body => body.box[i])) * MM).concat([3, 4, 5].map(i => Math.max(...other.bodies.map(body => body.box[i])) * MM)) : null;
+        const theirBox = (other.bodies || []).length ? [0, 1, 2].map(i => Math.min(...other.bodies.map(body => (body.tightBox || body.box)[i])) * MM).concat([3, 4, 5].map(i => Math.max(...other.bodies.map(body => (body.tightBox || body.box)[i])) * MM)) : null;
         const off = now.volume_mm3 && volume ? Math.abs(now.volume_mm3 - volume) / volume : null;
         const boxDiff = now.min && theirBox ? Math.max(...[...now.min, ...now.max].map((x, i) => Math.abs(x - theirBox[i]))) : null;
         entry.difference = { volume: off, box_mm: boxDiff };
