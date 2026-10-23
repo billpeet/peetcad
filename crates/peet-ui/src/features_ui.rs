@@ -1671,17 +1671,30 @@ pub fn corner_panel(
                             CornerRelief::Flush => {
                                 "Cut back to where the two flanges end, so each bend ends in line with its flange."
                             }
+                            CornerRelief::Circular => {
+                                "A circle centred where the two flanges' ends meet in the flat pattern, cut from the face, the bends and the flanges."
+                            }
+                            CornerRelief::Square => {
+                                "A square centred where the two flanges' ends meet in the flat pattern, cut from the face, the bends and the flanges."
+                            }
                         };
                         ui.selectable_value(&mut c.relief, r, r.label())
                             .on_hover_text(tip);
                     }
                 });
             ui.end_row();
-            if c.relief == CornerRelief::Rectangular {
+            if matches!(
+                c.relief,
+                CornerRelief::Rectangular | CornerRelief::Circular | CornerRelief::Square
+            ) {
                 value_row(
                     ui,
                     "Relief size",
-                    "How far the relief reaches past the bends.",
+                    if c.relief == CornerRelief::Rectangular {
+                        "How far the relief reaches past the bends."
+                    } else {
+                        "How big the relief is across."
+                    },
                     "corner_relief_size",
                     &mut c.relief_size,
                     ScalarKind::Length,

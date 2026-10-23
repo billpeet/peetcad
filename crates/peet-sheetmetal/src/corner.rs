@@ -16,7 +16,10 @@
 //! two flanges end instead, so the bends end in line with their flanges and the corner
 //! of the flat pattern is one notch with one inside corner. A *slanted* relief leaves the
 //! face its corner and ends each bend on the line from that corner to the end of its
-//! flange, which folds to a freeform end.
+//! flange, which folds to a freeform end. A *circular* or *square* relief is SolidWorks'
+//! corner relief of that shape: `relief_size` across, centred where the two flanges'
+//! ends meet in the flat pattern, and cut from the face, both bends and both flanges;
+//! outside it the face and the bends are cut back as a flush relief cuts them.
 //!
 //! **Flange ends.** Each flange's end at the corner is extended a little and then cut
 //! back against a plane of the other flange, in the folded part:
@@ -78,10 +81,25 @@ pub enum CornerRelief {
     /// Nothing is cut from the face: each bend ends on the line from the face's corner
     /// (where the two bends start) to where its flange ends.
     Slanted,
+    /// A circle `relief_size` across, centred where the two flanges' ends meet in the
+    /// flat pattern, cut from the face, both bends and both flanges (SolidWorks' circular
+    /// corner relief).
+    Circular,
+    /// A square `relief_size` across, its sides along the two edges, centred where the
+    /// two flanges' ends meet in the flat pattern, cut from the face, both bends and both
+    /// flanges (SolidWorks' rectangular corner relief).
+    Square,
 }
 
 impl CornerRelief {
-    pub const ALL: [Self; 4] = [Self::Rectangular, Self::Tear, Self::Flush, Self::Slanted];
+    pub const ALL: [Self; 6] = [
+        Self::Rectangular,
+        Self::Tear,
+        Self::Flush,
+        Self::Slanted,
+        Self::Circular,
+        Self::Square,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -89,6 +107,8 @@ impl CornerRelief {
             Self::Tear => "Tear",
             Self::Flush => "Flush",
             Self::Slanted => "Slanted",
+            Self::Circular => "Circular",
+            Self::Square => "Square",
         }
     }
 }
@@ -100,7 +120,8 @@ pub struct CornerSpec {
     /// The gap left between the flanges.
     pub gap: f64,
     pub relief: CornerRelief,
-    /// How far a rectangular relief reaches past the bends.
+    /// How far a rectangular relief reaches past the bends; how big a circular or square
+    /// one is across.
     pub relief_size: f64,
 }
 
@@ -307,13 +328,35 @@ impl Layout {
             // The relief, cut from the face and both first bends.
             let (sa, sb) = (a.pieces[0], b.pieces[0]);
             let flush = match (c.spec.relief, planes_of.first()) {
-                (CornerRelief::Flush | CornerRelief::Slanted, Some(planes)) => Some([
+                (
+                    CornerRelief::Flush
+                    | CornerRelief::Slanted
+                    | CornerRelief::Circular
+                    | CornerRelief::Square,
+                    Some(planes),
+                ) => Some([
                     self.end_reach(a, c.ends[0], &planes[0], c.at),
                     self.end_reach(b, c.ends[1], &planes[1], c.at),
                 ]),
                 _ => None,
             };
-            if let Some(area) = self.corner_relief(c, ci, size, flush) {
+            if matches!(c.spec.relief, CornerRelief::Circular | CornerRelief::Square) {
+                // The shape, from everything at the corner; and the face and the bends cut back
+                // to where the flanges end, as a flush relief does (a bend is no longer than its
+                // flange), never less than a tear.
+                if let Some(area) = self.shaped_relief(c, ci, flush.unwrap_or([None, None])) {
+                    let mut pieces = vec![a.parent, sa, sb];
+                    pieces.extend(a.pieces.get(1).copied());
+                    pieces.extend(b.pieces.get(1).copied());
+                    out.cuts.push(Cut { area, pieces });
+                }
+                if let Some(area) = self.corner_relief(c, ci, size, flush) {
+                    out.cuts.push(Cut {
+                        area,
+                        pieces: vec![a.parent, sa, sb],
+                    });
+                }
+            } else if let Some(area) = self.corner_relief(c, ci, size, flush) {
                 // A slanted relief only touches the face at its corner.
                 let pieces = if c.spec.relief == CornerRelief::Slanted {
                     vec![sa, sb]
@@ -568,7 +611,11 @@ impl Layout {
         let (a, b) = (&self.attachments[ia], &self.attachments[ib]);
         let margin = match c.spec.relief {
             CornerRelief::Rectangular => c.spec.relief_size.max(0.0),
-            CornerRelief::Tear | CornerRelief::Flush | CornerRelief::Slanted => 0.0,
+            CornerRelief::Tear
+            | CornerRelief::Flush
+            | CornerRelief::Slanted
+            | CornerRelief::Circular
+            | CornerRelief::Square => 0.0,
         };
         // Each edge's band: the trim and the bend strip, as distances into the face.
         let band = |att: &crate::flange::Attachment| -> [f64; 2] {
@@ -680,6 +727,78 @@ impl Layout {
         poly = clip(&poly, -db, -(eb + c.at.dot(db)), tag(2));
         if poly.len() < 3 {
             return None;
+        }
+        Some(polygon_area(&poly))
+    }
+
+    /// A circular or square relief at corner `c`: `relief_size` across, centred where the
+    /// two flanges' ends meet in the flat pattern. `ends` is how far from the corner each
+    /// flange ends once its end is cut (`None`: where its own flat ends).
+    fn shaped_relief(&self, c: &Corner, index: usize, ends: [Option<f64>; 2]) -> Option<Area> {
+        let size = c.spec.relief_size;
+        if size <= MIN_LENGTH {
+            return None;
+        }
+        let atts = c.attachments.map(|i| &self.attachments[i]);
+        let away = |k: usize| {
+            if c.ends[k] == 0 {
+                atts[k].along()
+            } else {
+                -atts[k].along()
+            }
+        };
+        let (da, db) = (away(0), away(1));
+        // Where a flange's first flat ends, from the corner, if nothing cuts it.
+        let own = |k: usize| -> Option<f64> {
+            let att = atts[k];
+            let piece = &self.pieces[*att.pieces.get(1)?];
+            let (lo, hi) = rect_extent(&piece.outline, att.a, att.along(), att.out());
+            let u = if c.ends[k] == 0 { lo.x } else { hi.x };
+            Some((att.a + att.along() * u - c.at).dot(away(k)))
+        };
+        let fa = ends[0].or_else(|| own(0))?;
+        let fb = ends[1].or_else(|| own(1))?;
+        // The point x from the corner with x·da = fa and x·db = fb.
+        let det = da.perp_dot(db);
+        if det.abs() < 1e-9 {
+            return None;
+        }
+        let x = DVec2::new((fa * db.y - fb * da.y) / det, (da.x * fb - db.x * fa) / det);
+        let centre = c.at + x;
+        let tag = |i: u8| CurveTag::Generated {
+            owner: atts[1].owner,
+            part: CORNER_PART + 2 + c.ends[1] as u32,
+            index: i + 4 * (index % 32) as u8,
+        };
+        if c.spec.relief == CornerRelief::Circular {
+            return Some(Area {
+                loops: vec![vec![Edge2 {
+                    curve: peet_sketch::Curve::Circle {
+                        center: centre,
+                        radius: size / 2.0,
+                    },
+                    reversed: false,
+                    tag: tag(0),
+                }]],
+            });
+        }
+        let h = size / 2.0;
+        let mut poly: Vec<(DVec2, CurveTag)> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (s, t))| (centre + da * (s * h) + db * (t * h), tag(i as u8)))
+            .collect();
+        // Counter-clockwise, as every outline is.
+        let turn: f64 = (0..4)
+            .map(|i| poly[i].0.perp_dot(poly[(i + 1) % 4].0))
+            .sum();
+        if turn < 0.0 {
+            poly.reverse();
+            // Each point tags the edge from it to the next: shift the tags back one.
+            let tags: Vec<CurveTag> = poly.iter().map(|p| p.1).collect();
+            for i in 0..4 {
+                poly[i].1 = tags[(i + 1) % 4];
+            }
         }
         Some(polygon_area(&poly))
     }
