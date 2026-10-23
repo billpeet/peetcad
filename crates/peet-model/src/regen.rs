@@ -857,11 +857,16 @@ impl Engine {
                         }
                         _ => None,
                     };
-                    Ok((plane, depth, up_to, sketch))
+                    let draft = e
+                        .params
+                        .draft
+                        .evaluate(ScalarKind::Angle, &model.parameters)
+                        .map_err(|m| format!("Draft: {m}."))?;
+                    Ok((plane, depth, draft, up_to, sketch))
                 })();
                 match inputs {
                     Err(m) => fail(m, Output::None),
-                    Ok((plane, depth, up_to, sketch)) => {
+                    Ok((plane, depth, draft, up_to, sketch)) => {
                         let sketch_key = run.out_keys.get(&e.sketch).copied().unwrap_or(0);
                         let key = hash::of(&(
                             2u8,
@@ -870,6 +875,7 @@ impl Engine {
                             sketch_key,
                             run.body_key,
                             depth,
+                            draft,
                             &up_to,
                         ));
                         self.solid_feature(id, key, run, |bodies| {
@@ -880,6 +886,7 @@ impl Engine {
                                 sketch,
                                 params: &e.params,
                                 depth,
+                                draft,
                                 up_to,
                                 stamp: key,
                                 mirror: false,
@@ -1940,11 +1947,13 @@ impl<'m> Ctx<'m, '_> {
                         EndCondition::UpTo(r) => Some(self.plane(r)?),
                         _ => None,
                     };
+                    let draft = self.scalar(&e.params.draft, ScalarKind::Angle, "Draft")?;
                     pattern::Seed::Extrude {
                         plane,
                         sketch,
                         params: &e.params,
                         depth,
+                        draft,
                         up_to,
                     }
                 }

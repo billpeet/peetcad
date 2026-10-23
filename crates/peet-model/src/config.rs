@@ -1051,10 +1051,14 @@ mod tests {
     fn a_features_values_and_a_sketchs_dimensions_are_listed() {
         let (m, sketch, extrude, width) = plate();
         let values = m.values(extrude);
-        assert_eq!(values.len(), 1);
+        assert_eq!(values.len(), 2);
         assert_eq!(
             (values[0].name.as_str(), values[0].kind),
             ("depth", ScalarKind::Length)
+        );
+        assert_eq!(
+            (values[1].name.as_str(), values[1].kind),
+            ("draft", ScalarKind::Angle)
         );
         let dims = m.values(sketch);
         assert_eq!(dims.len(), 1);

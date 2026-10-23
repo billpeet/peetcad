@@ -268,7 +268,7 @@ fn pair_edge_uses(patches: &mut [Patch], edges: &mut Vec<GEdge>) -> Result<(), S
             let j = (i + 1) % n;
             if fan[j].1 || fan[i].3 == fan[j].3 {
                 return Err(format!(
-                    "the bodies touch along an edge near ({:.4}, {:.4}, {:.4}) in a way                      that can't be separated into solids",
+                    "the bodies touch along an edge near ({:.4}, {:.4}, {:.4}) in a way that can't be separated into solids",
                     at.x, at.y, at.z
                 ));
             }

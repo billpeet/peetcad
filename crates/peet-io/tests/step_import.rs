@@ -969,6 +969,39 @@ fn inch_box_with_reversed_edges_and_unmarked_bounds() {
 }
 
 #[test]
+fn closed_shells_of_a_surface_model_are_solids() {
+    // As SolidWorks writes a part with imported bodies: its solids' shells in a surface
+    // model, beside the open shells of surfaces.
+    let mut w = Step::default();
+    let faces = box_faces(
+        &mut w,
+        DVec3::ZERO,
+        v3(1.0, 2.0, 3.0),
+        false,
+        false,
+        NO_HOLES,
+    );
+    let closed = w.shell(&faces);
+    let lid = box_faces(
+        &mut w,
+        v3(5.0, 0.0, 0.0),
+        v3(6.0, 1.0, 1.0),
+        false,
+        false,
+        NO_HOLES,
+    );
+    let open = w.add(format!("OPEN_SHELL('',(#{}))", lid[0]));
+    let model = w.add(format!(
+        "SHELL_BASED_SURFACE_MODEL('Meter',(#{closed},#{open}))"
+    ));
+    let imported = import(&w.part(&[model], UnitStyle::Millimetres));
+    assert_eq!(imported.bodies.len(), 1);
+    assert_close(measure::volume(&imported.bodies[0].solid), 6.0);
+    assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
+    assert!(imported.warnings[0].contains("surface bod"));
+}
+
+#[test]
 fn file_without_units_is_taken_as_millimetres() {
     let mut w = Step::default();
     let faces = box_faces(

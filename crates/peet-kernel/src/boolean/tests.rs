@@ -504,6 +504,66 @@ fn parallel_cylinders_intersect_in_lines() {
     assert_eq!(c.shells, 2);
 }
 
+/// A ring about the Z axis through the origin: a tube of `minor` radius round a circle of
+/// `major` radius.
+fn ring(major: f64, minor: f64) -> Solid {
+    let mut sketch = Sketch::new();
+    sketch.add_circle(DVec2::new(major, 0.0), minor);
+    let profile = peet_sketch::region::find_regions(&sketch);
+    let region = profile
+        .region_at(DVec2::new(major + 0.3 * minor, 0.2 * minor))
+        .expect("the tube's section");
+    let axis = crate::revolve::RevolveAxis {
+        origin: DVec2::ZERO,
+        dir: DVec2::Y,
+    };
+    crate::revolve::revolve(
+        &Plane::front(),
+        &[profile.regions[region].clone()],
+        &axis,
+        0.0,
+        2.0 * PI,
+    )
+    .unwrap()
+}
+
+#[test]
+fn flat_faces_along_a_ring() {
+    // Planes parallel to a ring's axis cut it in curves with no closed form (spiric
+    // sections), traced on the ring written as a freeform surface. What is cut off and
+    // what is left make the whole ring between them.
+    let (major, minor) = (10.0, 3.0);
+    let whole = 2.0 * PI * PI * major * minor * minor;
+    let torus = ring(major, minor);
+    assert!((volume(&torus) - whole).abs() < 1e-6 * whole);
+    // Its bounds are exact, as far as the ring reaches.
+    let bounds = torus.bounds();
+    let reach = v(major + minor, major + minor, minor);
+    assert!(
+        (bounds.max - reach).abs().max_element() < 1e-9,
+        "{bounds:?}"
+    );
+    assert!(
+        (bounds.min + reach).abs().max_element() < 1e-9,
+        "{bounds:?}"
+    );
+    for c in [8.0, 11.5] {
+        let slab = cuboid(v(-20.0, c, -5.0), v(20.0, 20.0, 5.0));
+        let (left, _) = run(&torus, &slab, BooleanOp::Subtract);
+        let (cut, _) = run(&torus, &slab, BooleanOp::Intersect);
+        let sum = volume(&left) + volume(&cut);
+        assert!(
+            (sum - whole).abs() < 1e-4 * whole,
+            "{sum} instead of {whole}"
+        );
+    }
+    // A block standing on the ring's outermost point only touches it.
+    let block = cuboid(v(-5.0, major + minor, -5.0), v(5.0, 20.0, 5.0));
+    let (s, c) = run(&torus, &block, BooleanOp::Union);
+    assert_eq!(c.shells, 2);
+    assert!((volume(&s) - whole - 10.0 * 7.0 * 10.0).abs() < 1e-4 * whole);
+}
+
 #[test]
 fn crossing_cylinders_of_different_sizes() {
     // A rod of radius 1 through one of radius 2, square across it: the rims are curves

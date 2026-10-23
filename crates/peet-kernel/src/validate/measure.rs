@@ -339,6 +339,45 @@ pub(crate) fn bulge_bounds(solid: &Solid, face: FaceId) -> Aabb {
     if !(u0 <= u1 && v0 <= v1) {
         return b;
     }
+    // A sphere and a ring torus are both (c + r cos v)(cos u, sin u) + r sin v along the
+    // axis. How far one reaches along each axis over the parameter rectangle is found
+    // exactly, among the places where neither parameter can go further: the best `u`
+    // turning towards the axis, or a bound of the rectangle, and likewise `v`.
+    let ring = match &f.surface {
+        Surface::Sphere(s) => Some((s.frame, 0.0, s.radius)),
+        Surface::Torus(t) if t.minor < t.major => Some((t.frame, t.major, t.minor)),
+        _ => None,
+    };
+    if let Some((frame, c, r)) = ring {
+        let within = |t: f64, lo: f64, hi: f64| {
+            let t = t + std::f64::consts::TAU * ((lo - t) / std::f64::consts::TAU).ceil();
+            (t <= hi).then_some(t)
+        };
+        let local = |u: f64, v: f64| {
+            let rho = c + r * v.cos();
+            frame.to_world(DVec3::new(rho * u.cos(), rho * u.sin(), r * v.sin()))
+        };
+        for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
+            for d in [axis, -axis] {
+                let (a, bb, e) = (
+                    d.dot(frame.x_axis()),
+                    d.dot(frame.y_axis()),
+                    d.dot(frame.z_axis()),
+                );
+                let us = [within(bb.atan2(a), u0, u1), Some(u0), Some(u1)];
+                for u in us.into_iter().flatten() {
+                    let k = a * u.cos() + bb * u.sin();
+                    for v in [within(e.atan2(k), v0, v1), Some(v0), Some(v1)]
+                        .into_iter()
+                        .flatten()
+                    {
+                        b.extend(local(u, v));
+                    }
+                }
+            }
+        }
+        return b;
+    }
     for i in 0..=GRID {
         for j in 0..=GRID {
             let f_ij = DVec2::new(i as f64, j as f64) / GRID as f64;

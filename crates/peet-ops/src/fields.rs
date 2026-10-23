@@ -1016,13 +1016,20 @@ feature_args! {
 feature_args! {
     /// An extrusion or a cut of a sketch's closed regions.
     Extrude: FeatureKind::Extrude(f) => &mut **f,
-        ExtrudeFeature { sketch, params: peet_model::Extrude { end, depth, reverse, operation, regions } } => {
+        ExtrudeFeature { sketch, params: peet_model::Extrude { end, depth, reverse, operation, regions, flip_side, draft, draft_outward } } => {
     sketch: FeatureSel as SketchF = sketch,
     operation: Operation as Choice<Operation> = operation,
     end: End as EndF = end,
     depth: Input as Length = depth,
     reverse: bool as Flag = reverse,
     regions: Regions as RegionsF = regions,
+    /// A cut removes everything outside the regions, within its reach.
+    flip_side: bool as Flag = flip_side,
+    /// Degrees the walls lean from the direction of extrusion, from the sketch plane.
+    draft: Input as Angle = draft,
+    /// The draft widens what is added or removed away from the sketch, where it otherwise
+    /// narrows.
+    draft_outward: bool as Flag = draft_outward,
     }
 }
 
@@ -1417,12 +1424,15 @@ feature_args! {
 feature_args! {
     /// A solid of one wall thickness turned into a sheet metal body.
     ConvertToSheet: FeatureKind::ConvertToSheet(f) => &mut **f,
-        ConvertToSheetFeature { face, model, relief, relief_ratio } => {
+        ConvertToSheetFeature { face, model, relief, relief_ratio, thickness } => {
     /// The flat face that stays fixed. Absent: the largest flat face of the only body.
     face: Option<FaceSel> as OptFace = face,
     bend: Bend as BendF = model,
     relief: ReliefType as Choice<ReliefType> = relief,
     relief_ratio: Input as Number = relief_ratio,
+    /// The sheet's own thickness, from the fixed face in (a flat body only). `Some(None)`
+    /// uses the solid's.
+    thickness: Option<Input> as OptLength = thickness,
     }
 }
 

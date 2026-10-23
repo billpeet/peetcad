@@ -302,6 +302,12 @@ with their defaults' types):
 
 - `plane`: `from` + `distance` (offset), `from` + `about` + `angle` (angled), or `a` + `b`
   (halfway between).
+- `extrude` and `cut` take `draft`: degrees the walls lean from the direction of
+  extrusion, from the sketch plane, so that what is added or removed narrows away from the
+  sketch (`draft_outward`: widens). Not with `mid_plane`. A `cut` with `flip_side`
+  removes everything outside its regions within its reach (SolidWorks' "flip side to
+  cut"); with a draft the removed part still narrows, so the regions grow. Regions picked
+  side by side (`regions`) are extruded as one shape.
 - `axis`: `edge`, `face` (a round face) or `a` + `b` (two planes). `point`: `x`, `y`, `z`
   or `vertex`.
 - `base_flange` from an open profile takes `bends`: a bend model (as `bend`) or `null` for
@@ -373,12 +379,15 @@ with their defaults' types):
 - `sweep` takes `profile` and `path` (two sketches). Corners between straight pieces of
   the path are mitred. A path with a spline in it is followed as a whole: it has no
   corners, the profile's plane only has to cross its start (not squarely), and the sides
-  are freeform.
+  are freeform. So is a path that leaves the profile's plane at a slant: the profile is
+  carried along it as drawn. A profile part way along a straight piece of the path, square
+  to it, is swept both ways along the whole path.
 - `loft` takes `profiles`: two or more sketches in order, each with the same number of
   edges (a circle adapts).
 - `convert_to_sheet` turns a solid of one wall thickness into a sheet metal body. It takes
   `face` (the flat face that stays fixed; left out, the largest flat face of the only
-  body), `bend`, `relief` and `relief_ratio`.
+  body), `bend`, `relief` and `relief_ratio`. `thickness` gives a flat body a sheet
+  thickness of its own, from `face` into the solid (`null`: the solid's own).
 - `hole` drills at every point of its sketch. `standard` (`{"size": "M6", "fit": "close"
   | "normal" | "loose" | "tapped"}`) sets every size; sizes given as well win.
 - `fillet` and `chamfer` take `edges` and `size`; `shell` takes `open` (faces to remove)
@@ -479,7 +488,7 @@ in all of them. Only the numeric fields of a feature can differ: an `edit` with
 | `open` | `path`, `discard` |
 | `open_sample` | `sample` (`bracket`, `enclosure`, `chassis`, `housing`, `cover`, `bolt`, `screw`, or `assembly`: an assembly of the last five, mated), `discard` |
 | `save` | `path` (optional once the part has a file), `caches` (default true: a part's file keeps its built bodies and their display meshes, so it opens without rebuilding; an assembly's keeps the display meshes the application has drawn) |
-| `import_step` | `path`. In a part: the file's solids become bodies, in one feature named after the file. In an assembly: the file's parts and assemblies become parts and sub-assemblies, placed as components where the file has them (fixed); replies `components`, `parts`, `bodies` |
+| `import_step` | `path`. In a part: the file's solids become bodies, in one feature named after the file (a closed shell of a surface model is a solid too; open shells are skipped with a warning). In an assembly: the file's parts and assemblies become parts and sub-assemblies, placed as components where the file has them (fixed); replies `components`, `parts`, `bodies` |
 | `import_dxf` | `path`, and `sketch` (an existing one) or `on` with `name` (a new one; default the top plane); `unit`, `placement` (`keep`, `centred`, `lower_left`) |
 | `export` | `path`, `format` (`stl`, `dxf`, `step`; taken from the path if absent), `body`, `schema` (`ap214`, `ap242`) |
 
