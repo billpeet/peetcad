@@ -338,6 +338,13 @@ function importPart(doc, dir) {
       if (d < away) { on = candidate; pf = plane; away = d; }
       if (d < 1e-4) break;
     }
+    // Nothing there (a sketch on a plane SolidWorks made for it, or on a face PeetCAD has elsewhere): a plane
+    // where SolidWorks' sketch is, as SolidWorks' cuts and extrusions go from any plane
+    let planeMade = null;
+    if ((!on || away > NEAR) && !onFace && !needFace) {
+      planeMade = planeWhere(name + " plane", sf);
+      if (planeMade) { on = planeMade; pf = probe(planeMade); away = 0; }
+    }
     if (!on || (away > NEAR && !onFace)) return { error: needFace ? "no flat face of the part lies where the sketch does" : "no plane or face lies where the sketch does" };
 
     const toPeet = p => { const d = sub(fromSketch(sf, p), pf.o); return [tidy(dot(d, pf.x)), tidy(dot(d, pf.y))]; };
@@ -1491,9 +1498,9 @@ function importPart(doc, dir) {
           if (!peet.apply({ op: "plane", from: turned, distance, flip, name }).ok) continue;
           const where = probe(name);
           if (parallel(where) && Math.abs(dot(sub(where.o, pf.o), pf.n)) < 1e-3) {
+            // The part has the two planes: the script keeps them and not the tries
             peet.script.length = mark;
-            peet.apply({ op: "plane", from: base, about, angle: tidy(angle), name: turned });
-            peet.apply({ op: "plane", from: turned, distance, flip, name });
+            peet.script.push({ op: "plane", from: base, about, angle: tidy(angle), name: turned }, { op: "plane", from: turned, distance, flip, name });
             planes.set(f.name, name);
             return record(f, "imported", "as a fixed plane turned about an axis");
           }
@@ -1527,11 +1534,13 @@ function importPart(doc, dir) {
           if (op && !peet.apply(op).ok) continue;
           const where = probe(op ? name : turned);
           if (parallel(where) && Math.abs(dot(sub(where.o, pf.o), pf.n)) < 1e-3) {
+            // The part has the planes: the script keeps them and not the tries
             peet.script.length = mark;
-            if (op) {
-              peet.apply({ op: "plane", from: base, about, angle: tidy(angle), name: turned });
-              peet.apply(op);
-            } else peet.apply({ op: "plane", from: base, about, angle: tidy(angle), name });
+            if (op) peet.script.push({ op: "plane", from: base, about, angle: tidy(angle), name: turned }, op);
+            else {
+              peet.run({ op: "delete", feature: turned }, true);
+              peet.apply({ op: "plane", from: base, about, angle: tidy(angle), name });
+            }
             return true;
           }
           if (op) peet.apply({ op: "delete", feature: name });
@@ -1541,6 +1550,32 @@ function importPart(doc, dir) {
     }
     peet.script.length = mark;
     return false;
+  }
+
+  /**
+   * A plane named `name` where SolidWorks has a sketch's plane `sf`: an offset of the standard plane it is
+   * parallel to, or of one turned about an axis of the model to it. Its name, or null if none comes out
+   * there. The tries are left out of the script.
+   */
+  function planeWhere(name, sf) {
+    const mark = peet.script.length;
+    const axis = ["x", "y", "z"].find(k => Math.abs(Math.abs(dot(sf.n, AXES[k])) - 1) < 1e-9);
+    if (axis) {
+      const from = { x: "right", y: "front", z: "top" }[axis];
+      const distance = tidy(Math.abs(dot(sf.o, AXES[axis])));
+      for (const flip of distance > 1e-9 ? [false, true] : [false]) {
+        const op = distance > 1e-9 ? { op: "plane", from, distance, flip, name } : { op: "plane", from, distance: 0, name };
+        if (!peet.apply(op).ok) continue;
+        const where = probe(name);
+        if (where && samePlane(where, sf)) { peet.script.length = mark; peet.script.push(op); return name; }
+        peet.apply({ op: "delete", feature: name });
+      }
+      peet.script.length = mark;
+      return null;
+    }
+    const about = ["x", "y", "z"].find(k => Math.abs(dot(sf.n, AXES[k])) < 1e-9);
+    if (!about) return null;
+    return planeAbout(name, about, sf) ? name : null;
   }
 
   const values = f => (f.definition && f.definition.values) || {};
@@ -1554,6 +1589,8 @@ function importPart(doc, dir) {
   }
 
   const LATER = "left for the configuration it is live in";
+  /** A feature a pattern or mirror copies that is suppressed in SolidWorks and could not be built: SolidWorks copies nothing of it. */
+  const unbuilt = p => p && !made.has(p.name) && (byName.get(p.name) || {}).suppressed === true;
   const elsewhere = doc.configurations.filter(c => c !== config && !c.flatPattern).map(flatten);
   const liveElsewhere = name => elsewhere.some(m => m.has(name) && !m.get(name).suppressed);
 
@@ -1716,10 +1753,13 @@ function importPart(doc, dir) {
             // A rectangle is four lines, each along the edge or square to it. Anything else is cut to shape.
             const drawn = p.sketch.segments.filter(g => !g.construction);
             const square = g => { const d = unit(sub(fromSketch(sf, g.end), fromSketch(sf, g.start))), c = Math.abs(dot(d, along)); return c > 0.9999 || c < 1e-4; };
-            if (drawn.length !== 4 || drawn.some(g => g.type !== "line" || !g.start || !g.end || !square(g))) {
-              // How far the outline rises from its foot, which the flange has to reach before it is cut to it
-              const fa = fromSketch(sf, foot.g.start), fu = unit(sub(fromSketch(sf, foot.g.end), fa));
-              const rise = Math.max(...drawn.flatMap(pointsAlong).map(q => { const d = sub(fromSketch(sf, q), fa); return len(sub(d, mul(fu, dot(d, fu)))); }));
+            // How far the outline rises from its foot, which the flange has to reach before it is cut to it
+            const fa = fromSketch(sf, foot.g.start), fu = unit(sub(fromSketch(sf, foot.g.end), fa));
+            const rise = Math.max(...drawn.flatMap(pointsAlong).map(q => { const d = sub(fromSketch(sf, q), fa); return len(sub(d, mul(fu, dot(d, fu)))); }));
+            // A rectangle taller than the flange's length (one edge of a flange on several, its profile drawn
+            // taller than the others) is as tall as it is drawn: it is the flange's outline
+            const taller = Math.abs(angle - 90) < 1e-6 && rise > length - (thickness || 0) + 0.01;
+            if (taller || drawn.length !== 4 || drawn.some(g => g.type !== "line" || !g.start || !g.end || !square(g))) {
               outline = { sketch: p, foot: foot.g, rise };
               // An outline that widens past an end of the edge its foot runs to: the flange is made that
               // wide (it overhangs the edge from the bend on) and cut back to the outline.
@@ -1761,7 +1801,9 @@ function importPart(doc, dir) {
         // a depth becomes a ratio of its width: PeetCAD's relief is as deep past the bend as it is wide.
         const ownRelief = {};
         if (v.UseDefaultBendRelief === false) {
-          const kind = { 1: "rectangular", 2: "tear", 3: "obround" }[v.AutoReliefType];
+          // A relief under a micron wide (and not a ratio) cuts nothing: it is a tear
+          const none = !v.UseReliefRatio && v.ReliefWidth > 0 && v.ReliefWidth * MM < 1e-3;
+          const kind = none ? "tear" : { 1: "rectangular", 2: "tear", 3: "obround" }[v.AutoReliefType];
           if (kind) ownRelief.relief = kind;
           if (kind && kind !== "tear") {
             if (v.UseReliefRatio && v.ReliefRatio > 0) ownRelief.relief_ratio = tidy(v.ReliefRatio);
@@ -1977,7 +2019,8 @@ function importPart(doc, dir) {
         if (sheetPart) {
           if (end === 0 && !v.LinkToThickness && thickness && depth < thickness - 1e-6)
             return record(f, "not supported", `a cut ${tidy(depth)} mm deep into ${tidy(thickness)} mm sheet (an etch): sheet metal cuts go through`);
-          const reach = reachOf(end, depth, v.BothDirections);
+          // Cut while the part is unfolded: through the sheet, where it lies in the blank
+          const reach = unfolded ? null : reachOf(end, depth, v.BothDirections);
           const sk = useSketch(f);
           let built = sk.error ? { ok: false, message: sk.error } : sheetCut(f, sk.name, reach, sk.frame);
           if (!built.ok && sketchOf(f)) {
@@ -1990,11 +2033,11 @@ function importPart(doc, dir) {
         }
         const sk = useSketch(f);
         if (sk.error) return record(f, "failed", sk.error);
-        const shape = end === 0 ? { end: "blind", depth: tidy(depth) } : end === 6 ? { end: "mid_plane", depth: tidy(depth) } : { end: "through_all" };
+        const shape = end === 0 ? { end: "blind", depth: tidy(depth) } : end === 6 ? { end: "mid_plane", depth: tidy(depth) } : end === 2 ? { end: "through_next" } : { end: "through_all" };
         let built;
         // Which way it goes: the way that cuts where SolidWorks' cut did
         built = nearest(f, [false, true].map(reverse => ({ op: "cut", sketch: sk.name, name: f.name, ...shape, reverse })));
-        if (built.ok && ![0, 1, 6, 9].includes(end)) built.warning = `SolidWorks' end condition ${end} is cut through all`;
+        if (built.ok && ![0, 1, 2, 6, 9].includes(end)) built.warning = `SolidWorks' end condition ${end} is cut through all`;
         if (!built.ok && unsure) {
           const added = extrude();
           if (added.ok) return finish(f, added);
@@ -2069,7 +2112,9 @@ function importPart(doc, dir) {
       }
 
       case "HoleWzd": {
-        if (/slot/i.test(f.name)) return slots(f);
+        // A slot no longer than it is wide is a round hole, as SolidWorks makes it
+        const slotWidth = (v.HoleDiameter || v.ThruHoleDiameter || v.Diameter || 0) * MM;
+        if (/slot/i.test(f.name) && !(v.Length * MM <= slotWidth + 1e-6)) return slots(f);
         const where = (f.sub || []).find(c => SKETCH.test(c.type) && c.sketch && !c.sketch.error && c.sketch.points.length);
         if (!where) return record(f, "failed", "the sketch of its positions was not exported");
         const wanted = new Set((v.GetSketchPoints || []).filter(p => p && p.id).map(p => p.id.join(".")));
@@ -2100,6 +2145,7 @@ function importPart(doc, dir) {
       case "LPattern": {
         const seeds = [];
         for (const p of v.PatternFeatureArray || []) {
+          if (unbuilt(p)) continue;
           if (!p || !made.has(p.name)) return record(f, "failed", `what it copies (${p ? p.name : "nothing"}) was not imported`);
           seeds.push(...made.get(p.name));
         }
@@ -2124,8 +2170,13 @@ function importPart(doc, dir) {
         };
         const direction = (axis, reversed, spacing, alone) => {
           let d = null;
-          if (axis && axis.start && axis.end) d = mul(unit(sub(mm(axis.end), mm(axis.start))), reversed ? -1 : 1);
-          else if (axis && axis.kind === "face" && axis.normal) {
+          if (axis && axis.start && axis.end) {
+            d = mul(unit(sub(mm(axis.end), mm(axis.start))), reversed ? -1 : 1);
+            // Which way along an edge SolidWorks goes is not always from its start to its end: the way
+            // its body has the copies settles it
+            const way = seen(spacing * MM, d);
+            if (way) d = way;
+          } else if (axis && axis.kind === "face" && axis.normal) {
             // Along a flat face's normal
             d = mul(unit(axis.normal), reversed ? -1 : 1);
             const way = seen(spacing * MM, d);
@@ -2134,7 +2185,7 @@ function importPart(doc, dir) {
           if (!d) return null;
           const k = ["x", "y", "z"].find(k => Math.abs(Math.abs(dot(d, AXES[k])) - 1) < 1e-9);
           if (k) return { axis: k, flip: dot(d, AXES[k]) < 0 };
-          if (axis && axis.start && axis.end) return { axis: edgeSelector(axis), flip: !!reversed };
+          if (axis && axis.start && axis.end) return { axis: edgeSelector(axis), flip: dot(unit(sub(mm(axis.end), mm(axis.start))), d) < 0 };
           // Any straight edge of the part that way
           const edge = (peet.ask({ op: "edges" }).edges || []).find(e => e.curve === "line" && len(sub(e.to, e.from)) > 1e-6 && Math.abs(Math.abs(dot(unit(sub(e.to, e.from)), d)) - 1) < 1e-9);
           return edge ? { axis: { between: [edge.from, edge.to] }, flip: dot(unit(sub(edge.to, edge.from)), d) < 0 } : null;
@@ -2165,6 +2216,7 @@ function importPart(doc, dir) {
         for (const p of v.PatternFeatureArray || []) {
           if (p && flanges.has(p.name)) { bent.push(flanges.get(p.name)); sheetMetal.push(p.name); continue; }
           if (p && miters.has(p.name)) { mitred.push(miters.get(p.name)); sheetMetal.push(p.name); continue; }
+          if (unbuilt(p)) continue;
           if (!p || !made.has(p.name)) return record(f, "failed", `what it mirrors (${p ? p.name : "nothing"}) was not imported`);
           seeds.push(...made.get(p.name));
         }

@@ -592,30 +592,41 @@ pub(crate) fn apply_sheet_cut(
     reach: Option<(f64, f64)>,
     seed: u64,
 ) -> Result<Applied, FeatureError> {
-    let face = face.ok_or_else(|| {
-        FeatureError(
-            "Sketch the cut on a flat face of the sheet metal part: a sheet metal cut goes square through the sheet from there."
-                .to_owned(),
-        )
-    })?;
-    let found = find_face(bodies, face).ok_or_else(|| {
-        FeatureError(format!(
-            "The face its sketch is on no longer exists ({}).",
-            model.describe_face(&face.name)
-        ))
-    })?;
-    let body = &bodies[found.body];
-    let sheet = body.sheet.as_ref().ok_or_else(|| {
-        FeatureError(
+    let found = match face {
+        Some(face) => Some(find_face(bodies, face).ok_or_else(|| {
+            FeatureError(format!(
+                "The face its sketch is on no longer exists ({}).",
+                model.describe_face(&face.name)
+            ))
+        })?),
+        None => None,
+    };
+    if let Some(found) = &found
+        && bodies[found.body].sheet.is_none()
+    {
+        return Err(FeatureError(
             "The sketch is not on a sheet metal body. Use Cut-Extrude for solid bodies.".to_owned(),
-        )
-    })?;
-    let (on_piece, frame, top) = sheet.flange_face(found.id).ok_or_else(|| {
-        FeatureError(
-            "Sketch the cut on a flat face of the sheet (a flange's top or bottom), not on a bend or an edge."
-                .to_owned(),
-        )
-    })?;
+        ));
+    }
+    // A sketch on a plane, or on a face that is not a flange's top or bottom (the sheet's
+    // edge): cut from there, as SolidWorks' cut-extrude does from any plane.
+    let on_flange = found.as_ref().and_then(|found| {
+        let sheet = bodies[found.body].sheet.as_ref()?;
+        Some((found.body, sheet, sheet.flange_face(found.id)?))
+    });
+    let Some((body_index, sheet, (on_piece, frame, top))) = on_flange else {
+        return sheet_cut_anywhere(
+            feature,
+            model,
+            bodies,
+            found.map(|f| f.body),
+            plane,
+            sketch,
+            reach,
+            seed,
+        );
+    };
+    let body = &bodies[body_index];
     refuse_splines(sketch)?;
     let profile = find_regions(sketch);
     if profile.regions.is_empty() {
@@ -674,7 +685,7 @@ pub(crate) fn apply_sheet_cut(
         r.contains(c) && layout.pieces[on_piece].covers(to_flat(c))
     });
     let before = peet_kernel::validate::measure::volume(&body.solid);
-    let (new, mut warning) = sheet_body(model, layout, body.origin, stamp(seed, found.body))?;
+    let (new, mut warning) = sheet_body(model, layout, body.origin, stamp(seed, body_index))?;
     let after = peet_kernel::validate::measure::volume(&new.solid);
     if (before - after).abs() <= 1e-9 * before.abs().max(1.0) {
         if !over_sheet {
@@ -688,8 +699,121 @@ pub(crate) fn apply_sheet_cut(
         });
     }
     let mut out = bodies.to_vec();
-    out[found.body] = Arc::new(new);
+    out[body_index] = Arc::new(new);
     Ok((out, warning))
+}
+
+/// A sheet metal cut whose sketch is not on a flange's top or bottom: on a plane, or on a
+/// face along the sheet's edge. It cuts as SolidWorks' cut-extrude does from such a sketch:
+/// through the flanges with a face in the sketch's plane, and with a reach, through every
+/// flange the reach takes in ([`cut_beyond`]), going in against the sketch plane's normal
+/// (into the face, for a sketch on one). `body` is the body of the face the sketch is on;
+/// for a sketch on a plane every sheet metal body is cut.
+#[allow(clippy::too_many_arguments)]
+fn sheet_cut_anywhere(
+    feature: FeatureId,
+    model: &Model,
+    bodies: &[Arc<Body>],
+    body: Option<usize>,
+    plane: &Plane,
+    sketch: &Sketch,
+    reach: Option<(f64, f64)>,
+    seed: u64,
+) -> Result<Applied, FeatureError> {
+    refuse_splines(sketch)?;
+    let profile = find_regions(sketch);
+    if profile.regions.is_empty() {
+        return Err(FeatureError(
+            "The sketch has no closed region to cut. Draw a closed shape.".to_owned(),
+        ));
+    }
+    let regions: Vec<_> = default_regions(&profile)
+        .into_iter()
+        .map(|i| profile.regions[i].clone())
+        .collect();
+    let world = |p: DVec2| plane.from_plane_coords(p);
+    let into = -plane.normal();
+    let mut out = bodies.to_vec();
+    let mut warning = None;
+    let mut cut_any = false;
+    for (index, b) in bodies.iter().enumerate() {
+        let Some(sheet) = &b.sheet else { continue };
+        if body.is_some_and(|i| i != index) {
+            continue;
+        }
+        let cuts = cut_from_plane(&sheet.layout, &world, into, reach, &regions, feature.0);
+        if cuts.is_empty() {
+            continue;
+        }
+        let mut layout = sheet.layout.clone();
+        for (area, pieces) in cuts {
+            layout.add_cut_on(area, pieces);
+        }
+        let before = peet_kernel::validate::measure::volume(&b.solid);
+        let (new, w) = sheet_body(model, layout, b.origin, stamp(seed, index))?;
+        let after = peet_kernel::validate::measure::volume(&new.solid);
+        if (before - after).abs() > 1e-9 * before.abs().max(1.0) {
+            cut_any = true;
+            warning = warning.or(w);
+            out[index] = Arc::new(new);
+        }
+    }
+    if !cut_any {
+        return Err(FeatureError(if reach.is_none() {
+            "Its sketch is not on a flange's top or bottom, and no flange has a face in its plane. \
+             Sketch the cut on a flat face of the sheet, or give it an end (blind or through all) \
+             to cut from where the sketch is."
+                .to_owned()
+        } else {
+            "The cut doesn't remove any material: nothing of the sheet is within its reach \
+             under its shape. Check its direction (reverse) and its depth."
+                .to_owned()
+        }));
+    }
+    Ok((out, warning))
+}
+
+/// Whether a sheet metal cut's sketch is off a flange's top or bottom, and is cut from as
+/// [`sheet_cut_anywhere`] does: `Some(None)` for a sketch on a plane, `Some(Some(body))` for
+/// one on a face of a sheet metal body that is not a flange's top or bottom (its edge).
+pub(crate) fn off_flange(bodies: &[Arc<Body>], face: Option<&FaceRef>) -> Option<Option<usize>> {
+    let Some(face) = face else { return Some(None) };
+    let found = find_face(bodies, face)?;
+    let sheet = bodies[found.body].sheet.as_ref()?;
+    sheet.flange_face(found.id).is_none().then_some(Some(found.body))
+}
+
+/// The cuts a sheet metal cut makes in `layout` from a sketch placed in the model by
+/// `world`, going `into` from its plane, each with the pieces it is cut from: the flanges
+/// with a face in the sketch's plane, cut square through by the regions, and with a reach,
+/// the others it takes in ([`cut_beyond`]).
+pub(crate) fn cut_from_plane(
+    layout: &Layout,
+    world: &dyn Fn(DVec2) -> DVec3,
+    into: DVec3,
+    reach: Option<(f64, f64)>,
+    regions: &[peet_sketch::region::Region],
+    owner: u32,
+) -> Vec<(Area, Vec<usize>)> {
+    let t = layout.settings.thickness;
+    let origin = world(DVec2::ZERO);
+    let mut done = vec![false; layout.pieces.len()];
+    let mut out = Vec::new();
+    for (i, piece) in layout.pieces.iter().enumerate() {
+        if !piece.is_flange() || piece.frame.z_axis().cross(into).length() > 1e-9 {
+            continue;
+        }
+        let level = piece.frame.to_local(origin).z;
+        if level.abs() < 1e-6 || (level - t).abs() < 1e-6 {
+            done[i] = true;
+            let through = |p: DVec2| piece.frame.to_local(world(p)).truncate();
+            out.push((Area::from_regions(regions, owner).mapped(&through), vec![i]));
+        }
+    }
+    if let Some(span) = reach {
+        out.extend(cut_beyond(layout, &done, world, into, span, regions, owner));
+    }
+    out
 }
 
 /// How far out from its edge an edge flange is set, evaluated.

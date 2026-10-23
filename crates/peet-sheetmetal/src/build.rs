@@ -658,12 +658,40 @@ fn drop_scrap(layout: &Layout, kept: Vec<(Region, usize)>) -> Vec<(Region, usize
     let s = &layout.settings;
     let relief = s.radius + s.thickness * (1.0 + s.relief_ratio);
     let scrap = 2.0 * relief * relief;
-    let keep: Vec<bool> = (0..n)
+    let mut keep: Vec<bool> = (0..n)
         .map(|i| {
             let fragment = fragments.find(i);
             largest[&kept[i].1].0 == fragment || size[&fragment] > scrap
         })
         .collect();
+    // A fragment still joined to what is kept of another piece is part of the sheet, not
+    // scrap: a bend cut across in several places is in several strips, each joining its
+    // flanges.
+    let joined = |i: usize, j: usize| {
+        edges[i]
+            .iter()
+            .any(|a| edges[j].iter().any(|b| a.0 == b.0 && close(a.1, b.2) && close(a.2, b.1)))
+    };
+    loop {
+        let mut grew = false;
+        for i in 0..n {
+            if keep[i] {
+                continue;
+            }
+            if (0..n).any(|j| keep[j] && kept[j].1 != kept[i].1 && joined(i, j)) {
+                let fragment = fragments.find(i);
+                for (k, kk) in keep.iter_mut().enumerate() {
+                    if fragments.find(k) == fragment {
+                        *kk = true;
+                    }
+                }
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
     kept.into_iter()
         .zip(keep)
         .filter_map(|(k, keep)| keep.then_some(k))

@@ -373,6 +373,57 @@ fn cut_across_a_bend() {
     before.cuts.clear();
 }
 
+#[test]
+fn cuts_through_a_whole_bend_leave_its_strips() {
+    // Two cuts that each take the bend away over its whole width leave it in three
+    // strips. Each still joins the plate to the flange: none is scrap.
+    let mut layout = plate_layout(settings(0.5));
+    layout
+        .add_edge_flange(
+            2,
+            &top_edge(true),
+            &flange(25.0, FlangePosition::MaterialInside),
+        )
+        .unwrap();
+    let bend = layout
+        .pieces
+        .iter()
+        .find(|p| !p.is_flange())
+        .expect("the bend");
+    let ys: Vec<f64> = bend
+        .outline
+        .edges()
+        .flat_map(|e| [e.curve.start().y, e.curve.end().y])
+        .collect();
+    let (y0, y1) = ys
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &y| (a.min(y), b.max(y)));
+    let (_, full) = built(layout.clone());
+    for (k, x) in [20.0, 60.0].into_iter().enumerate() {
+        layout.add_cut(Area::polygon(
+            &[
+                DVec2::new(x, y0),
+                DVec2::new(x + 10.0, y0),
+                DVec2::new(x + 10.0, y1),
+                DVec2::new(x, y1),
+            ],
+            |i| CurveTag::Sketch {
+                owner: 3 + k as u32,
+                entity: i as u32,
+            },
+        ));
+    }
+    let (solid, body) = built(layout);
+    assert_close(
+        flat_area(&full) - flat_area(&body),
+        2.0 * 10.0 * (y1 - y0),
+        1e-6,
+    );
+    let flat = measure::volume(&body.flat);
+    assert_close(measure::volume(&solid), flat, flat * 2e-5);
+    assert_eq!(body.bend_lines[0].segments.len(), 3);
+}
+
 /// A plate with a flange on its top edge and `cut` made after it, at K = 0.5.
 fn cut_across_the_bend(cut: Area) -> (Solid, SheetBody) {
     let mut layout = plate_layout(settings(0.5));

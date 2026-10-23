@@ -499,6 +499,15 @@ fn sheet_copies(
         } => (plane, *sketch, face.as_ref()),
         _ => unreachable!(),
     };
+    // A cut sketched on a plane or on the sheet's edge: each copy cuts from where the motion
+    // takes its sketch, as the original does.
+    if let Seed::SheetCut { reach, .. } = seed
+        && let Some(body) = crate::sheet::off_flange(bodies, face)
+    {
+        return Ok(cut_copies_anywhere(
+            feature, model, bodies, body, plane, sketch, *reach, motions, si, stamp, name, skipped,
+        )?);
+    }
     let on = sketch_face(model, bodies, face, "the copied feature")?;
     let mut layout = on.sheet.layout.clone();
     // A point inside the sketch's shape, to tell which flange a copy lands on
@@ -591,22 +600,79 @@ fn sheet_copies(
                         },
                         other => other,
                     });
+                // The other flanges with a face in the copy's plane, each through its own
+                // place in the flat pattern, as the original cuts them: a mirror of a cut on
+                // a flange cuts the mirrored flange across from it, in the same plane.
+                let into = frame.z_axis() * if top { -1.0 } else { 1.0 };
+                let world = |p: peet_math::DVec2| m.point(plane.from_plane_coords(p));
+                let mut done = vec![false; layout.pieces.len()];
+                done[piece] = true;
+                // Whether the shape, placed in the flat pattern by `map`, is over the sheet
+                let over = |map: &dyn Fn(peet_math::DVec2) -> peet_math::DVec2| {
+                    regions.iter().any(|r| {
+                        let (lo, hi) = r.outer.bounds();
+                        let c = (lo + hi) / 2.0;
+                        r.contains(c)
+                            .then_some(c)
+                            .into_iter()
+                            .chain(r.outer.edges.iter().flat_map(|e| {
+                                (1..8).map(|k| e.curve.point_at(k as f64 / 8.0))
+                            }))
+                            .any(|p| layout.pieces.iter().any(|pc| pc.covers(map(p))))
+                    })
+                };
+                let probes = [peet_math::DVec2::ZERO, peet_math::DVec2::X, peet_math::DVec2::Y];
+                let mut others = Vec::new();
+                for (area, pieces) in
+                    crate::sheet::cut_from_plane(&layout, &world, into, None, &regions, feature.0)
+                {
+                    let i = pieces[0];
+                    if i == piece {
+                        continue;
+                    }
+                    done[i] = true;
+                    let other = layout.pieces[i].frame;
+                    let through = |p: peet_math::DVec2| other.to_local(world(p)).truncate();
+                    if probes.iter().all(|p| through(*p).distance(to_flat(*p)) < 1e-6)
+                        || !over(&through)
+                    {
+                        continue;
+                    }
+                    others.push((area, pieces));
+                }
+                // A copy whose shape lies wholly off the sheet cuts nothing: say so, as
+                // SolidWorks leaves such an instance out.
+                if reach.is_none() && others.is_empty() && !over(&to_flat) {
+                    skipped.push(format!("copy {} of {name} (it is off the sheet)", k + 2));
+                    continue;
+                }
                 if piece == on.piece {
                     layout.add_cut(area);
                 } else {
                     layout.add_cut_on(area, vec![piece]);
                 }
+                for (area, pieces) in others {
+                    let area = area.retagged(|t| match t {
+                        CurveTag::Sketch { owner, entity } => CurveTag::Copy {
+                            owner,
+                            copy,
+                            entity,
+                        },
+                        other => other,
+                    });
+                    layout.add_cut_on(area, pieces);
+                }
                 // As far past its own sheet as the original goes
                 if let Some(span) = *reach {
-                    let mut done = vec![false; layout.pieces.len()];
-                    done[piece] = true;
-                    // Into the sheet from the copy's face, which is the original's moved
-                    let into = frame.z_axis() * if top { -1.0 } else { 1.0 };
-                    let world = |p: peet_math::DVec2| m.point(plane.from_plane_coords(p));
                     let beyond =
                         crate::sheet::cut_beyond(&layout, &done, &world, into, span, &regions, feature.0);
                     for (area, pieces) in beyond {
                         let area = area.retagged(|t| match t {
+                            CurveTag::Sketch { owner, entity } => CurveTag::Copy {
+                                owner,
+                                copy,
+                                entity,
+                            },
                             CurveTag::Generated { owner, part, index } => CurveTag::Generated {
                                 owner,
                                 part: part ^ (copy << 16),
@@ -660,6 +726,83 @@ fn sheet_copies(
         return Ok((bodies.to_vec(), 0, None));
     }
     let (out, warning) = rebuild_sheet(model, bodies, on.body, layout, stamp)?;
+    Ok((out, made, warning))
+}
+
+/// Every copy of a sheet metal cut sketched off a flange's top or bottom (on a plane, or on
+/// the sheet's edge): each cuts from where the motion takes the sketch, going the way the
+/// motion takes the original's way in. `body` is the body of the face the sketch is on, or
+/// `None` for every sheet metal body.
+#[allow(clippy::too_many_arguments)]
+fn cut_copies_anywhere(
+    feature: FeatureId,
+    model: &Model,
+    bodies: &[Arc<Body>],
+    body: Option<usize>,
+    plane: &Plane,
+    sketch: &Sketch,
+    reach: Option<(f64, f64)>,
+    motions: &[Motion],
+    si: usize,
+    stamp: u64,
+    name: &str,
+    skipped: &mut Vec<String>,
+) -> Result<SheetCopies, FeatureError> {
+    let profile = find_regions(sketch);
+    let regions: Vec<_> = default_regions(&profile)
+        .into_iter()
+        .map(|i| profile.regions[i].clone())
+        .collect();
+    if regions.is_empty() {
+        return Err(FeatureError("its sketch has no closed region to cut.".to_owned()));
+    }
+    let mut out = bodies.to_vec();
+    let mut warning = None;
+    let mut cut = vec![false; motions.len()];
+    for (index, b) in bodies.iter().enumerate() {
+        let Some(sheet) = &b.sheet else { continue };
+        if body.is_some_and(|i| i != index) {
+            continue;
+        }
+        let mut layout = sheet.layout.clone();
+        let mut any = false;
+        for (k, m) in motions.iter().enumerate() {
+            let copy = copy_number(si, k + 1);
+            let world = |p: peet_math::DVec2| m.point(plane.from_plane_coords(p));
+            let into = m.vector(-plane.normal());
+            let cuts =
+                crate::sheet::cut_from_plane(&layout, &world, into, reach, &regions, feature.0);
+            for (area, pieces) in cuts {
+                let area = area.retagged(|t| match t {
+                    CurveTag::Sketch { owner, entity } => CurveTag::Copy {
+                        owner,
+                        copy,
+                        entity,
+                    },
+                    CurveTag::Generated { owner, part, index } => CurveTag::Generated {
+                        owner,
+                        part: part ^ (copy << 16),
+                        index,
+                    },
+                    other => other,
+                });
+                layout.add_cut_on(area, pieces);
+                cut[k] = true;
+                any = true;
+            }
+        }
+        if any {
+            let (rebuilt, w) = rebuild_sheet(model, &out, index, layout, stamp)?;
+            out = rebuilt;
+            warning = warning.or(w);
+        }
+    }
+    for (k, c) in cut.iter().enumerate() {
+        if !c {
+            skipped.push(format!("copy {} of {name} (nothing of the sheet is in its way)", k + 2));
+        }
+    }
+    let made = cut.iter().filter(|c| **c).count();
     Ok((out, made, warning))
 }
 
