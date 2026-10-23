@@ -36,6 +36,36 @@ features. It always has an exact **flat pattern**, which is what the DXF export 
   sheet is slit). `relief_ratio`: its width, and how far it reaches past the bend, as a
   multiple of the thickness (default 0.5).
 
+## Tabs
+
+A tab adds a flat piece to a sheet metal body: a closed sketch on a flat face of the
+sheet (or on a plane in that face's plane), `base_flange` with `tab: true`. It is part of
+that face's flange, with the body's thickness (its own `thickness`, `radius`, `reverse`
+are ignored), so it folds and unfolds with it. It is what SolidWorks' base flange makes
+on a part that has sheet metal already ("Tab1").
+
+- The sketch must touch the sheet: overlap the face or share an edge with it. One that
+  touches nothing fails ("A tab adds to a sheet metal body ..."): move the sketch, or
+  leave out `tab` for a body of its own.
+- It fills in what earlier cuts took: a tab drawn across a slot bridges it. Later cuts
+  cut it like the rest of the face.
+- An inside corner it makes with the sheet takes a `break_corner` like any other.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [300, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "sketch", "name": "Slot", "on": {"feature": "Base-Flange1", "side": "top"}, "draw": [{"type": "rectangle", "from": [20, 20], "to": [280, 40]}]}
+{"op": "sheet_cut", "sketch": "Slot"}
+{"op": "sketch", "name": "Bridge", "on": {"at": [0, 0, 2], "normal": [0, 0, 1]}, "draw": [{"type": "rectangle", "from": [40, 20], "to": [60, 40]}]}
+{"op": "base_flange", "name": "Tab1", "sketch": "Bridge", "tab": true}
+{"op": "break_corner", "name": "Round", "size": 3, "edges": [{"between": [[60, 20, 0], [60, 20, 2]]}, {"between": [[60, 40, 0], [60, 40, 2]]}]}
+{"op": "linear_pattern", "features": ["Tab1", "Round"], "direction": "x", "spacing": 100, "count": 3}
+{"op": "bodies"}
+```
+
+The slot is cut first and bridged three times: the tab, then two copies of it and of its
+rounded corners.
+
 ## From a solid
 
 `convert_to_sheet` turns a solid that is already shaped like sheet metal (one wall
@@ -329,6 +359,14 @@ stays sheet metal (`fillet` and `chamfer` turn it into a plain solid).
   way round and it lies across from the original. A copy whose edge is not an edge of
   the sheet (the edge it would go on has a flange already, or is not there) is left out
   with a warning.
+- A `miter_flange` is copied the same way: its profile along the edges the motion takes
+  its edges to, in the other order for a mirror (so `offset_start` and `offset_end`
+  change ends). Every one of those edges must be an edge of the sheet. A tab's copy is
+  its sketch moved, added to the flange whose face the moved sketch is on; a
+  `break_corner`'s copy rounds (or adds to) the corner the motion takes the original's
+  to. Copy a break corner with the tab or flange whose corners it breaks, after it in
+  `features` order (copies are made in model order, so a corner of a copied tab is there
+  when the corner is copied).
 
 ```jsonl
 {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
@@ -336,6 +374,18 @@ stays sheet metal (`fillet` and `chamfer` turn it into a plain solid).
 {"op": "edge_flange", "name": "Lip", "length": 20, "offset_start": 10, "offset_end": 60, "edge": {"between": [[0, 60, 2], [100, 60, 2]]}}
 {"op": "plane", "from": "front", "distance": 30, "flip": true, "name": "Middle"}
 {"op": "mirror", "features": ["Lip"], "plane": "Middle"}
+```
+
+A gutter (a mitre flange) mirrored to the other end of a plate:
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 100]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "sketch", "name": "Profile", "on": {"at": [100, 0, 1], "normal": [0, -1, 0]}, "draw": [{"type": "polyline", "points": [[0, 0], [0, 20], [8, 20]]}]}
+{"op": "miter_flange", "name": "Gutter", "sketch": "Profile", "edges": [{"between": [[0, 0, 2], [0, 100, 2]]}], "offset_start": 5}
+{"op": "plane", "from": "right", "distance": 100, "name": "Middle"}
+{"op": "mirror", "name": "Other gutter", "features": ["Gutter"], "plane": "Middle"}
+{"op": "bend_table"}
 ```
 
 - **A cut across a bend:** draw it on the flat face as it lies in the blank, running

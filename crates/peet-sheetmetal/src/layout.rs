@@ -366,11 +366,30 @@ pub struct Cut {
     /// The pieces the cut applies to: those that existed when it was made, plus the pieces
     /// later split off them (by a sketched bend), which keep their holes.
     pub pieces: Vec<usize>,
+    /// Sheet added to a piece after the cut (a tab, a rounded inside corner), which the
+    /// cut leaves: what is added fills the cut in.
+    pub keep: Vec<(usize, Area)>,
 }
 
 impl Cut {
+    /// A cut of `area` out of `pieces`.
+    pub fn new(area: Area, pieces: Vec<usize>) -> Self {
+        Self {
+            area,
+            pieces,
+            keep: Vec::new(),
+        }
+    }
+
     pub fn applies_to(&self, piece: usize) -> bool {
         self.pieces.contains(&piece)
+    }
+
+    /// Whether the cut takes the sheet of `piece` at `p` away.
+    pub fn removes(&self, piece: usize, p: DVec2) -> bool {
+        self.applies_to(piece)
+            && self.area.contains(p)
+            && !self.keep.iter().any(|(k, a)| *k == piece && a.contains(p))
     }
 }
 
@@ -666,15 +685,25 @@ impl Layout {
 
     /// Cuts `area` (in flat coordinates) out of the pieces `pieces` only.
     pub fn add_cut_on(&mut self, area: Area, pieces: Vec<usize>) {
-        self.cuts.push(Cut { area, pieces });
+        self.cuts.push(Cut::new(area, pieces));
     }
 
     /// Cuts `area` (in flat coordinates) out of every piece that exists now.
     pub fn add_cut(&mut self, area: Area) {
-        self.cuts.push(Cut {
-            area,
-            pieces: (0..self.pieces.len()).collect(),
-        });
+        self.cuts
+            .push(Cut::new(area, (0..self.pieces.len()).collect()));
+    }
+
+    /// Adds sheet to a flange: `area` (in flat coordinates) becomes part of `piece`, cuts
+    /// made before included, as a tab or a rounded inside corner fills in what an earlier
+    /// cut took away. Later cuts cut it as they cut the rest of the piece.
+    pub fn add_sheet(&mut self, piece: usize, area: Area) {
+        for c in &mut self.cuts {
+            if c.applies_to(piece) {
+                c.keep.push((piece, area.clone()));
+            }
+        }
+        self.pieces[piece].adds.push(area);
     }
 
     /// The pieces that are bends, with their index.

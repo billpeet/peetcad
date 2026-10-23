@@ -1825,6 +1825,16 @@ impl<'m> Ctx<'m, '_> {
 fn seed_key(model: &Model, seeds: &[FeatureId], out_keys: &HashMap<FeatureId, u64>) -> u64 {
     let mut key = 0;
     for &s in seeds {
+        // A copy of a pattern or a mirror: what it copies too
+        match model.feature(s).map(|f| &f.kind) {
+            Some(FeatureKind::Pattern(p)) => {
+                key = hash::combine(key, seed_key(model, &p.seeds, out_keys))
+            }
+            Some(FeatureKind::Mirror(m)) => {
+                key = hash::combine(key, seed_key(model, &m.seeds, out_keys))
+            }
+            _ => {}
+        }
         let def = model.feature(s).map_or(0, |f| hash::of(&f.kind));
         let sketch = model
             .feature(s)
@@ -1839,7 +1849,9 @@ fn seed_key(model: &Model, seeds: &[FeatureId], out_keys: &HashMap<FeatureId, u6
 impl<'m> Ctx<'m, '_> {
     /// The copied features, resolved.
     /// Each with its place in the model, which the copies are built in the order of.
-    fn seeds(&self, ids: &[FeatureId]) -> Result<Vec<(String, pattern::Seed<'m>, usize)>, String> {
+    /// A copy of a pattern or a mirror is a copy of what it copies, where the pattern has it
+    /// (the original and each copy), as SolidWorks copies one.
+    fn seeds(&self, ids: &[FeatureId]) -> Result<Vec<pattern::SeedEntry<'m>>, String> {
         if ids.is_empty() {
             return Err("Pick the features to copy.".to_owned());
         }
@@ -1848,7 +1860,59 @@ impl<'m> Ctx<'m, '_> {
             self.state_of(id, "A copied feature")?;
             let feature = self.model.feature(id).expect("state_of checked it exists");
             let name = feature.name.clone();
+            // What a pattern or a mirror copies, where it has it: the original included
+            let original = pattern::Motion::Rigid(Frame::WORLD);
+            let copies = match &feature.kind {
+                FeatureKind::Pattern(p) => {
+                    let mut motions = vec![original];
+                    motions.extend(self.pattern_motions(&p.def)?);
+                    Some((motions, &p.seeds))
+                }
+                FeatureKind::Mirror(m) => {
+                    let plane = self
+                        .plane(&m.plane)
+                        .map_err(|e| format!("{name}'s mirror plane: {e}"))?;
+                    let motion = pattern::Motion::Mirror {
+                        point: plane.origin(),
+                        normal: plane.normal(),
+                    };
+                    Some((vec![original, motion], &m.seeds))
+                }
+                _ => None,
+            };
+            if let Some((motions, seeds)) = copies {
+                for (n, seed, index, inner) in self.seeds(seeds)? {
+                    let moved = if inner.is_empty() {
+                        motions.clone()
+                    } else {
+                        motions
+                            .iter()
+                            .flat_map(|m| inner.iter().map(move |i| m.after(i)))
+                            .collect()
+                    };
+                    out.push((n, seed, index, moved));
+                }
+                continue;
+            }
             let seed = match &feature.kind {
+                FeatureKind::BaseFlange(b) if b.tab => {
+                    let (plane, sketch) = self.sketch_input(b.sketch)?;
+                    pattern::Seed::Tab { plane, sketch }
+                }
+                FeatureKind::BreakCorner(_) => pattern::Seed::BreakCorner { original: id },
+                FeatureKind::MiterFlange(m) => {
+                    let (plane, sketch) = self.sketch_input(m.sketch)?;
+                    pattern::Seed::MiterFlange {
+                        original: id,
+                        plane,
+                        sketch,
+                        gap: self.scalar(&m.gap, ScalarKind::Length, "Gap")?,
+                        offsets: [
+                            self.scalar(&m.offset_start, ScalarKind::Length, "Start offset")?,
+                            self.scalar(&m.offset_end, ScalarKind::Length, "End offset")?,
+                        ],
+                    }
+                }
                 FeatureKind::Extrude(e) => {
                     let (plane, sketch) = self.sketch_input(e.sketch)?;
                     let depth = if e.params.end.uses_depth() {
@@ -1917,12 +1981,18 @@ impl<'m> Ctx<'m, '_> {
                 }
                 other => {
                     return Err(format!(
-                        "{name} is a {}, which can't be copied: patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts, forms and edge flanges.",
-                        other.type_name().to_lowercase()
+                        "{name} is a {}, which can't be copied: {}",
+                        other.type_name().to_lowercase(),
+                        crate::feature::COPIED
                     ));
                 }
             };
-            out.push((name, seed, self.model.index_of(id).unwrap_or(usize::MAX)));
+            out.push((
+                name,
+                seed,
+                self.model.index_of(id).unwrap_or(usize::MAX),
+                Vec::new(),
+            ));
         }
         Ok(out)
     }

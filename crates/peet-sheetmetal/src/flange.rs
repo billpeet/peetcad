@@ -289,10 +289,7 @@ impl Layout {
             tag,
         );
         cut.loops.extend(area.loops);
-        self.cuts.push(Cut {
-            area: cut,
-            pieces: made.pieces.clone(),
-        });
+        self.cuts.push(Cut::new(cut, made.pieces.clone()));
         Ok(())
     }
 
@@ -598,10 +595,7 @@ impl Layout {
         }
         let before: Vec<usize> = (0..new_pieces[0]).collect();
         for area in reliefs.into_iter().flatten() {
-            self.cuts.push(Cut {
-                area,
-                pieces: before.clone(),
-            });
+            self.cuts.push(Cut::new(area, before.clone()));
         }
         self.attachments.push(Attachment {
             owner,
@@ -777,6 +771,20 @@ impl Layout {
         offsets: [f64; 2],
         gap: f64,
     ) -> Result<(), String> {
+        self.add_miter_flange_part(owner, 0, sites, points, offsets, gap)
+    }
+
+    /// [`Self::add_miter_flange`] with its pieces numbered from `part_base` (bits 12 and
+    /// up): a copy of a mitre flange, which needs names apart from the other copies'.
+    pub fn add_miter_flange_part(
+        &mut self,
+        owner: u32,
+        part_base: u32,
+        sites: &[EdgeSite],
+        points: &[DVec2],
+        offsets: [f64; 2],
+        gap: f64,
+    ) -> Result<(), String> {
         if sites.is_empty() {
             return Err("Pick the edges for the flange to run along.".to_owned());
         }
@@ -803,7 +811,8 @@ impl Layout {
                 if i == 0 { offsets[0] } else { 0.0 },
                 if i == last { offsets[1] } else { 0.0 },
             ];
-            self.add_profile(owner, site, off, trim, &segments, (i as u32) << 8, None)
+            let part = part_base | ((i as u32) << 8);
+            self.add_profile(owner, site, off, trim, &segments, part, None)
                 .map_err(|m| format!("Edge {}: {m}", i + 1))?;
         }
         let me = self.attachments.len() - sites.len();

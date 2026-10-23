@@ -169,6 +169,16 @@ pub(crate) fn apply_base_flange(
     input: &BaseFlangeInput<'_>,
     bodies: &[Arc<Body>],
 ) -> Result<Applied, FeatureError> {
+    if input.def.tab {
+        return apply_tab(
+            input.feature,
+            input.model,
+            bodies,
+            &input.plane,
+            input.sketch,
+            input.stamp,
+        );
+    }
     let owner = input.feature.0;
     refuse_splines(input.sketch)?;
     let profile = find_regions(input.sketch);
@@ -225,6 +235,103 @@ pub(crate) fn apply_base_flange(
     let mut out = bodies.to_vec();
     out.push(Arc::new(body));
     Ok((out, warning))
+}
+
+/// The closed regions of a tab's sketch.
+pub(crate) fn tab_regions(
+    sketch: &Sketch,
+) -> Result<Vec<peet_sketch::region::Region>, FeatureError> {
+    refuse_splines(sketch)?;
+    let profile = find_regions(sketch);
+    let regions: Vec<_> = default_regions(&profile)
+        .into_iter()
+        .map(|i| profile.regions[i].clone())
+        .collect();
+    if regions.is_empty() {
+        return Err(FeatureError(
+            "A tab is a closed sketch: close its outline.".to_owned(),
+        ));
+    }
+    Ok(regions)
+}
+
+/// A tab: the regions of a closed sketch on a flat face of a sheet metal body (or in its
+/// plane) added to that face's flange, with the body's thickness.
+pub(crate) fn apply_tab(
+    feature: FeatureId,
+    model: &Model,
+    bodies: &[Arc<Body>],
+    plane: &Plane,
+    sketch: &Sketch,
+    seed: u64,
+) -> Result<Applied, FeatureError> {
+    let regions = tab_regions(sketch)?;
+    for (index, body) in bodies.iter().enumerate() {
+        let Some(sheet) = &body.sheet else {
+            continue;
+        };
+        let t = sheet.layout.settings.thickness;
+        let area = |frame: &Frame| {
+            Area::from_regions(&regions, feature.0)
+                .mapped(&|p| frame.to_local(plane.from_plane_coords(p)).truncate())
+        };
+        if let Some((piece, area)) = flange_beside(
+            &sheet.layout,
+            plane.origin(),
+            plane.normal(),
+            &[0.0, t],
+            &area,
+        ) {
+            let mut layout = sheet.layout.clone();
+            layout.add_sheet(piece, area);
+            return rebuild_sheet(model, bodies, index, layout, seed);
+        }
+    }
+    Err(FeatureError(
+        "A tab adds to a sheet metal body: draw its sketch on a flat face of one (or in the face's plane), touching the sheet."
+            .to_owned(),
+    ))
+}
+
+/// The flange with a face in the plane through `origin` square to `normal` (model
+/// coordinates), `levels` above its bottom side, that has sheet next to an area. `area`
+/// gives the area in a flange's flat coordinates from the flange's placement; it comes
+/// back in the flange's found.
+pub(crate) fn flange_beside(
+    layout: &Layout,
+    origin: DVec3,
+    normal: DVec3,
+    levels: &[f64],
+    area: &dyn Fn(&Frame) -> Area,
+) -> Option<(usize, Area)> {
+    const NEAR: f64 = 1e-3;
+    let dirs = [
+        DVec2::X,
+        DVec2::Y,
+        -DVec2::X,
+        -DVec2::Y,
+        DVec2::new(1.0, 1.0).normalize(),
+        DVec2::new(1.0, -1.0).normalize(),
+        DVec2::new(-1.0, 1.0).normalize(),
+        DVec2::new(-1.0, -1.0).normalize(),
+    ];
+    layout.pieces.iter().enumerate().find_map(|(i, p)| {
+        if !p.is_flange() || p.frame.z_axis().cross(normal).length() > 1e-9 {
+            return None;
+        }
+        let level = p.frame.to_local(origin).z;
+        if !levels.iter().any(|l| (level - l).abs() <= 1e-6) {
+            return None;
+        }
+        let a = area(&p.frame);
+        let touches = a.edges().any(|e| {
+            (0..=4).any(|k| {
+                let q = e.curve.point_at(f64::from(k) / 4.0);
+                dirs.iter().any(|d| p.covers(q + *d * NEAR))
+            })
+        });
+        touches.then_some((i, a))
+    })
 }
 
 /// The lines of an open sketch as one chain, in order. The chain starts at the free end of
@@ -1075,7 +1182,26 @@ pub(crate) fn apply_miter_flange(
         .as_ref()
         .expect("checked by edge_on_sheet");
     let sites = chain_sites(sites).map_err(FeatureError)?;
+    let parent = &sheet.layout.pieces[sites[0].piece];
+    let t = sheet.layout.settings.thickness;
+    let profile = miter_profile(&sites, &parent.frame, plane, sketch, t)?;
+    let mut layout = sheet.layout.clone();
+    layout
+        .add_miter_flange(feature.0, &sites, &profile, offsets, gap)
+        .map_err(FeatureError)?;
+    rebuild_sheet(model, bodies, index, layout, seed)
+}
 
+/// A mitre flange's profile across its edges: its points as distances out from the edge
+/// it is drawn square to and heights above the bottom side of the sheet, starting at the
+/// edge. `frame` is the placement of the face the edges are on.
+pub(crate) fn miter_profile(
+    sites: &[EdgeSite],
+    frame: &Frame,
+    plane: &Plane,
+    sketch: &Sketch,
+    t: f64,
+) -> Result<Vec<DVec2>, FeatureError> {
     // The profile, in the flat pattern's frame of the face the edges are on.
     let chain = open_chain(sketch).map_err(|m| {
         FeatureError(format!(
@@ -1084,16 +1210,14 @@ pub(crate) fn apply_miter_flange(
     })?;
     let mut points: Vec<DVec2> = vec![chain[0].a];
     points.extend(chain.iter().map(|l| l.b));
-    let parent = &sheet.layout.pieces[sites[0].piece];
-    let t = sheet.layout.settings.thickness;
     let local: Vec<DVec3> = points
         .iter()
-        .map(|&p| parent.frame.to_local(plane.from_plane_coords(p)))
+        .map(|&p| frame.to_local(plane.from_plane_coords(p)))
         .collect();
     // The edge the profile is drawn square to, and the profile in its plane.
     let tol = 1e-4;
     let mut profile = None;
-    for s in &sites {
+    for s in sites {
         let d = (s.b - s.a).normalize_or_zero();
         let out = DVec2::new(d.y, -d.x);
         let along: Vec<f64> = local.iter().map(|q| (q.truncate() - s.a).dot(d)).collect();
@@ -1118,22 +1242,17 @@ pub(crate) fn apply_miter_flange(
             break;
         }
     }
-    let profile = profile.ok_or_else(|| {
+    profile.ok_or_else(|| {
         FeatureError(
             "The profile must be drawn square to one of the edges, starting at that edge's top or bottom corner. Sketch it on the face at the end of the edge, or on a plane square to it."
                 .to_owned(),
         )
-    })?;
-    let mut layout = sheet.layout.clone();
-    layout
-        .add_miter_flange(feature.0, &sites, &profile, offsets, gap)
-        .map_err(FeatureError)?;
-    rebuild_sheet(model, bodies, index, layout, seed)
+    })
 }
 
 /// Puts edges in chain order: each starting where the one before ends (they may close a
 /// loop).
-fn chain_sites(mut sites: Vec<EdgeSite>) -> Result<Vec<EdgeSite>, String> {
+pub(crate) fn chain_sites(mut sites: Vec<EdgeSite>) -> Result<Vec<EdgeSite>, String> {
     let same = |p: DVec2, q: DVec2| p.distance(q) <= 1e-6;
     // Start where no other edge ends (or anywhere, for a closed loop).
     let start = (0..sites.len())
@@ -1246,7 +1365,8 @@ pub(crate) fn apply_break_corner(
     let mut layout = bodies[index].sheet.as_ref().expect("checked").layout.clone();
     for (piece, area, _, adds) in cuts {
         if adds {
-            layout.pieces[piece].adds.push(area);
+            // A rounded inside corner fills in what earlier cuts took there.
+            layout.add_sheet(piece, area);
         } else {
             layout.add_cut_on(area, vec![piece]);
         }

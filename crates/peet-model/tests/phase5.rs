@@ -316,8 +316,21 @@ fn pattern_and_mirror_of_sheet_cuts() {
     assert_close(p.volume(), W * H * T - 9.0 * one);
     let sheet = p.bodies()[0].sheet.clone().unwrap();
     assert_eq!(sheet.outline.iter().filter(|l| !l.outer).count(), 9);
-    // A mirror can't copy a pattern, and says so.
-    let bad = p.model.add_mirror(vec![pattern], PlaneRef::Feature(mid));
+    // A mirror of the pattern copies its eight holes, the original included, to x = 85,
+    // 65, 45 and 25: one of them is the hole the first mirror made already.
+    let copy = p.model.add_mirror(vec![pattern], PlaneRef::Feature(mid));
+    p.rebuild();
+    p.assert_ok();
+    assert!(matches!(p.status(copy), Status::Ok), "{:?}", p.status(copy));
+    assert_close(p.volume(), W * H * T - 16.0 * one);
+    // A mirror can't copy a base flange (other than a tab), and says so.
+    let base = p
+        .model
+        .features()
+        .find(|f| matches!(f.kind, FeatureKind::BaseFlange(_)))
+        .map(|f| f.id)
+        .unwrap();
+    let bad = p.model.add_mirror(vec![base], PlaneRef::Feature(mid));
     p.rebuild();
     let Status::Failed(m) = p.status(bad) else {
         panic!("{:?}", p.status(bad))
