@@ -133,6 +133,8 @@ pub(crate) enum Seed<'a> {
         original: FeatureId,
         def: &'a crate::feature::EdgeFlangeFeature,
         spec: peet_sheetmetal::EdgeFlangeSpec,
+        /// Its outline sketch, which each copy is shaped to, moved with it.
+        outline: Option<(Plane, &'a Sketch)>,
     },
     SheetCut {
         plane: Plane,
@@ -602,6 +604,7 @@ fn flange_copies(
         original,
         def,
         spec,
+        outline,
     } = seed
     else {
         unreachable!()
@@ -678,7 +681,24 @@ fn flange_copies(
         if turned {
             copy_spec.offsets = [spec.offsets[1], spec.offsets[0]];
         }
-        match layout.add_edge_flange_part(feature.0, copy << 4, &site, &copy_spec, own) {
+        let added = match outline {
+            None => layout.add_edge_flange_part(feature.0, copy << 4, &site, &copy_spec, own),
+            Some((plane, sketch)) => {
+                let profile = find_regions(sketch);
+                let regions: Vec<_> = default_regions(&profile)
+                    .into_iter()
+                    .map(|i| profile.regions[i].clone())
+                    .collect();
+                let shape = |frame: &Frame| {
+                    let to_flat = |p: peet_math::DVec2| {
+                        frame.to_local(m.point(plane.from_plane_coords(p))).truncate()
+                    };
+                    Area::from_regions(&regions, feature.0).mapped(&to_flat)
+                };
+                layout.add_edge_flange_outlined(feature.0, copy << 4, &site, &copy_spec, own, &shape)
+            }
+        };
+        match added {
             Ok(()) => made += 1,
             Err(e) => skipped.push(format!("copy {} of {name} ({e})", k + 2)),
         }

@@ -391,6 +391,11 @@ pub struct EdgeFlangeFeature {
     /// How far out from its edge the flange is set (SolidWorks' position offset): the
     /// sheet runs on that far flat before the bend. Negative sets it in.
     pub position_offset: Scalar,
+    /// A sketch of the flange's shape, as SolidWorks' flange profile: the flange is made
+    /// as wide and as long as the sketch's region reaches and cut to it. Its plane need not
+    /// be the flange's (one turned about the edge by the flange's angle is): the region is
+    /// projected onto the flange.
+    pub outline: Option<FeatureId>,
 }
 
 impl EdgeFlangeFeature {
@@ -408,6 +413,7 @@ impl EdgeFlangeFeature {
             relief_ratio: None,
             bend: None,
             position_offset: Scalar::new(0.0),
+            outline: None,
         }
     }
 }
@@ -987,6 +993,7 @@ impl FeatureKind {
                 if let Some(edge) = &e.edge {
                     out.extend(edge.features());
                 }
+                out.extend(e.outline);
             }
             Self::SheetCut(c) => out.push(c.sketch),
             Self::Hem(h) => {
@@ -1087,7 +1094,13 @@ impl FeatureKind {
                 v
             }
             Self::EdgeFlange(e) => {
-                let mut v = vec![&e.length, &e.angle, &e.offset_start, &e.offset_end];
+                let mut v = vec![
+                    &e.length,
+                    &e.angle,
+                    &e.offset_start,
+                    &e.offset_end,
+                    &e.position_offset,
+                ];
                 v.extend(e.radius.as_ref());
                 v.extend(e.relief_ratio.as_ref());
                 v.extend(e.bend.as_ref().map(|b| match b {
@@ -1097,7 +1110,8 @@ impl FeatureKind {
                 }));
                 v
             }
-            Self::SheetCut(_) | Self::Mirror(_) => Vec::new(),
+            Self::SheetCut(c) => vec![&c.depth],
+            Self::Mirror(_) => Vec::new(),
             Self::Hem(h) => vec![
                 &h.length,
                 &h.gap,
@@ -1192,6 +1206,7 @@ macro_rules! slots {
                         ("angle", Angle, & $($m)? e.angle),
                         ("offset_start", Length, & $($m)? e.offset_start),
                         ("offset_end", Length, & $($m)? e.offset_end),
+                        ("position_offset", Length, & $($m)? e.position_offset),
                     ];
                     if let Some(r) = & $($m)? e.radius {
                         v.push(("radius", Length, r));
@@ -1285,12 +1300,12 @@ macro_rules! slots {
                         ("relief_ratio", Number, & $($m)? c.relief_ratio),
                     ]
                 }
+                Self::SheetCut(c) => vec![("depth", Length, & $($m)? c.depth)],
                 Self::Sketch(_)
                 | Self::Axis(_)
                 | Self::CoordSystem(_)
                 | Self::Plane(PlaneDef::Midplane { .. })
                 | Self::Point(PointDef::Vertex(_))
-                | Self::SheetCut(_)
                 | Self::Mirror(_)
                 | Self::Import(_)
                 | Self::Sweep(_)
@@ -1569,6 +1584,7 @@ impl From<EdgeFlangeFeatureV11> for EdgeFlangeFeature {
             relief_ratio: None,
             bend: None,
             position_offset: Scalar::new(0.0),
+            outline: None,
         }
     }
 }

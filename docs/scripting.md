@@ -292,7 +292,9 @@ with their defaults' types):
   end, with the bend staying on the edge. An `edge_flange` can have a `relief`
   (`rectangular`, `obround`, `tear`) and a `relief_ratio` of its own for where it is set
   back, and a `bend` of its own (as the base flange's); without them, or with `null`,
-  it uses the body's. `position_offset` sets the flange out from its edge, the sheet
+  it uses the body's. `outline` is a sketch of the flange's shape (on a plane turned about
+  the edge): the flange is as wide and as long as its region and cut to it, from its foot
+  out. `position_offset` sets the flange out from its edge, the sheet
   running on flat to the bend (negative: in). `position` is SolidWorks': at an angle other than 90 a
   `material_inside` flange's outer face goes through the edge on the far face of the
   sheet, `t / tan(angle)` back from where the outer faces meet.

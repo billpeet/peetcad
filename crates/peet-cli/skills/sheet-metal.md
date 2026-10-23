@@ -116,6 +116,27 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
 {"op": "edge_flange", "length": 20, "position": "bend_outside", "position_offset": 7, "edge": {"between": [[0, 60, 2], [100, 60, 2]]}}
 ```
 
+- `outline` shapes a flange to a sketch of its own, as SolidWorks' "Edit Flange
+  Profile" does: a trapezoid, a tab with a round top, a flange wider at its tip. Draw it
+  first, on a plane turned about the flange's edge by the flange's angle (from the face
+  the edge is on, `about` the edge), with its foot along the edge. The flange is then as
+  wide as the sketch's region along the edge and as long as it reaches, which overrides
+  `length`, `offset_start` and `offset_end`. Everything outside the region, from its
+  foot out, is cut from the flange and its bend. It follows the sketch: change a
+  dimension and the flange changes.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "plane", "from": {"feature": "Base-Flange1", "side": "top"}, "about": {"between": [[0, 60, 2], [100, 60, 2]]}, "angle": 90, "name": "Lip plane"}
+{"op": "sketch", "name": "Lip shape", "on": "Lip plane", "draw": [{"type": "polyline", "closed": true, "points": [[10, 62], [90, 62], [70, 32], [30, 32]]}]}
+{"op": "edge_flange", "name": "Lip", "length": 10, "outline": "Lip shape", "edge": {"between": [[0, 60, 2], [100, 60, 2]]}}
+```
+
+  Look at the plane before drawing (`{"op": "sketch", "on": "Lip plane", "draw": []}`
+  replies with its `origin`, `x` and `y`). Here x runs along the edge and y down the
+  flange from 62 above the sheet, so the trapezoid is 80 wide at the bend and 40 wide 30
+  up.
 - `offset_start` and `offset_end` set a flange back from the two ends of its edge, with
   a relief at each end: a wall on a 180 edge with both offsets 5 has a bend 170 long
   (`bend_table` gives each bend's `length`). Where two flanges are set back a little

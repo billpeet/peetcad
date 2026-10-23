@@ -381,6 +381,7 @@ pub(crate) fn apply_edge_flange(
     bodies: &[Arc<Body>],
     def: &EdgeFlangeFeature,
     spec: &EdgeFlangeSpec,
+    outline: Option<(Plane, &Sketch)>,
     seed: u64,
 ) -> Result<Applied, FeatureError> {
     let edge = def.edge.as_ref().ok_or_else(|| {
@@ -411,9 +412,30 @@ pub(crate) fn apply_edge_flange(
         model: edge_flange_bend(def, &model.parameters).map_err(FeatureError)?,
         set_out: edge_flange_position_offset(def, &model.parameters).map_err(FeatureError)?,
     };
-    layout
-        .add_edge_flange_with(feature.0, &site, spec, own)
-        .map_err(FeatureError)?;
+    match outline {
+        None => layout.add_edge_flange_with(feature.0, &site, spec, own),
+        Some((plane, sketch)) => {
+            // The sketch's regions, projected onto the flange: its flat placement takes
+            // them to flat coordinates
+            refuse_splines(sketch)?;
+            let profile = find_regions(sketch);
+            let regions: Vec<_> = default_regions(&profile)
+                .into_iter()
+                .map(|i| profile.regions[i].clone())
+                .collect();
+            if regions.is_empty() {
+                return Err(FeatureError(
+                    "Its outline sketch has no closed region: draw the flange's shape.".to_owned(),
+                ));
+            }
+            let shape = |frame: &Frame| {
+                let to_flat = |p: DVec2| frame.to_local(plane.from_plane_coords(p)).truncate();
+                Area::from_regions(&regions, feature.0).mapped(&to_flat)
+            };
+            layout.add_edge_flange_outlined(feature.0, 0, &site, spec, own, &shape)
+        }
+    }
+    .map_err(FeatureError)?;
     let (new, warning) = sheet_body(model, layout, body.origin, stamp(seed, found.body))?;
     let mut out = bodies.to_vec();
     out[found.body] = Arc::new(new);

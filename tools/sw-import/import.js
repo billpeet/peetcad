@@ -210,6 +210,7 @@ function importPart(doc, dir) {
   const made = new Map();       // SolidWorks feature name -> names of the PeetCAD features that stand for it
   const planeFrames = new Map(); // SolidWorks plane name -> where it is
   const flanges = new Map();     // SolidWorks edge flange name -> what it was made with, for mirroring it
+  const rectangular = new Set(); // SolidWorks edge flanges whose outline could not be their own
   const miters = new Map();      // SolidWorks mitre flange name -> what it was made with, for mirroring it
   const promoted = new Map();    // "D1@Sketch1" -> the parameter that sketch dimension now follows
   const formulas = new Set();    // the sketch dimensions (full names) whose value is a formula
@@ -1207,6 +1208,43 @@ function importPart(doc, dir) {
     return record(f, "failed", "the plane did not come out where SolidWorks has it");
   }
 
+  /**
+   * A plane where SolidWorks has a sketch's plane \`pf\`, turned about \`about\` (an edge, before a flange is
+   * put on it): a standard plane turned about it, offset if the sketch is not on the edge. Named \`name\`;
+   * false if no way round puts it there. The tries are left out of the script.
+   */
+  function planeAbout(name, about, pf) {
+    const mark = peet.script.length;
+    const parallel = q => q && Math.abs(Math.abs(dot(q.n, pf.n)) - 1) < 1e-5;
+    for (const [base, normal] of [["top", [0, 0, 1]], ["front", [0, 1, 0]], ["right", [1, 0, 0]]]) {
+      const turn = Math.acos(Math.min(1, Math.abs(dot(pf.n, normal)))) * 180 / Math.PI;
+      for (const angle of [turn, -turn, 180 - turn, turn - 180]) {
+        const turned = name + " turned";
+        if (!peet.apply({ op: "plane", from: base, about, angle: tidy(angle), name: turned }).ok) continue;
+        const at = probe(turned);
+        if (!parallel(at)) { peet.apply({ op: "delete", feature: turned }); continue; }
+        const distance = tidy(Math.abs(dot(sub(pf.o, at.o), at.n)));
+        for (const flip of distance > 1e-6 ? [false, true] : [null]) {
+          const op = flip === null ? null : { op: "plane", from: turned, distance, flip, name };
+          if (op && !peet.apply(op).ok) continue;
+          const where = probe(op ? name : turned);
+          if (parallel(where) && Math.abs(dot(sub(where.o, pf.o), pf.n)) < 1e-3) {
+            peet.script.length = mark;
+            if (op) {
+              peet.apply({ op: "plane", from: base, about, angle: tidy(angle), name: turned });
+              peet.apply(op);
+            } else peet.apply({ op: "plane", from: base, about, angle: tidy(angle), name });
+            return true;
+          }
+          if (op) peet.apply({ op: "delete", feature: name });
+        }
+        peet.apply({ op: "delete", feature: turned });
+      }
+    }
+    peet.script.length = mark;
+    return false;
+  }
+
   const values = f => (f.definition && f.definition.values) || {};
 
   function bendOf(v) {
@@ -1384,7 +1422,7 @@ function importPart(doc, dir) {
             outline.above = offsets.length;
             notes.push("its outline reaches further than its length: the flange is made long enough and cut to the outline");
           }
-          return { edge: { at: edge.middle.map(tidy) }, offsets, outline };
+          return { edge: { at: edge.middle.map(tidy) }, offsets, outline, found: edge };
         });
         // A relief of the flange's own, where SolidWorks does not use the body's. One given as a width and
         // a depth becomes a ratio of its width: PeetCAD's relief is as deep past the bend as it is wide.
@@ -1408,19 +1446,52 @@ function importPart(doc, dir) {
           // A bend allowance of the flange's own
           ...(v.UseDefaultBendAllowance === false && v.GetCustomBendAllowance ? { bend: bendOf(v) } : {}),
         };
+        // An outline that is not a rectangle, as the flange's own: drawn on a plane turned about the edge to
+        // where SolidWorks' profile sketch is. The flange is made as wide and as long as it reaches and cut
+        // to it, and follows it.
+        const outlined = [];
+        ops.forEach((o, i) => {
+          if (!o.outline || rectangular.has(f.name)) return;
+          const piece = f.name + (ops.length > 1 ? i + 1 : "");
+          const sf = frameOf(o.outline.sketch.sketch.modelToSketch);
+          const plane = piece + " outline plane";
+          if (!planeAbout(plane, { between: [o.found.from.map(tidy), o.found.to.map(tidy)] }, sf)) return;
+          const sk = importSketch(o.outline.sketch, { name: piece + " outline", onFace: plane });
+          if (sk.error) { peet.apply({ op: "delete", features: [plane, plane + " turned"] }); return; }
+          o.native = { plane, sketch: sk.name };
+          outlined.push(plane, plane + " turned", sk.name);
+        });
+        const withOutline = o => o.native ? { outline: o.native.sketch } : {};
         let built;
-        if (ops.length === 1) built = buildFlange(f, { ...common, edge: ops[0].edge, ...ops[0].offsets });
+        if (ops.length === 1) built = buildFlange(f, { ...common, edge: ops[0].edge, ...ops[0].offsets, ...withOutline(ops[0]) });
         else {
           built = { ok: true, names: [] };
           ops.forEach((o, i) => {
             if (!built.ok) return;
-            const one = buildFlange(f, { ...common, name: f.name + (i + 1), edge: o.edge, ...o.offsets });
+            const one = buildFlange(f, { ...common, name: f.name + (i + 1), edge: o.edge, ...o.offsets, ...withOutline(o) });
             if (!one.ok) built = one; else built.names.push(...one.names);
           });
         }
-        // An outline that is not a rectangle: the flange is cut to it
+        // An outline that cuts the sheet apart is not where the flange is (SolidWorks draws some so)
+        if (built.ok && outlined.length && /separate pieces/.test(built.warning || "")) {
+          peet.apply({ op: "delete", features: built.names });
+          built = { ok: false, message: built.warning };
+        }
+        if (!built.ok && outlined.length) {
+          // The outline could not be the flange's own: a rectangle, cut to it afterwards
+          peet.apply({ op: "delete", features: outlined.filter(n => (peet.ask({ op: "feature", feature: n }).ok)) });
+          rectangular.add(f.name);
+          return handleLive(f);
+        }
+        if (built.ok && outlined.length) {
+          built.names.push(...outlined.filter(n => peet.ask({ op: "feature", feature: n }).ok));
+          // Made to its outline, so the stand-in's notes do not apply
+          for (let k = notes.length - 1; k >= 0; k--) if (/its outline reaches further/.test(notes[k])) notes.splice(k, 1);
+          if (!ops.some(o => o.outline && !o.native)) built.warning = notes.length ? [...new Set(notes)].join("; ") : built.warning;
+        }
+        // An outline that is not a rectangle and could not be the flange's own: the flange is cut to it
         if (built.ok) ops.forEach((o, i) => {
-          if (!o.outline) return;
+          if (!o.outline || o.native) return;
           const cut = cutToOutline(f, f.name + (ops.length > 1 ? i + 1 : "") + " outline", o.outline);
           if (cut.name) { built.names.push(cut.sketch, cut.name); notes.push("its outline is not a rectangle: a rectangular flange is made and cut to the outline, which does not follow the part"); return; }
           notes.push(`its outline is not a rectangle: a rectangular flange is made (${cut.error})`);

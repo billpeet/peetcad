@@ -924,9 +924,11 @@ impl Engine {
                     }
                 }
             }
-            FeatureKind::EdgeFlange(e) => match sheet::edge_flange_spec(e, &model.parameters) {
+            FeatureKind::EdgeFlange(e) => match sheet::edge_flange_spec(e, &model.parameters)
+                .and_then(|spec| Ok((spec, e.outline.map(|s| ctx.sketch_input(s)).transpose()?)))
+            {
                 Err(m) => fail(m, Output::None),
-                Ok(spec) => {
+                Ok((spec, outline)) => {
                     // The relief ratio as it evaluates now: the definition only holds its
                     // expression.
                     let ratio = e
@@ -945,9 +947,10 @@ impl Engine {
                         sheet::edge_flange_position_offset(e, &model.parameters).ok();
                     let values =
                         (spec.length, spec.angle, spec.offsets, spec.radius, ratio, bend, set_out);
-                    let key = hash::of(&(4u8, id, &**e, run.body_key, values));
+                    let outline_key = e.outline.and_then(|s| run.out_keys.get(&s).copied());
+                    let key = hash::of(&(4u8, id, &**e, run.body_key, values, outline_key));
                     self.solid_feature(id, key, run, |bodies| {
-                        sheet::apply_edge_flange(id, model, bodies, e, &spec, key)
+                        sheet::apply_edge_flange(id, model, bodies, e, &spec, outline, key)
                     })
                 }
             },
@@ -1869,6 +1872,7 @@ impl<'m> Ctx<'m, '_> {
                     original: id,
                     def: e,
                     spec: sheet::edge_flange_spec(e, &self.model.parameters)?,
+                    outline: e.outline.map(|s| self.sketch_input(s)).transpose()?,
                 },
                 FeatureKind::SheetCut(c) => {
                     let (plane, sketch) = self.sketch_input(c.sketch)?;

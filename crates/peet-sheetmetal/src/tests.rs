@@ -1873,3 +1873,50 @@ fn a_sharp_bend() {
     assert_close(blank, H - v.outside_setback() + v.allowance + 20.0 - v.outside_setback(), 1e-6);
     assert_close(v.outside_setback(), T, 1e-3);
 }
+
+#[test]
+fn a_flange_shaped_to_an_outline() {
+    // SolidWorks' flange profile: a trapezoid on the flange's plane, 80 wide at the edge
+    // and 40 wide at the top, 30 up. The flange is made that wide and that long and cut to
+    // it, and the bend below stays whole where the outline's foot is.
+    let mut layout = plate_layout(settings(0.5));
+    let world = [
+        DVec3::new(10.0, H, 0.0),
+        DVec3::new(90.0, H, 0.0),
+        DVec3::new(70.0, H, 30.0),
+        DVec3::new(30.0, H, 30.0),
+    ];
+    let outline = |frame: &peet_math::Frame| {
+        let flat: Vec<DVec2> = world.iter().map(|p| frame.to_local(*p).truncate()).collect();
+        Area::polygon(&flat, |i| CurveTag::Sketch {
+            owner: 9,
+            entity: i as u32,
+        })
+    };
+    layout
+        .add_edge_flange_outlined(
+            2,
+            0,
+            &top_edge(true),
+            &flange(10.0, FlangePosition::MaterialInside),
+            FlangeOwn::default(),
+            &outline,
+        )
+        .unwrap();
+    let (solid, body) = built(layout);
+    let b = bounds(&solid);
+    assert_close(b.max.z, 30.0, 1e-6);
+    // The top is the outline's: 40 wide, from 30 to 70
+    let top: Vec<f64> = solid
+        .vertices
+        .iter()
+        .filter(|v| v.point.z > 30.0 - 1e-6)
+        .map(|v| v.point.x)
+        .collect();
+    assert!(!top.is_empty());
+    let (lo, hi) = top.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+    assert_close(lo, 30.0, 1e-6);
+    assert_close(hi, 70.0, 1e-6);
+    // K = 0.5 keeps the volume: the blank is the folded part laid flat.
+    assert_close(measure::volume(&solid), measure::volume(&body.flat), 1e-3);
+}

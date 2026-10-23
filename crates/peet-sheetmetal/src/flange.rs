@@ -219,6 +219,83 @@ impl Layout {
             .map(|_| ())
     }
 
+    /// An edge flange shaped to an outline of its own, as SolidWorks' flange profile
+    /// shapes one. `outline` gives the outline in flat coordinates from the placement of
+    /// the flange's flat (which does not depend on the flange's width or length). The
+    /// flange is made as wide as the outline along its edge and as long as it reaches
+    /// (`spec`'s offsets and length give way to it), and everything outside the outline,
+    /// from its foot (the line of it nearest the edge) out, is cut from the flange and its
+    /// bend. `part_base` numbers its pieces (see [`Self::add_edge_flange_part`]).
+    pub fn add_edge_flange_outlined(
+        &mut self,
+        owner: u32,
+        part_base: u32,
+        site: &EdgeSite,
+        spec: &EdgeFlangeSpec,
+        own: FlangeOwn,
+        outline: &dyn Fn(&peet_math::Frame) -> Area,
+    ) -> Result<(), String> {
+        // Where the flange's flat goes: a trial flange, built and thrown away
+        let mut trial = self.clone();
+        trial.add_edge_flange_part(owner, part_base, site, spec, own)?;
+        let at = trial.attachments.last().ok_or("The flange was not made.")?.clone();
+        let Some(&flat) = at.pieces.get(1) else {
+            return Err("The flange is all bend: there is nothing to shape to the outline.".to_owned());
+        };
+        let area = outline(&trial.pieces[flat].frame);
+        if area.loops.is_empty() {
+            return Err("The outline has no closed region.".to_owned());
+        }
+        // The outline's extent along the edge (u) and away from it (v)
+        let d = at.along();
+        let out = DVec2::new(d.y, -d.x);
+        let (mut u, mut v) = ([f64::INFINITY, f64::NEG_INFINITY], [f64::INFINITY, f64::NEG_INFINITY]);
+        for e in area.edges() {
+            for k in 0..=32 {
+                let p = e.curve.point_at(k as f64 / 32.0) - at.a;
+                let (pu, pv) = (p.dot(d), p.dot(out));
+                u = [u[0].min(pu), u[1].max(pu)];
+                v = [v[0].min(pv), v[1].max(pv)];
+            }
+        }
+        // How far the trial flange reaches, to make it reach as far as the outline
+        let tip = trial.pieces[*at.pieces.last().unwrap_or(&flat)]
+            .outline
+            .edges()
+            .flat_map(|e| [e.curve.start(), e.curve.end()])
+            .map(|p| (p - at.a).dot(out))
+            .fold(f64::NEG_INFINITY, f64::max);
+        let len = at.a.distance(at.b);
+        let mut shaped = *spec;
+        shaped.offsets = [u[0], len - u[1]];
+        shaped.length = spec.length + (v[1] - tip) + 0.01;
+        self.add_edge_flange_part(owner, part_base, site, &shaped, own)?;
+        let made = self.attachments.last().ok_or("The flange was not made.")?.clone();
+        // Everything between the outline and a box round it, from its foot out
+        let margin = 1.0;
+        let corner = |pu: f64, pv: f64| at.a + d * pu + out * pv;
+        let tag = |index: usize| CurveTag::Generated {
+            owner,
+            part: part_base | 0x4000_0000,
+            index: index as u8,
+        };
+        let mut cut = Area::polygon(
+            &[
+                corner(u[0] - margin, v[0]),
+                corner(u[1] + margin, v[0]),
+                corner(u[1] + margin, v[1] + margin),
+                corner(u[0] - margin, v[1] + margin),
+            ],
+            tag,
+        );
+        cut.loops.extend(area.loops);
+        self.cuts.push(Cut {
+            area: cut,
+            pieces: made.pieces.clone(),
+        });
+        Ok(())
+    }
+
     /// Adds a hem on a straight boundary edge of a flange.
     pub fn add_hem(&mut self, owner: u32, site: &EdgeSite, spec: &HemSpec) -> Result<(), String> {
         let t = self.settings.thickness;
