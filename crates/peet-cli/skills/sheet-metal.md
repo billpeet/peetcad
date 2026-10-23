@@ -145,16 +145,30 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
   corner with a small gap; `corner` changes how those are treated.
 - The reliefs at a set-back flange's ends are the body's (the base flange's `relief`
   and `relief_ratio`) unless the edge flange has its own: `"relief": "tear"` cuts
-  nothing, which is right when the bend is outside the sheet (`material_outside`,
-  `bend_outside`) and the body's rectangular relief would only notch it;
-  `"relief_ratio": 1` makes the slot one thickness wide and deep past the bend.
-  `null` goes back to the body's. Hems and miter flanges always use the body's.
+  nothing, which is right when the bend takes little of the sheet (`material_outside`)
+  and the body's rectangular relief would only notch it; `"relief_ratio": 1` makes the
+  slot one thickness wide and deep past the bend. `null` goes back to the body's. Hems
+  and miter flanges always use the body's. A flange whose bend is wholly outside the
+  sheet (`bend_outside`, or set out by `position_offset`) gets no relief at all, as in
+  SolidWorks: it takes nothing from the sheet.
 
   ```jsonl
   {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 150]}]}
   {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
   {"op": "edge_flange", "name": "Lip", "length": 25, "position": "material_outside", "offset_start": 40, "offset_end": 40, "relief": "tear", "edges": [{"between": [[0, 0, 2], [200, 0, 2]]}]}
   {"op": "edge_flange", "name": "Tab", "length": 25, "offset_start": 60, "offset_end": 60, "relief": "obround", "relief_ratio": 1, "edges": [{"between": [[200, 150, 2], [0, 150, 2]]}]}
+  {"op": "bodies"}
+  ```
+- A flange on an edge that runs to a corner of its face **sharper than square** (a
+  triangle's side), with its bend inside the sheet (`material_inside`,
+  `material_outside`): the face is narrower where the bend starts than the edge is
+  long, and the bend ends on a slant from the face's corner to the end of its flange,
+  as SolidWorks' does. Nothing to set; the bend's ends are freeform faces.
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "polyline", "closed": true, "points": [[0, 0], [100, 0], [0, 100]]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+  {"op": "edge_flange", "name": "Lip", "length": 20, "position": "material_outside", "relief": "tear", "edges": [{"between": [[100, 0, 2], [0, 100, 2]]}]}
   {"op": "bodies"}
   ```
 - An edge flange's bend is worked out as the body's are unless it has a `bend` of its
@@ -231,7 +245,10 @@ after the flanges it is about.
   and the later one stops short of it). `plain` differs from `butt` when the later
   flange stands outside its edge (`material_outside`, `bend_outside`): a butt corner
   runs the earlier flange on to meet it, a plain one doesn't.
-- `gap` is how far a flange that stops short stays from the other's inside face.
+- `gap` is how far a flange that stops short stays from the other's inside face. In an
+  `open` corner it is measured from the flange's own inside face, so where the face's
+  corner is not square the flange's outside face comes a little nearer the other
+  flange (or stays a little further off).
 - `relief` is what is cut from the blank where the two bends meet: `rectangular` (a
   rectangle reaching `relief_size` past the bends), `tear` (only what the bends would
   share), `flush` (back to where the flanges end, so each bend ends in line with its
@@ -241,7 +258,9 @@ after the flanges it is about.
   short slanted edges at each corner).
 - **To match a part made in SolidWorks:** for the corners of one of its flange features
   on several edges, `open` with `flush` and its gap divided by 1.414 (SolidWorks
-  measures the gap between the two flanges corner to corner, and both stop short); for
+  measures the gap between the two flanges corner to corner, and both stop short; at a
+  corner of the face that is not square, its gap times the cosine of half the face's
+  angle there, one `corner` for each gap); for
   a corner between two of its flange features, `plain` with the bend radius as the gap.
   The blank is then the same, edge for edge. SolidWorks' folded part is not quite its
   blank folded: there the bends end on a slant and the face keeps its corner. `slanted`
@@ -279,20 +298,38 @@ stays sheet metal (`fillet` and `chamfer` turn it into a plain solid).
 {"op": "bodies"}
 ```
 
-- `edges` are the corners: each the short edge **through the sheet** where two straight
-  sides of a flat face meet, one sheet thickness long. `between` its two ends, or `at`
+- `edges` are the corners: each the short edge **through the sheet** where two sides
+  of a flat face meet, one sheet thickness long. `between` its two ends, or `at`
   its middle, not an end, where other edges meet it (`peet edges` lists them; a corner edge has both ends at one place on
   the face, a thickness apart). An edge along a face is not a corner.
 - `kind`: `fillet` (the default; `size` is the radius) or `chamfer` (`size` is the
-  distance along each side).
-- An outside corner loses sheet; an inside corner (of a notch or an L) gains it, as a
-  fillet there does in SolidWorks. A corner next to a bend is not a corner of a flat
-  face: break the flange's far corners, or cut the shape with `sheet_cut`.
+  distance along each side). A chamfer needs two straight sides; a fillet also rounds
+  a corner between a straight side and an arc, or two arcs (where a cut's round end
+  meets a straight edge): the round touches both, as SolidWorks' fillet does.
+- An outside corner loses sheet; an inside corner (of a notch, an L or a cutout) gains
+  it, as a fillet there does in SolidWorks. A cut made later still cuts the round. A
+  corner next to a bend is not a corner of a flat face: break the flange's far
+  corners, or cut the shape with `sheet_cut`.
 
 ```jsonl
 {"op": "sketch", "on": "top", "draw": [{"type": "polyline", "closed": true, "points": [[0, 0], [100, 0], [100, 30], [50, 30], [50, 60], [0, 60]]}]}
 {"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
 {"op": "break_corner", "size": 5, "edges": [{"between": [[50, 30, 0], [50, 30, 2]]}, {"between": [[100, 0, 0], [100, 0, 2]]}]}
+```
+
+A cutout's inside corners, and the corners where a slot's round end meets the plate's
+edge:
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 100]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "sketch", "on": {"at": [100, 50, 2], "normal": [0, 0, 1]}, "name": "Window", "draw": [{"type": "rectangle", "from": [20, 20], "to": [80, 80]}]}
+{"op": "sheet_cut", "sketch": "Window"}
+{"op": "break_corner", "name": "Window rounds", "size": 5, "edges": [{"between": [[20, 20, 0], [20, 20, 2]]}, {"between": [[80, 80, 0], [80, 80, 2]]}]}
+{"op": "sketch", "on": {"at": [100, 50, 2], "normal": [0, 0, 1]}, "name": "Slot", "draw": [{"type": "slot", "from": [130, 95], "to": [170, 95], "radius": 10}]}
+{"op": "sheet_cut", "sketch": "Slot"}
+{"op": "break_corner", "name": "Slot rounds", "size": 3, "edges": [{"at": [121.339746, 100, 1]}, {"at": [178.660254, 100, 1]}]}
+{"op": "bodies"}
 ```
 - "The corner's sides are too short" gives the largest size that fits there. Two
   corners at the ends of one side share it: their sizes together can't exceed it.

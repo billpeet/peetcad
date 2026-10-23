@@ -195,6 +195,167 @@ impl BreakKind {
     }
 }
 
+/// The round of radius `r` at a corner `at` of the flat outline where `incoming` (which
+/// ends there) meets `outgoing` (which starts there), one of them or both arcs: what
+/// [`SheetBody::corner_break`] returns for it but the piece. The round is tangent to both
+/// sides, as SolidWorks' fillet is: its centre is `r` from each, on the sheet's side of an
+/// outside corner and the other side of an inside one.
+fn round_curved_corner(
+    incoming: &(Curve, bool),
+    outgoing: &(Curve, bool),
+    at: DVec2,
+    r: f64,
+    tag: &impl Fn(u8) -> CurveTag,
+) -> Result<(crate::Area, [[DVec2; 2]; 2], bool), String> {
+    // Direction of travel along a side at a point of it.
+    let heading = |(curve, reversed): &(Curve, bool), q: DVec2| -> Option<DVec2> {
+        let d = match *curve {
+            Curve::Line { a, b } => (b - a).normalize_or_zero(),
+            Curve::Arc { center, .. } => (q - center).normalize_or_zero().perp(),
+            _ => return None,
+        };
+        Some(if *reversed { -d } else { d })
+    };
+    let unsupported = || "Only a corner between straight sides and arcs can be rounded.".to_owned();
+    let d1 = heading(incoming, at).ok_or_else(unsupported)?;
+    let d2 = heading(outgoing, at).ok_or_else(unsupported)?;
+    let signed = d1.perp_dot(d2).atan2(d1.dot(d2));
+    if signed.abs() <= 1e-6 {
+        return Err("The sides meet without a corner there: nothing to round.".to_owned());
+    }
+    // The sheet is on the left of the outline: an outside corner turns left.
+    let inside = signed < 0.0;
+    let side = if inside { -1.0 } else { 1.0 };
+    // Each side moved `r` towards the round's centre: a line, or a circle.
+    enum Offset {
+        Line(DVec2, DVec2),
+        Circle(DVec2, f64),
+    }
+    let offset = |(curve, reversed): &(Curve, bool)| match *curve {
+        Curve::Line { a, b } => {
+            let d = if *reversed { a - b } else { b - a }.normalize();
+            let n = d.perp() * side * r;
+            Offset::Line(a + n, d)
+        }
+        Curve::Arc { center, radius, .. } => {
+            // Counter-clockwise, its centre is on the left: towards it is to the left.
+            let left_is_in = !*reversed;
+            let grow = if left_is_in == (side > 0.0) { -r } else { r };
+            Offset::Circle(center, radius + grow)
+        }
+        _ => unreachable!("checked above"),
+    };
+    let (o1, o2) = (offset(incoming), offset(outgoing));
+    // Where the two meet, nearest the corner.
+    let line_circle = |p: DVec2, d: DVec2, c: DVec2, rr: f64| -> Vec<DVec2> {
+        let f = p - c;
+        let b = f.dot(d);
+        let disc = b * b - (f.length_squared() - rr * rr);
+        if disc < 0.0 {
+            return Vec::new();
+        }
+        let s = disc.sqrt();
+        vec![p + d * (-b - s), p + d * (-b + s)]
+    };
+    let candidates: Vec<DVec2> = match (&o1, &o2) {
+        (Offset::Line(p, d), Offset::Circle(c, rr))
+        | (Offset::Circle(c, rr), Offset::Line(p, d)) => line_circle(*p, *d, *c, *rr),
+        (Offset::Circle(c1, r1), Offset::Circle(c2, r2)) => {
+            let v = *c2 - *c1;
+            let dist = v.length();
+            if dist <= 1e-12 {
+                Vec::new()
+            } else {
+                let x = (dist * dist + r1 * r1 - r2 * r2) / (2.0 * dist);
+                let h2 = r1 * r1 - x * x;
+                if h2 < 0.0 {
+                    Vec::new()
+                } else {
+                    let (u, h) = (v / dist, h2.sqrt());
+                    let m = *c1 + u * x;
+                    vec![m + u.perp() * h, m - u.perp() * h]
+                }
+            }
+        }
+        (Offset::Line(..), Offset::Line(..)) => unreachable!("two lines are rounded by the caller"),
+    };
+    let center = candidates
+        .into_iter()
+        .min_by(|a, b| a.distance(at).total_cmp(&b.distance(at)))
+        .ok_or("The corner's sides are too short or too tightly curved for that radius.")?;
+    // Where the round touches each side.
+    let touch = |(curve, _): &(Curve, bool)| match *curve {
+        Curve::Line { a, b } => {
+            let d = (b - a).normalize();
+            a + d * (center - a).dot(d)
+        }
+        Curve::Arc {
+            center: c, radius, ..
+        } => c + (center - c).normalize() * radius,
+        _ => unreachable!("checked above"),
+    };
+    let (t1, t2) = (touch(incoming), touch(outgoing));
+    // Each touching point must be on its side, between the corner and the side's far end.
+    let on_side = |(curve, _): &(Curve, bool), q: DVec2| match *curve {
+        Curve::Line { a, b } => {
+            let len = a.distance(b);
+            let u = (q - a).dot((b - a) / len);
+            (-1e-9..=len + 1e-9).contains(&u)
+        }
+        Curve::Arc {
+            center: c,
+            start_angle,
+            sweep,
+            ..
+        } => {
+            let v = q - c;
+            let rel = (v.y.atan2(v.x) - start_angle).rem_euclid(std::f64::consts::TAU);
+            rel <= sweep + 1e-9 || rel >= std::f64::consts::TAU - 1e-9
+        }
+        _ => false,
+    };
+    if !(on_side(incoming, t1) && on_side(outgoing, t2)) {
+        return Err("The corner's sides are too short for that radius.".to_owned());
+    }
+    // The stretch of a side between two of its points, run from `p` to `q`.
+    let stretch =
+        |(curve, reversed): &(Curve, bool), p: DVec2, q: DVec2, tag: CurveTag| match *curve {
+            Curve::Arc {
+                center: c, radius, ..
+            } => arc_between(c, radius, p, q, !*reversed, tag),
+            _ => Edge2::line(p, q, tag),
+        };
+    // The round from t2 back to t1, the short way round its centre.
+    let ccw = (t2 - center).perp_dot(t1 - center) > 0.0;
+    let edges = vec![
+        stretch(incoming, t1, at, tag(0)),
+        stretch(outgoing, at, t2, tag(1)),
+        arc_between(center, r, t2, t1, ccw, tag(2)),
+    ];
+    Ok((
+        crate::Area { loops: vec![edges] },
+        [[at, t1], [at, t2]],
+        inside,
+    ))
+}
+
+/// The arc of the circle (`center`, `radius`) from `p` to `q`, counter-clockwise or not.
+fn arc_between(center: DVec2, radius: f64, p: DVec2, q: DVec2, ccw: bool, tag: CurveTag) -> Edge2 {
+    let angle = |x: DVec2| (x - center).y.atan2((x - center).x);
+    let (from, to) = if ccw { (p, q) } else { (q, p) };
+    let sweep = (angle(to) - angle(from)).rem_euclid(std::f64::consts::TAU);
+    Edge2 {
+        curve: Curve::Arc {
+            center,
+            radius,
+            start_angle: angle(from),
+            sweep,
+        },
+        reversed: !ccw,
+        tag,
+    }
+}
+
 impl SheetBody {
     /// What breaking a corner of the sheet changes: the piece the corner is on, the
     /// region in flat coordinates, the stretch of each of the corner's two sides that it
@@ -251,8 +412,18 @@ impl SheetBody {
                     }
                     let straight = |k: usize| matches!(l.edges[k].0, Curve::Line { .. });
                     if !(straight(k) && straight(next)) {
+                        if kind == BreakKind::Fillet {
+                            return round_curved_corner(
+                                &l.edges[k],
+                                &l.edges[next],
+                                at,
+                                size,
+                                &tag,
+                            )
+                            .map(|(area, sides, inside)| (index, area, sides, inside));
+                        }
                         return Err(
-                            "Only a corner between two straight sides can be broken.".to_owned()
+                            "Only a corner between two straight sides can be chamfered.".to_owned()
                         );
                     }
                     // The outline has the sheet on its left, so an outside corner turns left
@@ -801,7 +972,7 @@ impl Flat {
             p.adds.iter().flat_map(|a| a.edges()).for_each(&mut add);
         }
         for c in &layout.cuts {
-            c.area.edges().for_each(&mut add);
+            c.edges().for_each(&mut add);
         }
         let form_areas: Vec<_> = layout.forms.iter().map(|f| f.area()).collect();
         for a in &form_areas {
@@ -824,11 +995,7 @@ impl Flat {
                 if !piece.covers(p) {
                     continue;
                 }
-                if layout
-                    .cuts
-                    .iter()
-                    .any(|c| c.applies_to(pi) && c.area.contains(p))
-                {
+                if layout.cuts.iter().any(|c| c.applies_to(pi) && c.removes(p)) {
                     continue;
                 }
                 // A form's outline is a hole that its own faces fill.

@@ -1246,6 +1246,12 @@ pub(crate) fn apply_break_corner(
     let mut layout = bodies[index].sheet.as_ref().expect("checked").layout.clone();
     for (piece, area, _, adds) in cuts {
         if adds {
+            // An inside corner of a cut: the cut gives the round back.
+            for cut in &mut layout.cuts {
+                if cut.applies_to(piece) {
+                    cut.spared.push(area.clone());
+                }
+            }
             layout.pieces[piece].adds.push(area);
         } else {
             layout.add_cut_on(area, vec![piece]);

@@ -366,11 +366,34 @@ pub struct Cut {
     /// The pieces the cut applies to: those that existed when it was made, plus the pieces
     /// later split off them (by a sketched bend), which keep their holes.
     pub pieces: Vec<usize>,
+    /// Parts of the area given back to the sheet by later features (a rounded inside
+    /// corner of the cut): the cut leaves them.
+    pub spared: Vec<Area>,
 }
 
 impl Cut {
+    pub fn new(area: Area, pieces: Vec<usize>) -> Self {
+        Self {
+            area,
+            pieces,
+            spared: Vec::new(),
+        }
+    }
+
     pub fn applies_to(&self, piece: usize) -> bool {
         self.pieces.contains(&piece)
+    }
+
+    /// Whether the cut takes the sheet at `p` (flat coordinates).
+    pub fn removes(&self, p: DVec2) -> bool {
+        self.area.contains(p) && !self.spared.iter().any(|s| s.contains(p))
+    }
+
+    /// Every curve of the cut, the spared parts' too.
+    pub fn edges(&self) -> impl Iterator<Item = &Edge2> {
+        self.area
+            .edges()
+            .chain(self.spared.iter().flat_map(|s| s.edges()))
     }
 }
 
@@ -666,15 +689,13 @@ impl Layout {
 
     /// Cuts `area` (in flat coordinates) out of the pieces `pieces` only.
     pub fn add_cut_on(&mut self, area: Area, pieces: Vec<usize>) {
-        self.cuts.push(Cut { area, pieces });
+        self.cuts.push(Cut::new(area, pieces));
     }
 
     /// Cuts `area` (in flat coordinates) out of every piece that exists now.
     pub fn add_cut(&mut self, area: Area) {
-        self.cuts.push(Cut {
-            area,
-            pieces: (0..self.pieces.len()).collect(),
-        });
+        self.cuts
+            .push(Cut::new(area, (0..self.pieces.len()).collect()));
     }
 
     /// The pieces that are bends, with their index.

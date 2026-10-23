@@ -273,7 +273,7 @@ impl Layout {
                 && !self
                     .cuts
                     .iter()
-                    .any(|c| c.applies_to(form.piece) && c.area.contains(q))
+                    .any(|c| c.applies_to(form.piece) && c.removes(q))
         };
         if !form.ring(t).into_iter().all(material) {
             return Err(format!(

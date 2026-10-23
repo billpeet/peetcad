@@ -242,7 +242,7 @@ impl Layout {
                     };
                     [
                         vec![(away, away.dot(c.at))],
-                        self.keep_clear(fb, fa, false, gap),
+                        self.keep_clear(fb, fa, false, gap, false),
                     ]
                 } else {
                     // (keep beyond the other's outer face (true) or inner face, gap)
@@ -251,9 +251,13 @@ impl Layout {
                         CornerKind::Overlap => [(false, gap), (true, 0.0)],
                         CornerKind::Open => [(false, gap), (false, gap)],
                     };
+                    // An open corner's gap is measured from each flange's inner face, as
+                    // SolidWorks measures it: where the corner is not square, the outer face
+                    // comes nearer the other flange or stays further off.
+                    let inner_only = c.spec.kind == CornerKind::Open;
                     [
-                        self.keep_clear(fa, fb, rules[0].0, rules[0].1),
-                        self.keep_clear(fb, fa, rules[1].0, rules[1].1),
+                        self.keep_clear(fa, fb, rules[0].0, rules[0].1, inner_only),
+                        self.keep_clear(fb, fa, rules[1].0, rules[1].1, inner_only),
                     ]
                 };
                 push(
@@ -320,7 +324,7 @@ impl Layout {
                 } else {
                     vec![a.parent, sa, sb]
                 };
-                out.cuts.push(Cut { area, pieces });
+                out.cuts.push(Cut::new(area, pieces));
             }
         }
         let grow = 2.0 * (self.max_radius() + t) + 4.0 * t + 1.0;
@@ -485,8 +489,16 @@ impl Layout {
     }
 
     /// Half-planes `n·p ≥ k` (flat coordinates) that keep flange `flange` on the far side
-    /// of flange `other`'s outer (or inner) face, `gap` clear, at both faces of the sheet.
-    fn keep_clear(&self, flange: usize, other: usize, outer: bool, gap: f64) -> Vec<(DVec2, f64)> {
+    /// of flange `other`'s outer (or inner) face, `gap` clear, at both faces of the sheet
+    /// (or, `inner_only`, at the flange's own inner face).
+    fn keep_clear(
+        &self,
+        flange: usize,
+        other: usize,
+        outer: bool,
+        gap: f64,
+        inner_only: bool,
+    ) -> Vec<(DVec2, f64)> {
         let t = self.settings.thickness;
         let (fp, op) = (&self.pieces[flange], &self.pieces[other]);
         let up_of = |piece: usize| {
@@ -504,7 +516,12 @@ impl Layout {
         };
         let face_point = op.frame.to_world(DVec3::new(0.0, 0.0, z));
         let mut out = Vec::new();
-        for level in [0.0, t] {
+        let levels: &[f64] = match (inner_only, up_of(flange)) {
+            (false, _) => &[0.0, t],
+            (true, true) => &[t],
+            (true, false) => &[0.0],
+        };
+        for &level in levels {
             // Signed distance from the face of a flat point p at this level:
             // inside · (R·(p, level) + origin − face_point).
             let g = fp.frame.vector_to_local(inside);
