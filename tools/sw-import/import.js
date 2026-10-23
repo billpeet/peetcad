@@ -1483,7 +1483,7 @@ function importPart(doc, dir) {
             const rise = Math.max(...drawn.flatMap(pointsAlong).map(q => { const d = sub(fromSketch(sf, q), fa); return len(sub(d, mul(fu, dot(d, fu)))); }));
             // A rectangle taller than the flange's length (one edge of a flange on several, its profile drawn
             // taller than the others) is as tall as it is drawn: it is the flange's outline
-            const taller = rise > length - (thickness || 0) + 0.01;
+            const taller = Math.abs(angle - 90) < 1e-6 && rise > length - (thickness || 0) + 0.01;
             if (taller || drawn.length !== 4 || drawn.some(g => g.type !== "line" || !g.start || !g.end || !square(g))) {
               outline = { sketch: p, foot: foot.g, rise };
               // An outline that widens past an end of the edge its foot runs to: the flange is made that
