@@ -23,7 +23,7 @@
 
 use std::sync::Arc;
 
-use peet_math::{DQuat, DVec3, Frame, Plane};
+use peet_math::{DMat3, DQuat, DVec2, DVec3, Frame, Plane};
 use peet_sheetmetal::{Area, CurveTag, Form, FormKind};
 use peet_sketch::Sketch;
 use peet_sketch::region::find_regions;
@@ -41,13 +41,20 @@ use crate::{FeatureError, Model};
 pub(crate) enum Motion {
     Rigid(Frame),
     Mirror { point: DVec3, normal: DVec3 },
+    /// A reflection in the XY plane, then a rigid motion: what a mirror followed by a
+    /// pattern (a copy of a mirror) comes to.
+    Reflected(Frame),
 }
+
+/// The reflection in the XY plane.
+const FLIP_Z: DMat3 = DMat3::from_diagonal(DVec3::new(1.0, 1.0, -1.0));
 
 impl Motion {
     pub fn point(&self, p: DVec3) -> DVec3 {
         match *self {
             Self::Rigid(f) => f.to_world(p),
             Self::Mirror { point, normal } => p - normal * (2.0 * (p - point).dot(normal)),
+            Self::Reflected(f) => f.to_world(FLIP_Z * p),
         }
     }
 
@@ -55,11 +62,44 @@ impl Motion {
         match *self {
             Self::Rigid(f) => f.vector_to_world(v),
             Self::Mirror { normal, .. } => v - normal * (2.0 * v.dot(normal)),
+            Self::Reflected(f) => f.vector_to_world(FLIP_Z * v),
         }
     }
 
     pub fn is_mirror(&self) -> bool {
-        matches!(self, Self::Mirror { .. })
+        matches!(self, Self::Mirror { .. } | Self::Reflected(_))
+    }
+
+    /// The motion as a matrix and a translation: `p ↦ m·p + t`.
+    fn affine(&self) -> (DMat3, DVec3) {
+        match *self {
+            Self::Rigid(f) => (DMat3::from_quat(f.rotation), f.origin),
+            Self::Mirror { point, normal } => (
+                DMat3::IDENTITY - 2.0 * outer(normal, normal),
+                normal * (2.0 * point.dot(normal)),
+            ),
+            Self::Reflected(f) => (DMat3::from_quat(f.rotation) * FLIP_Z, f.origin),
+        }
+    }
+
+    /// `self` after `first`: where a copy made by `first` goes when it is copied by
+    /// `self` (a copy of a pattern or a mirror).
+    pub fn after(&self, first: &Motion) -> Motion {
+        let (a, s) = self.affine();
+        let (b, t) = first.affine();
+        let m = a * b;
+        let origin = a * t + s;
+        if m.determinant() > 0.0 {
+            Self::Rigid(Frame {
+                origin,
+                rotation: DQuat::from_mat3(&m).normalize(),
+            })
+        } else {
+            Self::Reflected(Frame {
+                origin,
+                rotation: DQuat::from_mat3(&(m * FLIP_Z)).normalize(),
+            })
+        }
     }
 
     /// Where a sketch plane goes. A reflection can't be a frame, so for a mirror the
@@ -70,7 +110,7 @@ impl Motion {
             Self::Rigid(f) => Some(Plane {
                 frame: f.compose(&plane.frame),
             }),
-            Self::Mirror { .. } => {
+            Self::Mirror { .. } | Self::Reflected(_) => {
                 let x = self.vector(plane.frame.x_axis());
                 let y = -self.vector(plane.frame.y_axis());
                 let frame = Frame::from_origin_z_x(self.point(plane.origin()), x.cross(y), x)?;
@@ -104,6 +144,11 @@ impl Motion {
             rotation,
         })
     }
+}
+
+/// The matrix `a·bᵀ`.
+fn outer(a: DVec3, b: DVec3) -> DMat3 {
+    DMat3::from_cols(a * b.x, a * b.y, a * b.z)
 }
 
 /// A feature to copy, with its references resolved.
@@ -150,7 +195,25 @@ pub(crate) enum Seed<'a> {
         def: &'a FormFeature,
         height: f64,
     },
+    /// A tab (a base flange added to a sheet metal body): its sketch, moved.
+    Tab { plane: Plane, sketch: &'a Sketch },
+    /// A break corner: what it takes from (or adds to) the sheet, moved.
+    BreakCorner { original: FeatureId },
+    /// A mitre flange: the same profile along the edges the motion takes the original's to.
+    MiterFlange {
+        original: FeatureId,
+        plane: Plane,
+        sketch: &'a Sketch,
+        gap: f64,
+        offsets: [f64; 2],
+    },
 }
+
+/// A copied feature: its name (for messages), what it is, its place in the model, and the
+/// motions of the pattern or mirror it is a copy of, if it is (none: it is copied as it
+/// is). A copy of a pattern copies what the pattern copies, the original and each copy
+/// moved on.
+pub(crate) type SeedEntry<'a> = (String, Seed<'a>, usize, Vec<Motion>);
 
 /// The number of a copy, for its faces' names.
 fn copy_number(seed: usize, copy: usize) -> u32 {
@@ -162,7 +225,7 @@ pub(crate) fn apply_copies(
     feature: FeatureId,
     model: &Model,
     bodies: &[Arc<Body>],
-    seeds: &[(String, Seed<'_>, usize)],
+    seeds: &[SeedEntry<'_>],
     motions: &[Motion],
     stamp: u64,
 ) -> Result<Applied, FeatureError> {
@@ -180,8 +243,19 @@ pub(crate) fn apply_copies(
     let mut order: Vec<usize> = (0..seeds.len()).collect();
     order.sort_by_key(|&i| seeds[i].2);
     for si in order {
-        let (name, seed, _) = &seeds[si];
+        let (name, seed, _, inner) = &seeds[si];
         let key = crate::hash::combine(stamp, si as u64);
+        // A copy of a pattern or a mirror: each of its copies, moved on
+        let composed: Vec<Motion>;
+        let motions = if inner.is_empty() {
+            motions
+        } else {
+            composed = motions
+                .iter()
+                .flat_map(|m| inner.iter().map(move |i| m.after(i)))
+                .collect();
+            &composed
+        };
         let result = match seed {
             Seed::Extrude { .. } | Seed::Revolve { .. } | Seed::Hole { .. } => {
                 let mut ok = 0;
@@ -198,6 +272,42 @@ pub(crate) fn apply_copies(
                 Ok(())
             }
             Seed::EdgeFlange { .. } => flange_copies(
+                feature,
+                model,
+                &bodies,
+                seed,
+                motions,
+                si,
+                key,
+                name,
+                &mut skipped,
+            )
+            .map(|(b, n, w)| {
+                bodies = b;
+                made += n;
+                if w.is_some() {
+                    warning = w;
+                }
+            }),
+            Seed::Tab { .. } | Seed::BreakCorner { .. } => added_copies(
+                feature,
+                model,
+                &bodies,
+                seed,
+                motions,
+                si,
+                key,
+                name,
+                &mut skipped,
+            )
+            .map(|(b, n, w)| {
+                bodies = b;
+                made += n;
+                if w.is_some() {
+                    warning = w;
+                }
+            }),
+            Seed::MiterFlange { .. } => miter_copies(
                 feature,
                 model,
                 &bodies,
@@ -326,9 +436,7 @@ fn solid_copy(
             })?;
             return Ok(out);
         }
-        Seed::SheetCut { .. } | Seed::Form { .. } | Seed::EdgeFlange { .. } => {
-            unreachable!("copied in the flat pattern")
-        }
+        _ => unreachable!("copied in the flat pattern"),
     };
     // Name the copy's faces apart from the other copies'.
     let instance = FaceName::new(feature, FaceRole::Instance(copy));
@@ -389,12 +497,16 @@ fn sheet_copies(
             face,
             ..
         } => (plane, *sketch, face.as_ref()),
-        Seed::Extrude { .. } | Seed::Revolve { .. } | Seed::Hole { .. } | Seed::EdgeFlange { .. } => {
-            unreachable!()
-        }
+        _ => unreachable!(),
     };
     let on = sketch_face(model, bodies, face, "the copied feature")?;
     let mut layout = on.sheet.layout.clone();
+    // A point inside the sketch's shape, to tell which flange a copy lands on
+    let probe = find_regions(sketch).regions.iter().find_map(|r| {
+        let (lo, hi) = r.outer.bounds();
+        let c = (lo + hi) / 2.0;
+        r.contains(c).then_some(c)
+    });
     let mut made = 0;
     for (k, m) in motions.iter().enumerate() {
         let copy = copy_number(si, k + 1);
@@ -406,23 +518,44 @@ fn sheet_copies(
         let moved_o = m.point(plane.origin());
         let off = (moved_o - plane.origin()).dot(n);
         let t = layout.settings.thickness;
-        let target = if moved_n.cross(n).length() <= 1e-9 && off.abs() <= 1e-6 {
-            Some((on.piece, on.frame, on.top))
-        } else if matches!(seed, Seed::SheetCut { .. }) {
+        // A flange with a face in the copy's plane, and which face
+        let in_plane = |p: &peet_sheetmetal::Piece| {
+            let level = p.frame.to_local(moved_o).z;
+            if !p.is_flange() || moved_n.cross(p.frame.z_axis()).length() > 1e-9 {
+                None
+            } else if level.abs() <= 1e-6 {
+                Some(false)
+            } else if (level - t).abs() <= 1e-6 {
+                Some(true)
+            } else {
+                None
+            }
+        };
+        // The one under the copy's shape, which may be another flange in the same plane than the
+        // original's (a mirror of a hole in one lip of a channel lands on the other lip)
+        let under = probe.map(|q| m.point(plane.from_plane_coords(q)));
+        let holding = under.and_then(|q| {
             layout.pieces.iter().enumerate().find_map(|(i, p)| {
-                let z = p.frame.z_axis();
-                let level = p.frame.to_local(moved_o).z;
-                (p.is_flange() && moved_n.cross(z).length() <= 1e-9)
-                    .then_some(())
-                    .and_then(|_| {
-                        if level.abs() <= 1e-6 {
-                            Some((i, p.frame, false))
-                        } else if (level - t).abs() <= 1e-6 {
-                            Some((i, p.frame, true))
-                        } else {
-                            None
-                        }
-                    })
+                let top = in_plane(p)?;
+                p.covers(p.frame.to_local(q).truncate())
+                    .then_some((i, p.frame, top))
+            })
+        });
+        let target = if moved_n.cross(n).length() <= 1e-9 && off.abs() <= 1e-6 {
+            let own = under
+                .is_none_or(|q| layout.pieces[on.piece].covers(on.frame.to_local(q).truncate()));
+            if own {
+                Some((on.piece, on.frame, on.top))
+            } else {
+                holding.or(Some((on.piece, on.frame, on.top)))
+            }
+        } else if matches!(seed, Seed::SheetCut { .. }) {
+            holding.or_else(|| {
+                layout
+                    .pieces
+                    .iter()
+                    .enumerate()
+                    .find_map(|(i, p)| in_plane(p).map(|top| (i, p.frame, top)))
             })
         } else {
             None
@@ -520,9 +653,7 @@ fn sheet_copies(
                     layout = before;
                 }
             }
-            Seed::Extrude { .. } | Seed::Revolve { .. } | Seed::Hole { .. } | Seed::EdgeFlange { .. } => {
-                unreachable!()
-            }
+            _ => unreachable!(),
         }
     }
     if made == 0 {
@@ -551,7 +682,6 @@ fn flange_holding(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use peet_math::DVec2;
 
     #[test]
     fn mirror_sketch_plane_reflects_points() {
@@ -573,6 +703,47 @@ mod tests {
         }
         // The normal is reflected too.
         assert!(moved.normal().abs_diff_eq(m.vector(plane.normal()), 1e-12));
+    }
+
+    #[test]
+    fn composed_motions_move_points_as_one_after_the_other() {
+        let mx = Motion::Mirror {
+            point: DVec3::new(100.0, 0.0, 0.0),
+            normal: DVec3::X,
+        };
+        let my = Motion::Mirror {
+            point: DVec3::new(0.0, 50.0, 0.0),
+            normal: DVec3::Y,
+        };
+        let shift = Motion::translation(DVec3::new(0.0, 0.0, 7.0));
+        let turn = Motion::rotation(DVec3::new(5.0, 0.0, 0.0), DVec3::Z, 0.3);
+        let p = DVec3::new(20.0, 15.0, 3.0);
+        for (outer, inner) in [(my, mx), (shift, mx), (mx, turn), (turn, shift), (mx, mx)] {
+            let both = outer.after(&inner);
+            let want = outer.point(inner.point(p));
+            assert!(both.point(p).abs_diff_eq(want, 1e-9), "{both:?}");
+            let v = DVec3::new(0.3, -0.7, 0.2);
+            assert!(
+                both.vector(v)
+                    .abs_diff_eq(outer.vector(inner.vector(v)), 1e-12)
+            );
+            assert_eq!(both.is_mirror(), outer.is_mirror() != inner.is_mirror());
+        }
+        // Two mirrors in planes square to each other: a half turn about their line.
+        let half = my.after(&mx);
+        assert!(
+            half.point(p)
+                .abs_diff_eq(DVec3::new(180.0, 85.0, 3.0), 1e-9)
+        );
+        // A reflected motion's sketch plane still lands mirrored points where they go.
+        let reflected = shift.after(&mx);
+        let moved = reflected.sketch_plane(&Plane::TOP).unwrap();
+        let q = DVec2::new(3.0, 4.0);
+        assert!(
+            moved
+                .from_plane_coords(DVec2::new(q.x, -q.y))
+                .abs_diff_eq(reflected.point(Plane::TOP.from_plane_coords(q)), 1e-9)
+        );
     }
 
     #[test]
@@ -647,27 +818,7 @@ fn flange_copies(
     for (k, m) in motions.iter().enumerate() {
         let copy = copy_number(si, k + 1);
         let moved = ends.map(|p| m.point(p));
-        // The flange whose middle the moved edge lies in, along its boundary
-        let target = layout.pieces.iter().enumerate().find_map(|(i, p)| {
-            if !p.is_flange() {
-                return None;
-            }
-            let local = moved.map(|q| p.frame.to_local(q));
-            if local.iter().any(|q| (q.z - t / 2.0).abs() > 1e-6) {
-                return None;
-            }
-            let (a, b) = (local[0].truncate(), local[1].truncate());
-            let d = (b - a).normalize_or_zero();
-            let mid = (a + b) / 2.0;
-            let left = p.covers(mid + d.perp() * 1e-3);
-            let right = p.covers(mid - d.perp() * 1e-3);
-            match (left, right) {
-                (true, false) => Some((i, a, b, false)),
-                (false, true) => Some((i, b, a, true)),
-                _ => None,
-            }
-        });
-        let Some((piece, a, b, turned)) = target else {
+        let Some((piece, a, b, turned)) = edge_at(&layout, moved) else {
             skipped.push(format!(
                 "copy {} of {name} (no edge of the sheet is where it would go)",
                 k + 2
@@ -700,6 +851,299 @@ fn flange_copies(
         };
         match added {
             Ok(()) => made += 1,
+            Err(e) => skipped.push(format!("copy {} of {name} ({e})", k + 2)),
+        }
+    }
+    if made == 0 {
+        return Ok((bodies.to_vec(), 0, None));
+    }
+    let (out, warning) = rebuild_sheet(model, bodies, index, layout, stamp)?;
+    Ok((out, made, warning))
+}
+
+/// The edge of a flange of `layout` between two points through the middle of the sheet
+/// (model coordinates): the flange, the edge's ends in flat coordinates with the flange's
+/// material on their left, and whether that turned the points round.
+fn edge_at(
+    layout: &peet_sheetmetal::Layout,
+    ends: [DVec3; 2],
+) -> Option<(usize, DVec2, DVec2, bool)> {
+    let t = layout.settings.thickness;
+    layout.pieces.iter().enumerate().find_map(|(i, p)| {
+        if !p.is_flange() {
+            return None;
+        }
+        let local = ends.map(|q| p.frame.to_local(q));
+        if local.iter().any(|q| (q.z - t / 2.0).abs() > 1e-6) {
+            return None;
+        }
+        let (a, b) = (local[0].truncate(), local[1].truncate());
+        let d = (b - a).normalize_or_zero();
+        let mid = (a + b) / 2.0;
+        let left = p.covers(mid + d.perp() * 1e-3);
+        let right = p.covers(mid - d.perp() * 1e-3);
+        match (left, right) {
+            (true, false) => Some((i, a, b, false)),
+            (false, true) => Some((i, b, a, true)),
+            _ => None,
+        }
+    })
+}
+
+/// Every copy of a tab or a break corner: sheet added to (or taken from) the flange the
+/// motion takes the original's to, in the flat pattern, and each body changed rebuilt once.
+#[allow(clippy::too_many_arguments)]
+fn added_copies(
+    feature: FeatureId,
+    model: &Model,
+    bodies: &[Arc<Body>],
+    seed: &Seed<'_>,
+    motions: &[Motion],
+    si: usize,
+    stamp: u64,
+    name: &str,
+    skipped: &mut Vec<String>,
+) -> Result<SheetCopies, FeatureError> {
+    let mut layouts: Vec<Option<peet_sheetmetal::Layout>> = vec![None; bodies.len()];
+    let layout_of = |layouts: &[Option<peet_sheetmetal::Layout>], i: usize| {
+        layouts[i]
+            .clone()
+            .or_else(|| bodies[i].sheet.as_ref().map(|s| s.layout.clone()))
+    };
+    let mut made = 0;
+    match seed {
+        Seed::Tab { plane, sketch } => {
+            let regions = crate::sheet::tab_regions(sketch)?;
+            for (k, m) in motions.iter().enumerate() {
+                let copy = copy_number(si, k + 1);
+                let world = |p: DVec2| m.point(plane.from_plane_coords(p));
+                let area = |frame: &Frame| {
+                    Area::from_regions(&regions, feature.0)
+                        .mapped(&|p| frame.to_local(world(p)).truncate())
+                        .retagged(|t| match t {
+                            CurveTag::Sketch { owner, entity } => CurveTag::Copy {
+                                owner,
+                                copy,
+                                entity,
+                            },
+                            other => other,
+                        })
+                };
+                let origin = m.point(plane.origin());
+                let normal = m.vector(plane.normal());
+                let found = (0..bodies.len()).find_map(|i| {
+                    let layout = layout_of(&layouts, i)?;
+                    let t = layout.settings.thickness;
+                    let (piece, area) =
+                        crate::sheet::flange_beside(&layout, origin, normal, &[0.0, t], &area)?;
+                    Some((i, layout, piece, area))
+                });
+                let Some((i, mut layout, piece, area)) = found else {
+                    skipped.push(format!(
+                        "copy {} of {name} (no flat face of the sheet is where it would go)",
+                        k + 2
+                    ));
+                    continue;
+                };
+                layout.add_sheet(piece, area);
+                layouts[i] = Some(layout);
+                made += 1;
+            }
+        }
+        Seed::BreakCorner { original } => {
+            // What the original took or added, on the body it is on
+            let owned = |a: &Area| {
+                a.edges()
+                    .next()
+                    .is_some_and(|e| e.tag.owner() == original.0)
+            };
+            let found = bodies.iter().enumerate().find_map(|(i, b)| {
+                let layout = &b.sheet.as_ref()?.layout;
+                let mut parts: Vec<(usize, Area, bool)> = Vec::new();
+                for (pi, p) in layout.pieces.iter().enumerate() {
+                    parts.extend(
+                        p.adds
+                            .iter()
+                            .filter(|a| owned(a))
+                            .map(|a| (pi, a.clone(), true)),
+                    );
+                }
+                for c in &layout.cuts {
+                    if owned(&c.area)
+                        && let Some(&pi) = c.pieces.first()
+                    {
+                        parts.push((pi, c.area.clone(), false));
+                    }
+                }
+                (!parts.is_empty()).then_some((i, parts))
+            });
+            let (index, parts) = found.ok_or_else(|| {
+                FeatureError("the break corner it copies is not on a sheet metal body".to_owned())
+            })?;
+            let mut layout = layout_of(&layouts, index).expect("a sheet metal body");
+            let t = layout.settings.thickness;
+            for (k, m) in motions.iter().enumerate() {
+                let copy = copy_number(si, k + 1);
+                let mut trial = layout.clone();
+                let mut ok = true;
+                for (pi, area, add) in &parts {
+                    let from = trial.pieces[*pi].frame;
+                    let world = |q: DVec2| m.point(from.to_world(q.extend(t / 2.0)));
+                    let moved = |frame: &Frame| {
+                        area.mapped(&|q| frame.to_local(world(q)).truncate())
+                            .retagged(|tag| match tag {
+                                CurveTag::Generated { part, index, .. } => CurveTag::Generated {
+                                    owner: feature.0,
+                                    part: 0x8000_0000 | (copy << 8) | (part & 0xff),
+                                    index,
+                                },
+                                other => other,
+                            })
+                    };
+                    let origin = m.point(from.to_world(DVec3::new(0.0, 0.0, t / 2.0)));
+                    let normal = m.vector(from.z_axis());
+                    match crate::sheet::flange_beside(&trial, origin, normal, &[t / 2.0], &moved) {
+                        Some((piece, a)) if *add => trial.add_sheet(piece, a),
+                        Some((piece, a)) => trial.add_cut_on(a, vec![piece]),
+                        None => {
+                            ok = false;
+                            break;
+                        }
+                    }
+                }
+                if ok {
+                    layout = trial;
+                    made += 1;
+                } else {
+                    skipped.push(format!(
+                        "copy {} of {name} (no corner of the sheet is where it would go)",
+                        k + 2
+                    ));
+                }
+            }
+            layouts[index] = Some(layout);
+        }
+        _ => unreachable!(),
+    }
+    if made == 0 {
+        return Ok((bodies.to_vec(), 0, None));
+    }
+    let mut out = bodies.to_vec();
+    let mut warning = None;
+    for (i, layout) in layouts.into_iter().enumerate() {
+        if let Some(layout) = layout {
+            let (b, w) = rebuild_sheet(model, &out, i, layout, stamp)?;
+            out = b;
+            warning = warning.or(w);
+        }
+    }
+    Ok((out, made, warning))
+}
+
+/// Every copy of a mitre flange: the same profile along the edges the motion takes the
+/// original's to (in the other order for a mirror, which turns them round), added to the
+/// flat pattern of the body the original is on and the body rebuilt once.
+#[allow(clippy::too_many_arguments)]
+fn miter_copies(
+    feature: FeatureId,
+    model: &Model,
+    bodies: &[Arc<Body>],
+    seed: &Seed<'_>,
+    motions: &[Motion],
+    si: usize,
+    stamp: u64,
+    name: &str,
+    skipped: &mut Vec<String>,
+) -> Result<SheetCopies, FeatureError> {
+    let Seed::MiterFlange {
+        original,
+        plane,
+        sketch,
+        gap,
+        offsets,
+    } = seed
+    else {
+        unreachable!()
+    };
+    // The body the original is on, and its edges in the flat pattern, in order
+    let found = bodies.iter().enumerate().find_map(|(i, b)| {
+        let sheet = b.sheet.as_ref()?;
+        let ats: Vec<_> = sheet
+            .layout
+            .attachments
+            .iter()
+            .filter(|a| a.owner == original.0)
+            .cloned()
+            .collect();
+        (!ats.is_empty()).then_some((i, sheet, ats))
+    });
+    let (index, sheet, ats) = found.ok_or_else(|| {
+        FeatureError("the mitre flange it copies is not on a sheet metal body".to_owned())
+    })?;
+    let mut layout = sheet.layout.clone();
+    let t = layout.settings.thickness;
+    let parent = layout.pieces[ats[0].parent].frame;
+    let sites: Vec<peet_sheetmetal::EdgeSite> = ats
+        .iter()
+        .map(|a| peet_sheetmetal::EdgeSite {
+            piece: a.parent,
+            a: a.a,
+            b: a.b,
+            top: false,
+        })
+        .collect();
+    let profile = crate::sheet::miter_profile(&sites, &parent, plane, sketch, t)?;
+    let mut made = 0;
+    for (k, m) in motions.iter().enumerate() {
+        let copy = copy_number(si, k + 1);
+        let mut moved = Vec::new();
+        let mut turned = false;
+        for at in &ats {
+            let frame = layout.pieces[at.parent].frame;
+            let ends = [at.a, at.b].map(|p| m.point(frame.to_world(p.extend(t / 2.0))));
+            match edge_at(&layout, ends) {
+                Some((piece, a, b, turn)) => {
+                    turned = turn;
+                    moved.push(peet_sheetmetal::EdgeSite {
+                        piece,
+                        a,
+                        b,
+                        top: false,
+                    });
+                }
+                None => break,
+            }
+        }
+        if moved.len() != ats.len() {
+            skipped.push(format!(
+                "copy {} of {name} (no edge of the sheet is where it would go)",
+                k + 2
+            ));
+            continue;
+        }
+        // The profile's heights from the side of the sheet the original's are from
+        let flip = m
+            .vector(parent.z_axis())
+            .dot(layout.pieces[moved[0].piece].frame.z_axis())
+            < 0.0;
+        let points: Vec<DVec2> = profile
+            .iter()
+            .map(|p| if flip { DVec2::new(p.x, t - p.y) } else { *p })
+            .collect();
+        let offs = if turned {
+            [offsets[1], offsets[0]]
+        } else {
+            *offsets
+        };
+        let mut trial = layout.clone();
+        let added = crate::sheet::chain_sites(moved).and_then(|sites| {
+            trial.add_miter_flange_part(feature.0, copy << 12, &sites, &points, offs, *gap)
+        });
+        match added {
+            Ok(()) => {
+                layout = trial;
+                made += 1;
+            }
             Err(e) => skipped.push(format!("copy {} of {name} ({e})", k + 2)),
         }
     }

@@ -326,7 +326,14 @@ with their defaults' types):
   default `end`, `sheet`, is through its own sheet only.
 - `linear_pattern`, `circular_pattern` and `mirror` copy edge flanges too: each copy is the
   same flange on the edge the copy's motion takes the original's edge to, set back from its
-  ends the other way round for a mirror.
+  ends the other way round for a mirror. They copy mitre flanges (the profile along the
+  moved edges, in the other order for a mirror), tabs (the sketch moved) and break corners
+  (the moved corner) the same way.
+- A pattern or a mirror can be copied by another: the copy is of everything it has, its
+  originals and their copies, each moved on, as SolidWorks copies a mirror of a mirror.
+- `base_flange` with `tab: true` is a tab: its closed sketch, on a flat face of a sheet
+  metal body or in its plane and touching the sheet, is added to that face's flange with
+  the body's thickness, filling in what earlier cuts took.
 - `break_corner` rounds (`kind` `fillet`, the default) or chamfers (`chamfer`) corners of a
   sheet metal body by `size`. `edges` are the corners: the edges through the sheet where
   two straight sides of a flat face meet. The body stays sheet metal. An inside corner

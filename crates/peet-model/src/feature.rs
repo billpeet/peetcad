@@ -352,7 +352,14 @@ pub struct BaseFlangeFeature {
     /// Open profiles: a bend model of each bend's own, in order along the profile (`None`,
     /// or none given: the body's), as SolidWorks' sketched bends can have.
     pub bends: Vec<Option<BendModelDef>>,
+    /// A tab: a closed sketch on a flat face of a sheet metal body (or in its plane) adds
+    /// to that body, as SolidWorks' base flange does on a part that has sheet metal
+    /// already. It takes the body's thickness and fills in what earlier cuts took.
+    pub tab: bool,
 }
+
+/// What patterns and mirrors copy, for messages.
+pub const COPIED: &str = "patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts, forms, edge and mitre flanges, tabs, break corners, and other patterns and mirrors.";
 
 impl BaseFlangeFeature {
     pub fn new(sketch: FeatureId) -> Self {
@@ -364,6 +371,7 @@ impl BaseFlangeFeature {
             symmetric: false,
             flip_depth: false,
             bends: Vec::new(),
+            tab: false,
         }
     }
 }
@@ -390,6 +398,7 @@ impl From<BaseFlangeFeatureV11> for BaseFlangeFeature {
             symmetric: b.symmetric,
             flip_depth: b.flip_depth,
             bends: Vec::new(),
+            tab: false,
         }
     }
 }
@@ -972,17 +981,24 @@ impl FeatureKind {
         }
     }
 
-    /// Whether a pattern or a mirror can copy the feature.
+    /// Whether a pattern or a mirror can copy the feature (see [`COPIED`]).
     pub fn can_be_copied(&self) -> bool {
-        matches!(
-            self,
-            Self::Extrude(_)
-                | Self::SheetCut(_)
-                | Self::Form(_)
-                | Self::Revolve(_)
-                | Self::Hole(_)
-                | Self::EdgeFlange(_)
-        )
+        match self {
+            Self::BaseFlange(b) => b.tab,
+            other => matches!(
+                other,
+                Self::Extrude(_)
+                    | Self::SheetCut(_)
+                    | Self::Form(_)
+                    | Self::Revolve(_)
+                    | Self::Hole(_)
+                    | Self::EdgeFlange(_)
+                    | Self::MiterFlange(_)
+                    | Self::BreakCorner(_)
+                    | Self::Pattern(_)
+                    | Self::Mirror(_)
+            ),
+        }
     }
 
     /// The features this one refers to directly, without duplicates.

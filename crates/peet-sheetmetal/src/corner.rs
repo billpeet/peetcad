@@ -320,7 +320,7 @@ impl Layout {
                 } else {
                     vec![a.parent, sa, sb]
                 };
-                out.cuts.push(Cut { area, pieces });
+                out.cuts.push(Cut::new(area, pieces));
             }
         }
         let grow = 2.0 * (self.max_radius() + t) + 4.0 * t + 1.0;

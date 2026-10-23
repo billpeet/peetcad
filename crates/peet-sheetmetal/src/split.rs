@@ -412,6 +412,16 @@ impl Layout {
             if cut.applies_to(piece) {
                 cut.pieces.extend([bend_index, child_index]);
             }
+            let kept: Vec<Area> = cut
+                .keep
+                .iter()
+                .filter(|(k, _)| *k == piece)
+                .map(|(_, a)| a.clone())
+                .collect();
+            for a in kept {
+                cut.keep.push((bend_index, a.clone()));
+                cut.keep.push((child_index, a));
+            }
         }
 
         // Move what hangs from the moving side.

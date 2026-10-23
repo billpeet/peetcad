@@ -140,10 +140,34 @@ shell goes through the wall, one added before it is shelled with the body.
 ## Patterns and mirrors
 
 `linear_pattern`, `circular_pattern` and `mirror` copy **features**, by name, not
-bodies. They copy extrudes, cuts, revolves, holes, sheet metal cuts, forms and edge
-flanges (see the `sheet-metal` skill); to repeat
+bodies. They copy extrudes, cuts, revolves, holes, sheet metal cuts, forms, edge and
+mitre flanges, tabs and break corners (see the `sheet-metal` skill); to repeat
 a fillet, fillet all the edges in one feature. `count` includes the original. A linear
 pattern becomes a grid with `direction2`, `spacing2`, `count2`.
+
+**A pattern or a mirror can be copied too**, as SolidWorks copies one: a mirror of
+`Mirror1` copies everything `Mirror1` has, its originals and their copies, across the
+new plane, and a pattern of a pattern repeats the whole pattern. Name the pattern or
+mirror in `features`, not what it copies (naming both copies the originals twice). A copy
+that lands where nothing can be made (a cut off the part, a flange with no edge to go on)
+is left out with a warning, as for any other copy.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 100]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "sketch", "name": "Seed", "on": {"feature": "Extrude1", "side": "end"}, "draw": [{"type": "circle", "center": [20, 15], "radius": 4}]}
+{"op": "cut", "sketch": "Seed", "end": "through_all"}
+{"op": "plane", "from": "right", "distance": 100, "name": "Across"}
+{"op": "plane", "from": "front", "distance": 50, "flip": true, "name": "Along"}
+{"op": "mirror", "name": "Pair", "features": ["Cut-Extrude1"], "plane": "Across"}
+{"op": "mirror", "name": "Four", "features": ["Pair"], "plane": "Along"}
+{"op": "linear_pattern", "name": "Middle row", "features": ["Pair"], "direction": "y", "spacing": 35, "count": 2}
+{"op": "bodies"}
+```
+
+Here `Four` makes two holes (the mirrors of the seed and of its copy), so the plate has
+four; `Middle row` copies both holes of `Pair` 35 along y, making six. Read the copies
+off `faces`: each copy's faces are named after the feature that made it.
 
 `count` and a grid's `count2` can follow parameters: use an expression when the
 number of copies changes with a part size. Expressions return a unitless whole number

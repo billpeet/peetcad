@@ -824,11 +824,7 @@ impl Flat {
                 if !piece.covers(p) {
                     continue;
                 }
-                if layout
-                    .cuts
-                    .iter()
-                    .any(|c| c.applies_to(pi) && c.area.contains(p))
-                {
+                if layout.cuts.iter().any(|c| c.removes(pi, p)) {
                     continue;
                 }
                 // A form's outline is a hole that its own faces fill.

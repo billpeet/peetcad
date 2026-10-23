@@ -1095,6 +1095,7 @@ feature_args! {
             symmetric,
             flip_depth,
             bends,
+            tab,
         } => {
     sketch: FeatureSel as SketchF = sketch,
     thickness: Input as Length = thickness,
@@ -1110,6 +1111,9 @@ feature_args! {
     flip_depth: bool as Flag = flip_depth,
     /// Open profiles: a bend model of each bend's own, in order along the profile.
     bends: Vec<Option<Bend>> as OptBends = bends,
+    /// A tab: adds the closed sketch to the sheet metal body whose flat face it is drawn
+    /// on (or in the plane of), with that body's thickness.
+    tab: bool as Flag = tab,
     }
 }
 
