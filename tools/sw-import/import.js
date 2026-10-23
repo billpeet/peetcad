@@ -788,6 +788,33 @@ function importPart(doc, dir) {
    */
   function slots(f) {
     if (!sheetBody()) return record(f, "not supported", "a slot from the hole wizard, in a part that is not sheet metal");
+    // From the hole wizard's own sketch: a line from tip to tip for each slot, the slot's length long, drawn
+    // as a slot of the hole's diameter whose ends' centres are a radius in from the tips. Failing that, the
+    // slots are read off their round ends in SolidWorks' body.
+    const v = values(f);
+    const diameter = (v.HoleDiameter || v.ThruHoleDiameter || v.Diameter || 0) * MM, length = (v.Length || 0) * MM;
+    const where = (f.sub || []).find(c => SKETCH.test(c.type) && c.sketch && !c.sketch.error && c.sketch.segments.some(g => g.type === "line"));
+    const centres = where ? where.sketch.segments.filter(g => g.type === "line" && g.start && g.end && Math.abs(Math.hypot(g.end.x - g.start.x, g.end.y - g.start.y) * MM - length) < 1e-3) : [];
+    // The slots as the hole wizard's sketch has them: `keep` keeps them whatever they come to
+    const fromSketch = keep => {
+      if (!(diameter > 0 && length > 0 && centres.length)) return false;
+      const sk = importSketch(where, { name: f.name + " sketch", needFace: true, draw: toPeet => centres.map(g => {
+        const k = diameter / 2 / length;
+        const at = t => ({ x: g.start.x + (g.end.x - g.start.x) * t, y: g.start.y + (g.end.y - g.start.y) * t });
+        return { type: "slot", from: toPeet(at(k)), to: toPeet(at(1 - k)), radius: tidy(diameter / 2) };
+      }) });
+      if (sk.error) return false;
+      const built = sheetCut(f, sk.name, reachOf(v.EndCondition, (v.HoleDepth || v.ThruHoleDepth || 0) * MM, false), sk.frame);
+      // Kept only if its faces come to what SolidWorks' slots' do: a feature can have slots on several
+      // faces, which its one sketch does not show
+      const theirs = facesOf(f.name).reduce((sum, face) => sum + face.area * 1e6, 0);
+      const ours = built.ok ? (peet.ask({ op: "faces" }).faces || []).filter(x => (x.made_by || []).some(m => built.names.includes(m.feature))).reduce((sum, x) => sum + x.area_mm2, 0) : 0;
+      if (built.ok && (keep || Math.abs(ours - theirs) <= 0.01 * theirs + 0.5)) { finish(f, built); return true; }
+      if (built.ok) peet.apply({ op: "delete", features: built.names });
+      peet.apply({ op: "delete", feature: sk.name });
+      return false;
+    };
+    if (fromSketch(false)) return;
     const ends = facesOf(f.name).filter(face => face.cylinder).map(roundFace).filter(e => e.height > 1e-6);
     const pairs = [];
     while (ends.length >= 2) {
@@ -796,7 +823,7 @@ function importPart(doc, dir) {
       ends.forEach((e, i) => { if (len(sub(e.level, a.level)) < len(sub(ends[k].level, a.level))) k = i; });
       pairs.push([a, ends.splice(k, 1)[0]]);
     }
-    if (pairs.length === 0) return record(f, "not supported", "a slot from the hole wizard, whose ends are not in SolidWorks' body to copy");
+    if (pairs.length === 0) return fromSketch(true) || record(f, "not supported", "a slot from the hole wizard, whose ends are not in SolidWorks' body to copy");
     // One slot can leave its two ends twice over (a face each side of a cut through it): once is enough
     const seen = new Set(), groups = new Map();
     for (const [a, b] of pairs) {
@@ -818,7 +845,7 @@ function importPart(doc, dir) {
       if (!built.ok) { problem = built.message; peet.apply({ op: "delete", feature: sk.name }); continue; }
       names.push(...built.names);
     }
-    if (names.length === 0) return record(f, "failed", problem || "its slots could not be read");
+    if (names.length === 0) return fromSketch(true) || record(f, "failed", problem || "its slots could not be read");
     made.set(f.name, names);
     return record(f, "imported with a warning", `as a sheet metal cut of the slots' shape, which does not follow the part${problem ? "; some slots were left: " + problem : ""}`);
   }
