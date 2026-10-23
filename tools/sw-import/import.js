@@ -1387,6 +1387,12 @@ function importPart(doc, dir) {
           reverse: dot(direction, sk.frame.n) < 0,
         };
         const drawn = sketchOf(f).sketch.segments.filter(g => !g.construction);
+        // A closed sketch on a part that has sheet metal already is a tab, which SolidWorks adds to the body
+        // whose face it is on. One that touches no sheet is a body of its own, as a base flange is.
+        if (!isOpen(drawn) && sheetBody()) {
+          const tab = build(f, { op: "base_flange", sketch: sk.name, name: f.name, tab: true });
+          if (tab.ok) return finish(f, tab);
+        }
         if (!isOpen(drawn)) return finish(f, build(f, op));
         return finish(f, openBaseFlange(f, v, op, drawn));
       }
@@ -1842,16 +1848,25 @@ function importPart(doc, dir) {
         if ((v.D2TotalInstances || 1) > 1) {
           const second = direction(v.D2Axis, v.D2ReverseDirection, v.D2Spacing, false);
           if (!second) return record(f, "failed", "its second direction was not exported");
-          Object.assign(op, { direction2: second.axis, flip2: second.flip, spacing2: tidy(v.D2Spacing * MM), count2: v.D2TotalInstances });
+          const along = { direction: second.axis, flip: second.flip, spacing: tidy(v.D2Spacing * MM), count: v.D2TotalInstances };
+          // Only the seed copied the second way: two patterns of the seed, one each way
+          if (v.D2PatternSeedOnly) {
+            const one = v.D1TotalInstances > 1 ? build(f, op) : { ok: true, names: [] };
+            if (!one.ok) return finish(f, one);
+            const two = build(f, { op: "linear_pattern", name: f.name + " second direction", features: seeds, ...along });
+            if (!two.ok && one.names.length) peet.apply({ op: "delete", features: one.names });
+            return finish(f, two.ok ? { ok: true, names: [...one.names, ...two.names], warning: one.warning || two.warning } : two);
+          }
+          Object.assign(op, { direction2: along.direction, flip2: along.flip, spacing2: along.spacing, count2: along.count });
         }
         return finish(f, build(f, op));
       }
 
       case "MirrorPattern": {
-        const seeds = [], bent = [], mitred = [];
+        const seeds = [], bent = [], mitred = [], sheetMetal = [];
         for (const p of v.PatternFeatureArray || []) {
-          if (p && flanges.has(p.name)) { bent.push(flanges.get(p.name)); continue; }
-          if (p && miters.has(p.name)) { mitred.push(miters.get(p.name)); continue; }
+          if (p && flanges.has(p.name)) { bent.push(flanges.get(p.name)); sheetMetal.push(p.name); continue; }
+          if (p && miters.has(p.name)) { mitred.push(miters.get(p.name)); sheetMetal.push(p.name); continue; }
           if (!p || !made.has(p.name)) return record(f, "failed", `what it mirrors (${p ? p.name : "nothing"}) was not imported`);
           seeds.push(...made.get(p.name));
         }
@@ -1861,12 +1876,12 @@ function importPart(doc, dir) {
         if (!plane || !where) return record(f, "failed", "its mirror plane was not imported");
         const names = [];
         let warning = null, nativeFailed = null;
-        // PeetCAD's mirror copies edge flanges, and the sheet metal cuts that shape their outlines, as
-        // SolidWorks' does. Only if a copy can't be made (or for a mitre flange) is a mirrored flange made
-        // as a flange of its own on the edge across the plane, which no longer follows the original.
-        if (bent.length && !mitred.length) {
-          const kinds = new Set(["Edge flange", "Sheet metal cut"]);
-          const copied = bent.flatMap(b => made.get(b.name) || []).filter(n => kinds.has((peet.ask({ op: "feature", feature: n }).type || "")));
+        // PeetCAD's mirror copies edge and mitre flanges, and the sheet metal cuts that shape their outlines,
+        // as SolidWorks' does. Only if a copy can't be made is a mirrored flange made as a flange of its own on
+        // the edge across the plane, which no longer follows the original.
+        if (sheetMetal.length) {
+          const kinds = new Set(["Edge flange", "Sheet metal cut", "Miter flange"]);
+          const copied = sheetMetal.flatMap(n => made.get(n) || []).filter(n => kinds.has((peet.ask({ op: "feature", feature: n }).type || "")));
           const built = build(f, { op: "mirror", name: f.name, features: [...seeds, ...copied], plane });
           if (built.ok && !built.warning) {
             made.set(f.name, built.names);
