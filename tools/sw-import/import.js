@@ -225,6 +225,16 @@ function importPart(doc, dir) {
   peet.note(`${path.basename(doc.sourcePath)}, configuration ${config.name}, imported from its SolidWorks export.`);
 
   const report = { name: doc.name, configuration: config.name, features: [], notes: [] };
+  // A feature that fails to rebuild in a configuration (an error, not a warning) leaves nothing in
+  // SolidWorks' body there, as if it were suppressed (Top Hat's Edge-Flange3, whose outline crosses itself
+  // where its edge is short): it is treated as suppressed in that configuration, and built where it is not
+  for (const c of doc.configurations) {
+    const faced = new Set((c.bodies || []).flatMap(b => b.faces.map(face => face.feature)));
+    for (const x of c.features || []) if (x.errorCode != null && !x.isWarning && !x.suppressed && !faced.has(x.name) && !STRUCTURE.test(x.type) && !SKETCH.test(x.type) && x.type !== "RefPlane") {
+      x.suppressed = true;
+      if (c === config) report.notes.push(`${x.name} fails to rebuild in SolidWorks (error ${x.errorCode}) and is not in its body: it is taken as suppressed here.`);
+    }
+  }
   /** A configuration's features by name, sub-features included. */
   const flatten = c => { const m = new Map(); (function walk(list) { for (const x of list || []) { if (!m.has(x.name)) m.set(x.name, x); walk(x.sub); } })(c.features); return m; };
   // The configuration being imported from: the active one first, then each other one for the features
@@ -591,9 +601,20 @@ function importPart(doc, dir) {
     return area ? mul(sum, 1 / area) : null;
   }
   function middleInPeet(names) {
+    // The middle of each face's box, as SolidWorks' are taken: a face's `center` is a point on it, which
+    // on a long face can be far from its middle
+    const faces = (peet.ask({ op: "faces" }).faces || []).filter(face => face.surface === "plane" && (face.made_by || []).some(m => names.includes(m.feature) && (m.side === "top" || m.side === "bottom")));
+    const boxes = new Map();
+    if (faces.length) for (const e of peet.ask({ op: "edges" }).edges || []) for (const i of e.faces || []) {
+      const key = e.body + "|" + i;
+      const b = boxes.get(key) || { lo: [Infinity, Infinity, Infinity], hi: [-Infinity, -Infinity, -Infinity] };
+      for (const p of [e.from, e.to, e.middle]) if (p) { b.lo = b.lo.map((v, k) => Math.min(v, p[k])); b.hi = b.hi.map((v, k) => Math.max(v, p[k])); }
+      boxes.set(key, b);
+    }
     let sum = [0, 0, 0], area = 0;
-    for (const face of peet.ask({ op: "faces" }).faces || []) if (face.surface === "plane" && (face.made_by || []).some(m => names.includes(m.feature) && (m.side === "top" || m.side === "bottom"))) {
-      sum = add(sum, mul(face.center, face.area_mm2));
+    for (const face of faces) {
+      const b = boxes.get(face.body + "|" + face.index);
+      sum = add(sum, mul(b ? mid(b.lo, b.hi) : face.center, face.area_mm2));
       area += face.area_mm2;
     }
     return area ? mul(sum, 1 / area) : null;
@@ -602,14 +623,14 @@ function importPart(doc, dir) {
    * Builds a flange, and turns it over if it came out on the other side of the sheet from where SolidWorks
    * has it. Which way a flange bends is not in its definition: it follows from the edge picked.
    */
-  function buildFlange(f, op, swName = f.name, where = null) {
+  function buildFlange(f, op, swName = f.name, where = null, known = false) {
     const theirs = where ? [where] : swName ? facesOf(swName).filter(face => face.surface === "plane" && face.area * 1e6 > 4 * (thickness || 1) ** 2).map(face => mid(mm(face.box.slice(0, 3)), mm(face.box.slice(3)))) : [];
     const want = theirs.length ? theirs : null;
     const off = names => { const at = middleInPeet(names); return at ? Math.min(...theirs.map(p => len(sub(p, at)))) : 0; };
     const good = Math.max(1, 0.2 * (op.length || 0), (thickness || 0) * 0.75);
     // The same flange turned over and, if it is set back unevenly, with its set-backs at the other ends:
     // which end of an edge is its start is not something the two programs agree on.
-    const uneven = (op.offset_start || 0) !== (op.offset_end || 0);
+    const uneven = (op.offset_start || 0) !== (op.offset_end || 0) && !known;
     const swapped = { ...op, offset_start: op.offset_end, offset_end: op.offset_start };
     for (const k of ["offset_start", "offset_end"]) if (swapped[k] === undefined) delete swapped[k];
     const variants = [op, { ...op, flip: !op.flip }, ...(uneven ? [swapped, { ...swapped, flip: !op.flip }] : [])];
@@ -620,13 +641,14 @@ function importPart(doc, dir) {
       if (!built.ok) continue;
       if (!want) return built;
       const d = off(built.names);
-      if (d < good) return built;
+      // Set back unevenly, the two ways round are a little apart: only an exact fit settles it at once
+      if (d < (uneven ? 1e-3 : good)) return built;
       if (!best || d < best.d) best = { variant, d };
       peet.apply({ op: "delete", features: built.names });
     }
     if (!best) return first;
     const built = build(f, best.variant);
-    if (built.ok) built.warning = `it is ${best.d.toFixed(1)} mm from where SolidWorks has it`;
+    if (built.ok && best.d >= good) built.warning = `it is ${best.d.toFixed(1)} mm from where SolidWorks has it`;
     return built;
   }
 
@@ -776,9 +798,24 @@ function importPart(doc, dir) {
       if (p < -NEAR || p > len(d) + NEAR) continue;
       const away = len(sub(q, mul(u, p)));
       const score = away + Math.abs(len(d) - whole) * 1e-3;
-      if (away <= NEAR && (!best || score < best.score)) best = { score, away, from: edge.from, to: edge.to, middle: edge.middle };
+      if (away <= NEAR && (!best || score < best.score)) best = { score, away, from: edge.from, to: edge.to, middle: edge.middle, body: edge.body, faces: edge.faces };
     }
     return best;
+  }
+
+  /**
+   * Whether an edge of the sheet starts at its `from`, as a flange on it counts its start: the end from which
+   * the sheet is on the left, looking down on the sheet's top face. Null if it can't be told.
+   */
+  function startsAtFrom(edge) {
+    if (!edge.faces || edge.faces.length !== 2) return null;
+    const faces = (peet.ask({ op: "faces" }).faces || []).filter(x => x.body === edge.body && edge.faces.includes(x.index));
+    const side = m => face => (face.made_by || []).some(x => x.side === m);
+    const flat = faces.find(face => side("top")(face) || side("bottom")(face)), wall = faces.find(face => face !== flat);
+    if (!flat || !wall || !flat.normal || !wall.normal) return null;
+    const up = side("top")(flat) ? flat.normal : mul(flat.normal, -1);
+    const along = dot(sub(edge.to, edge.from), cross(mul(wall.normal, -1), up));
+    return Math.abs(along) > 1e-9 ? along > 0 : null;
   }
 
   /** The faces a feature has in SolidWorks' final body. */
@@ -822,7 +859,17 @@ function importPart(doc, dir) {
     const v = values(f);
     const diameter = (v.HoleDiameter || v.ThruHoleDiameter || v.Diameter || 0) * MM, length = (v.Length || 0) * MM;
     const where = (f.sub || []).find(c => SKETCH.test(c.type) && c.sketch && !c.sketch.error && c.sketch.segments.some(g => g.type === "line"));
-    const centres = where ? where.sketch.segments.filter(g => g.type === "line" && g.start && g.end && Math.abs(Math.hypot(g.end.x - g.start.x, g.end.y - g.start.y) * MM - length) < 1e-3) : [];
+    let centres = where ? where.sketch.segments.filter(g => g.type === "line" && g.start && g.end && Math.abs(Math.hypot(g.end.x - g.start.x, g.end.y - g.start.y) * MM - length) < 1e-3) : [];
+    // A slot goes at each of the feature's points, turned as the line drawn through one of them is:
+    // SolidWorks draws that line through the first point only (Gland Plate Frame's slots)
+    const points = (Array.isArray(v.GetSketchPoints) ? v.GetSketchPoints : []).filter(p => p && where && p.sketch === where.name && typeof p.x === "number" && typeof p.y === "number");
+    const middleOf = g => ({ x: (g.start.x + g.end.x) / 2, y: (g.start.y + g.end.y) / 2 });
+    const through = p => g => Math.hypot(middleOf(g).x - p.x, middleOf(g).y - p.y) * MM < 1e-3;
+    const drawn = centres.filter(g => points.some(p => through(p)(g)));
+    if (drawn.length) {
+      const hx = (drawn[0].end.x - drawn[0].start.x) / 2, hy = (drawn[0].end.y - drawn[0].start.y) / 2;
+      centres = points.map(p => drawn.find(through(p)) || { type: "line", start: { x: p.x - hx, y: p.y - hy }, end: { x: p.x + hx, y: p.y + hy } });
+    }
     // The slots as the hole wizard's sketch has them: `keep` keeps them whatever they come to
     const fromSketch = keep => {
       if (!(diameter > 0 && length > 0 && centres.length)) return false;
@@ -1406,7 +1453,6 @@ function importPart(doc, dir) {
         // Measured to the plane that touches the outside of the bend: for a square bend that is the outer
         // corner too. For other angles it is not, and the flange comes out a little long or short.
         if (v.OffsetDimType === 3 && Math.abs(v.BendAngle - Math.PI / 2) > 1e-6) notes.push("its length is measured to the bend's tangent, which is only the same as PeetCAD's at 90 degrees");
-        if (v.OffsetType !== 1) notes.push("its length is up to a vertex in SolidWorks: the distance it had is used");
         // SolidWorks' position offset: the flange set out from its edge (in, reversed)
         const setOut = v.UsePositionOffset && v.PositionOffsetDistance > 0 ? tidy(v.PositionOffsetDistance * MM * (v.ReversePositionOffset ? -1 : 1)) : 0;
         if (setOut && v.PositionOffsetType !== 1) notes.push(`its position offset is up to something (type ${v.PositionOffsetType}): the distance it had is used`);
@@ -1417,6 +1463,21 @@ function importPart(doc, dir) {
         if (found.some(e => !e)) return record(f, "failed", `no edge of the part is within ${NEAR} mm of where SolidWorks has the flange's edge`);
         const far = Math.max(...found.map(e => e.away));
         if (far > 1e-3) notes.push(`its edge is ${far.toFixed(3)} mm from where SolidWorks has it`);
+        // On several edges each edge has an outline of its own, and SolidWorks makes each piece as long as its
+        // outline reaches: a rectangle that rises further or less far from its foot than the first one makes
+        // that piece longer or shorter by as much (the flange's length is the first one's). At 90 degrees the
+        // foot is on the face of the sheet the flange is bent towards, so the length is the rise and the
+        // thickness, whichever outline comes first. An outline of another shape is made to its own reach.
+        const rises = profiles.length === edges.length && edges.length > 1 ? edges.map((e, i) => {
+          const drawn = profiles[i].sketch.segments.filter(g => !g.construction);
+          if (drawn.length !== 4 || drawn.some(g => g.type !== "line" || !g.start || !g.end)) return null;
+          const sf = frameOf(profiles[i].sketch.modelToSketch), s = mm(e.start), along = unit(sub(mm(e.end), s));
+          const away = drawn.flatMap(g => [g.start, g.end]).map(q => { const d = sub(fromSketch(sf, q), s); return len(sub(d, mul(along, dot(d, along)))); });
+          return Math.max(...away) - Math.min(...away);
+        }) : null;
+        const square = Math.abs(angle - 90) < 1e-6 && thickness;
+        const lengthOf = index => !rises || rises[index] === null ? length
+          : square ? rises[index] + thickness : rises[0] !== null ? length + rises[index] - rises[0] : length;
         const ops = found.map((edge, index) => {
           const s = edge.from, along = unit(sub(edge.to, edge.from)), whole = len(sub(edge.to, edge.from));
           let offsets = {}, outline = null;
@@ -1460,12 +1521,27 @@ function importPart(doc, dir) {
           // An outline taller than the flange: the flange is made taller (by more than it can need, the cut
           // takes the rest), so that there is sheet to cut the outline from
           // (A flange's end is its length less the sheet's thickness from the face its outline is drawn from.)
-          if (outline && outline.rise > length - (thickness || 0) + 0.01) {
+          const own = lengthOf(index);
+          if (Math.abs(own - length) > 1e-6) offsets.length = tidy(own);
+          if (outline && outline.rise > own - (thickness || 0) + 0.01) {
             offsets.length = tidy(outline.rise + 2 * ((thickness || 0) + radius) + 1);
             outline.above = offsets.length;
             notes.push("its outline reaches further than its length: the flange is made long enough and cut to the outline");
           }
-          return { edge: { at: edge.middle.map(tidy) }, offsets, outline, found: edge };
+          // The set-backs were read from the edge's `from`: if the flange counts its start from the other end,
+          // they change places
+          let known = false;
+          if ((offsets.offset_start || 0) !== (offsets.offset_end || 0)) {
+            const fromStart = startsAtFrom(edge);
+            known = fromStart !== null;
+            if (fromStart === false) {
+              const [a, b] = [offsets.offset_start, offsets.offset_end];
+              delete offsets.offset_start; delete offsets.offset_end;
+              if (b !== undefined) offsets.offset_start = b;
+              if (a !== undefined) offsets.offset_end = a;
+            }
+          }
+          return { edge: { at: edge.middle.map(tidy) }, offsets, outline, found: edge, known };
         });
         // A relief of the flange's own, where SolidWorks does not use the body's. One given as a width and
         // a depth becomes a ratio of its width: PeetCAD's relief is as deep past the bend as it is wide.
@@ -1489,6 +1565,18 @@ function importPart(doc, dir) {
           // A bend allowance of the flange's own
           ...(v.UseDefaultBendAllowance === false && v.GetCustomBendAllowance ? { bend: bendOf(v) } : {}),
         };
+        // Up to a vertex: the flange runs up to the vertex of the part where SolidWorks' is, its end through
+        // it square to the flange, and follows it. The length it had is where PeetCAD starts from.
+        if (v.OffsetType !== 1) {
+          const ref = v.OffsetReference;
+          const upTo = v.OffsetType === 2 && ref && ref.kind === "vertex" && ref.point ? { at: mm(ref.point).map(tidy) } : null;
+          const fits = upTo && [false, true].some(flip => {
+            const reply = peet.ask({ ...common, up_to: upTo, edge: ops[0].edge, ...ops[0].offsets, flip });
+            return reply.ok && !(reply.created || []).some(c => c.status === "failed");
+          });
+          if (fits) common.up_to = upTo;
+          else notes.push(`its length is up to ${upTo ? "a vertex" : `something (type ${v.OffsetType})`} in SolidWorks${upTo ? " that the part does not have" : ""}: the distance it had is used`);
+        }
         // An outline that is not a rectangle, as the flange's own: drawn on a plane turned about the edge to
         // where SolidWorks' profile sketch is. The flange is made as wide and as long as it reaches and cut
         // to it, and follows it.
@@ -1509,14 +1597,16 @@ function importPart(doc, dir) {
         });
         const withOutline = o => o.native ? { outline: o.native.sketch } : {};
         let built;
-        if (ops.length === 1) built = buildFlange(f, { ...common, edge: ops[0].edge, ...ops[0].offsets, ...withOutline(ops[0]) });
+        if (ops.length === 1) built = buildFlange(f, { ...common, edge: ops[0].edge, ...ops[0].offsets, ...withOutline(ops[0]) }, f.name, null, ops[0].known);
         else {
           built = { ok: true, names: [] };
           ops.forEach((o, i) => {
             if (!built.ok) return;
-            const one = buildFlange(f, { ...common, name: pieceName(i), edge: o.edge, ...o.offsets, ...withOutline(o) });
+            const one = buildFlange(f, { ...common, name: pieceName(i), edge: o.edge, ...o.offsets, ...withOutline(o) }, f.name, null, o.known);
             if (!one.ok) built = one; else built.names.push(...one.names);
           });
+          // A piece that can't be built takes the ones built before it away with it
+          if (!built.ok) for (let i = ops.length - 1; i >= 0; i--) if (peet.ask({ op: "feature", feature: pieceName(i) }).ok) peet.apply({ op: "delete", feature: pieceName(i) });
         }
         // An outline that cuts the sheet apart is not where the flange is (SolidWorks draws some so)
         if (built.ok && outlined.length && /separate pieces/.test(built.warning || "")) {
@@ -1542,7 +1632,7 @@ function importPart(doc, dir) {
           if (cut.name) { built.names.push(cut.sketch, cut.name); notes.push("its outline is not a rectangle: a rectangular flange is made and cut to the outline, which does not follow the part"); return; }
           notes.push(`its outline is not a rectangle: a rectangular flange is made (${cut.error})`);
           // Made longer for an outline it could not then be cut to: back to its own length
-          if (o.offsets.length !== undefined) peet.apply({ op: "edit", feature: pieceName(i), length: common.length });
+          if (o.offsets.length !== undefined) peet.apply({ op: "edit", feature: pieceName(i), length: tidy(lengthOf(i)) });
         });
         if (built.ok && notes.length) built.warning = [...new Set(notes)].join("; ");
         const gap = (v.GapDistance || 0) * MM;
