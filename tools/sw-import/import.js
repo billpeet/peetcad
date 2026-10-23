@@ -1154,6 +1154,36 @@ function importPart(doc, dir) {
   }
 
   /**
+   * A full round fillet (a face rounded off between the two faces beside it), whose faces the export does not
+   * name. Between two parallel faces it is a fillet of half the width on the face's two edges, which meet
+   * where the face was: those edges are read off SolidWorks' round faces of it.
+   */
+  function fullRound(f) {
+    const round = facesOf(f.name).filter(face => face.surface === "cylinder" && face.cylinder && face.box);
+    if (!round.length || round.length !== facesOf(f.name).length) return record(f, "not supported", "a full round fillet that is not round faces between parallel faces");
+    const picks = [];
+    let size = null;
+    for (const face of round) {
+      const axis = unit(face.cylinder.slice(3, 6)), centre = mm(face.cylinder.slice(0, 3)), r = face.cylinder[6] * MM;
+      if (size !== null && Math.abs(size - r) > 1e-6) return record(f, "not supported", "a full round fillet of more than one radius");
+      size = r;
+      const lo = mm(face.box.slice(0, 3)), hi = mm(face.box.slice(3));
+      const towards = sub(mid(lo, hi), centre), bulge = unit(sub(towards, mul(axis, dot(towards, axis))));
+      const side = cross(axis, bulge);
+      const corners = [0, 1, 2, 3, 4, 5, 6, 7].map(i => [i & 1 ? hi[0] : lo[0], i & 2 ? hi[1] : lo[1], i & 4 ? hi[2] : lo[2]]);
+      const along = corners.map(p => dot(sub(p, centre), axis));
+      const [t0, t1] = [Math.min(...along), Math.max(...along)];
+      for (const s of [1, -1]) {
+        const p = add(add(centre, mul(bulge, r)), mul(side, s * r));
+        picks.push({ between: [add(p, mul(axis, t0)).map(tidy), add(p, mul(axis, t1)).map(tidy)] });
+      }
+    }
+    const built = build(f, { op: "fillet", name: f.name, size: tidy(size), edges: picks, chain: false });
+    if (built.ok) built.warning = [built.warning, "a full round fillet, as a fillet of half the width on the two edges of the face it rounds off (read off SolidWorks' round face): it does not follow the width"].filter(Boolean).join("; ");
+    return finish(f, built);
+  }
+
+  /**
    * The face SolidWorks' extrusion goes up to (end condition 4), as a selector, if it is a flat face parallel
    * to the sketch: PeetCAD's extrusion can go up to it and follow it.
    */
@@ -1753,17 +1783,32 @@ function importPart(doc, dir) {
         unfolded = null;
         return record(f, "imported", "nothing to do: a sheet metal cut is made in the flat pattern");
 
-      case "Revolution": {
+      case "Revolution": case "RevCut": {
         const sk = useSketch(f);
         if (sk.error) return record(f, "failed", sk.error);
         const axis = v.Axis && v.Axis.kind === "sketchSegment" && v.Axis.id ? sk.ids.get(v.Axis.id.join(".")) : undefined;
         const angle = (v["GetRevolutionAngle(true)"] || 2 * Math.PI) * 180 / Math.PI;
         let built;
         for (const reverse of [false, true]) {
-          built = build(f, { op: "revolve", sketch: sk.name, name: f.name, angle: tidy(angle), ...(axis !== undefined ? { axis: { line: axis } } : {}), ...(reverse ? { reverse } : {}) });
+          // A boss that SolidWorks does not merge is a body of its own
+          const apart = f.type === "Revolution" && v.Merge === false ? { operation: "new_body" } : {};
+          built = build(f, { op: f.type === "RevCut" ? "cut_revolve" : "revolve", sketch: sk.name, name: f.name, ...apart, angle: tidy(angle), ...(axis !== undefined ? { axis: { line: axis } } : {}), ...(reverse ? { reverse } : {}) });
           if (built.ok || Math.abs(angle - 360) < 1e-6) break;
         }
         return finish(f, built);
+      }
+
+      case "Draft": {
+        // Faces tilted about a neutral plane, picked by a point on each. Which way they lean is tried both
+        // ways, and the one kept that puts the faces where SolidWorks has them.
+        if (v.Type !== 0 || !v.NeutralPlane) return record(f, "not supported", "a draft other than about a neutral plane");
+        const n = v.NeutralPlane;
+        const neutral = n.kind === "feature" ? planes.get(n.name) : n.kind === "face" && n.surface === "plane" && n.point && n.normal ? { at: mm(n.point).map(tidy), normal: n.normal.map(tidy) } : null;
+        if (!neutral) return record(f, "failed", "its neutral plane was not imported");
+        const faces = (v.FacesToDraft || []).filter(x => x && x.point).map(x => ({ at: mm(x.point).map(tidy) }));
+        if (!faces.length || faces.length !== (v.FacesToDraft || []).length) return record(f, "failed", "the faces it drafts were not exported");
+        const angle = tidy(v.Angle * 180 / Math.PI);
+        return finish(f, nearest(f, [false, true].map(flip => ({ op: "draft", name: f.name, faces, neutral, angle, flip }))));
       }
 
       case "ExtruThin": {
@@ -1790,6 +1835,7 @@ function importPart(doc, dir) {
         if (!sheetBody()) {
           // On a solid: PeetCAD's fillet, on the edges SolidWorks rounded. An edge is picked by its ends, a
           // round one by a point on it.
+          if (f.type === "Fillet" && v.Type === 3) return fullRound(f);
           if (f.type !== "Fillet" || v.Type !== 0 || v.IsMultipleRadius || !(v.DefaultRadius > 0)) return record(f, "not supported", f.type === "Fillet" ? "a fillet that is not one radius along edges" : null);
           const picks = [];
           for (const e of v.Edges || []) {
@@ -1846,7 +1892,11 @@ function importPart(doc, dir) {
           const line = x => [x.axis, x.center];
           if (!round.length || round.some(x => { const [a, c] = line(x), [a0, c0] = line(round[0]); return Math.abs(Math.abs(dot(a, a0)) - 1) > 1e-9 || len(cross(sub(c, c0), a0)) > 1e-6; }))
             return record(f, "not supported", "an axis of a round face, where what it was made from has no one axis");
-          return finish(f, build(f, { op: "axis", name: f.name, face: { body: round[0].body, index: round[0].index } }));
+          // Picked by what made it where that is the one face, which follows the part
+          const by = (round[0].made_by || [])[0];
+          const all = peet.ask({ op: "faces" }).faces || [];
+          const unique = by && all.filter(x => (x.made_by || []).some(m => m.feature === by.feature && m.side === by.side)).length === 1;
+          return finish(f, build(f, { op: "axis", name: f.name, face: unique ? { feature: by.feature, side: by.side } : { body: round[0].body, index: round[0].index } }));
         }
         if (v.Type === 0) {
           // The line a revolve of its sketch turns about, on two of the model's planes
