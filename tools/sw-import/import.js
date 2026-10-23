@@ -29,8 +29,14 @@ const jobs = Math.max(1, parseInt(option("--jobs") || "1", 10));
 const flag = name => { const i = args.indexOf(name); if (i >= 0) args.splice(i, 1); return i >= 0; };
 /** Without them a part is the right shape and can't be driven. Leaving them out is much quicker. */
 const relations = !flag("--no-relations");
+/**
+ * A folder of SolidWorks' STEP files (`<Name>.SLDPRT.<configuration>.step`, as the exporter writes them). Where
+ * one is there, the volume to match is its body's as PeetCAD measures it: SolidWorks' own mass properties are
+ * a few parts in 100,000 out for a body with freeform faces (the ends of slanted bends), its STEP body is not.
+ */
+const stepDir = option("--step");
 if (args.length !== 2) {
-  console.error("Usage: node import.js <export.swx.json | folder of exports> <output folder> [--peet <peet executable>] [--only <text>]");
+  console.error("Usage: node import.js <export.swx.json | folder of exports> <output folder> [--peet <peet executable>] [--only <text>] [--step <folder of STEP files>]");
   process.exit(2);
 }
 const [input, outDir] = args.map(a => path.resolve(a));
@@ -753,14 +759,25 @@ function importPart(doc, dir) {
           && Math.abs(dot(sub(face.center, shared), along)) < 0.25 * len(sub(piece.end, piece.start))));
       }
       ends.sort((a, b) => b.area_mm2 - a.area_mm2);
-      if (ends[0]) picks.push({ at: ends[0].center.map(tidy), normal: ends[0].normal.map(tidy) });
+      // SolidWorks' gap is between the two pieces' inner faces' ends, which each stop short of the other's
+      // inner face by the gap times the cosine of half the face's angle at the corner
+      const away = piece => { const far = len(sub(piece.start, shared)) < 1e-3 ? piece.end : piece.start; return unit(sub(far, shared)); };
+      const angle = Math.acos(Math.max(-1, Math.min(1, dot(away(pieces[i]), away(pieces[j])))));
+      if (ends[0]) picks.push({ face: { at: ends[0].center.map(tidy), normal: ends[0].normal.map(tidy) }, gap: tidy(Math.max(gap, 0) * Math.cos(angle / 2)) });
     }
-    if (picks.length === 0) return null;
-    const reply = peet.apply({ op: "corner", name, faces: picks, kind: "open", gap: tidy(Math.max(gap, 0) / Math.SQRT2), relief: "slanted" });
-    if (!reply.ok) return null;
-    const made = (reply.created || [])[0];
-    if (!made || made.status === "failed") { peet.apply({ op: "delete", feature: name }); return null; }
-    return made.name;
+    // One corner feature for each gap
+    const byGap = new Map();
+    for (const p of picks) { if (!byGap.has(p.gap)) byGap.set(p.gap, []); byGap.get(p.gap).push(p.face); }
+    const names = [];
+    for (const [g, faces] of byGap) {
+      const one = name + (names.length ? " " + (names.length + 1) : "");
+      const reply = peet.apply({ op: "corner", name: one, faces, kind: "open", gap: g, relief: "slanted" });
+      if (!reply.ok) continue;
+      const made = (reply.created || [])[0];
+      if (!made || made.status === "failed") { peet.apply({ op: "delete", feature: one }); continue; }
+      names.push(made.name);
+    }
+    return names;
   }
 
   /** The straight edge of the part nearest a SolidWorks edge: parallel to it and within reach. */
@@ -823,6 +840,14 @@ function importPart(doc, dir) {
     const diameter = (v.HoleDiameter || v.ThruHoleDiameter || v.Diameter || 0) * MM, length = (v.Length || 0) * MM;
     const where = (f.sub || []).find(c => SKETCH.test(c.type) && c.sketch && !c.sketch.error && c.sketch.segments.some(g => g.type === "line"));
     const centres = where ? where.sketch.segments.filter(g => g.type === "line" && g.start && g.end && Math.abs(Math.hypot(g.end.x - g.start.x, g.end.y - g.start.y) * MM - length) < 1e-3) : [];
+    // A slot at each of the feature's points: a point with no line of its own gets one like the first's
+    if (centres.length) for (const p of v.GetSketchPoints || []) {
+      if (!(p && p.x != null && p.y != null) || (p.sketch && where && p.sketch !== where.name)) continue;
+      const middle = g => ({ x: (g.start.x + g.end.x) / 2, y: (g.start.y + g.end.y) / 2 });
+      if (centres.some(g => Math.hypot(middle(g).x - p.x, middle(g).y - p.y) * MM < 1e-3)) continue;
+      const g = centres[0], m = middle(g);
+      centres.push({ type: "line", start: { x: g.start.x - m.x + p.x, y: g.start.y - m.y + p.y }, end: { x: g.end.x - m.x + p.x, y: g.end.y - m.y + p.y } });
+    }
     // The slots as the hole wizard's sketch has them: `keep` keeps them whatever they come to
     const fromSketch = keep => {
       if (!(diameter > 0 && length > 0 && centres.length)) return false;
@@ -885,9 +910,10 @@ function importPart(doc, dir) {
    */
   /**
    * A break corner as PeetCAD's own feature. The corners are found from the faces the feature left in
-   * SolidWorks' body: a round's axis is its radius over the cosine of half its sweep from the corner's edge
-   * through the sheet, and a chamfer's face is in front of it. False if a corner's edge is not in the part
-   * (the corner is not square, or the part differs there).
+   * SolidWorks' body: a round's corner is the edge through the sheet nearest it beyond its radius from its
+   * axis, in front of it (a round that a hole cuts in two is one, about one axis), and a chamfer's face is in
+   * front of its corner. Kept if PeetCAD's rounds come to the area SolidWorks' have. False if a corner's
+   * edge is not in the part or the corner can't be broken so.
    */
   function breakCorners(f) {
     if (!sheetBody() || !thickness) return false;
@@ -908,27 +934,44 @@ function importPart(doc, dir) {
     };
     const faces = facesOf(f.name);
     if (faces.length === 0) return false;
+    // The rounds, each about one axis with one radius
+    const rounds = [];
     for (const face of faces) {
       const middle = mid(mm(face.box.slice(0, 3)), mm(face.box.slice(3)));
       if (face.cylinder) {
         const axis = unit(face.cylinder.slice(3, 6)), on = mm(face.cylinder.slice(0, 3)), radius = face.cylinder[6] * MM;
-        const sweep = face.area * 1e6 / (radius * thickness);
-        if (!(sweep > 0.05 && sweep < Math.PI - 0.05)) return false;
-        const reach = radius / Math.cos(sweep / 2);
-        const fits = e => {
-          if (Math.abs(dot(unit(sub(e.to, e.from)), axis)) < 0.9999) return false;
-          const v = sub(e.middle, on);
-          return Math.abs(len(sub(v, mul(axis, dot(v, axis)))) - reach) < 0.02;
-        };
-        if (!take("fillet", radius, fits, middle)) return false;
+        const offAxis = q => { const v = sub(q, on); return len(sub(v, mul(axis, dot(v, axis)))); };
+        const same = rounds.find(r => Math.abs(r.radius - radius) < 1e-6 && Math.abs(Math.abs(dot(r.axis, axis)) - 1) < 1e-9 && offAxis(r.on) < 1e-6 && Math.abs(dot(sub(middle, r.middles[0][0]), axis)) < 1e-3);
+        if (same) { same.middles.push([middle, face.area]); same.area += face.area; continue; }
+        if (offAxis(middle) < 1e-9) return false;
+        rounds.push({ axis, on, radius, middles: [[middle, face.area]], area: face.area });
       } else if (face.plane && face.normal) {
-        // A chamfer's face is the sheet's thickness high and, on a square corner, its distance times
-        // root 2 long: the corner's edge is half that length in front of its middle.
+        // A chamfer's face is the sheet's thickness high, across the corner: the corner's edge is in front
+        // of its middle (half its length in front on a square corner). The distance along each side is
+        // from the corner to an end of the face.
         const normal = unit(face.normal), length = face.area * 1e6 / thickness;
-        const front = [1, -1].map(side => add(middle, mul(normal, side * length / 2)));
-        const fits = e => Math.abs(dot(unit(sub(e.to, e.from)), normal)) < 1e-4 && front.some(q => len(sub(e.middle, q)) < 0.02);
-        if (!take("chamfer", length / Math.SQRT2, fits, middle)) return false;
+        const ahead = e => { const v = sub(e.middle, middle); return { s: Math.abs(dot(v, normal)), off: len(sub(v, mul(normal, dot(v, normal)))) }; };
+        const fits = e => { const { s, off } = ahead(e); return Math.abs(dot(unit(sub(e.to, e.from)), normal)) < 1e-4 && off < 0.02 && s > 1e-3 && s < length; };
+        let best = null;
+        for (const e of edges) if (fits(e) && (!best || ahead(e).s < ahead(best).s)) best = e;
+        if (!best) return false;
+        const size = Math.hypot(length / 2, ahead(best).s);
+        if (!take("chamfer", size, e => e === best, middle)) return false;
       } else return false;
+    }
+    for (const r of rounds) {
+      const total = r.middles.reduce((t, [, a]) => t + a, 0);
+      const middle = r.middles.reduce((t, [q, a]) => add(t, mul(q, a / total)), [0, 0, 0]);
+      const radial = q => { const v = sub(q, r.on); return sub(v, mul(r.axis, dot(v, r.axis))); };
+      const towards = unit(radial(middle));
+      // The corner is beyond the radius from the axis, on the round's side of it: on the line that halves
+      // the corner between two straight sides, near it where a side is an arc
+      const fits = e => {
+        if (Math.abs(dot(unit(sub(e.to, e.from)), r.axis)) < 0.9999) return false;
+        const v = radial(e.middle), d = len(v);
+        return d > r.radius + 1e-3 && d < 4 * r.radius && dot(v, towards) > 0.7 * d;
+      };
+      if (!take("fillet", r.radius, fits, middle)) return false;
     }
     const names = [];
     let n = 0;
@@ -936,6 +979,13 @@ function importPart(doc, dir) {
       const built = build(f, { op: "break_corner", name: f.name + (n++ ? " " + n : ""), kind: g.kind, size: tidy(g.size), edges: g.edges.map(e => ({ between: [e.from, e.to] })) });
       if (!built.ok) { if (names.length) peet.apply({ op: "delete", features: names }); return false; }
       names.push(...built.names);
+    }
+    // The rounds must come to as much as SolidWorks' (a later feature can take some of them): a corner
+    // not found leaves less
+    if (rounds.length) {
+      const theirs = rounds.reduce((t, r) => t + r.area * 1e6, 0);
+      const ours = (peet.ask({ op: "faces" }).faces || []).filter(x => x.surface === "cylinder" && (x.made_by || []).some(m => names.includes(m.feature))).reduce((t, x) => t + x.area_mm2, 0);
+      if (ours < theirs * (1 - 1e-3) - 0.01) { peet.apply({ op: "delete", features: names }); return false; }
     }
     made.set(f.name, names);
     record(f, "imported");
@@ -1451,6 +1501,20 @@ function importPart(doc, dir) {
               const reach = drawn.flatMap(g => [g.start, g.end]).filter(Boolean).map(q => dot(sub(fromSketch(sf, q), s), along));
               if (Math.abs(start) < 1e-3 && Math.min(...reach) < -1e-3) start = Math.min(...reach);
               if (Math.abs(end) < 1e-3 && whole - Math.max(...reach) < -1e-3) end = whole - Math.max(...reach);
+            } else if (Math.abs(v.BendAngle - Math.PI / 2) < 1e-9 && v.OffsetType === 1) {
+              // A rectangle of a flange on several edges has a height of its own, which SolidWorks keeps
+              // when it differs from the feature's length. The length is from the face of the sheet the
+              // flange turns away from: the rectangle's height, and a thickness more if its foot is on the
+              // other face (which SolidWorks' body has a face a thickness behind)
+              const fa = fromSketch(sf, foot.g.start), fu = unit(sub(fromSketch(sf, foot.g.end), fa));
+              const ups = drawn.flatMap(g => [g.start, g.end]).map(q => { const d = sub(fromSketch(sf, q), fa); return sub(d, mul(fu, dot(d, fu))); });
+              const top = ups.reduce((a, b) => len(b) > len(a) ? b : a);
+              const rise = len(top), u = rise > 1e-9 ? unit(top) : null;
+              const levels = u ? (cur.bodies || []).flatMap(b => b.faces).filter(x => x.plane && x.normal && Math.abs(dot(unit(x.normal), u)) > 0.9999).map(x => dot(u, mm(x.plane.slice(3, 6)))) : [];
+              const at = level => levels.some(o => Math.abs(o - level) < 1e-3);
+              const t = thickness || 0, level = u ? dot(u, fa) : 0;
+              const own = !u || !at(level) || at(level - t) === at(level + t) ? null : at(level - t) ? rise + t : rise;
+              if (found.length > 1 && own !== null && Math.abs(own - length) > 1e-3) offsets.length = tidy(own);
             }
             // A foot that runs past an end of the edge is a flange wider than its edge: a negative offset.
             if (Math.abs(start) > 1e-3) offsets.offset_start = tidy(start);
@@ -1551,8 +1615,7 @@ function importPart(doc, dir) {
           const others = cornersWithOthers(f.name, flangeNames, radius);
           if (others) built.names.push(others);
           if (flangeNames.length === edges.length && edges.length > 1) {
-            const corner = corners(f.name + " corners", gap, edges.map((e, i) => ({ name: flangeNames[i], start: mm(e.start), end: mm(e.end) })));
-            if (corner) built.names.push(corner);
+            built.names.push(...corners(f.name + " corners", gap, edges.map((e, i) => ({ name: flangeNames[i], start: mm(e.start), end: mm(e.end) }))));
           }
         }
         if (built.ok) flanges.set(f.name, { name: f.name, common, gap, pieces: edges.map((e, i) => ({ start: mm(e.start), end: mm(e.end), offsets: ops[i].offsets, outline: ops[i].outline })) });
@@ -1939,15 +2002,33 @@ function importPart(doc, dir) {
   const bodies = peet.ask({ op: "bodies" }).bodies || [];
   const total = (mass && mass.total) || {};
   const sw = config.bodies || [];
-  const swVolume = sw.reduce((a, b) => a + b.volume, 0) * 1e9;
+  let swVolume = sw.reduce((a, b) => a + b.volume, 0) * 1e9;
+  const step = stepDir ? measureStep(stepDir, doc.name, config.name) : null;
+  if (step) {
+    report.notes.push(`The volume and box to match are SolidWorks' STEP body's, ${tidy(step.volume)} mm³; SolidWorks reported ${tidy(swVolume)}.`);
+    swVolume = step.volume;
+  }
   const swArea = sw.reduce((a, b) => a + b.area, 0) * 1e6;
-  const swBox = sw.length ? [0, 1, 2].map(i => Math.min(...sw.map(b => b.box[i])) * MM).concat([3, 4, 5].map(i => Math.max(...sw.map(b => b.box[i])) * MM)) : null;
+  // SolidWorks' box is loose round a freeform face (by a tenth of a millimetre at the end of a slanted bend);
+  // its STEP body's, measured as PeetCAD measures its own, is not
+  const swBox = step ? step.box : sw.length ? [0, 1, 2].map(i => Math.min(...sw.map(b => b.box[i])) * MM).concat([3, 4, 5].map(i => Math.max(...sw.map(b => b.box[i])) * MM)) : null;
   const box = total.min ? [...total.min, ...total.max] : null;
   const boxOff = box && swBox ? Math.max(...box.map((x, i) => Math.abs(x - swBox[i]))) : null;
   const volumeOff = total.volume_mm3 && swVolume ? Math.abs(total.volume_mm3 - swVolume) / swVolume : null;
   const flat = bodies.find(b => b.flat_size);
   const swFlat = config.flatDxf ? dxfSize(path.join(path.dirname(doc.__file), config.flatDxf)) : null;
-  const flatOff = flat && swFlat ? Math.max(...[...flat.flat_size].sort((a, b) => a - b).map((x, i) => Math.abs(x - [...swFlat].sort((a, b) => a - b)[i]))) : null;
+  const sizeOff = (p, q) => Math.max(...[...p].sort((a, b) => a - b).map((x, i) => Math.abs(x - [...q].sort((a, b) => a - b)[i])));
+  let flatOff = flat && swFlat ? sizeOff(flat.flat_size, swFlat) : null;
+  // SolidWorks wrote some flat DXFs of the folded part seen square to two of its axes, not of its blank: the
+  // drawing is the size of the part's box that way (as the box is measured, a hundredth or so loose round
+  // a freeform face), and the part is bent (its box is thicker than the sheet)
+  if (flatOff !== null && flatOff >= 1e-2 && thickness) {
+    const seen = [swBox, box].filter(Boolean).some(b => {
+      const size = [0, 1, 2].map(i => b[i + 3] - b[i]);
+      return [[0, 1], [0, 2], [1, 2]].some(([i, j]) => sizeOff([size[i], size[j]], swFlat) < 2e-2 && size[3 - i - j] > thickness + 1e-2);
+    });
+    if (seen) { flatOff = null; report.notes.push("SolidWorks' flat DXF is a view of the folded part, not its blank: the flat size is not compared"); }
+  }
   report.solidworks = { bodies: sw.length, volume_mm3: +swVolume.toFixed(3), area_mm2: +swArea.toFixed(3), box: swBox && swBox.map(tidy), flat_size: swFlat };
   report.peetcad = { bodies: bodies.length, volume_mm3: total.volume_mm3, area_mm2: total.area_mm2, box, flat_size: flat && flat.flat_size, sheet_metal: bodies.some(b => b.sheet_metal) };
   report.difference = { volume: volumeOff, box_mm: boxOff, flat_mm: flatOff };
@@ -2166,8 +2247,9 @@ function importPart(doc, dir) {
         const entry = entries.get(other);
         if (!entry || !peet.apply({ op: "configuration", configuration: other.name }).ok) continue;
         const now = (peet.ask({ op: "mass" }).total) || {};
-        const volume = (other.bodies || []).reduce((sum, body) => sum + body.volume, 0) * 1e9;
-        const theirBox = (other.bodies || []).length ? [0, 1, 2].map(i => Math.min(...other.bodies.map(body => body.box[i])) * MM).concat([3, 4, 5].map(i => Math.max(...other.bodies.map(body => body.box[i])) * MM)) : null;
+        const step = stepDir ? measureStep(stepDir, doc.name, other.name) : null;
+        const volume = step ? step.volume : (other.bodies || []).reduce((sum, body) => sum + body.volume, 0) * 1e9;
+        const theirBox = step ? step.box : (other.bodies || []).length ? [0, 1, 2].map(i => Math.min(...other.bodies.map(body => body.box[i])) * MM).concat([3, 4, 5].map(i => Math.max(...other.bodies.map(body => body.box[i])) * MM)) : null;
         const off = now.volume_mm3 && volume ? Math.abs(now.volume_mm3 - volume) / volume : null;
         const boxDiff = now.min && theirBox ? Math.max(...[...now.min, ...now.max].map((x, i) => Math.abs(x - theirBox[i]))) : null;
         entry.difference = { volume: off, box_mm: boxDiff };
@@ -2184,6 +2266,23 @@ function importPart(doc, dir) {
   fs.writeFileSync(path.join(dir, doc.name + ".jsonl"), peet.script.map(l => typeof l === "string" ? l : JSON.stringify(l)).join("\n") + "\n");
   fs.writeFileSync(path.join(dir, doc.name + ".report.json"), JSON.stringify(report, null, 1));
   return report;
+}
+
+/**
+ * The volume and box of SolidWorks' STEP body for a configuration, as PeetCAD measures them, or null if there
+ * is no such file or PeetCAD can't read it. The exporter writes `<Name>.SLDPRT.<configuration>.step`, with characters a
+ * file name can't have as `_`, and the extension's case as the part's file has it.
+ */
+function measureStep(dir, name, configuration) {
+  if (!fs.existsSync(dir)) return null;
+  const want = `${name}.sldprt.${configuration.replace(/[<>:"/\\|?*]/g, "_")}.step`.toLowerCase();
+  const file = fs.readdirSync(dir).find(f => f.toLowerCase() === want);
+  if (!file) return null;
+  const reply = spawnSync(peetExe, ["op", JSON.stringify({ op: "import_step", path: path.join(dir, file) }), JSON.stringify({ op: "mass" }), "--no-save", "-q"], { encoding: "utf8", maxBuffer: 1 << 28 });
+  try {
+    const total = JSON.parse((reply.stdout || "").trim().split("\n").pop()).total;
+    return total && total.volume_mm3 > 0 && total.min ? { volume: total.volume_mm3, box: [...total.min, ...total.max] } : null;
+  } catch { return null; }
 }
 
 /** The size of a DXF drawing, from its header. */
@@ -2207,7 +2306,7 @@ if (jobs > 1 && chosen.length > 1) {
   // Each part in a process of its own, then the reports they wrote are read back for the summary
   const { spawn } = require("child_process");
   const queue = [...chosen];
-  const pass = [...(relations ? [] : ["--no-relations"]), "--peet", peetExe];
+  const pass = [...(relations ? [] : ["--no-relations"]), "--peet", peetExe, ...(stepDir ? ["--step", stepDir] : [])];
   const next = () => {
     const file = queue.shift();
     if (!file) return Promise.resolve();
