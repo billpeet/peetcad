@@ -473,6 +473,17 @@ reference_field!(PointF, PointSel, PointRef, required: true, nullable: false, "p
         PointRef::Vertex(v) => vertex_out(v, doc),
     },
     arg: |p, _| p.clone().into());
+reference_field!(OptPoint, Option<PointSel>, Option<PointRef>, required: false, nullable: true,
+    "\"origin\", a reference point or a vertex selector, or null for none",
+    parse: |v| or_null(v, PointSel::parse),
+    assign: |a, doc| a.as_ref().map(|p| select::point(doc, p)).transpose(),
+    read: |p, doc| match p {
+        None => Value::Null,
+        Some(PointRef::Origin) => json!("origin"),
+        Some(PointRef::Feature(id)) => json!(doc.model.name_of(*id)),
+        Some(PointRef::Vertex(v)) => vertex_out(v, doc),
+    },
+    arg: |p, _| p.clone().map(Into::into));
 reference_field!(FaceF, FaceSel, FaceRef, required: true, nullable: false, "face",
     parse: FaceSel::parse,
     assign: |a, doc| select::face_ref(doc, a),
@@ -1116,7 +1127,7 @@ feature_args! {
 feature_args! {
     /// A flange with a bend on an edge of a sheet metal body.
     EdgeFlange: FeatureKind::EdgeFlange(f) => &mut **f,
-        EdgeFlangeFeature { edge, length, angle, position, offset_start, offset_end, flip, radius, relief, relief_ratio, bend, position_offset, outline } => {
+        EdgeFlangeFeature { edge, length, angle, position, offset_start, offset_end, flip, radius, relief, relief_ratio, bend, position_offset, outline, up_to } => {
     /// `Some(None)`: to be picked afterwards.
     edge: Option<EdgeSel> as OptEdge = edge,
     length: Input as Length = length,
@@ -1139,6 +1150,9 @@ feature_args! {
     position_offset: Input as Length = position_offset,
     /// A sketch of the flange's shape, or null for a plain rectangle.
     outline: Option<FeatureSel> as OptionalSketch = outline,
+    /// A point the flange runs up to in place of its length (SolidWorks' up to vertex),
+    /// or null for its length.
+    up_to: Option<PointSel> as OptPoint = up_to,
     }
 }
 

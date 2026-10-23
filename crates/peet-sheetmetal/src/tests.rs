@@ -1957,3 +1957,94 @@ fn a_profile_bend_with_its_own_model() {
     assert_close(bend.values.allowance, 2.0 * bend.values.outside_setback() - 0.1, 1e-9);
     built(layout);
 }
+
+#[test]
+fn a_flange_up_to_a_point() {
+    // SolidWorks' "up to vertex": the flange's end goes through the point, square to the
+    // flange, whatever length it was given to start from.
+    for (angle, start) in [(90.0_f64, 10.0), (105.0, 40.0), (60.0, 25.0)] {
+        let mut layout = plate_layout(settings(0.5));
+        let mut spec = flange(start, FlangePosition::MaterialInside);
+        spec.angle = angle;
+        let point = DVec3::new(50.0, H + 5.0, 37.0);
+        let length = layout
+            .edge_flange_length_to(2, 0, &top_edge(true), &spec, FlangeOwn::default(), point)
+            .unwrap();
+        spec.length = length;
+        layout.add_edge_flange(2, &top_edge(true), &spec).unwrap();
+        // It reads back as laid out
+        assert_close(layout.edge_flange_length(0).unwrap(), length, 1e-9);
+        let (solid, _) = built(layout);
+        let a = angle.to_radians();
+        let along = DVec3::new(0.0, a.cos(), a.sin());
+        let end = solid
+            .vertices
+            .iter()
+            .map(|v| v.point.dot(along))
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert_close(end, point.dot(along), 1e-6);
+    }
+    // A point behind the bend is refused
+    let layout = plate_layout(settings(0.5));
+    let err = layout
+        .edge_flange_length_to(
+            2,
+            0,
+            &top_edge(true),
+            &flange(10.0, FlangePosition::MaterialInside),
+            FlangeOwn::default(),
+            DVec3::new(50.0, H, 0.5),
+        )
+        .unwrap_err();
+    assert!(err.contains("behind the flange's bend"), "{err}");
+}
+
+#[test]
+fn a_flange_beside_a_cut_may_share_a_sliver() {
+    // A cut takes a strip 3 wide off the plate's side, its end drawn a few microns off
+    // square, and a flange goes on the edge it leaves, outwards. In the flat pattern the
+    // flange's end runs a few microns into the sheet beyond the cut, as SolidWorks' does:
+    // that sliver stays with the plate rather than counting as an overlap.
+    let tag = |i: usize| CurveTag::Sketch {
+        owner: 9,
+        entity: i as u32,
+    };
+    let cut = |end: [f64; 2]| {
+        Area::polygon(
+            &[
+                DVec2::new(W - 3.0, -1.0),
+                DVec2::new(W + 1.0, -1.0),
+                DVec2::new(W + 1.0, end[1]),
+                DVec2::new(W, end[1]),
+                DVec2::new(W - 3.0, end[0]),
+            ],
+            tag,
+        )
+    };
+    let site = |end: f64| EdgeSite {
+        piece: 0,
+        a: DVec2::new(W - 3.0, 0.0),
+        b: DVec2::new(W - 3.0, end),
+        top: true,
+    };
+    let mut layout = plate_layout(settings(0.5));
+    layout.add_cut(cut([40.004, 40.0]));
+    layout
+        .add_edge_flange(
+            2,
+            &site(40.004),
+            &flange(10.0, FlangePosition::MaterialInside),
+        )
+        .unwrap();
+    built(layout);
+    // A real overlap is still refused
+    let mut long = plate_layout(settings(0.5));
+    long.add_cut(cut([41.0, 39.0]));
+    long.add_edge_flange(
+        2,
+        &site(41.0),
+        &flange(10.0, FlangePosition::MaterialInside),
+    )
+    .unwrap();
+    assert!(matches!(build(long), Err(SheetError::Overlap { .. })));
+}

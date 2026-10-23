@@ -926,9 +926,16 @@ impl Engine {
             }
             FeatureKind::EdgeFlange(e) => match sheet::edge_flange_spec(e, &model.parameters)
                 .and_then(|spec| Ok((spec, e.outline.map(|s| ctx.sketch_input(s)).transpose()?)))
-            {
+                .and_then(|(spec, outline)| {
+                    let up_to = e
+                        .up_to
+                        .as_ref()
+                        .map(|p| ctx.point(p).map_err(|m| format!("Up to: {m}")))
+                        .transpose()?;
+                    Ok((spec, outline, up_to))
+                }) {
                 Err(m) => fail(m, Output::None),
-                Ok((spec, outline)) => {
+                Ok((spec, outline, up_to)) => {
                     // The relief ratio as it evaluates now: the definition only holds its
                     // expression.
                     let ratio = e
@@ -948,9 +955,18 @@ impl Engine {
                     let values =
                         (spec.length, spec.angle, spec.offsets, spec.radius, ratio, bend, set_out);
                     let outline_key = e.outline.and_then(|s| run.out_keys.get(&s).copied());
-                    let key = hash::of(&(4u8, id, &**e, run.body_key, values, outline_key));
+                    let up_to_key = up_to.map(|p| p.to_array());
+                    let key = hash::of(&(
+                        4u8,
+                        id,
+                        &**e,
+                        run.body_key,
+                        values,
+                        outline_key,
+                        up_to_key,
+                    ));
                     self.solid_feature(id, key, run, |bodies| {
-                        sheet::apply_edge_flange(id, model, bodies, e, &spec, outline, key)
+                        sheet::apply_edge_flange(id, model, bodies, e, &spec, outline, up_to, key)
                     })
                 }
             },

@@ -623,6 +623,17 @@ fn flange_copies(
         FeatureError("the flange it copies is not on a sheet metal body".to_owned())
     })?;
     let mut layout = sheet.layout.clone();
+    // A flange that runs up to a point: its copies are as long as it came out
+    let length = def
+        .up_to
+        .as_ref()
+        .and_then(|_| {
+            layout
+                .attachments
+                .iter()
+                .position(|a| a.owner == original.0)
+        })
+        .and_then(|k| layout.edge_flange_length(k));
     let t = layout.settings.thickness;
     let parent = &layout.pieces[at.parent];
     // The original's bend: which way it goes, in the model
@@ -678,6 +689,9 @@ fn flange_copies(
         let top = (way.dot(layout.pieces[piece].frame.z_axis()) > 0.0) != spec.flip;
         let site = peet_sheetmetal::EdgeSite { piece, a, b, top };
         let mut copy_spec = *spec;
+        if let Some(length) = length {
+            copy_spec.length = length;
+        }
         if turned {
             copy_spec.offsets = [spec.offsets[1], spec.offsets[0]];
         }

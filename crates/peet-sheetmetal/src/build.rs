@@ -565,6 +565,17 @@ impl UnionFind {
     }
 }
 
+/// How thin a region of the flat pattern may be, as a fraction of the thickness, for two
+/// pieces to share it without that counting as an overlap.
+const SLIVER: f64 = 0.005;
+
+/// Whether a region is a sliver: nowhere wider than [`SLIVER`] times the thickness `t`
+/// (twice its area over its perimeter, which for a thin region is about its width).
+fn is_sliver(region: &Region, t: f64) -> bool {
+    let perimeter: f64 = region.outer.edges.iter().map(|e| e.curve.length()).sum();
+    perimeter > 0.0 && 2.0 * region.area().abs() / perimeter < SLIVER * t
+}
+
 /// A point strictly inside a region (the centroid of its largest triangle).
 fn interior_point(region: &Region) -> Option<DVec2> {
     let (lo, hi) = region.outer.bounds();
@@ -841,6 +852,12 @@ impl Flat {
                     continue;
                 }
                 if let Some(prev) = owner {
+                    // A sliver two pieces share, as where a flange ends a few microns past
+                    // the corner of a cut beside it, stays with the earlier piece: SolidWorks
+                    // builds such a part, and the later piece loses next to nothing.
+                    if is_sliver(&region, layout.settings.thickness) {
+                        continue;
+                    }
                     return Err(SheetError::Overlap {
                         a: layout.pieces[prev].origin,
                         b: piece.origin,
