@@ -662,6 +662,37 @@ impl Field for OptBend {
     }
 }
 
+/// A bend model for each bend of a profile, each a bend model or null for the body's.
+pub(crate) struct OptBends;
+
+impl Field for OptBends {
+    type Arg = Vec<Option<Bend>>;
+    type Target = Vec<Option<BendModelDef>>;
+    fn describe() -> String {
+        format!("list of {}, one for each bend along the profile", OptBend::describe())
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        let list = v.as_array().ok_or("expected a list, one bend model or null for each bend")?;
+        list.iter().map(OptBend::parse).collect()
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        let mut out = Vec::with_capacity(arg.len());
+        for a in arg {
+            let mut model = None;
+            OptBend::assign(a, &mut model, doc)?;
+            out.push(model);
+        }
+        *target = out;
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        Value::Array(target.iter().map(|t| OptBend::read(t, doc)).collect())
+    }
+    fn arg(target: &Self::Target, doc: &Document) -> Option<Self::Arg> {
+        target.iter().map(|t| OptBend::arg(t, doc)).collect()
+    }
+}
+
 reference_field!(RevolveAxisF, RevolveAxis, RevolveAxisRef, required: false, nullable: false,
 "sketch_x | sketch_y | {\"line\": id of a line of the sketch} | axis (default: the sketch's first construction line, else sketch_y)",
 parse: RevolveAxis::parse,
@@ -1063,6 +1094,7 @@ feature_args! {
             depth,
             symmetric,
             flip_depth,
+            bends,
         } => {
     sketch: FeatureSel as SketchF = sketch,
     thickness: Input as Length = thickness,
@@ -1076,6 +1108,8 @@ feature_args! {
     depth: Input as Length = depth,
     symmetric: bool as Flag = symmetric,
     flip_depth: bool as Flag = flip_depth,
+    /// Open profiles: a bend model of each bend's own, in order along the profile.
+    bends: Vec<Option<Bend>> as OptBends = bends,
     }
 }
 

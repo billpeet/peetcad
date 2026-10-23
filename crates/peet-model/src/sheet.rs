@@ -199,13 +199,25 @@ pub(crate) fn apply_base_flange(
         } else {
             [0.0, d]
         };
-        Layout::open_profile(
+        // Each bend's own model, where it has one
+        let models = input
+            .def
+            .bends
+            .iter()
+            .enumerate()
+            .map(|(k, b)| {
+                bend_model(b.as_ref(), &input.model.parameters)
+                    .map_err(|m| FeatureError(format!("Bend {}: {m}", k + 1)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Layout::open_profile_with(
             input.settings,
             owner,
             &input.plane,
             &chain,
             depth,
             input.def.reverse,
+            &models,
         )
     }
     .map_err(FeatureError)?;
@@ -352,11 +364,19 @@ pub(crate) fn edge_flange_bend(
     def: &EdgeFlangeFeature,
     params: &Parameters,
 ) -> Result<Option<BendModel>, String> {
+    bend_model(def.bend.as_ref(), params)
+}
+
+/// A bend model of a feature's own, evaluated. `None` for the body's.
+pub(crate) fn bend_model(
+    def: Option<&BendModelDef>,
+    params: &Parameters,
+) -> Result<Option<BendModel>, String> {
     let value = |s: &crate::Scalar, kind, label: &str| {
         s.evaluate(kind, params)
             .map_err(|m| format!("{label}: {m}."))
     };
-    Ok(match &def.bend {
+    Ok(match def {
         None => None,
         Some(BendModelDef::KFactor(k)) => {
             Some(BendModel::KFactor(value(k, ScalarKind::Number, "K-factor")?))

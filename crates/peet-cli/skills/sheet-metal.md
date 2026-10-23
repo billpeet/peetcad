@@ -170,6 +170,16 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
   {"op": "edge_flange", "name": "Hood", "length": 60, "angle": 105, "bend": {"deduction": 3.5}, "edges": [{"between": [[0, 0, 2], [200, 0, 2]]}]}
   {"op": "bend_table"}
   ```
+- The bends of a base flange from an open profile take `bends`: a bend model or `null`
+  for each, in order along the profile, as SolidWorks' sketched bends can have their
+  own. Give a shallow bend a smaller deduction when "Corner N: The bend allowance works
+  out at ..." says the body's is too big for it.
+
+  ```jsonl
+  {"op": "sketch", "on": "front", "draw": [{"type": "polyline", "points": [[0, 0], [100, 0], [200, 20], [200, 40]]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.1, "bend": {"deduction": 2.5}, "depth": 50, "bends": [{"deduction": 0.1}, null]}
+  {"op": "bend_table"}
+  ```
 - A **negative** offset runs an edge flange or a hem past that end of its edge, for one
   wider than the sheet it is bent from: `"offset_end": -12` ends it 12 beyond the
   edge. The bend stays on the edge and the flange overhangs it, with no relief. The

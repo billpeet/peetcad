@@ -149,6 +149,33 @@ function joinInLine(segments) {
   return lines.length < segments.length ? lines.map(g => ({ type: "line", ...g })) : segments;
 }
 
+/**
+ * The angles a profile of lines turns through at its corners, in order from one end: what each bend of a
+ * base flange from it turns through.
+ */
+function profileAngles(lines) {
+  const ends = new Map();
+  for (const g of lines) for (const p of [g.start, g.end]) ends.set(spot(p), (ends.get(spot(p)) || 0) + 1);
+  const first = lines.find(g => ends.get(spot(g.start)) === 1 || ends.get(spot(g.end)) === 1);
+  if (!first) return [];
+  const chain = [], left = [...lines];
+  let at = ends.get(spot(first.start)) === 1 ? first.start : first.end;
+  while (left.length) {
+    const k = left.findIndex(g => spot(g.start) === spot(at) || spot(g.end) === spot(at));
+    if (k < 0) break;
+    const g = left.splice(k, 1)[0];
+    const [a, b] = spot(g.start) === spot(at) ? [g.start, g.end] : [g.end, g.start];
+    chain.push([b.x - a.x, b.y - a.y]);
+    at = b;
+  }
+  const angles = [];
+  for (let i = 0; i + 1 < chain.length; i++) {
+    const [u, v] = [chain[i], chain[i + 1]];
+    angles.push(Math.atan2(Math.abs(u[0] * v[1] - u[1] * v[0]), u[0] * v[0] + u[1] * v[1]));
+  }
+  return angles;
+}
+
 /** The standard plane that lies where this frame does, if one does. */
 function standardPlane(f) {
   if (Math.abs(Math.abs(f.n[2]) - 1) < 1e-9 && Math.abs(f.o[2]) < 1e-6) return "top";
@@ -1092,9 +1119,25 @@ function importPart(doc, dir) {
     };
     let best = null;
     const mark = peet.script.length;
-    for (const reverse of [op.reverse, !op.reverse]) {
+    // Each bend's own bend model, from SolidWorks' sketched bends under it, given to the corner of the same
+    // angle. Which end of the profile PeetCAD counts the bends from is tried both ways.
+    const own = (f.sub || []).filter(x => x.type === "SketchBend" && !x.suppressed).map(x => values(x)).map(b => ({
+      angle: b.BendAngle, model: b.UseDefaultBendAllowance === false && b.GetCustomBendAllowance ? bendOf(b) : null, used: false,
+    }));
+    const orders = [undefined];
+    if (own.some(b => b.model)) {
+      const corners = profileAngles(joined);
+      const bends = corners.map(a => {
+        const b = own.filter(x => !x.used).sort((p, q) => Math.abs(p.angle - a) - Math.abs(q.angle - a))[0];
+        if (!b || Math.abs(b.angle - a) > 1e-3) return null;
+        b.used = true;
+        return b.model;
+      });
+      if (bends.some(Boolean)) orders.splice(0, 1, bends, [...bends].reverse());
+    }
+    for (const bends of orders) for (const reverse of [op.reverse, !op.reverse]) {
       for (const flip_depth of symmetric ? [false] : [false, true]) {
-        const tried = { ...op, sketch, reverse, depth: tidy(depth), ...(symmetric ? { symmetric: true } : { flip_depth }) };
+        const tried = { ...op, sketch, reverse, depth: tidy(depth), ...(symmetric ? { symmetric: true } : { flip_depth }), ...(bends ? { bends } : {}) };
         const built = build(f, tried);
         if (!built.ok) { if (!best) best = { built }; continue; }
         const s = score();
@@ -1449,10 +1492,13 @@ function importPart(doc, dir) {
         // An outline that is not a rectangle, as the flange's own: drawn on a plane turned about the edge to
         // where SolidWorks' profile sketch is. The flange is made as wide and as long as it reaches and cut
         // to it, and follows it.
+        // A piece of a flange on several edges is named after it, numbered; with a space where SolidWorks
+        // has a feature of that name already (Edge-Flange1 on two edges beside an Edge-Flange11)
+        const pieceName = i => ops.length === 1 ? f.name : byName.has(f.name + (i + 1)) ? `${f.name} ${i + 1}` : f.name + (i + 1);
         const outlined = [];
         ops.forEach((o, i) => {
           if (!o.outline || rectangular.has(f.name)) return;
-          const piece = f.name + (ops.length > 1 ? i + 1 : "");
+          const piece = pieceName(i);
           const sf = frameOf(o.outline.sketch.sketch.modelToSketch);
           const plane = piece + " outline plane";
           if (!planeAbout(plane, { between: [o.found.from.map(tidy), o.found.to.map(tidy)] }, sf)) return;
@@ -1468,7 +1514,7 @@ function importPart(doc, dir) {
           built = { ok: true, names: [] };
           ops.forEach((o, i) => {
             if (!built.ok) return;
-            const one = buildFlange(f, { ...common, name: f.name + (i + 1), edge: o.edge, ...o.offsets, ...withOutline(o) });
+            const one = buildFlange(f, { ...common, name: pieceName(i), edge: o.edge, ...o.offsets, ...withOutline(o) });
             if (!one.ok) built = one; else built.names.push(...one.names);
           });
         }
@@ -1492,11 +1538,11 @@ function importPart(doc, dir) {
         // An outline that is not a rectangle and could not be the flange's own: the flange is cut to it
         if (built.ok) ops.forEach((o, i) => {
           if (!o.outline || o.native) return;
-          const cut = cutToOutline(f, f.name + (ops.length > 1 ? i + 1 : "") + " outline", o.outline);
+          const cut = cutToOutline(f, pieceName(i) + " outline", o.outline);
           if (cut.name) { built.names.push(cut.sketch, cut.name); notes.push("its outline is not a rectangle: a rectangular flange is made and cut to the outline, which does not follow the part"); return; }
           notes.push(`its outline is not a rectangle: a rectangular flange is made (${cut.error})`);
           // Made longer for an outline it could not then be cut to: back to its own length
-          if (o.offsets.length !== undefined) peet.apply({ op: "edit", feature: ops.length > 1 ? f.name + (i + 1) : f.name, length: common.length });
+          if (o.offsets.length !== undefined) peet.apply({ op: "edit", feature: pieceName(i), length: common.length });
         });
         if (built.ok && notes.length) built.warning = [...new Set(notes)].join("; ");
         const gap = (v.GapDistance || 0) * MM;

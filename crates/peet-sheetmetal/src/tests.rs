@@ -1920,3 +1920,40 @@ fn a_flange_shaped_to_an_outline() {
     // K = 0.5 keeps the volume: the blank is the folded part laid flat.
     assert_close(measure::volume(&solid), measure::volume(&body.flat), 1e-3);
 }
+
+#[test]
+fn a_profile_bend_with_its_own_model() {
+    // SolidWorks' sketched bends can each have a deduction of their own: a shallow bend
+    // whose body deduction would make its allowance negative takes a smaller one.
+    let mut s = settings(0.5);
+    s.model = BendModel::Deduction(3.65);
+    s.radius = 0.1;
+    let chain = [
+        ChainLine {
+            entity: 1,
+            a: DVec2::new(0.0, 0.0),
+            b: DVec2::new(100.0, 0.0),
+        },
+        ChainLine {
+            entity: 2,
+            a: DVec2::new(100.0, 0.0),
+            b: DVec2::new(200.0, 20.0),
+        },
+    ];
+    let plane = Plane::front();
+    let err = Layout::open_profile(s, 1, &plane, &chain, [0.0, 50.0], false).unwrap_err();
+    assert!(err.contains("Corner 1"), "{err}");
+    let layout = Layout::open_profile_with(
+        s,
+        1,
+        &plane,
+        &chain,
+        [0.0, 50.0],
+        false,
+        &[Some(BendModel::Deduction(0.1))],
+    )
+    .unwrap();
+    let bend = layout.bends().next().unwrap().1;
+    assert_close(bend.values.allowance, 2.0 * bend.values.outside_setback() - 0.1, 1e-9);
+    built(layout);
+}

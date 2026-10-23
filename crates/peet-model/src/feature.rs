@@ -349,6 +349,9 @@ pub struct BaseFlangeFeature {
     pub symmetric: bool,
     /// Open profiles: extrude against the sketch normal.
     pub flip_depth: bool,
+    /// Open profiles: a bend model of each bend's own, in order along the profile (`None`,
+    /// or none given: the body's), as SolidWorks' sketched bends can have.
+    pub bends: Vec<Option<BendModelDef>>,
 }
 
 impl BaseFlangeFeature {
@@ -360,6 +363,47 @@ impl BaseFlangeFeature {
             depth: Scalar::new(50.0),
             symmetric: false,
             flip_depth: false,
+            bends: Vec::new(),
+        }
+    }
+}
+
+/// A base flange as model schemas through 11 stored it: before its bends could have models
+/// of their own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct BaseFlangeFeatureV11 {
+    sketch: FeatureId,
+    settings: SheetSettingsDef,
+    reverse: bool,
+    depth: Scalar,
+    symmetric: bool,
+    flip_depth: bool,
+}
+
+impl From<BaseFlangeFeatureV11> for BaseFlangeFeature {
+    fn from(b: BaseFlangeFeatureV11) -> Self {
+        Self {
+            sketch: b.sketch,
+            settings: b.settings,
+            reverse: b.reverse,
+            depth: b.depth,
+            symmetric: b.symmetric,
+            flip_depth: b.flip_depth,
+            bends: Vec::new(),
+        }
+    }
+}
+
+impl From<&BaseFlangeFeature> for BaseFlangeFeatureV11 {
+    /// The old layout, which has no room for the bends' own models.
+    fn from(b: &BaseFlangeFeature) -> Self {
+        Self {
+            sketch: b.sketch,
+            settings: b.settings.clone(),
+            reverse: b.reverse,
+            depth: b.depth.clone(),
+            symmetric: b.symmetric,
+            flip_depth: b.flip_depth,
         }
     }
 }
@@ -1464,7 +1508,7 @@ pub(crate) enum FeatureKindV9 {
     Axis(AxisDef),
     Point(PointDef),
     CoordSystem(CoordSystemDef),
-    BaseFlange(Box<BaseFlangeFeature>),
+    BaseFlange(Box<BaseFlangeFeatureV11>),
     EdgeFlange(Box<EdgeFlangeFeatureV11>),
     SheetCut(Box<SheetCutFeatureV11>),
     Hem(Box<HemFeature>),
@@ -1496,7 +1540,7 @@ impl From<FeatureKindV9> for FeatureKind {
             FeatureKindV9::Axis(v) => Self::Axis(v),
             FeatureKindV9::Point(v) => Self::Point(v),
             FeatureKindV9::CoordSystem(v) => Self::CoordSystem(v),
-            FeatureKindV9::BaseFlange(v) => Self::BaseFlange(v),
+            FeatureKindV9::BaseFlange(v) => Self::BaseFlange(Box::new((*v).into())),
             FeatureKindV9::EdgeFlange(v) => Self::EdgeFlange(Box::new((*v).into())),
             FeatureKindV9::SheetCut(v) => Self::SheetCut(Box::new((*v).into())),
             FeatureKindV9::Hem(v) => Self::Hem(v),
@@ -1530,7 +1574,7 @@ impl From<FeatureKind> for FeatureKindV9 {
             FeatureKind::Axis(v) => Self::Axis(v),
             FeatureKind::Point(v) => Self::Point(v),
             FeatureKind::CoordSystem(v) => Self::CoordSystem(v),
-            FeatureKind::BaseFlange(v) => Self::BaseFlange(v),
+            FeatureKind::BaseFlange(v) => Self::BaseFlange(Box::new((&*v).into())),
             FeatureKind::EdgeFlange(v) => Self::EdgeFlange(Box::new((&*v).into())),
             FeatureKind::SheetCut(v) => Self::SheetCut(Box::new((&*v).into())),
             FeatureKind::Hem(v) => Self::Hem(v),
@@ -1614,7 +1658,7 @@ pub(crate) enum FeatureKindV11 {
     Axis(AxisDef),
     Point(PointDef),
     CoordSystem(CoordSystemDef),
-    BaseFlange(Box<BaseFlangeFeature>),
+    BaseFlange(Box<BaseFlangeFeatureV11>),
     EdgeFlange(Box<EdgeFlangeFeatureV11>),
     SheetCut(Box<SheetCutFeatureV11>),
     Hem(Box<HemFeature>),
@@ -1646,7 +1690,7 @@ impl From<FeatureKindV11> for FeatureKind {
             FeatureKindV11::Axis(v) => Self::Axis(v),
             FeatureKindV11::Point(v) => Self::Point(v),
             FeatureKindV11::CoordSystem(v) => Self::CoordSystem(v),
-            FeatureKindV11::BaseFlange(v) => Self::BaseFlange(v),
+            FeatureKindV11::BaseFlange(v) => Self::BaseFlange(Box::new((*v).into())),
             FeatureKindV11::EdgeFlange(v) => Self::EdgeFlange(Box::new((*v).into())),
             FeatureKindV11::SheetCut(v) => Self::SheetCut(Box::new((*v).into())),
             FeatureKindV11::Hem(v) => Self::Hem(v),
@@ -1680,7 +1724,7 @@ impl From<FeatureKind> for FeatureKindV11 {
             FeatureKind::Axis(v) => Self::Axis(v),
             FeatureKind::Point(v) => Self::Point(v),
             FeatureKind::CoordSystem(v) => Self::CoordSystem(v),
-            FeatureKind::BaseFlange(v) => Self::BaseFlange(v),
+            FeatureKind::BaseFlange(v) => Self::BaseFlange(Box::new((&*v).into())),
             FeatureKind::EdgeFlange(v) => Self::EdgeFlange(Box::new((&*v).into())),
             FeatureKind::SheetCut(v) => Self::SheetCut(Box::new((&*v).into())),
             FeatureKind::Hem(v) => Self::Hem(v),
@@ -1856,7 +1900,7 @@ pub(crate) enum FeatureKindV8 {
     Axis(AxisDef),
     Point(PointDef),
     CoordSystem(CoordSystemDef),
-    BaseFlange(Box<BaseFlangeFeature>),
+    BaseFlange(Box<BaseFlangeFeatureV11>),
     EdgeFlange(Box<EdgeFlangeFeatureV11>),
     SheetCut(Box<SheetCutFeatureV11>),
     Hem(Box<HemFeature>),
@@ -1892,7 +1936,7 @@ impl From<FeatureKindV8> for FeatureKind {
             FeatureKindV8::Axis(v) => Self::Axis(v),
             FeatureKindV8::Point(v) => Self::Point(v),
             FeatureKindV8::CoordSystem(v) => Self::CoordSystem(v),
-            FeatureKindV8::BaseFlange(v) => Self::BaseFlange(v),
+            FeatureKindV8::BaseFlange(v) => Self::BaseFlange(Box::new((*v).into())),
             FeatureKindV8::EdgeFlange(v) => Self::EdgeFlange(Box::new((*v).into())),
             FeatureKindV8::SheetCut(v) => Self::SheetCut(Box::new((*v).into())),
             FeatureKindV8::Hem(v) => Self::Hem(v),
@@ -1929,7 +1973,7 @@ impl From<&FeatureKind> for FeatureKindV8 {
             FeatureKind::Axis(v) => Self::Axis(v.clone()),
             FeatureKind::Point(v) => Self::Point(v.clone()),
             FeatureKind::CoordSystem(v) => Self::CoordSystem(v.clone()),
-            FeatureKind::BaseFlange(v) => Self::BaseFlange(v.clone()),
+            FeatureKind::BaseFlange(v) => Self::BaseFlange(Box::new((&**v).into())),
             FeatureKind::EdgeFlange(v) => Self::EdgeFlange(Box::new((&**v).into())),
             FeatureKind::SheetCut(v) => Self::SheetCut(Box::new((&**v).into())),
             FeatureKind::Hem(v) => Self::Hem(v.clone()),

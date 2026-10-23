@@ -501,6 +501,20 @@ impl Layout {
         depth: [f64; 2],
         flip: bool,
     ) -> Result<Self, String> {
+        Self::open_profile_with(settings, owner, plane, chain, depth, flip, &[])
+    }
+
+    /// [`Self::open_profile`] with a bend model of each bend's own, in order along the
+    /// profile (`None`, or none given: the body's), as SolidWorks' sketched bends can have.
+    pub fn open_profile_with(
+        settings: SheetSettings,
+        owner: u32,
+        plane: &Plane,
+        chain: &[ChainLine],
+        depth: [f64; 2],
+        flip: bool,
+        models: &[Option<BendModel>],
+    ) -> Result<Self, String> {
         settings.check()?;
         let t = settings.thickness;
         if chain.is_empty() {
@@ -530,7 +544,8 @@ impl Layout {
             }
             // Turning towards the material bends towards the top side (z = t).
             let up = (cross > 0.0) == (side > 0.0);
-            let values = BendValues::new(settings.model, angle, settings.radius, t)
+            let model = models.get(k).copied().flatten().unwrap_or(settings.model);
+            let values = BendValues::new(model, angle, settings.radius, t)
                 .map_err(|m| format!("Corner {}: {m}", k + 1))?;
             // The sketch line is the outside of the bend when it turns towards the material.
             let setback = if up {

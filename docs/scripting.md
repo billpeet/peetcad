@@ -287,6 +287,8 @@ with their defaults' types):
   (halfway between).
 - `axis`: `edge`, `face` (a round face) or `a` + `b` (two planes). `point`: `x`, `y`, `z`
   or `vertex`.
+- `base_flange` from an open profile takes `bends`: a bend model (as `bend`) or `null` for
+  each bend in order along the profile, as SolidWorks' sketched bends can have their own.
 - `edge_flange` and `hem` take `edges` to make one feature per edge. `offset_start` and
   `offset_end` set it back from the ends of its edge; a negative one runs it past that
   end, with the bend staying on the edge. An `edge_flange` can have a `relief`
