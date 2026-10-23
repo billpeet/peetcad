@@ -348,13 +348,10 @@ impl Layout {
                     let mut pieces = vec![a.parent, sa, sb];
                     pieces.extend(a.pieces.get(1).copied());
                     pieces.extend(b.pieces.get(1).copied());
-                    out.cuts.push(Cut { area, pieces });
+                    out.cuts.push(Cut::new(area, pieces));
                 }
                 if let Some(area) = self.corner_relief(c, ci, size, flush) {
-                    out.cuts.push(Cut {
-                        area,
-                        pieces: vec![a.parent, sa, sb],
-                    });
+                    out.cuts.push(Cut::new(area, vec![a.parent, sa, sb]));
                 }
             } else if let Some(area) = self.corner_relief(c, ci, size, flush) {
                 // A slanted relief only touches the face at its corner.
