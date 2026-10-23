@@ -45,14 +45,14 @@ its SolidWorks plane does, and its points are converted through the two planes' 
 | SolidWorks | PeetCAD |
 |---|---|
 | Sketch | `sketch` with its lines, arcs and circles where they are, ends that meet joined |
-| Reference plane | `plane`: an offset of a standard plane, where SolidWorks has it (its transform runs from the plane to the model, the other way from a sketch's) |
-| Base flange | `base_flange`, with the body's thickness, radius, bend deduction and relief. From an open profile: as deep as SolidWorks has it, to both sides for its mid-plane end condition, with lines that are in line joined; which side the sheet is on is tried both ways and the one kept whose faces are where SolidWorks' are |
-| Edge flange | `edge_flange`: length converted to the outer corner, position, angle, set-backs read off its outline sketch (negative where the outline runs past the edge), its own relief and bend allowance where it has them |
+| Reference plane | `plane`: an offset of a standard plane, or of one turned about an axis, where SolidWorks has it (its transform runs from the plane to the model, the other way from a sketch's) |
+| Base flange | `base_flange`, with the body's thickness, radius (0 too), bend deduction and relief. From an open profile: as deep as SolidWorks has it, to both sides for its mid-plane end condition, with lines that are in line joined; which side the sheet is on is tried both ways and the one kept whose faces are where SolidWorks' are |
+| Edge flange | `edge_flange`: length converted to the outer corner, position (SolidWorks' meaning, which PeetCAD's has), position offset, angle, set-backs read off its outline sketch (negative where the outline runs past the edge), its own relief and bend allowance where it has them |
 | Mitre flange | `miter_flange` on the same edges with the same gap and offsets. The profile is tried as drawn and with it, or its start, moved a thickness across the sketch: PeetCAD puts the sheet on the side of the profile that follows from the corner of the edge it starts at, SolidWorks from the flange's position. The one kept has its flat faces in the most planes SolidWorks' has |
-| Cut-extrude | `sheet_cut` on sheet metal, `cut` on a solid. A cut of nothing but text is left out (P5) |
-| Boss-extrude | `extrude` |
-| Hole wizard | `sheet_cut` with circles on sheet metal, `hole` on a solid |
-| Linear pattern, mirror | `linear_pattern`, `mirror`. A pattern along a flat face goes along its normal; one whose direction was not exported goes the way SolidWorks' body has the copies from the original |
+| Cut-extrude | `sheet_cut` on sheet metal, with SolidWorks' end condition as its `end`, `depth` and `both`: through next and up to a surface or a vertex as deep as SolidWorks' walls of the cut reach. `cut` on a solid. Which way either goes is the way that makes SolidWorks' walls where they are. A cut of nothing but text is left out (P5) |
+| Boss-extrude | `extrude`; up to a surface or a vertex, as deep as SolidWorks' faces of it go |
+| Hole wizard | `sheet_cut` with circles on sheet metal (with the hole's end condition), `hole` on a solid. A slot: a sketch slot on the line its sketch has from tip to tip |
+| Linear pattern, mirror | `linear_pattern`, `mirror`, of edge flanges too. A pattern along a flat face goes along its normal; one whose direction was not exported goes the way SolidWorks' body has the copies from the original |
 | Break corner | `break_corner`, where the corner's edge is in the part |
 
 These are stood in for, with a warning in the report. Each has the right shape but does
@@ -61,16 +61,12 @@ not follow the part when it changes:
 - **A break corner whose edge is not found, and a fillet on a sheet's corner:** a sheet
   metal cut of the shape SolidWorks removed, read off the faces the feature left in
   SolidWorks' body.
-- **A cut through more than one flange.** SolidWorks' cut-extrude goes through whatever
-  is in its way; PeetCAD's sheet metal cut goes through the flanges in its sketch's plane.
-  Each other flange where SolidWorks' body has walls of the cut gets a sheet metal cut of
-  its own: of the same sketch, projected, on a flange parallel to it (and for a hole
-  wizard hole); of the band where the sketch's outline crosses the flange, on one square
-  to it (a cut that trims the ends of the flanges standing up from its face).
-- **A slot from the hole wizard:** a sheet metal cut of a slot, read off its round ends,
-  on each face the feature has slots on.
-- **A mirrored flange:** a flange of its own on the edge across the mirror plane. A
-  mirrored mitre flange likewise, with its profile moved across the plane.
+- **Slots from the hole wizard on several faces**, which its one sketch does not show: a
+  sheet metal cut of a slot, read off its round ends, on each face the feature has
+  slots on.
+- **A mirrored flange PeetCAD's mirror can't copy** (a mitre flange, or one whose edge
+  across the plane is not there yet): a flange of its own on the edge across the plane,
+  a mitre flange with its profile moved across the plane.
 - **A flange whose outline is not a rectangle:** a rectangular flange, and a sheet metal
   cut of everything between the outline and a box around it. Where the outline reaches
   further than the flange's length (a round top), the flange is made long enough first.
@@ -120,10 +116,11 @@ quicker and enough to check shapes.
 
 - **Sizes of features** (a flange's length, a pattern's count) that differ between
   configurations or are set by an equation, except a linear pattern's.
-- **Sketched bends**, which PeetCAD has; **corner reliefs**, whose definition the export
-  does not have.
-- **An edge flange set out from its edge** (SolidWorks' position offset): it is made on
-  the edge, with a warning. PeetCAD has no such option (P39).
+- **Sketched bends**, which PeetCAD has; **corner reliefs** and **library features**,
+  whose definitions the export does not have.
+- **A cut that removes nothing in SolidWorks** because it points away from the part:
+  it can't be told from one whose faces later features took away, and is cut both ways
+  to see (Plinth bolt).
 - **Reference planes that follow** what they were defined from: they are fixed offsets.
 - **Checking a suppressed feature.** It is built without anything to compare it with.
 - Assemblies.
