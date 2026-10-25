@@ -3,7 +3,7 @@
 What PeetCAD can't yet do that the SolidWorks component library needs. The aim is for
 FabSys to drive PeetCAD in place of SolidWorks; parts come first, assemblies after.
 
-**Status, 25 October 2026:** first written on 9 October from names and counts; since then
+**Status, 26 October 2026:** first written on 9 October from names and counts; since then
 the whole library has been exported and imported, and the entries below say what that
 found. Update an entry when it is confirmed, fixed or decided against.
 
@@ -70,25 +70,31 @@ From four parts, so these are sightings, not counts for the library.
 
 ## What the importer found
 
-All 201 parts were last run through `tools/sw-import` on 25 October 2026 (`run-m3`, with
-`--step exportsstep`), after the parallel work below. Before that they were run on 23 October, from the third
-export (which adds what is inside sketch blocks, the way each dimension measures and
-the selections of most suppressed features). The parts, the operations that made them
-and a report each are in `C:\Users\marti\source\peetcad-imports\run-r6`. The run of
+All 201 parts were last run through `tools/sw-import` on 26 October 2026 (`run-m4`), from
+the fourth export (`exports\out-all-v4`, format 4: what is in a library feature, a body's
+tight box, a corner relief's dimensions) with its STEP files as the reference. The five
+"b Tophat" parts are no longer on the NAS and come from the third export. On 25 October
+(`run-m3`) and 23 October (`run-r6`) they were run from the third export (which adds
+what is inside sketch blocks, the way each dimension measures and the selections of most
+suppressed features). The parts, the operations that made them and a report each are in
+`C:\Users\marti\source\peetcad-imports\run-m4`. The run of
 12 October, before that day's changes, is in `run-base` beside it, and
 `scratch\compare.js` sets two runs against each other part by part.
 
-**Shape, in the active configuration**, on 12, 23 and 25 October:
+**Shape, in the active configuration**, on 12, 23, 25 and 26 October:
 
-| Result | 12 Oct | 23 Oct | 25 Oct |
-|---|---|---|---|
-| Matches SolidWorks: volume, bounding box and flat size | 118 | 138 | 182 |
-| Same size and flat pattern, volume within 5% | 17 | 16 | 12 |
-| Everything imported, but it differs | 13 | 13 | 5 |
-| A feature could not be imported | 47 | 30 | 1 |
-| Nothing built | 6 | 4 | 1 |
+| Result | 12 Oct | 23 Oct | 25 Oct | 26 Oct |
+|---|---|---|---|---|
+| Matches SolidWorks: volume, bounding box and flat size | 118 | 138 | 182 | 185 |
+| Same size and flat pattern, volume within 5% | 17 | 16 | 12 | 12 |
+| Everything imported, but it differs | 13 | 13 | 5 | 2 |
+| A feature could not be imported | 47 | 30 | 1 | 1 |
+| Nothing built | 6 | 4 | 1 | 1 |
 
-On 25 October no part came out worse than on 23 October. "Matches" counts the two parts
+No part came out worse on 25 October than on 23 October, nor on 26 October than on 25 October.
+On the 26th, the tight boxes put Box Roof End Left and Right's size right, and STEP import
+heals SolidWorks' tolerant edges, so Weather Shield Door is measured against its STEP body
+and matches; Battery Bracket and Elsteel Plinth match too. "Matches" counts the two parts
 that match with a feature left out (a weldment's structural member, a mirror of a body).
 
 "Matches" is about shape only. On 23 October 113 of the 138 use no stand-in. The other 25 match
@@ -211,9 +217,14 @@ of its own, and merged; besides what P5, P9, P12, P29 and P35 say:
 
 **Still to do:** see "Next" below.
 
-**Waiting on the exporter:** the exporter now writes what is in a library feature, a
-body's tight box and a corner relief's dimensions (format 4), but has not been run: it
-needs `will` logged in to SolidWorks-PC, as it runs in his desktop session.
+**The fourth export** (26 October) writes what is in a library feature, a body's tight
+box and a corner relief's dimensions. It runs in `will`'s desktop session on
+SolidWorks-PC, so he must be logged in.
+
+**STEP import heals tolerant edges** (26 October): SolidWorks writes edges whose curve
+strays from its faces by up to a few ten-thousandths of a millimetre (Parasolid's
+tolerant edges). `import_step` fits such an edge, up to 0.01 mm out, onto both faces
+and warns; further out it still refuses the body.
 
 ## What converting four parts by hand showed
 
@@ -389,29 +400,25 @@ are done) and break corner (P8, 55 parts; first needs a check of whether `fillet
 4. A1 and A2, which nearly every FabSys mate depends on; then A3 and A5.
 5. The **Decide** entries: P4, P6, A6, A9, A10.
 
-## Next, as of 25 October
+## Next, as of 26 October
 
-The 21 parts that are not an exact match yet, by what holds them back:
+The 18 parts that are not an exact match yet, by what holds them back:
 
-1. **The exporter run** (needs `will` logged in to SolidWorks-PC): corner reliefs' sizes
-   and library feature contents for the parts that still use stand-ins.
-2. **Volume only, the right size and flat pattern** (12): Top Hat's outline (the
+1. **Volume only, the right size and flat pattern** (12): Top Hat's outline (the
    importer falls back to a rectangle and a cut), Box Roof Bottom Front's cut that ends
    in a bend, Roof Front Flange's Cut-Extrude6 cutting the base, Gear tray bracket's tab
    and Wall Left Right Middle's mitre flange copies (1% and 0.2%), Laptop Bracket (4.4%),
-   and Battery Bracket, Box Roof Bottom Back, Elsteel Plinth, Laptop Shelf, Louvre Filter
+   and Box Roof End Left and Right, Box Roof Bottom Back, Laptop Shelf, Louvre Filter
    Bracket, Plinth PFC Long B, all under 0.04%.
-3. **Different** (5): Box Roof End Left and Right (box 0.18 mm out), Peaked Angled Roof
-   (a flange's flat pattern overlaps the base's), Lifting Lug (a fillet that runs over
-   its face), Weather Shield Door (volume to 7 digits; SolidWorks box is 0.003 mm
-   loose, and its STEP file, which would settle it, has an edge 0.0006 mm off its face,
-   which PeetCAD refuses to import; ABB Flow Meter fails the same way).
-4. **Features left out**: M6 Nutsert (move body and drafts in patterns), Weldment
+2. **Different** (2): Peaked Angled Roof (a flange's flat pattern overlaps the base's),
+   Lifting Lug (a fillet that runs over its face).
+3. **Features left out**: M6 Nutsert (move body and drafts in patterns), Weldment
    30x30x2's structural member (P18), and MirrorCableway Cover Bracket LH's mirror of a
    body.
-5. **Nothing built**: ABB Flow Meter. Its STEP file, like Weather Shield Door's, has edges
-   a few ten-thousandths of a millimetre off their faces, which SolidWorks writes and other
-   programs read; `import_step` should accept them within the file's own tolerance.
-6. **Driving the parts**: sizes of features that equations or configurations set (a
+4. **Nothing built**: ABB Flow Meter. Its STEP file's tolerant edges are healed now, but
+   three sliver bodies have vertices 0.2 to 0.6 mm off their edges and five shells have
+   faces whose boundary doesn't close. Export it some other way, or import the bodies
+   that are valid and warn about the rest.
+5. **Driving the parts**: sizes of features that equations or configurations set (a
    flange's length, a pattern's spacing), which the importer does not carry over; then
    P4 and P27. Sketch text's font, which the export doesn't carry.
