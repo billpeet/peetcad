@@ -3,7 +3,7 @@
 What PeetCAD can't yet do that the SolidWorks component library needs. The aim is for
 FabSys to drive PeetCAD in place of SolidWorks; parts come first, assemblies after.
 
-**Status, 23 October 2026:** first written on 9 October from names and counts; since then
+**Status, 25 October 2026:** first written on 9 October from names and counts; since then
 the whole library has been exported and imported, and the entries below say what that
 found. Update an entry when it is confirmed, fixed or decided against.
 
@@ -70,24 +70,28 @@ From four parts, so these are sightings, not counts for the library.
 
 ## What the importer found
 
-All 201 parts were last run through `tools/sw-import` on 23 October 2026, from the third
+All 201 parts were last run through `tools/sw-import` on 25 October 2026 (`run-m3`, with
+`--step exportsstep`), after the parallel work below. Before that they were run on 23 October, from the third
 export (which adds what is inside sketch blocks, the way each dimension measures and
 the selections of most suppressed features). The parts, the operations that made them
 and a report each are in `C:\Users\marti\source\peetcad-imports\run-r6`. The run of
 12 October, before that day's changes, is in `run-base` beside it, and
 `scratch\compare.js` sets two runs against each other part by part.
 
-**Shape, in the active configuration**, on 12 October and on 23 October:
+**Shape, in the active configuration**, on 12, 23 and 25 October:
 
-| Result | 12 Oct | 23 Oct |
-|---|---|---|
-| Matches SolidWorks: volume, bounding box and flat size | 118 | 138 |
-| Same size and flat pattern, volume within 5% | 17 | 16 |
-| Everything imported, but it differs | 13 | 13 |
-| A feature could not be imported | 47 | 30 |
-| Nothing built | 6 | 4 |
+| Result | 12 Oct | 23 Oct | 25 Oct |
+|---|---|---|---|
+| Matches SolidWorks: volume, bounding box and flat size | 118 | 138 | 182 |
+| Same size and flat pattern, volume within 5% | 17 | 16 | 12 |
+| Everything imported, but it differs | 13 | 13 | 5 |
+| A feature could not be imported | 47 | 30 | 1 |
+| Nothing built | 6 | 4 | 1 |
 
-"Matches" is about shape only. 113 of the 138 use no stand-in. The other 25 match
+On 25 October no part came out worse than on 23 October. "Matches" counts the two parts
+that match with a feature left out (a weldment's structural member, a mirror of a body).
+
+"Matches" is about shape only. On 23 October 113 of the 138 use no stand-in. The other 25 match
 because the importer stands in for something: a flange whose length runs up to a vertex
 is given the length it had (10), hole wizard slots on several faces are cut to the shape
 read off SolidWorks' body (8), fillets on a sheet's corners likewise (5), sketch text is
@@ -136,7 +140,7 @@ What holds most of the others back is what holds back their active configuration
 | | Gap | Evidence | Mark |
 |---|---|---|---|
 | P28 | **Corners where edge flanges meet.** Done, in two parts. (1) Between the pieces of one flange feature on several edges SolidWorks stops both short and ends each bend in line with its flange: `corner` with `open`, its gap over 1.414 and the new relief `flush` gives the same blank, edge for edge (a tray with four 23 mm flanges: 12 lines, the same vertices). (2) Between two flange features SolidWorks runs nothing on: the earlier flange ends where its own edge does. That is the new kind `plain` (PeetCAD's butt corner runs the earlier flange on to the later one's outer face when the later one stands outside its edge); with it Double Door Seal's volume and area are SolidWorks' to the last digit given. **Left:** SolidWorks trims the ends of the bends at a corner of kind (1) on a slant in the folded solid and writes its flat pattern with square ends, so its solid and its blank do not agree; PeetCAD's do, and the volume stays a few hundredths of a percent out. And `plain` is not what SolidWorks does where flanges are at an angle (the vent hoods): the importer keeps it only where it brings the flanges nearer. **Slanted bend ends, done:** SolidWorks' folded part ends each bend at such a corner on the line from the face's corner to the end of its flange (a freeform face), and leaves the face its corner; its flat pattern has square ends. The corner relief `slanted` does the same, and the importer uses it for corners of kind (1): Flush Handle's area is SolidWorks' and its volume 0.002% out where it was 0.058%. 19 parts have such corners; in the others the change is under 0.01% either way and no verdict changes, because something else holds them back. | The tray: volume 0.06% out where it was 2.5%. Double Door Seal: 0 where it was 4.3% | Done; angled flanges' corners to look into |
-| P29 | **A cut sketched on the sheet's edge face**, or on a plane that is not a face of the sheet. `sheet_cut` wants the sketch on a flange's top or bottom. | 4 parts (Cableway Cover Bracket LH and RH, Door, Louvre Filter Bracket) | Gap |
+| P29 | **A cut sketched on the sheet's edge face**, or on a plane that is not a face of the sheet. Done with P40: `sheet_cut` takes a sketch on any plane and cuts as far as its end condition reaches. | Cableway Cover Bracket LH and RH and Door match; Louvre Filter Bracket is the right size, 0.02% out | Done |
 | P30 | **A cut across a bend at an angle or with a curve.** Done (`edeaf9c`): any edge of a sheet metal cut can cross a bend. One that crosses on a slant or as a curve folds to a freeform curve, with a ruled wall through the sheet; the blank is unchanged. A round hole on a bend and a triangle across one keep the blank's volume to 2 parts in 100,000 at K = 0.5. | None of the 11 parts is refused for it any more; they are held back by other things now | Done |
 | P31 | **The vent hoods and box roofs** (flanges at other angles than 90°). Not an angle convention. Three things, all done: (1) the hood's last flange has a bend deduction of its own in SolidWorks, so `edge_flange` takes `bend` as the base flange does (15 flanges in 12 parts); (2) the side walls' outlines are trapezoids, four lines that the importer took for a rectangle: it now cuts them to shape, on the mirrored side too, and makes the flange wider than its edge where the outline is; (3) a sheet metal cut only went through the flange its sketch is on, and now goes through every flange with a face in the sketch's plane, so holes drawn over two lips cut both. Between flange features where SolidWorks cuts nothing, the importer now also sets PeetCAD's own corner with a `tear` relief. | All 10 vent hoods match SolidWorks: 8 were 0.03 to 0.35% out and the 2 SS2 hoods did not build. The box roofs are unchanged (Box Roof Top and the Ends are 0.1 to 0.18 mm out in size) | Done for the hoods; box roofs open |
 | P32 | **A bend deduction that makes the allowance negative** is refused. For edge flanges, P31's `bend` on the flange gives one its own. For an open-profile base flange, done: `base_flange` takes `bends`, a bend model or null for each bend along the profile, as SolidWorks' sketched bends have their own; the importer gives each bend its SolidWorks sketched bend's | SS2 Vent Hood 250mm and 300mm build; Baffle (VSD) is 0.9% out where it was 11.9%; Peaked Angled Roof builds, the right size, where nothing did (one of its flanges' flat pattern overlaps the base's, which is still to look into) | Done |
@@ -147,7 +151,7 @@ What holds most of the others back is what holds back their active configuration
 | P39 | **An edge flange set out from its edge** (SolidWorks' "Offset" in the flange's position). Done: `edge_flange` takes `position_offset`; the sheet runs on flat that far before the bend | Roof Angled matches; Radio Bracket is the right size, 0.1% out where it was 3.5%; Peaked Angled Roof is held back by P32 | Done |
 | P40 | **A sheet metal cut through every flange in its way.** Done: `sheet_cut` takes SolidWorks' end conditions, `end` (`sheet`, `blind` with `depth`, `through_all`), `reverse` and `both`. It cuts the flanges parallel to its sketch that lie wholly within its reach, and across the flanges square to it, on across the bend at the end of one it goes past; flanges at other angles are left. Patterns and mirrors of such a cut reach as far. The importer maps SolidWorks' end conditions onto it. It takes through next and up to a surface or a vertex as deep as SolidWorks' walls of the cut reach, and the direction from where those walls are | 18 parts have such cuts. Wall Left, Wall Right, the MS2 Esc Extensions, Battery Clamp Long and Mullion H and V match, with the cut a feature of their own | Done |
 | P41 | **A bend radius of 0.** Done: a sharp bend, as SolidWorks allows, is folded round a radius of a tenth of a micron, which moves its setbacks by less than that. It used to come out invalid, so the importer used 0.01 mm, which put the flat pattern 0.01 mm out wherever a bend allowance was used | 9 parts, the Weather Shields among them | Done |
-| P35 | **A flange whose length runs up to a vertex, one with its own outline that is not a rectangle, and one wider than its edge.** Wider than its edge is done: a negative `offset_start` or `offset_end` runs an edge flange past that end of its edge. An outline of its own is done: `edge_flange` takes `outline`, a sketch of the flange's shape on a plane turned about its edge; the flange is made as wide and as long as it reaches and cut to it from its foot out, and follows it. The importer turns a plane about the edge to where SolidWorks' profile sketch is and draws the profile there; where that fails, or the outline is not where the flange is (Top Hat), it falls back to a rectangle and a cut. **Left:** up to a vertex, for which the importer uses the length the flange had | Outline: none of the matching parts relies on the cut stand-in now; Radio Bracket and Escutcheon match with it, Flow Meter Fixed Bracket is 0.01% out where it was 0.8%. Up to a vertex: 12 flanges | Done but up to a vertex |
+| P35 | **A flange whose length runs up to a vertex, one with its own outline that is not a rectangle, and one wider than its edge.** Wider than its edge is done: a negative `offset_start` or `offset_end` runs an edge flange past that end of its edge. An outline of its own is done: `edge_flange` takes `outline`, a sketch of the flange's shape on a plane turned about its edge; the flange is made as wide and as long as it reaches and cut to it from its foot out, and follows it. The importer turns a plane about the edge to where SolidWorks' profile sketch is and draws the profile there; where that fails, or the outline is not where the flange is (Top Hat), it falls back to a rectangle and a cut. Up to a vertex is done: `edge_flange` takes `up_to`, a vertex its length runs to, and follows it. | Outline: none of the matching parts relies on the cut stand-in now; Radio Bracket and Escutcheon match with it, Flow Meter Fixed Bracket matches. Up to a vertex: 12 flanges, none given a fixed length now | Done |
 | P36 | **A flange with its own relief.** Done: `edge_flange` takes `relief` (`rectangular`, `obround`, `tear`) and `relief_ratio` of its own, the body's without them. Two more fields of the feature, so the model schema is 12; schema 11 files are migrated on open. Where SolidWorks' flange had a tear relief and the body's is rectangular, PeetCAD cut notches SolidWorks doesn't (Top Bracket: two of 1 x 1.1 mm). A relief given as a width and a depth is not there: the importer uses the width for both. | 58 flanges in 46 parts. 12 more parts match SolidWorks (Top Bracket to 8 digits of volume, the Esc Surrounds, ElSteel Geartray, Floor, Wall Inner Vertical, the Schneider radio brackets). 3 flanges have a width and a depth | Done |
 
 **What looking into the near-misses found.** `tools/sw-import/diagnose.js` sets the area
@@ -186,16 +190,30 @@ The rest are P28, P35 and:
   already is kept, as SolidWorks keeps it, with a warning; a pattern of it can cut
   elsewhere (both Gland Plates match).
 
-**Still the importer's to do**, not PeetCAD's: parts where a feature's sketch found no face
-or plane to go on, four of them solid parts (Lifting Lug, Locking Rod Behind Door, Plinth
-bolt, Weldment 30x30x2) and the rest sketched on a flange's edge (P29). Plinth bolt's
-through-all cut removes nothing in SolidWorks (it points away from the part) and its
-whole shaft in PeetCAD. Also sketched bends; sizes of features in configurations and
-equations; Louvre Filter Bracket and Cableway Cover Bracket LH and RH, 42% and 15% out,
-not looked into.
+**What the work of 25 October gained**, done as seven pieces at once, each in a worktree
+of its own, and merged; besides what P5, P9, P12, P29 and P35 say:
 
-**Waiting on the exporter:** the definitions of library features (5 parts), corner
-reliefs (3 parts) and 3D sketches that place hole wizard holes (HingeMale, HingeFemale).
+- **Solid features.** Cuts through a torus and exact boxes round spheres and tori;
+  `extrude` and `cut` take `draft` (with `draft_outward`), `flip_side`, `through_next`
+  and up to a face; `convert_to_sheet` takes the sheet's thickness; sweeps along more
+  kinds of path. Plinth bolt, Locking Rod Behind Door, Stay Bracket, Limit switch base,
+  HingeMale, HingeFemale and SS2 DoorStay Rod match.
+- **Corners as SolidWorks makes them**, at any angle between flanges, with the reliefs
+  and rounds SolidWorks puts there, and fillets on a sheet's corners imported as
+  `break_corner` wherever the corner is found.
+- **Library features** are imported as the features inside them, and hole wizard holes
+  placed on a 3D sketch are placed at its points.
+- **SolidWorks' STEP files as the reference** (`--step`): its mass properties are a few
+  parts in 100,000 out round freeform faces, and its box can be loose by a hundredth of
+  a millimetre; the STEP body measured by PeetCAD is not. A part that nothing could be
+  built of is imported from its STEP file; the only such part, ABB Flow Meter, has a
+  STEP file PeetCAD finds invalid, so it is still not built.
+
+**Still to do:** see "Next" below.
+
+**Waiting on the exporter:** the exporter now writes what is in a library feature, a
+body's tight box and a corner relief's dimensions (format 4), but has not been run: it
+needs `will` logged in to SolidWorks-PC, as it runs in his desktop session.
 
 ## What converting four parts by hand showed
 
@@ -245,7 +263,7 @@ are in `C:\Users\marti\source\peetcad-imports`.
 | P2 | **Suppression can't follow an expression.** It is a flag per configuration. | `"Vent hole" = iif("D2@Sketch1" > 300, "unsuppressed", "suppressed")` | Done (`689ab7c`): `set_suppression_expression`; not yet tried on a template |
 | P3 | **No user names for faces and edges.** Faces are named by the feature that made them. FabSys mates and sketches by name. | 97 parts carry 324 named faces and edges | Done (PR #13): `name_face`, `name_edge`, `{"name": ...}` as a selector. Checked on Access Plate 1 with its five SolidWorks names: they survive a change of length and a cut through the named face, and work as a sketch plane and as mate ends. Not yet tried: a named hole (the Door's hinge holes) or a named edge |
 | P4 | **Addressing by SolidWorks names.** FabSys sets `Width@Sketch1` and `D1@LPattern2`. A sketch dimension maps to `set_dimension`, a feature dimension to a field of `edit`; the importer has to keep a map from one to the other, or name things so none is needed. | About 5,100 dimensions | Decide |
-| P5 | **Sketch text.** No text entity in a sketch. FabSys sets text for etched labels. | `SetSketchText`; features `Etch L`, `Etch R`, `EtchRodGL` | Gap |
+| P5 | **Sketch text.** Done: a sketch takes `text` (a string, a height, a position and an angle), drawn from the font's glyphs as closed profiles a cut or extrusion can use, and `set_text` changes it as FabSys's `SetSketchText` does. **Left:** the export does not say which font, so the default is used | `SetSketchText`; features `Etch L`, `Etch R`, `EtchRodGL`; A3 Geartray and Tophat CB Covers match with their text cut | Done |
 | P6 | **Smart components and library features.** No equivalent. FabSys applies a smart feature about once per inserted component. | 43 parts hold smart components, 7 hold library features | Decide |
 
 ### Sheet metal features
@@ -254,10 +272,10 @@ are in `C:\Users\marti\source\peetcad-imports`.
 |---|---|---|---|
 | P7 | **Fold and unfold.** Not a gap: SolidWorks unfolds, cuts flat and folds again, and PeetCAD's sheet metal cut is made in the flat pattern to begin with. The importer treats Unfold and Fold as nothing to do and puts the cuts between them on the face that stays put. With P30 such a cut can have any shape. | 10 parts, all imported past their folds now | Not needed |
 | P8 | **Break corner.** Done: `break_corner` rounds (`fillet`) or chamfers corners of a sheet metal body by `size`, each picked by its edge through the sheet. It is made in the flat pattern, so the body stays sheet metal, and it follows the part. Outside corners between two straight sides only; no toolbar command yet (an operation and a panel). The importer uses it where it finds the corner's edge in the part and keeps its cut of the corner's shape otherwise; a fillet on a solid part becomes PeetCAD's `fillet`. **Left:** SolidWorks' Corner Relief feature (3 parts) has no definition in the export. | 55 parts (68 features). Double Door Seal matches (its corners are on a flange at 45°, which the cut could not place); Door Stop's fillets import | Done; Corner Relief needs the exporter |
-| P9 | **Patterns and mirrors of flanges.** Done for edge flanges: `mirror`, `linear_pattern` and `circular_pattern` copy one as SolidWorks does. Each copy is the same flange on the edge the motion takes the original's edge to, set back the other way round for a mirror. A copy of a sheet metal cut can land on another flange's face, and copies are built in model order, so a flange on a copied flange follows it. **Left:** mitre flanges, base flange tabs and mirrors of mirrors can't be copied | The ten vent hoods and Top Hat now mirror their flanges with PeetCAD's mirror. Wall Left Right Middle (a mitre flange), Door Lock Bracket Behind Door (a mirror of a mirror) and Gear tray bracket (a tab) still can't | Done for edge flanges |
+| P9 | **Patterns and mirrors of flanges.** Done for edge flanges: `mirror`, `linear_pattern` and `circular_pattern` copy one as SolidWorks does. Each copy is the same flange on the edge the motion takes the original's edge to, set back the other way round for a mirror. A copy of a sheet metal cut can land on another flange's face, and copies are built in model order, so a flange on a copied flange follows it. Mitre flanges, base flange tabs (`base_flange` with `tab: true`), break corners and patterns and mirrors themselves are copied too. | The ten vent hoods and Top Hat mirror their flanges with PeetCAD's mirror. Door Lock Bracket Behind Door (a mirror of a mirror) matches; Wall Left Right Middle (a mitre flange) and Gear tray bracket (a tab) are the right size, 0.2% and 1% out | Done |
 | P10 | **Edge flange options.** One edge per flange; profile from a sketch exists. Whether every position, offset and relief the templates use has a match is not known. | 142 parts (309 flanges) | Check |
 | P11 | **Holes, fillets and cuts on a sheet body.** Extrude and cut-extrude on a sheet body turn it into a plain solid; whether `hole` and `fillet` do too is not known. | Hole wizard in 80 parts, fillets in 35, cuts in over 140 | Check |
-| P12 | **Corner relief.** Reliefs are rectangular or tear; round is refused. | 3 parts | Check |
+| P12 | **Corner relief.** Done: `corner` takes the reliefs `circular` and `square` as well, sized as SolidWorks sizes them. | 3 parts. The exporter now writes corner reliefs; the library has not been exported again with it | Done; export to run |
 | P13 | **Multi-body sheet metal and mirrored stock.** | 3 parts with 2, 12 and 14 bodies; 1 mirror-stock part | Check |
 
 Base flange (167 parts), mitre flange (5), sketched bend (7), convert to sheet metal (1)
@@ -371,16 +389,29 @@ are done) and break corner (P8, 55 parts; first needs a check of whether `fillet
 4. A1 and A2, which nearly every FabSys mate depends on; then A3 and A5.
 5. The **Decide** entries: P4, P6, A6, A9, A10.
 
-## Next, as of 23 October
+## Next, as of 25 October
 
-1. **The exporter**: library features, corner reliefs and the 3D sketches hole wizard holes
-   are placed on. That is 10 parts held back by what the export lacks, not by PeetCAD.
-2. **A flange's length up to a vertex** (P35's remainder, 10 matching parts lean on the
-   length it had), and fillets on a sheet's corners as `break_corner` where the importer
-   can't find the corner's edge (5).
-3. **Copies of mitre flanges, tabs and mirrors of mirrors** (P9's remainder: Wall Left
-   Right Middle, Gear tray bracket, Door Lock Bracket Behind Door).
-4. **Peaked Angled Roof's flange** whose flat pattern overlaps the base's.
-5. **Driving the parts**: sizes of features that equations or configurations set (a
+The 21 parts that are not an exact match yet, by what holds them back:
+
+1. **The exporter run** (needs `will` logged in to SolidWorks-PC): corner reliefs' sizes
+   and library feature contents for the parts that still use stand-ins.
+2. **Volume only, the right size and flat pattern** (12): Top Hat's outline (the
+   importer falls back to a rectangle and a cut), Box Roof Bottom Front's cut that ends
+   in a bend, Roof Front Flange's Cut-Extrude6 cutting the base, Gear tray bracket's tab
+   and Wall Left Right Middle's mitre flange copies (1% and 0.2%), Laptop Bracket (4.4%),
+   and Battery Bracket, Box Roof Bottom Back, Elsteel Plinth, Laptop Shelf, Louvre Filter
+   Bracket, Plinth PFC Long B, all under 0.04%.
+3. **Different** (5): Box Roof End Left and Right (box 0.18 mm out), Peaked Angled Roof
+   (a flange's flat pattern overlaps the base's), Lifting Lug (a fillet that runs over
+   its face), Weather Shield Door (volume to 7 digits; SolidWorks box is 0.003 mm
+   loose, and its STEP file, which would settle it, has an edge 0.0006 mm off its face,
+   which PeetCAD refuses to import; ABB Flow Meter fails the same way).
+4. **Features left out**: M6 Nutsert (move body and drafts in patterns), Weldment
+   30x30x2's structural member (P18), and MirrorCableway Cover Bracket LH's mirror of a
+   body.
+5. **Nothing built**: ABB Flow Meter. Its STEP file, like Weather Shield Door's, has edges
+   a few ten-thousandths of a millimetre off their faces, which SolidWorks writes and other
+   programs read; `import_step` should accept them within the file's own tolerance.
+6. **Driving the parts**: sizes of features that equations or configurations set (a
    flange's length, a pattern's spacing), which the importer does not carry over; then
-   P4 and P27.
+   P4 and P27. Sketch text's font, which the export doesn't carry.

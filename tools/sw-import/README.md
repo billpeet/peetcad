@@ -4,7 +4,7 @@ Rebuilds SolidWorks parts in PeetCAD from their exports (`tools/sw-export`), and
 close each came out.
 
 ```
-node tools/sw-import/import.js <export.swx.json | folder of exports> <output folder> [--peet <peet>] [--only <text>] [--jobs <n>]
+node tools/sw-import/import.js <export.swx.json | folder of exports> <output folder> [--peet <peet>] [--only <text>] [--jobs <n>] [--step <folder>] [--no-relations]
 node tools/sw-import/summarise.js <output folder> [--parts]
 ```
 
@@ -23,8 +23,13 @@ text. `--jobs` imports that many parts at once, each in a process of its own: th
 most of it Gear tray. It uses `target/release/peet.exe` if there is one, then the debug build; give a copy with `--peet`
 for a long run, or a build in the meantime can't replace it.
 
-The library's export is on SolidWorks-PC in `C:UserswillAppDataLocalPeetSwExportout-all`, and a copy (without
-STEP files) in `peetcad-importsexportsout-all`. Keep copies out of `%TEMP%`, which Windows empties.
+`--step` takes a folder of SolidWorks' STEP files (`<Name>.SLDPRT.<configuration>.step`). Where a part has
+one, the volume and box to match are its STEP body's as PeetCAD measures it, not SolidWorks' mass properties,
+which are a few parts in 100,000 out round freeform faces such as the ends of slanted bends. A part nothing
+can be built of is imported from its STEP file instead, and says so in its report.
+
+The library's export is on SolidWorks-PC in `C:\Users\will\AppData\Local\PeetSwExport\out-all`, and a copy
+in `peetcad-imports\exports\out-all`, with SolidWorks' STEP files in `peetcad-imports\exports\step`. Keep copies out of `%TEMP%`, which Windows empties.
 
 It is a tool for the migration, not a feature of PeetCAD: the export is SolidWorks' own
 feature data under SolidWorks' own names, and an importer inside `peet` would tie
