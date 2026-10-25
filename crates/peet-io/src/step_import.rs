@@ -108,6 +108,24 @@
 //! curves, a hole across a seam) makes the import fail with the reasons, rather than
 //! handing the rest of the program a broken solid.
 //!
+//! Before that, *tolerant edges* are healed. Parasolid, and so SolidWorks, lets an edge
+//! carry its own tolerance, and writes a curve that comes only within it of the edge's
+//! faces: a cubic standing in for the arc where a plane meets a cone, a B-spline patch
+//! whose boundary sags inside the cylinder beside it. Off by a few ten-thousandths of a
+//! millimetre, such edges fail the kernel's check ([`EDGE_ON_SURFACE`], 1e-4 mm), though
+//! the file's stated uncertainty (1e-5 mm in SolidWorks' files) says nothing about them.
+//! An edge whose curve strays from its faces by more than that but no more than
+//! [`HEAL_LIMIT`] (0.01 mm) gets a new curve, a cubic B-spline fitted between the
+//! same vertices through points moved along the faces' normals onto both surfaces (a
+//! Newton step on the two signed distances, which may go a hair past the end of a
+//! B-spline patch whose boundary the edge is). Vertices and faces stay as they are, so
+//! the shape moves by no more than the edge was off. Each body with healed edges gets
+//! a warning saying how many and how far. An edge further off, or one whose new curve
+//! would miss its vertices, is left alone and the body fails as before; the kernel's
+//! check itself is not loosened, so PeetCAD's own modelling stays exact.
+//!
+//! [`EDGE_ON_SURFACE`]: peet_kernel::validate::EDGE_ON_SURFACE
+//!
 //! **Assemblies.** Parts placed in assemblies (`ITEM_DEFINED_TRANSFORMATION` under a
 //! `REPRESENTATION_RELATIONSHIP_WITH_TRANSFORMATION`, or `MAPPED_ITEM`) are given two
 //! ways. [`StepImport::bodies`] has them in place: one body per occurrence, moved by the
@@ -115,6 +133,8 @@
 //! [`StepImport::nodes`] keeps the structure: each part and assembly once, with what is
 //! placed in what and where (what an assembly that imports the file wants). A placement
 //! that is not a rigid motion is ignored with a warning.
+
+mod heal;
 
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
@@ -146,6 +166,12 @@ const MAX_BODIES: usize = 10_000;
 /// Coordinates and radii beyond this (mm) are treated as broken: far outside what the
 /// tolerance model in [`peet_math::tolerance`] can work with.
 pub const MAX_COORD: f64 = 1e9;
+
+/// The furthest (mm) an edge may stray from its faces and still be healed (see
+/// **Validity** above). SolidWorks' tolerant edges are off by up to a few ten-thousandths
+/// of a millimetre; this is more than ten times the worst seen, and far below the size
+/// of any feature of a part.
+pub const HEAL_LIMIT: f64 = 0.01;
 
 /// `VERTEX_POINT`s this close together (mm) are taken to be one vertex written twice,
 /// where a loop would otherwise not close. The same distance the kernel allows between a
@@ -352,7 +378,7 @@ pub fn read(text: &str) -> Result<StepImport> {
             Some(shell) => file.expect(shell, &["CLOSED_SHELL", "ORIENTED_CLOSED_SHELL"], None)?,
         };
         let mut builder = Builder::new(&file, units);
-        let built = match shell {
+        let mut built = match shell {
             None => builder.brep(&brep)?,
             Some(shell) => {
                 let model = file.expect(id, &["SHELL_BASED_SURFACE_MODEL"], None)?;
@@ -372,6 +398,22 @@ pub fn read(text: &str) -> Result<StepImport> {
         } else {
             "Body".to_owned()
         };
+        // Tolerant edges (see the module docs) are given curves that lie on their faces.
+        let healed = heal::heal_edges(&mut built.solid);
+        if healed.edges > 0 {
+            warnings.push(format!(
+                "{} of the body \"{name}\" lay up to {:.1e} mm off {} faces (the file gives \
+                 edges a tolerance, as SolidWorks does) and {} moved onto them.",
+                if healed.edges == 1 {
+                    "1 edge".to_owned()
+                } else {
+                    format!("{} edges", healed.edges)
+                },
+                healed.worst,
+                if healed.edges == 1 { "its" } else { "their" },
+                if healed.edges == 1 { "was" } else { "were" },
+            ));
+        }
         if let Err(problems) = validate(&built.solid) {
             let list: Vec<&str> = problems
                 .iter()

@@ -1024,6 +1024,77 @@ fn file_without_units_is_taken_as_millimetres() {
     );
 }
 
+/// A 1 × 2 × 3 box whose edge from the origin along +Y is a cubic that bows `sag` below
+/// the bottom face in its middle (staying in the face x = 0), as SolidWorks writes a
+/// tolerant edge.
+fn box_with_a_sagging_edge(sag: f64) -> String {
+    let mut w = Step::default();
+    let faces = box_faces(
+        &mut w,
+        DVec3::ZERO,
+        v3(1.0, 2.0, 3.0),
+        false,
+        false,
+        NO_HOLES,
+    );
+    // A cubic Bézier's middle is 3/4 of the way out to its inner control points.
+    let out = -4.0 / 3.0 * sag;
+    let points: Vec<u32> = [
+        v3(0.0, 0.0, 0.0),
+        v3(0.0, 2.0 / 3.0, out),
+        v3(0.0, 4.0 / 3.0, out),
+        v3(0.0, 2.0, 0.0),
+    ]
+    .into_iter()
+    .map(|p| w.point(p))
+    .collect();
+    let spline = format!(
+        "B_SPLINE_CURVE_WITH_KNOTS('',3,{},.UNSPECIFIED.,.F.,.F.,(4,4),(0.,1.),.UNSPECIFIED.)",
+        refs(&points)
+    );
+    let brep = w.solid("Tolerant", &faces);
+    let text = w.part(&[brep], UnitStyle::Millimetres);
+    // The first line written is that edge's.
+    let at = text.find("LINE('',").expect("a line");
+    let end = at + text[at..].find(" ;").expect("the line's end");
+    format!("{}{spline}{}", &text[..at], &text[end..])
+}
+
+#[test]
+fn edge_a_little_off_its_face_is_moved_onto_it() {
+    let sag = 4e-4;
+    let imported = import(&box_with_a_sagging_edge(sag));
+    assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
+    let warning = &imported.warnings[0];
+    assert!(
+        warning.starts_with("1 edge of the body \"Tolerant\" lay up to 4.0e-4 mm off its faces")
+            && warning.contains("moved onto them"),
+        "{warning}"
+    );
+    let s = &imported.bodies[0].solid;
+    assert_eq!(tuple(valid(s)), (8, 12, 6, 0, 1, 0));
+    assert!((measure::volume(s) - 6.0).abs() < 1e-6);
+    // The edge now lies on both its faces all along, not just where validation looks.
+    let healed = s
+        .edges
+        .iter()
+        .find(|e| matches!(e.curve, Curve3::Nurbs(_)))
+        .expect("the healed edge");
+    for k in 0..=64 {
+        let p = healed.point_at_fraction(f64::from(k) / 64.0);
+        assert!(p.x.abs() < 1e-5 && p.z.abs() < 1e-5, "{p:?}");
+    }
+}
+
+#[test]
+fn edge_far_off_its_face_is_still_refused() {
+    let message = import_error(&box_with_a_sagging_edge(0.1));
+    assert!(
+        message.contains("\"Tolerant\"") && message.contains("leaves the surface of face"),
+        "{message}"
+    );
+}
+
 #[test]
 fn inside_out_body_is_turned_round() {
     let mut w = Step::default();

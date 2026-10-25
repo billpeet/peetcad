@@ -488,8 +488,12 @@ peet components -f received.peet
   sub-assembly, import it into a new assembly document and `insert` that.
 - `import_step` in a **part** takes the same file as bodies where they are, without
   the structure: use it when the whole is to be one part.
-- `warnings` in the reply says what was left out or assumed (a face that can't be
-  read, units not given).
+- `warnings` in the reply says what was left out, assumed or mended (a face that can't
+  be read, units not given). "lay up to … mm off its faces … and was moved onto them"
+  means the file gave edges a tolerance, as SolidWorks does, and PeetCAD refitted them
+  onto their faces: the shape moved by at most that much, and the body is sound. An
+  edge more than 0.01 mm off fails the import ("leaves the surface of face"): export
+  the file again with a finer tolerance.
 
 Done when `components` shows every component with `"status": "ok"` and the `min` and
 `max` that were asked for, `mates` shows every mate `"ok"`, `freedom` is what was
