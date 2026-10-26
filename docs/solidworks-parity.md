@@ -70,7 +70,7 @@ From four parts, so these are sightings, not counts for the library.
 
 ## What the importer found
 
-All 201 parts were last run through `tools/sw-import` on 26 October 2026 (`run-m5`, after the
+All 201 parts were last run through `tools/sw-import` on 26 October 2026 (`run-m6`, after the
 second round of parallel work below; `run-m4` before it), from
 the fourth export (`exports\out-all-v4`, format 4: what is in a library feature, a body's
 tight box, a corner relief's dimensions) with its STEP files as the reference. The five
@@ -78,7 +78,7 @@ tight box, a corner relief's dimensions) with its STEP files as the reference. T
 (`run-m3`) and 23 October (`run-r6`) they were run from the third export (which adds
 what is inside sketch blocks, the way each dimension measures and the selections of most
 suppressed features). The parts, the operations that made them and a report each are in
-`C:\Users\marti\source\peetcad-imports\run-m5`. The run of
+`C:\Users\marti\source\peetcad-imports\run-m6`. The run of
 12 October, before that day's changes, is in `run-base` beside it, and
 `scratch\compare.js` sets two runs against each other part by part.
 
@@ -89,8 +89,8 @@ suppressed features). The parts, the operations that made them and a report each
 | Matches SolidWorks: volume, bounding box and flat size | 118 | 138 | 182 | 185 | 198 |
 | Same size and flat pattern, volume within 5% | 17 | 16 | 12 | 12 | 2 |
 | Everything imported, but it differs | 13 | 13 | 5 | 2 | 0 |
-| A feature could not be imported | 47 | 30 | 1 | 1 | 0 |
-| Nothing built | 6 | 4 | 1 | 1 | 1 |
+| A feature could not be imported | 47 | 30 | 1 | 1 | 1 |
+| Nothing built | 6 | 4 | 1 | 1 | 0 |
 
 No part came out worse on 25 October than on 23 October, nor on 26 October than on 25 October.
 On the 26th, the tight boxes put Box Roof End Left and Right's size right, and STEP import
@@ -249,6 +249,10 @@ and warns; further out it still refuses the body.
   face where SolidWorks' profile plane is and carries their dimensions per configuration
   (Top Hat in all eleven), reads which way a pattern goes when its copies tie, and
   measures a flat DXF that SolidWorks drew turned (Peaked Angled Roof's blank was right).
+- **STEP bodies SolidWorks stitched with tolerance** are repaired on import (sliver faces
+  dropped, vertices up to 1 mm off moved or split, gaps closed with patches), and a body
+  that still can't be made a solid is left out with a warning, not the whole file. A
+  STEP file with a body left out is not used as the reference volume.
 - **Booleans** where a traced curve touches another edge: five tangency cases the
   property tests found, now fixed and tested; 50,000 random cases pass.
 
@@ -430,13 +434,19 @@ are done) and break corner (P8, 55 parts; first needs a check of whether `fillet
 
 The 3 parts that are not an exact match yet:
 
-1. **Box Roof End Left and Right**, 0.002% out in volume, the right size. Most likely
-   SolidWorks' mass properties: the other configuration's STEP body matches PeetCAD to
-   0.00002% where its mass properties are 3 mm³ under it. This configuration's STEP file
-   has a body ("Paint hook hole") PeetCAD can't import yet, to settle it.
-2. **ABB Flow Meter**, nothing built: an imported STEP body in SolidWorks, whose STEP file
-   is broken beyond tolerant edges: three sliver bodies have vertices 0.2 to 0.6 mm off
-   their edges and five shells have faces whose boundary does not close.
+1. **Box Roof End Left and Right**, 0.002% out in volume, the right size: SolidWorks' mass
+   properties are wrong. Its STEP body, measured by PeetCAD, is 208471.07 mm³, PeetCAD's
+   rebuild 208471.13, SolidWorks' mass properties 208466.6 (Left) and 208466.0 (Right).
+   The importer can't use the STEP body as the reference yet: its "Paint hook hole" has a
+   flat face running 0.1 mm past where a bend touches it, which needs its surface replaced
+   rather than a patch below the kernel's smallest face.
+2. **ABB Flow Meter**: 7 of its 12 bodies import; the main one (97% of the volume) does
+   not. In SolidWorks it is an imported body: the original
+   (`\\nas\Design\Panel_Footprints\Monitors, Flow Meters\STEP_WaterMaster FET100 Remote
+   Transmitter.stp`) is a Creo export of 18 open shells, which SolidWorks stitched into
+   solids with tolerance; its STEP of them has fillets squeezed into vertices and faces a
+   micron wide, and SolidWorks gives two of its knobs no volume. Next: stitch the open
+   shells (sewing) in PeetCAD from the original, or rebuild faces whose edges sit off them.
 3. **Driving the parts**: sizes of features that equations or configurations set, which
    the importer does not carry over; a pattern up to a reference (Top Hat's counts are
    set per configuration); Battery Bracket's flange outline, whose tie to its edge
