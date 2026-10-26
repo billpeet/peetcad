@@ -257,7 +257,14 @@ fn pair_edge_uses(patches: &mut [Patch], edges: &mut Vec<GEdge>) -> Result<(), S
                 )
             })
             .collect();
-        sort_ccw(&mut fan, |f| f.0, |f| f.1);
+        sort_ccw(
+            &mut fan,
+            |f| f.0,
+            |_| 0.0,
+            |tied| {
+                tied.sort_by(|a, b| a.1.total_cmp(&b.1));
+            },
+        );
         let fan: Vec<(f64, bool, usize, bool)> =
             fan.into_iter().map(|f| (f.0, f.2, f.3, f.4)).collect();
         let n = fan.len();
@@ -507,32 +514,15 @@ fn build(
 /// Gives every fan of faces around a vertex its own copy of the vertex, so bodies (or
 /// parts of one body) that touch in a point are separate in the topology.
 fn split_vertex_fans(solid: &mut Solid) {
-    let mut outgoing: Vec<Vec<CoedgeId>> = vec![Vec::new(); solid.vertices.len()];
-    for c in 0..solid.coedges.len() as u32 {
-        let c = CoedgeId(c);
-        outgoing[solid.coedge_start(c).index()].push(c);
+    // A closed edge has both its ends at its vertex, and they can be in different fans (a
+    // circle round a hole whose wall touches another face at the circle's vertex). It
+    // can't end at two copies of one vertex, so it is cut in two first.
+    while let Some(e) = closed_edge_across_fans(solid) {
+        split_closed_edge(solid, e);
     }
-    for (v, list) in outgoing.iter().enumerate() {
-        let mut visited: HashSet<CoedgeId> = HashSet::new();
-        let mut first = true;
-        for &start in list {
-            if visited.contains(&start) {
-                continue;
-            }
-            // One fan: from a coedge leaving the vertex to the next one around it.
-            let mut fan = Vec::new();
-            let mut c = start;
-            while visited.insert(c) {
-                fan.push(c);
-                let Some(t) = solid.twin(solid.coedge(c).prev) else {
-                    break;
-                };
-                c = t;
-            }
-            if first {
-                first = false;
-                continue;
-            }
+    let fans = vertex_fans(solid);
+    for (v, fans) in fans.into_iter().enumerate() {
+        for fan in fans.into_iter().skip(1) {
             let copy = solid.add_vertex(solid.vertices[v].point);
             for c in fan {
                 let co = solid.coedge(c).clone();
@@ -547,5 +537,94 @@ fn split_vertex_fans(solid: &mut Solid) {
                 }
             }
         }
+    }
+}
+
+/// For each vertex, the fans of faces around it: each a list of the coedges leaving the
+/// vertex, from one to the next one around it.
+fn vertex_fans(solid: &Solid) -> Vec<Vec<Vec<CoedgeId>>> {
+    let mut outgoing: Vec<Vec<CoedgeId>> = vec![Vec::new(); solid.vertices.len()];
+    for c in 0..solid.coedges.len() as u32 {
+        let c = CoedgeId(c);
+        outgoing[solid.coedge_start(c).index()].push(c);
+    }
+    outgoing
+        .iter()
+        .map(|list| {
+            let mut visited: HashSet<CoedgeId> = HashSet::new();
+            let mut fans = Vec::new();
+            for &start in list {
+                if visited.contains(&start) {
+                    continue;
+                }
+                let mut fan = Vec::new();
+                let mut c = start;
+                while visited.insert(c) {
+                    fan.push(c);
+                    let Some(t) = solid.twin(solid.coedge(c).prev) else {
+                        break;
+                    };
+                    c = t;
+                }
+                fans.push(fan);
+            }
+            fans
+        })
+        .collect()
+}
+
+/// A closed edge whose two coedges leave its vertex in different fans.
+fn closed_edge_across_fans(solid: &Solid) -> Option<EdgeId> {
+    for fans in vertex_fans(solid) {
+        if fans.len() < 2 {
+            continue;
+        }
+        for (i, fan) in fans.iter().enumerate() {
+            for &c in fan {
+                let e = solid.coedge(c).edge;
+                if solid.edge(e).is_closed()
+                    && fans[i + 1..]
+                        .iter()
+                        .flatten()
+                        .any(|&d| solid.coedge(d).edge == e)
+                {
+                    return Some(e);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Cuts a closed edge in two halfway round, with a new vertex there.
+fn split_closed_edge(solid: &mut Solid, e: EdgeId) {
+    let edge = solid.edge(e).clone();
+    let tm = 0.5 * (edge.t0 + edge.t1);
+    let m = solid.add_vertex(edge.curve.point(tm));
+    let second = solid.add_edge(edge.curve.clone(), m, edge.end, tm, edge.t1);
+    {
+        let first = &mut solid.edges[e.index()];
+        first.end = m;
+        first.t1 = tm;
+    }
+    for c in edge.coedges {
+        let co = solid.coedge(c).clone();
+        let id = CoedgeId(solid.coedges.len() as u32);
+        // Forwards the second half follows the first; backwards it comes before it.
+        let (prev, next) = if co.reversed {
+            (co.prev, c)
+        } else {
+            (c, co.next)
+        };
+        solid.coedges.push(crate::topo::Coedge {
+            edge: second,
+            reversed: co.reversed,
+            loop_id: co.loop_id,
+            next,
+            prev,
+        });
+        solid.coedges[prev.index()].next = id;
+        solid.coedges[next.index()].prev = id;
+        solid.edges[second.index()].coedges.push(id);
     }
 }

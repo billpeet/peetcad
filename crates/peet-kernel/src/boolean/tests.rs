@@ -1280,6 +1280,194 @@ mod random {
         s
     }
 
+    /// Applies add (`true`) and cut features to `body` in turn: every step must be a valid
+    /// solid of the volume the intersection implies. For regressions found by the random
+    /// tests below.
+    #[track_caller]
+    fn sequence(mut body: Solid, steps: impl IntoIterator<Item = (bool, Solid)>) {
+        let before = crate::boolean::ssi::tracings();
+        for (add, solid) in steps {
+            let op = if add {
+                BooleanOp::Union
+            } else {
+                BooleanOp::Subtract
+            };
+            let next = boolean(&body, &solid, op).unwrap_or_else(|e| panic!("{op:?}: {e}"));
+            let common = boolean(&body, &solid, BooleanOp::Intersect)
+                .unwrap_or_else(|e| panic!("intersect: {e}"));
+            assert_valid(&next);
+            assert_valid(&common);
+            let (vb, vt, vc) = (volume(&body), volume(&solid), volume(&common));
+            let expected = if add { vb + vt - vc } else { vb - vc };
+            let slack = if crate::boolean::ssi::tracings() > before {
+                1e-3
+            } else {
+                1e-7
+            };
+            assert!(
+                (volume(&next) - expected).abs() < slack,
+                "{op:?}: volume {} instead of {expected}",
+                volume(&next)
+            );
+            body = next;
+        }
+    }
+
+    /// [`sequence`] from the block `feature_sequences` starts with.
+    #[track_caller]
+    fn tools(tools: &[Tool]) {
+        let body = cuboid(DVec3::ZERO, DVec3::splat(4.0));
+        sequence(body, tools.iter().map(|t| (t.add, t.solid())));
+    }
+
+    fn grid(min: [i32; 3], max: [i32; 3]) -> GridBox {
+        GridBox { min, max }
+    }
+
+    #[test]
+    fn traced_curve_tangent_to_a_later_cut() {
+        // A cylinder along y tangent to the block's side, then a cylinder along x cut
+        // through both (a traced crossing, tangent to the block's bottom plane where it
+        // meets it), then a box cut whose bottom edge touches that traced curve.
+        tools(&[
+            Tool {
+                add: true,
+                shape: grid([4, 3, 0], [6, 6, 1]),
+                round: Some((1, 2)),
+            },
+            Tool {
+                add: false,
+                shape: grid([2, 2, 0], [5, 6, 1]),
+                round: Some((0, 1)),
+            },
+            Tool {
+                add: false,
+                shape: grid([3, 4, 0], [5, 5, 1]),
+                round: None,
+            },
+        ]);
+    }
+
+    #[test]
+    fn traced_curve_touching_a_seam() {
+        // The crossing of the two cylinders touches the second one's seam (without
+        // crossing it) just where the box's side later cuts it.
+        tools(&[
+            Tool {
+                add: true,
+                shape: grid([4, 0, 2], [6, 2, 6]),
+                round: Some((1, 1)),
+            },
+            Tool {
+                add: true,
+                shape: grid([1, 0, 1], [6, 1, 6]),
+                round: Some((0, 2)),
+            },
+            Tool {
+                add: false,
+                shape: grid([1, 0, 1], [5, 2, 4]),
+                round: None,
+            },
+        ]);
+    }
+
+    #[test]
+    fn traced_curve_in_close_contact_with_a_plane() {
+        // The cut cylinder's lowest line touches the boss cylinder where the box's top
+        // plane is tangent to both: the traced crossing stays within a hair of that
+        // plane's circle for a while, crossing it by the fit's noise on either side.
+        tools(&[
+            Tool {
+                add: true,
+                shape: grid([2, 4, 0], [4, 5, 4]),
+                round: Some((2, 2)),
+            },
+            Tool {
+                add: false,
+                shape: grid([2, 2, 1], [6, 6, 6]),
+                round: Some((1, 1)),
+            },
+            Tool {
+                add: false,
+                shape: grid([0, 1, 2], [4, 5, 3]),
+                round: None,
+            },
+        ]);
+    }
+
+    #[test]
+    fn exact_circle_touching_a_traced_curve_at_a_vertex() {
+        // The cut cylinder spans the hole's length exactly, so the crossing of the two
+        // touches the hole's end circles; the box then cuts along one of those circles,
+        // which meets the traced curve where it touches it, a fit's error from the vertex.
+        tools(&[
+            Tool {
+                add: false,
+                shape: grid([2, 3, 0], [3, 4, 3]),
+                round: Some((1, 3)),
+            },
+            Tool {
+                add: false,
+                shape: grid([0, 2, 1], [2, 5, 2]),
+                round: Some((0, 1)),
+            },
+            Tool {
+                add: false,
+                shape: grid([0, 0, 1], [1, 3, 2]),
+                round: None,
+            },
+        ]);
+    }
+
+    #[test]
+    fn circle_tangent_to_a_line_at_a_vertex_found_from_a_traced_curve() {
+        // The boss cylinder's top circle touches the rod's top line where the traced
+        // crossing of the two touches the box's top plane; the vertex there comes from
+        // that traced curve, a fraction of the tolerance from where circle and line meet.
+        tools(&[
+            Tool {
+                add: true,
+                shape: grid([2, 1, 3], [6, 2, 4]),
+                round: Some((0, 1)),
+            },
+            Tool {
+                add: true,
+                shape: grid([4, 0, 2], [5, 1, 5]),
+                round: Some((2, 2)),
+            },
+            Tool {
+                add: false,
+                shape: grid([2, 0, 2], [5, 2, 4]),
+                round: None,
+            },
+        ]);
+    }
+
+    #[test]
+    fn hole_circle_through_a_point_where_faces_touch() {
+        // The hole and the slot's round end (same radius, crossing axes) touch at the
+        // vertex of the hole's top circle: the circle's two ends belong to different
+        // fans of faces around that vertex.
+        let features = [
+            Feature {
+                add: false,
+                plane: 0,
+                profile: Profile::Circle([5, 6], 1),
+                range: (0, 4),
+            },
+            Feature {
+                add: false,
+                plane: 2,
+                profile: Profile::Slot([0, 0], [5, 8], 1),
+                range: (2, 2),
+            },
+        ];
+        sequence(
+            block(&Plane::TOP, DVec2::ZERO, DVec2::splat(4.0), 0.0, 4.0),
+            features.iter().map(|f| (f.add, f.solid().unwrap())),
+        );
+    }
+
     proptest! {
         #![proptest_config(ProptestConfig::with_cases(cases()))]
 

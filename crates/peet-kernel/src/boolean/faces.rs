@@ -24,6 +24,9 @@ use crate::geom::Curve3;
 /// directions of intersection curves are only as exact as the curves themselves.
 const TANGENT_TIE: f64 = 1e-7;
 
+/// The most a curve's own inaccuracy may widen [`TANGENT_TIE`] (radians).
+const MAX_SLACK: f64 = 1e-3;
+
 /// How many interior points [`interior_points`] offers at most.
 const MAX_SAMPLES: usize = 6;
 
@@ -55,6 +58,12 @@ struct End {
     at_start: bool,
     angle: f64,
     curvature: f64,
+    /// How far `angle` may be from the true direction (radians), beyond [`TANGENT_TIE`].
+    slack: f64,
+    /// The unit direction it leaves in.
+    tangent: DVec3,
+    /// On a freeform curve (mostly a fit).
+    fitted: bool,
 }
 
 /// Removes edges that dangle: used in both directions with an end no other edge reaches.
@@ -139,12 +148,23 @@ pub(crate) fn trace_faces(
                 } else {
                     0.0
                 },
+                slack: direction_slack(&g.curve, t),
+                tangent,
+                fitted: matches!(g.curve, Curve3::Nurbs(_)),
             });
         }
     }
     let mut position: HashMap<(u32, bool), (u32, usize)> = HashMap::new();
     for (&v, ends) in &mut around {
-        sort_ccw(ends, |e| e.angle, |e| e.curvature);
+        let p = points[v as usize];
+        sort_ccw(
+            ends,
+            |e| e.angle,
+            |e| e.slack,
+            |tied| {
+                order_tangent(tied, domain, edges, p);
+            },
+        );
         for (i, e) in ends.iter().enumerate() {
             position.insert((e.edge, e.at_start), (v, i));
         }
@@ -266,32 +286,129 @@ pub(crate) fn trace_faces(
     Ok(faces)
 }
 
+/// How far the direction of `c` at `t` may be from the true direction where the curves
+/// at a vertex meet (radians).
+///
+/// A vertex is wherever, within `LINEAR`, the point was first found: a curve's direction
+/// there can be off by its curvature times that, which on a small circle is more than
+/// [`TANGENT_TIE`]. A freeform curve is mostly a fit as well (an intersection traced
+/// between two surfaces): it stays within a fraction of `LINEAR` of the true curve, so
+/// its direction is only good to about `LINEAR` over the length of the piece it is in.
+/// Where curves really are tangent (a cylinder cut where it touches a plane), the
+/// directions differ by that much, and must still count as tangent.
+fn direction_slack(c: &Curve3, t: f64) -> f64 {
+    let n = match c {
+        Curve3::Line(_) => return 0.0,
+        Curve3::Circle(ci) => return (LINEAR / ci.radius.max(LINEAR)).min(MAX_SLACK),
+        Curve3::Ellipse(e) => {
+            return (LINEAR * e.major / (e.minor * e.minor).max(LINEAR)).min(MAX_SLACK);
+        }
+        Curve3::Nurbs(n) => n,
+    };
+    // The piece of the curve `t` is in (the last one at the end of the domain).
+    let knots = n.knots();
+    let i = knots.partition_point(|&k| k <= t).min(knots.len() - 1);
+    let hi = knots[i];
+    let Some(&lo) = knots[..i].iter().rev().find(|&&k| k < hi) else {
+        return MAX_SLACK;
+    };
+    let length = n.point(lo).distance(n.point(hi));
+    (4.0 * LINEAR / length.max(LINEAR)).min(MAX_SLACK)
+}
+
+/// Orders edge ends leaving `p` in one direction (tangent to each other) counter-clockwise:
+/// the one bending left comes later.
+///
+/// Between exact curves that is the order of their geodesic curvatures. A fitted curve's
+/// second derivative is too rough for that (a fit within `LINEAR` over pieces `h` long
+/// can be off by `LINEAR / h²`, and curves that touch closely differ by less), so where
+/// one is involved the ends are compared a little way out: how far each is to the left
+/// there. Edges don't cross between vertices, so that is the order they leave in, and a
+/// quarter of the shortest edge out they are apart by far more than a fit is off.
+fn order_tangent(tied: &mut [End], domain: &Domain, edges: &[GEdge], p: DVec3) {
+    if tied.iter().all(|e| !e.fitted) {
+        tied.sort_by(|a, b| a.curvature.total_cmp(&b.curvature));
+        return;
+    }
+    let normal = domain.outward(p);
+    let along = tied[0].tangent;
+    let left = normal.cross(along).normalize_or_zero();
+    let mut reach = tied
+        .iter()
+        .map(|e| {
+            let g = &edges[e.edge as usize];
+            edge_length(&g.curve, g.t0, g.t1)
+        })
+        .fold(f64::INFINITY, f64::min)
+        * 0.25;
+    // Not so far that the surface turns away (a quarter of a cylinder's radius).
+    let bend = domain
+        .surface
+        .section_curvature(p, along)
+        .length()
+        .max(domain.surface.section_curvature(p, left).length());
+    if bend > 0.0 {
+        reach = reach.min(0.25 / bend);
+    }
+    let offset = |e: &End| {
+        let g = &edges[e.edge as usize];
+        let (t, sign) = if e.at_start {
+            (g.t0, 1.0)
+        } else {
+            (g.t1, -1.0)
+        };
+        let speed = g.curve.derivative(t).length().max(f64::MIN_POSITIVE);
+        let at = (t + sign * reach / speed).clamp(g.t0, g.t1);
+        (g.curve.point(at) - p).dot(left)
+    };
+    tied.sort_by(|a, b| offset(a).total_cmp(&offset(b)));
+}
+
+/// The length of the part `t0..t1` of a curve, near enough (by chords).
+fn edge_length(c: &Curve3, t0: f64, t1: f64) -> f64 {
+    const CHORDS: usize = 16;
+    let at = |k: usize| c.point(t0 + (t1 - t0) * k as f64 / CHORDS as f64);
+    (0..CHORDS).map(|i| at(i).distance(at(i + 1))).sum()
+}
+
 /// Sorts directions around a point counter-clockwise by `angle`. Directions tangent to
-/// each other (within [`TANGENT_TIE`]) are ordered by `bend`: how fast each turns
-/// counter-clockwise as it leaves, so the one bending left comes later.
-pub(crate) fn sort_ccw<T>(items: &mut [T], angle: impl Fn(&T) -> f64, bend: impl Fn(&T) -> f64) {
+/// each other (within [`TANGENT_TIE`], widened by the `slack` of each: how far its angle
+/// may be off) are put in order by `order_ties`.
+pub(crate) fn sort_ccw<T>(
+    items: &mut [T],
+    angle: impl Fn(&T) -> f64,
+    slack: impl Fn(&T) -> f64,
+    mut order_ties: impl FnMut(&mut [T]),
+) {
     items.sort_by(|a, b| angle(a).total_cmp(&angle(b)));
     let n = items.len();
     if n < 2 {
         return;
     }
+    let tie = |a: &T, b: &T| TANGENT_TIE + slack(a) + slack(b);
     // Start the cyclic order at a real gap, so tangent groups are contiguous.
     let gap = |i: usize| {
-        let d = angle(&items[i]) - angle(&items[(i + n - 1) % n]);
-        if i == 0 { d + TAU } else { d }
+        let (a, b) = (&items[(i + n - 1) % n], &items[i]);
+        let d = angle(b) - angle(a);
+        (if i == 0 { d + TAU } else { d }) - tie(a, b)
     };
-    let Some(first) = (0..n).find(|&i| gap(i) > TANGENT_TIE) else {
-        items.sort_by(|a, b| bend(a).total_cmp(&bend(b)));
+    let Some(first) = (0..n).find(|&i| gap(i) > 0.0) else {
+        order_ties(items);
         return;
     };
     items.rotate_left(first);
     let mut i = 0;
     while i < n {
         let mut j = i + 1;
-        while j < n && (angle(&items[j]) - angle(&items[j - 1])).rem_euclid(TAU) <= TANGENT_TIE {
+        while j < n
+            && (angle(&items[j]) - angle(&items[j - 1])).rem_euclid(TAU)
+                <= tie(&items[j - 1], &items[j])
+        {
             j += 1;
         }
-        items[i..j].sort_by(|a, b| bend(a).total_cmp(&bend(b)));
+        if j - i > 1 {
+            order_ties(&mut items[i..j]);
+        }
         i = j;
     }
 }
