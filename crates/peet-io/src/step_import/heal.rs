@@ -22,7 +22,7 @@ use peet_math::DVec3;
 use super::HEAL_LIMIT;
 
 /// How closely (mm) a healed edge follows its faces: well inside what validation allows.
-const HEAL_FIT: f64 = 0.1 * EDGE_ON_SURFACE;
+pub(super) const HEAL_FIT: f64 = 0.1 * EDGE_ON_SURFACE;
 
 /// How many pieces an edge is cut into to measure how far it is from its faces.
 const DRIFT_SAMPLES: usize = 32;
@@ -94,7 +94,7 @@ pub(super) fn heal_edges(solid: &mut Solid) -> Healed {
 }
 
 /// How far (mm) `p` is from the furthest of `surfaces`.
-fn distance(p: DVec3, surfaces: &[&Surface]) -> f64 {
+pub(super) fn distance(p: DVec3, surfaces: &[&Surface]) -> f64 {
     surfaces
         .iter()
         .map(|s| s.signed_distance(p).abs())
@@ -102,7 +102,7 @@ fn distance(p: DVec3, surfaces: &[&Surface]) -> f64 {
 }
 
 /// How far (mm) `curve` strays from `surfaces` over `t0..=t1`.
-fn drift(curve: &Curve3, t0: f64, t1: f64, surfaces: &[&Surface]) -> f64 {
+pub(super) fn drift(curve: &Curve3, t0: f64, t1: f64, surfaces: &[&Surface]) -> f64 {
     (0..=DRIFT_SAMPLES)
         .map(|k| curve.point(t0 + (t1 - t0) * k as f64 / DRIFT_SAMPLES as f64))
         .map(|p| distance(p, surfaces))
@@ -115,7 +115,7 @@ fn drift(curve: &Curve3, t0: f64, t1: f64, surfaces: &[&Surface]) -> f64 {
 /// the point go a little past the end of a B-spline surface whose boundary is the edge
 /// (where its closest point would stop): the signed distance along the normal, which is
 /// what validation measures, stays zero there.
-fn onto(p: DVec3, surfaces: &[&Surface]) -> DVec3 {
+pub(super) fn onto(p: DVec3, surfaces: &[&Surface]) -> DVec3 {
     let mut q = p;
     for _ in 0..STEPS {
         if distance(q, surfaces) <= 0.01 * HEAL_FIT {
