@@ -327,9 +327,24 @@ impl Layout {
             .flat_map(|e| [e.curve.start(), e.curve.end()])
             .map(|p| (p - at.a).dot(out))
             .fold(f64::NEG_INFINITY, f64::max);
+        // The offsets are from the ends of the edge as given, which the trial may have carried
+        // on to a corner (`at`): an outline that ends between the two ends ends at the edge's
+        // end, and the flange is carried on to the corner and fitted to the flange there.
+        let (start, end) = ((site.a - at.a).dot(d), (site.b - at.a).dot(d));
         let len = at.a.distance(at.b);
+        // (how far in from the edge's end, whether the outline still reaches the corner)
+        let offset = |inside: f64, to_corner: bool| {
+            if inside.abs() <= MIN_LENGTH || (inside < 0.0 && to_corner) {
+                0.0
+            } else {
+                inside
+            }
+        };
         let mut shaped = *spec;
-        shaped.offsets = [u[0], len - u[1]];
+        shaped.offsets = [
+            offset(u[0] - start, u[0] >= -MIN_LENGTH),
+            offset(end - u[1], u[1] <= len + MIN_LENGTH),
+        ];
         shaped.length = spec.length + (v[1] - tip) + 0.01;
         self.add_edge_flange_part(owner, part_base, site, &shaped, own)?;
         let made = self.attachments.last().ok_or("The flange was not made.")?.clone();
@@ -683,6 +698,18 @@ impl Layout {
             let area = Area::polygon(&[p, q, r], |i| tag(base + i as u8));
             self.cuts.push(Cut::new(area, vec![new_pieces[0]]));
         }
+        for (end, area) in self.through_parent_bend(site, span, trim, len) {
+            let base = if end == 0 {
+                wall::RELIEF_START
+            } else {
+                wall::RELIEF_END
+            };
+            let (piece, area) = area;
+            self.cuts.push(Cut::new(
+                Area::polygon(&area, |i| tag(base + i as u8)),
+                vec![piece],
+            ));
+        }
         self.attachments.push(Attachment {
             owner,
             parent: site.piece,
@@ -790,6 +817,59 @@ impl Layout {
                     line(apex, trim),
                     q + out_dir * (allowance - trim),
                 ],
+            ));
+        }
+        out
+    }
+
+    /// Where a flange's edge runs up to the bend its face hangs from and the flange takes its
+    /// bend out of the face (`trim` deep), the strip it takes runs on through that bend:
+    /// SolidWorks cuts the bend away there, square to it, so the two bends don't share the
+    /// corner. For each end of the edge that the flange reaches (its `span` along the edge of
+    /// length `len`), the bend piece and the region cut from it, in flat coordinates.
+    fn through_parent_bend(
+        &self,
+        site: &EdgeSite,
+        span: [f64; 2],
+        trim: f64,
+        len: f64,
+    ) -> Vec<(usize, (usize, [DVec2; 4]))> {
+        let mut out = Vec::new();
+        if trim <= MIN_LENGTH || len <= MIN_LENGTH {
+            return out;
+        }
+        let Some((bend_piece, bend)) = self.pieces.iter().enumerate().find_map(|(i, p)| {
+            p.bend()
+                .filter(|b| b.child == Some(site.piece))
+                .map(|b| (i, *b))
+        }) else {
+            return out;
+        };
+        let d = (site.b - site.a) / len;
+        let inward = DVec2::new(-d.y, d.x);
+        // The edge must be square to the fold line, which is the bend's far side
+        if d.dot(bend.along).abs() > 1e-6 {
+            return out;
+        }
+        let fold = bend.origin + bend.across * bend.width();
+        let reach = bend.width() + 1.0;
+        for (end, q, reached) in [
+            (0, site.a, span[0] <= MIN_LENGTH),
+            (1, site.b, span[1] >= len - MIN_LENGTH),
+        ] {
+            if !reached || (q - fold).perp_dot(bend.along).abs() > MIN_LENGTH {
+                continue;
+            }
+            // Only where the bend is there to cut: along it, the end lies within its length
+            let s = (q - bend.origin).dot(bend.along);
+            if s < -MIN_LENGTH || s > bend.length + MIN_LENGTH {
+                continue;
+            }
+            let back = -bend.across;
+            let p = q + inward * trim;
+            out.push((
+                end,
+                (bend_piece, [q, q + back * reach, p + back * reach, p]),
             ));
         }
         out

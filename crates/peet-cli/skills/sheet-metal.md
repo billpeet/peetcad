@@ -228,6 +228,18 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
   {"op": "edge_flange", "name": "Lip", "length": 20, "position": "material_outside", "relief": "tear", "edges": [{"between": [[100, 0, 2], [0, 100, 2]]}]}
   {"op": "bodies"}
   ```
+- A lip on a wall's **side edge**, which runs down to the bend the wall hangs from: with
+  its bend inside the sheet, the strip that bend takes from the wall runs on through the
+  wall's bend, which is cut away there, as SolidWorks does. Nothing to set; the wall's
+  bend starts the lip's setback (radius + thickness) in from the side.
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+  {"op": "edge_flange", "name": "Wall", "length": 30, "edge": {"between": [[0, 0, 2], [100, 0, 2]]}}
+  {"op": "edge_flange", "name": "Lip", "length": 15, "edge": {"at": [0, 2, 20]}}
+  {"op": "bodies"}
+  ```
 - An edge flange's bend is worked out as the body's are unless it has a `bend` of its
   own (`{"deduction": 3.5}`, or `k_factor` or `allowance`): for the one bend the press
   brake makes differently, such as a bend at another angle. The folded part is the
