@@ -70,32 +70,34 @@ From four parts, so these are sightings, not counts for the library.
 
 ## What the importer found
 
-All 201 parts were last run through `tools/sw-import` on 26 October 2026 (`run-m4`), from
+All 201 parts were last run through `tools/sw-import` on 26 October 2026 (`run-m5`, after the
+second round of parallel work below; `run-m4` before it), from
 the fourth export (`exports\out-all-v4`, format 4: what is in a library feature, a body's
 tight box, a corner relief's dimensions) with its STEP files as the reference. The five
 "b Tophat" parts are no longer on the NAS and come from the third export. On 25 October
 (`run-m3`) and 23 October (`run-r6`) they were run from the third export (which adds
 what is inside sketch blocks, the way each dimension measures and the selections of most
 suppressed features). The parts, the operations that made them and a report each are in
-`C:\Users\marti\source\peetcad-imports\run-m4`. The run of
+`C:\Users\marti\source\peetcad-imports\run-m5`. The run of
 12 October, before that day's changes, is in `run-base` beside it, and
 `scratch\compare.js` sets two runs against each other part by part.
 
-**Shape, in the active configuration**, on 12, 23, 25 and 26 October:
+**Shape, in the active configuration**, on 12, 23, 25 and 26 October (from the fourth export, then after round 2):
 
-| Result | 12 Oct | 23 Oct | 25 Oct | 26 Oct |
-|---|---|---|---|---|
-| Matches SolidWorks: volume, bounding box and flat size | 118 | 138 | 182 | 185 |
-| Same size and flat pattern, volume within 5% | 17 | 16 | 12 | 12 |
-| Everything imported, but it differs | 13 | 13 | 5 | 2 |
-| A feature could not be imported | 47 | 30 | 1 | 1 |
-| Nothing built | 6 | 4 | 1 | 1 |
+| Result | 12 Oct | 23 Oct | 25 Oct | 26 Oct | Round 2 |
+|---|---|---|---|---|---|
+| Matches SolidWorks: volume, bounding box and flat size | 118 | 138 | 182 | 185 | 198 |
+| Same size and flat pattern, volume within 5% | 17 | 16 | 12 | 12 | 2 |
+| Everything imported, but it differs | 13 | 13 | 5 | 2 | 0 |
+| A feature could not be imported | 47 | 30 | 1 | 1 | 0 |
+| Nothing built | 6 | 4 | 1 | 1 | 1 |
 
 No part came out worse on 25 October than on 23 October, nor on 26 October than on 25 October.
 On the 26th, the tight boxes put Box Roof End Left and Right's size right, and STEP import
 heals SolidWorks' tolerant edges, so Weather Shield Door is measured against its STEP body
 and matches; Battery Bracket and Elsteel Plinth match too. "Matches" counts the two parts
 that match with a feature left out (a weldment's structural member, a mirror of a body).
+After round 2 none of the 198 leaves a feature out, and none got worse.
 
 "Matches" is about shape only. On 23 October 113 of the 138 use no stand-in. The other 25 match
 because the importer stands in for something: a flange whose length runs up to a vertex
@@ -225,6 +227,30 @@ SolidWorks-PC, so he must be logged in.
 strays from its faces by up to a few ten-thousandths of a millimetre (Parasolid's
 tolerant edges). `import_step` fits such an edge, up to 0.01 mm out, onto both faces
 and warns; further out it still refuses the body.
+
+**What round 2 gained** (26 October), seven pieces of work at once, each in a worktree:
+
+- **Sheet metal cuts** with an end condition cut only the sheet their depth reaches, the
+  sketch's own included (Roof Front Flange); one that ends in a bend ends square to the
+  sheet where the straight cut leaves its far face (Box Roof Bottom Front and Back); a
+  shape over another flange in the sketch's plane cuts that flange alone (Top Hat); a
+  copied cut that lands on no flange cuts only those in line with the original's
+  (Wall Left Right Middle). An arc seen edge-on projects to the line it covers.
+- **Flanges.** Flanges on in-line edges of two faces joined by a bend are mitred round it
+  (Laptop Bracket); a flange gets a relief past its edge's end where its face carries on;
+  a flange on a wall's side edge runs its bend on through the wall's bend, and an outlined
+  flange ends where its outline does (Louvre Filter Bracket, Laptop Shelf).
+- **Solids.** `move_body` (Move/Copy Body), `insert_part` (Insert and Mirror Part) and
+  `structural_member` (weldments); drafts copied by patterns; a fillet beside a band
+  narrower than itself keeps the band's far edge (Lifting Lug); tight boxes round domes
+  with a recess in them. M6 Nutsert's screw is placed by SolidWorks' mates, which PeetCAD
+  has no body mates for: it is moved where SolidWorks has it, a stand-in.
+- **The importer** draws splines (Plinth PFC Long B's lettering), places outlines on the
+  face where SolidWorks' profile plane is and carries their dimensions per configuration
+  (Top Hat in all eleven), reads which way a pattern goes when its copies tie, and
+  measures a flat DXF that SolidWorks drew turned (Peaked Angled Roof's blank was right).
+- **Booleans** where a traced curve touches another edge: five tangency cases the
+  property tests found, now fixed and tested; 50,000 random cases pass.
 
 ## What converting four parts by hand showed
 
@@ -400,25 +426,19 @@ are done) and break corner (P8, 55 parts; first needs a check of whether `fillet
 4. A1 and A2, which nearly every FabSys mate depends on; then A3 and A5.
 5. The **Decide** entries: P4, P6, A6, A9, A10.
 
-## Next, as of 26 October
+## Next, after round 2
 
-The 18 parts that are not an exact match yet, by what holds them back:
+The 3 parts that are not an exact match yet:
 
-1. **Volume only, the right size and flat pattern** (12): Top Hat's outline (the
-   importer falls back to a rectangle and a cut), Box Roof Bottom Front's cut that ends
-   in a bend, Roof Front Flange's Cut-Extrude6 cutting the base, Gear tray bracket's tab
-   and Wall Left Right Middle's mitre flange copies (1% and 0.2%), Laptop Bracket (4.4%),
-   and Box Roof End Left and Right, Box Roof Bottom Back, Laptop Shelf, Louvre Filter
-   Bracket, Plinth PFC Long B, all under 0.04%.
-2. **Different** (2): Peaked Angled Roof (a flange's flat pattern overlaps the base's),
-   Lifting Lug (a fillet that runs over its face).
-3. **Features left out**: M6 Nutsert (move body and drafts in patterns), Weldment
-   30x30x2's structural member (P18), and MirrorCableway Cover Bracket LH's mirror of a
-   body.
-4. **Nothing built**: ABB Flow Meter. Its STEP file's tolerant edges are healed now, but
-   three sliver bodies have vertices 0.2 to 0.6 mm off their edges and five shells have
-   faces whose boundary doesn't close. Export it some other way, or import the bodies
-   that are valid and warn about the rest.
-5. **Driving the parts**: sizes of features that equations or configurations set (a
-   flange's length, a pattern's spacing), which the importer does not carry over; then
-   P4 and P27. Sketch text's font, which the export doesn't carry.
+1. **Box Roof End Left and Right**, 0.002% out in volume, the right size. Most likely
+   SolidWorks' mass properties: the other configuration's STEP body matches PeetCAD to
+   0.00002% where its mass properties are 3 mm³ under it. This configuration's STEP file
+   has a body ("Paint hook hole") PeetCAD can't import yet, to settle it.
+2. **ABB Flow Meter**, nothing built: an imported STEP body in SolidWorks, whose STEP file
+   is broken beyond tolerant edges: three sliver bodies have vertices 0.2 to 0.6 mm off
+   their edges and five shells have faces whose boundary does not close.
+3. **Driving the parts**: sizes of features that equations or configurations set, which
+   the importer does not carry over; a pattern up to a reference (Top Hat's counts are
+   set per configuration); Battery Bracket's flange outline, whose tie to its edge
+   PeetCAD refuses, so its other configurations differ; then P4 and P27. Sketch text's
+   font, which the export doesn't carry. Body mates for `move_body`.
