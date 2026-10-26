@@ -407,6 +407,35 @@ fn a_changed_dimension_moves_what_less_holds() {
     );
 }
 
+/// A profile placed by a dimension to the origin moves as a whole when it changes, as
+/// SolidWorks moves it: its shape is not stretched to meet the new value.
+#[test]
+fn a_changed_placement_moves_the_whole_profile() {
+    let mut s = Sketch::new();
+    let shape = shapes::rectangle(&mut s, v(100.0, 10.0), v(130.0, 30.0));
+    let [bottom, right, ..] = [
+        shape.curves[0],
+        shape.curves[1],
+        shape.curves[2],
+        shape.curves[3],
+    ];
+    let corner = pts(&s, bottom).0;
+    dim!(s, K::Length(bottom), 30.0);
+    dim!(s, K::Length(right), 20.0);
+    let place = dim!(s, K::HorizontalDistance(Sketch::ORIGIN, corner), 100.0);
+    assert_solved(&mut s);
+    s.constraint_mut(place)
+        .unwrap()
+        .dimension
+        .as_mut()
+        .unwrap()
+        .value = 40.0;
+    assert_solved(&mut s);
+    let (a, b) = line_ab(&s, bottom);
+    assert!(a.distance(v(40.0, 10.0)) < 1e-9, "{a:?}");
+    assert!(b.distance(v(70.0, 10.0)) < 1e-9, "{b:?}");
+}
+
 #[test]
 fn signs_are_kept() {
     let mut s = Sketch::new();

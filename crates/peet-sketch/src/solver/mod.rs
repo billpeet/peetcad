@@ -366,10 +366,14 @@ impl Solver {
         }
 
         // The geometry each variable is part of: a point's two coordinates go together.
+        // And which way each moves a point: 0 along x, 1 along y, 2 neither (a radius).
         let mut group: Vec<u32> = (0..st.n_vars as u32).collect();
+        let mut axis = vec![2u8; st.n_vars];
         for class in &st.classes {
             if class.slot != NONE && (class.slot as usize + 1) < st.n_vars {
                 group[class.slot as usize + 1] = class.slot;
+                axis[class.slot as usize] = 0;
+                axis[class.slot as usize + 1] = 1;
             }
         }
         // How many equations each point (or radius) takes part in, over the whole sketch.
@@ -429,6 +433,7 @@ impl Solver {
                     &cluster.vars,
                     &cluster.eqs,
                     &group,
+                    &axis,
                     &held_by,
                     &dimensions,
                     |vals| {
@@ -517,7 +522,8 @@ impl Solver {
 /// rectangle with its width and height dimensioned from one corner keeps that corner, and
 /// a new width moves the side across from it, not both sides half way.
 ///
-/// Points (and radii) are ranked by how many of the sketch's equations they take part in
+/// First the whole cluster is moved, if that does it (`translate`). Otherwise points
+/// (and radii) are ranked by how many of the sketch's equations they take part in
 /// (`held_by`, by the first slot of each, which `group` gives). Those of the top rank are held still and the rest solved for; if that works, the
 /// next rank is held as well, and so on while it still works. Returns whether any of it
 /// worked (the values are then the last solution found; otherwise they are as they were)
@@ -526,6 +532,7 @@ fn solve_holding_still(
     vars: &[u32],
     cluster_eqs: &[u32],
     group: &[u32],
+    axis: &[u8],
     held_by: &[usize],
     dimensions: &[bool],
     collapsed: impl Fn(&[f64]) -> bool,
@@ -542,11 +549,14 @@ fn solve_holding_still(
     {
         return (false, 0);
     }
+    let start: Vec<f64> = vars.iter().map(|&v| vals[v as usize]).collect();
+    if translate(vars, cluster_eqs, axis, eqs, vals, &start) {
+        return (true, 0);
+    }
     let score = |v: u32| held_by[group[v as usize] as usize];
     let mut ranks: Vec<usize> = vars.iter().map(|&v| score(v)).collect();
     ranks.sort_unstable_by(|a, b| b.cmp(a));
     ranks.dedup();
-    let start: Vec<f64> = vars.iter().map(|&v| vals[v as usize]).collect();
     let mut found: Option<Vec<f64>> = None;
     let mut iterations = 0;
     // Holding every rank still leaves nothing to solve for.
@@ -578,6 +588,74 @@ fn solve_holding_still(
         vals[v as usize] = x;
     }
     (solved, iterations)
+}
+
+/// Moves the whole cluster, unchanged in shape, as far as its dimensions say, where that
+/// satisfies them: SolidWorks moves a profile dimensioned to the model as a whole
+/// (Escutcheon Concealed's lock cut, 730 mm from the edge in one configuration and 55 mm
+/// in the other). Points move by one offset; radii stay. Returns whether it worked; if
+/// not, the values are as they were.
+fn translate(
+    vars: &[u32],
+    cluster_eqs: &[u32],
+    axis: &[u8],
+    eqs: &[Eq],
+    vals: &mut [f64],
+    start: &[f64],
+) -> bool {
+    let place = |t: [f64; 2], vals: &mut [f64]| {
+        for (&v, &x) in vars.iter().zip(start) {
+            let a = axis[v as usize];
+            vals[v as usize] = if a < 2 { x + t[a as usize] } else { x };
+        }
+    };
+    let residuals = |vals: &[f64]| -> Vec<f64> {
+        cluster_eqs
+            .iter()
+            .map(|&e| eqs[e as usize].residual(vals))
+            .collect()
+    };
+    let mut t = [0.0f64; 2];
+    let mut done = false;
+    for _ in 0..20 {
+        place(t, vals);
+        let r = residuals(vals);
+        if r.iter().all(|x| x.abs() <= peet_solve::TARGET) {
+            done = true;
+            break;
+        }
+        // Gauss-Newton on the two offsets, the derivatives by differences
+        let mut columns = [vec![0.0; r.len()], vec![0.0; r.len()]];
+        for (k, column) in columns.iter_mut().enumerate() {
+            let mut moved = t;
+            moved[k] += 1e-6;
+            place(moved, vals);
+            for (c, (now, was)) in column.iter_mut().zip(residuals(vals).iter().zip(&r)) {
+                *c = (now - was) / 1e-6;
+            }
+        }
+        let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
+        let (a, b, c) = (
+            dot(&columns[0], &columns[0]) + 1e-12,
+            dot(&columns[0], &columns[1]),
+            dot(&columns[1], &columns[1]) + 1e-12,
+        );
+        let (g0, g1) = (dot(&columns[0], &r), dot(&columns[1], &r));
+        let det = a * c - b * b;
+        if det.abs() < 1e-24 {
+            break;
+        }
+        t[0] -= (c * g0 - b * g1) / det;
+        t[1] -= (a * g1 - b * g0) / det;
+    }
+    if !done {
+        place(t, vals);
+        done = residuals(vals).iter().all(|x| x.abs() <= CONVERGED);
+    }
+    if !done {
+        place([0.0, 0.0], vals);
+    }
+    done
 }
 
 /// Drags one cluster: alternates a linearised step towards the soft targets (phase a) with

@@ -126,8 +126,10 @@ etch or cut out a label, `extrude` it to emboss one. Put the sketch on the face 
 - Geometry is drawn where you put it and a sketch need not be fully defined: an
   `under_defined` sketch builds as drawn. Add dimensions to what must stay exact or
   follow a parameter.
-- **Which way a new value moves an under-defined sketch:** as SolidWorks, what the most
-  relations and dimensions hold stays put and the rest moves. Width and height measured
+- **Which way a new value moves an under-defined sketch:** as SolidWorks. If moving the
+  whole sketch keeps everything else, it moves whole: a profile placed by a distance to
+  the origin or an edge keeps its shape. Otherwise what the most relations and dimensions
+  hold stays put and the rest moves. Width and height measured
   from one corner of a rectangle: a new width moves the far side, and the corner stays.
   To choose what stays, tie it down (`coincident` with `"origin"`, or a dimension to it).
 

@@ -266,8 +266,9 @@ for editing, so Smart Dimension and relations can select its edges and corners.
 Scripts obtain those references with an explicit `project` item.
 
 A new dimension value (`set_dimension`, a parameter, a configuration) moves an
-under-defined sketch as SolidWorks does: the points held by the most relations and
-dimensions stay put and the rest moves; only if that can't satisfy the sketch is the
+under-defined sketch as SolidWorks does: moved whole, if that satisfies it (a profile
+placed by a distance to the model keeps its shape); otherwise the points held by the most
+relations and dimensions stay put and the rest moves; only if that can't satisfy the sketch is the
 change spread over everything by least squares.
 
 `collinear` creates parallel plus point-on-line relations; `coradial` creates concentric
