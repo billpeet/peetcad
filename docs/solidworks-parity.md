@@ -3,7 +3,7 @@
 What PeetCAD can't yet do that the SolidWorks component library needs. The aim is for
 FabSys to drive PeetCAD in place of SolidWorks; parts come first, assemblies after.
 
-**Status, 26 October 2026:** first written on 9 October from names and counts; since then
+**Status, 27 October 2026:** first written on 9 October from names and counts; since then
 the whole library has been exported and imported, and the entries below say what that
 found. Update an entry when it is confirmed, fixed or decided against.
 
@@ -106,17 +106,18 @@ read off SolidWorks' body (8), fillets on a sheet's corners likewise (5), sketch
 left out (2); a part can be in more than one of these. Those have the right shape and do
 not follow the part when it changes.
 
-**Beyond shape**, on 23 October:
+**Beyond shape**, on 23 October and after round 3 (27 October, `run-m8`;
+`scratch\beyond.js` counts it):
 
-| | Imported | Of |
-|---|---|---|
-| Sketch relations and dimensions | 5,869 | 7,275 (81%); every one kept in 273 of 759 sketches |
-| Names of faces and edges | 311 | 320 |
-| Equations in force | 48 | 90 |
-| Other configurations that match SolidWorks | 42 | 85, in 50 parts; 14 more are the right size with the volume within 5% |
+| | 23 Oct | 27 Oct | Of (27 Oct) |
+|---|---|---|---|
+| Sketch relations and dimensions kept | 5,869 (81%) | 8,130 (95%) | 8,557; every one kept in 734 of 949 sketches |
+| Names of faces and edges | 311 | | 320 |
+| Equations in force imported | 48 | 82 | 91 |
+| Other configurations that match SolidWorks | 42 | 84 | 86, in 51 parts |
 
-In 22 of the 50 parts with more than one configuration, every configuration matches.
-What holds most of the others back is what holds back their active configuration.
+In 47 of the 51 parts with more than one configuration, every configuration matches.
+(The counts of 27 October include hole wizard sketches, now imported with their relations.)
 
 - **Relations that were dropped.** Coincident relations PeetCAD refused (most join
   points the importer had already joined); redundant ones, which SolidWorks accepts and
@@ -303,7 +304,7 @@ are in `C:\Users\marti\source\peetcad-imports`.
 | P1 | **No conditionals in expressions.** There is `min`, `max`, `round` and trigonometry, but no comparison and no `if`. | 89 parts have 386 equations; many are `iif(...)`: `"D1@LPattern2" = iif("D2@Sketch1" > 299, 3, 2)` | Done (`689ab7c`): `if`, `iif`, comparisons, `int`; checked on Access Plate 1 |
 | P2 | **Suppression can't follow an expression.** It is a flag per configuration. | `"Vent hole" = iif("D2@Sketch1" > 300, "unsuppressed", "suppressed")` | Done (`689ab7c`): `set_suppression_expression`; not yet tried on a template |
 | P3 | **No user names for faces and edges.** Faces are named by the feature that made them. FabSys mates and sketches by name. | 97 parts carry 324 named faces and edges | Done (PR #13): `name_face`, `name_edge`, `{"name": ...}` as a selector. Checked on Access Plate 1 with its five SolidWorks names: they survive a change of length and a cut through the named face, and work as a sketch plane and as mate ends. Not yet tried: a named hole (the Door's hinge holes) or a named edge |
-| P4 | **Addressing by SolidWorks names.** FabSys sets `Width@Sketch1` and `D1@LPattern2`. A sketch dimension maps to `set_dimension`, a feature dimension to a field of `edit`; the importer has to keep a map from one to the other, or name things so none is needed. | About 5,100 dimensions | Decide |
+| P4 | **Addressing by SolidWorks names.** Done (round 3): every sketch and feature dimension has an address `NAME@FEATURE`, as SolidWorks has (`Width@Sketch1`, `D1@LPattern2`; a feature's values are `d1`, `d2`, … or their field names unless named); expressions read them, `set` sets one by its address (per configuration too), `name_dimension` renames one and `dimensions` lists them. The importer gives every dimension SolidWorks' own name. Of the 70 addresses the FabSys scripts set on template parts, 60 exist in the imported parts. **Left:** global variables with spaces in their names become identifiers (`Base Height` is `Base_Height`). | About 5,100 dimensions | Done |
 | P5 | **Sketch text.** Done: a sketch takes `text` (a string, a height, a position and an angle), drawn from the font's glyphs as closed profiles a cut or extrusion can use, and `set_text` changes it as FabSys's `SetSketchText` does. **Left:** the export does not say which font, so the default is used | `SetSketchText`; features `Etch L`, `Etch R`, `EtchRodGL`; A3 Geartray and Tophat CB Covers match with their text cut | Done |
 | P6 | **Smart components and library features.** No equivalent. FabSys applies a smart feature about once per inserted component. | 43 parts hold smart components, 7 hold library features | Decide |
 
@@ -430,25 +431,55 @@ are done) and break corner (P8, 55 parts; first needs a check of whether `fillet
 4. A1 and A2, which nearly every FabSys mate depends on; then A3 and A5.
 5. The **Decide** entries: P4, P6, A6, A9, A10.
 
-## Next, after round 2
+## Round 3 (27 October): driving the parts
 
-The 3 parts that are not an exact match yet:
+Seven pieces of work, each in a worktree; what each changed:
 
-1. **Box Roof End Left and Right**, 0.002% out in volume, the right size: SolidWorks' mass
-   properties are wrong. Its STEP body, measured by PeetCAD, is 208471.07 mm³, PeetCAD's
-   rebuild 208471.13, SolidWorks' mass properties 208466.6 (Left) and 208466.0 (Right).
-   The importer can't use the STEP body as the reference yet: its "Paint hook hole" has a
-   flat face running 0.1 mm past where a bend touches it, which needs its surface replaced
-   rather than a patch below the kernel's smallest face.
-2. **ABB Flow Meter**: 7 of its 12 bodies import; the main one (97% of the volume) does
-   not. In SolidWorks it is an imported body: the original
-   (`\\nas\Design\Panel_Footprints\Monitors, Flow Meters\STEP_WaterMaster FET100 Remote
-   Transmitter.stp`) is a Creo export of 18 open shells, which SolidWorks stitched into
-   solids with tolerance; its STEP of them has fillets squeezed into vertices and faces a
-   micron wide, and SolidWorks gives two of its knobs no volume. Next: stitch the open
-   shells (sewing) in PeetCAD from the original, or rebuild faces whose edges sit off them.
-3. **Driving the parts**: sizes of features that equations or configurations set, which
-   the importer does not carry over; a pattern up to a reference (Top Hat's counts are
-   set per configuration); Battery Bracket's flange outline, whose tie to its edge
-   PeetCAD refuses, so its other configurations differ; then P4 and P27. Sketch text's
-   font, which the export doesn't carry. Body mates for `move_body`.
+- **Sketch solver.** A relation that the others already imply is accepted, as in
+  SolidWorks, where no sketch in the library is over-defined: only conflicting ones are
+  refused, and `peet feature` marks each `redundant` or `conflicting` (P27, done). A new
+  value for a dimension of a sketch that isn't fully defined moves the sketch as SolidWorks
+  does: the whole sketch by one offset if that does, else what the fewest relations hold.
+  `midpoint` takes an arc; `patterned` ties a linear sketch pattern's copies to the seed.
+- **The importer's relations.** SolidWorks numbers lines and arcs apart, and a line
+  overwrote an arc with its id; relations to model edges and vertices the sketch holds a
+  hidden copy of are projected from the model, with SolidWorks' ends; a line converted
+  from an edge takes the edge's ends; blocks are placed by their instance; texts' points.
+- **Dimension names and equations** (P4 above). PeetCAD's expressions read functions
+  in any case (`IIF`), an empty global variable is 0 and a disabled one keeps its value,
+  as SolidWorks has them; a pattern count from a formula is rounded.
+- **Other configurations.** A sketch that projects from a suppressed feature keeps what it
+  projected, with a warning, as SolidWorks keeps a dangling relation; simple holes;
+  hole wizard sketches keep their dimensions, so holes move per configuration;
+  `break_corner` takes faces; copies of a cut that runs off its flange cut as it does.
+- **Moved bodies by mates.** `move_body` takes `mates` (coincident, concentric,
+  parallel, distance, angle), solved at every rebuild: M6 Nutsert's screw is placed by
+  SolidWorks' two mates and follows them.
+- **Patterns up to a reference.** `linear_pattern` takes `up_to` (a plane or point,
+  with an offset), with SolidWorks' rule: count = floor(span / spacing) + 1, which gives
+  all ten of Top Hat's counts. The exporter can't read the reference: SolidWorks-PC runs
+  SolidWorks 2018 SP5 (26.5), whose API has no "up to reference" members (they came in
+  2019) and no corner relief data. So Top Hat's counts are still set per configuration.
+- **The exporter, format 5.** Members newer than its 2018 interop are read by name where
+  SolidWorks has them; on 2018 that is each pattern instance's transform. Sketch texts
+  carry their font, height and spacing.
+
+## Next, after round 3
+
+1. **Box Roof End Left and Right** and **ABB Flow Meter**: SolidWorks' or the file's
+   errors (see round 2): Box Roof End's mass properties are 5 mm³ under its own STEP
+   body, which PeetCAD matches to 0.06 mm³; ABB's original is 18 open shells SolidWorks
+   stitched with tolerance.
+2. **Gear tray / No Mounting Holes** (0.38%): Unfold1 and Fold1 are suppressed there, so
+   SolidWorks makes Cut-Extrude1 through the folded part; PeetCAD makes sheet metal cuts
+   in the flat. Needs Unfold and Fold features in PeetCAD.
+3. **Weather Shield Door / HingeRight** (0.003%): a blind cut through a bend, which
+   PeetCAD's `sheet_cut` leaves a sliver of in the bend.
+4. **Relations still dropped** (427): 74 midpoints of hole wizard slots the importer
+   leaves suppressed (Esc Surround), 88 that move the sketch because a projected edge is
+   not where SolidWorks' is, relations to another sketch's segments (PeetCAD projects only
+   model geometry), circular sketch patterns.
+5. **Driving the parts**: FabSys addresses still missing (Wall Inner Vertical's outline
+   set-backs, Wall Inner Horizontal's `CutoutDist`); global variables by SolidWorks' name
+   with spaces; mate dimensions by name and per configuration; a newer SolidWorks for
+   patterns up to a reference and corner reliefs.
