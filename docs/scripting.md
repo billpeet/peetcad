@@ -252,7 +252,8 @@ same list, or a part of one: `"a.start"`, `"a.end"`, `"c.center"`, `"r.bottom"`,
 solving. It defaults to construction geometry. `convert: true` makes projected edges
 profile geometry; `face` projects every boundary edge, addressed as `label.0`, etc.
 Vertices project to points and planes to their intersection line with the sketch.
-Straight edges and circles/arcs parallel to the sketch plane are supported. Parallel
+Straight edges and circles/arcs parallel to the sketch plane are supported; a circle or
+arc seen edge-on (its plane square to the sketch's) projects to the line it covers. Parallel
 planes, collapsed edges and other projected curve types fail with a diagnostic.
 Relations and dimensions use the projected ids like other sketch entities. Delete a
 projection by its root entity id to remove its source and attached relations.
@@ -330,7 +331,9 @@ with their defaults' types):
   `material_inside` flange's outer face goes through the edge on the far face of the
   sheet, `t / tan(angle)` back from where the outer faces meet.
 - `sheet_cut` cuts every flange with a face in its sketch's plane, each through its own
-  place in the flat pattern. With `end` `blind` (and `depth`) or `through_all` it reaches
+  place in the flat pattern. A closed shape that lies over another such flange and not
+  over the sketch's own cuts that flange only (holes drawn over both lips of a hat
+  section from one lip go through the lips, not the base). With `end` `blind` (and `depth`) or `through_all` it reaches
   further, as SolidWorks' cut-extrude does: into the sheet from the sketch's face
   (`reverse` away from it, `both` both ways), through the flanges parallel to the sketch
   that lie wholly within the reach, and across the flanges square to it where the
