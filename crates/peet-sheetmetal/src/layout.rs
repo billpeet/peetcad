@@ -426,6 +426,9 @@ pub mod wall {
     pub const TRIM: u8 = 8;
     pub const RELIEF_START: u8 = 12;
     pub const RELIEF_END: u8 = 16;
+    /// A flange's ends where it is mitred with a flange on the face across a bend.
+    pub const MITRE_START: u8 = 20;
+    pub const MITRE_END: u8 = 21;
     /// Open profiles: the walls along the depth sides, the two ends, and bend sides.
     pub const PROFILE_SIDE_LOW: u8 = 0;
     pub const PROFILE_SIDE_HIGH: u8 = 1;

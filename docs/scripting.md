@@ -320,6 +320,8 @@ with their defaults' types):
   back, and a `bend` of its own (as the base flange's); without them, or with `null`,
   it uses the body's. A flange whose bend lies outside the sheet (`bend_outside`, or set
   out by `position_offset`) takes nothing from it and gets no relief, as in SolidWorks.
+  Where its edge ends but its face goes on past the end (on in a curve, or round an inside
+  corner), the bend is relieved there too, past the end of the edge, as SolidWorks does.
   Where a flange's edge runs to a corner of its face sharper than square and its bend
   starts inside the sheet, the bend ends on a slant from the face's corner to the
   flange's end, as SolidWorks' does. Where a flange's edge runs down to the bend its face
@@ -375,6 +377,11 @@ with their defaults' types):
   `circular` and `square`, SolidWorks' corner relief: `relief_size` across, centred where
   the flanges' ends meet in the blank, cut from the face, the bends and the flanges).
   It applies to the corners of `faces`, or to every corner there is when it is added.
+  Flanges on in-line edges of two faces that a bend joins (the lips round the side of a
+  channel), each running to the bend, are mitred where they meet in one plane, as
+  SolidWorks mitres them: half the `gap` (0.1 unless a `corner` sets it) each side of the
+  line that halves the corner, with their bends ending on the mitre too. A `corner` on a
+  mitre's face sets only that mitre's `gap`.
 - `linear_pattern` becomes a grid with `direction2`, `spacing2`, `count2`; `"direction2":
   null` makes it a row again.
 - `count` for linear and circular part patterns, and a grid's `count2`, accept a number

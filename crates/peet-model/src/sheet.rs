@@ -1689,7 +1689,7 @@ pub(crate) fn apply_corner(
 ) -> Result<Applied, FeatureError> {
     // The faces' body (or the first sheet metal body), and which corners they pick.
     let mut index = None;
-    let mut picks: Vec<(usize, usize)> = Vec::new(); // (face's piece, face's end or 2: both)
+    let mut picks: Vec<(usize, usize, Option<bool>)> = Vec::new(); // (face's piece, face's end or 2: both, a mitre's)
     for f in &def.faces {
         let found = find_face(bodies, f).ok_or_else(|| {
             FeatureError(format!(
@@ -1707,18 +1707,22 @@ pub(crate) fn apply_corner(
             FeatureError("Corners are of sheet metal bodies: pick a flange's face.".to_owned())
         })?;
         let tag = &sheet.faces[found.id.index()];
-        let end = match *tag {
+        // Which end of the flange the face is, and whether it is the end's mitre with a
+        // flange across a bend (a square end is at a corner on the flange's own face)
+        let (end, across) = match *tag {
             FaceTag::Wall {
                 tag: CurveTag::Generated { index, .. },
                 ..
-            } if index == wall::FLANGE_START => 0,
-            FaceTag::Wall {
-                tag: CurveTag::Generated { index, .. },
-                ..
-            } if index == wall::FLANGE_END => 1,
-            _ => 2,
+            } => match index {
+                wall::FLANGE_START => (0, Some(false)),
+                wall::FLANGE_END => (1, Some(false)),
+                wall::MITRE_START => (0, Some(true)),
+                wall::MITRE_END => (1, Some(true)),
+                _ => (2, None),
+            },
+            _ => (2, None),
         };
-        picks.push((tag.piece(), end));
+        picks.push((tag.piece(), end, across));
     }
     let index = match index {
         Some(i) => i,
@@ -1732,11 +1736,12 @@ pub(crate) fn apply_corner(
     let mut changed = 0;
     for c in &mut layout.corners {
         let hit = def.faces.is_empty()
-            || picks.iter().any(|&(piece, end)| {
-                c.attachments.iter().zip(c.ends).any(|(&a, e)| {
-                    let att = &sheet.layout.attachments[a];
-                    att.pieces.contains(&piece) && (end == 2 || end == e)
-                })
+            || picks.iter().any(|&(piece, end, across)| {
+                across.is_none_or(|x| x == c.across.is_some())
+                    && c.attachments.iter().zip(c.ends).any(|(&a, e)| {
+                        let att = &sheet.layout.attachments[a];
+                        att.pieces.contains(&piece) && (end == 2 || end == e)
+                    })
             });
         if hit {
             c.spec = spec;
