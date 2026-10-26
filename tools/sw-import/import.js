@@ -3213,10 +3213,14 @@ function importPart(doc, dir) {
         const before = report.features.length;
         const had = new Set(made.keys());
         for (const f of other.features) {
+          // A feature between an Unfold and its Fold is cut in the flat here too (Top Hat's Cut-Extrude2)
+          if (!f.suppressed && f.type === "UnFold") unfolded = values(f).FixedFace || {};
+          if (!f.suppressed && f.type === "Fold") unfolded = null;
           if (f.suppressed || STRUCTURE.test(f.type) || f.type === "SheetMetal" || f.type === "RefPlane" || made.has(f.name) || sketches.has(f.name)) continue;
           if (report.features.some(x => x.name === f.name && x.result !== "suppressed" && x.result !== LATER)) continue;   // tried already, where it was live
           handle(f);
         }
+        unfolded = null;
         // What was imported here is suppressed in the active configuration now, where SolidWorks has it
         // suppressed: the configurations still to come are copies of it, and are not rebuilt with it there
         // (Top Hat's Edge-Flange3, whose outline turns inside out where its edge is short)

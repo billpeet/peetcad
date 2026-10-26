@@ -765,6 +765,13 @@ fn sheet_copies(
         let c = (lo + hi) / 2.0;
         r.contains(c).then_some(c)
     });
+    // Whether the original's shape is over its own flange. One that runs off it (a slot cut
+    // in the flat state across a bend and into the next flange, as Top Hat's) is placed in
+    // the flat pattern through its flange and cut from every piece there, and so are its
+    // copies that stay in its plane.
+    let original_on_flange = probe.is_none_or(|q| {
+        layout.pieces[on.piece].covers(on.frame.to_local(plane.from_plane_coords(q)).truncate())
+    });
     let mut made = 0;
     for (k, m) in motions.iter().enumerate() {
         let copy = copy_number(si, k + 1);
@@ -809,7 +816,7 @@ fn sheet_copies(
             if own {
                 Some((on.piece, on.frame, on.top))
             } else {
-                stray = holding.is_none();
+                stray = holding.is_none() && original_on_flange;
                 holding.or(Some((on.piece, on.frame, on.top)))
             }
         } else if matches!(seed, Seed::SheetCut { .. }) {
