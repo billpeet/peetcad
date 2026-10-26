@@ -639,13 +639,33 @@ pub(crate) fn apply_sheet_cut(
         .map(|i| profile.regions[i].clone())
         .collect();
     let to_flat = |p: DVec2| frame.to_local(plane.from_plane_coords(p)).truncate();
-    let area = Area::from_regions(&regions, feature.0).mapped(&to_flat);
+    // Into the sheet from the face the sketch is on
+    let into = frame.z_axis() * if top { -1.0 } else { 1.0 };
+    let thickness = sheet.layout.settings.thickness;
+    let origin = plane.from_plane_coords(DVec2::ZERO);
+    // With an end, the cut is SolidWorks' cut-extrude: straight from the sketch, so a flange
+    // it doesn't reach into is left, its own included (a cut going off the sheet's face), and
+    // where it ends in a bend it is made normal to the sheet where its wall leaves the sheet.
+    let reaches = |piece: &peet_sheetmetal::Piece| {
+        reach.is_none_or(|span| {
+            let a = (piece.frame.origin - origin).dot(into);
+            let b = a + thickness * piece.frame.z_axis().dot(into);
+            reaches_into(span, a, b)
+        })
+    };
     let mut layout = sheet.layout.clone();
-    layout.add_cut(area);
+    if reaches(&layout.pieces[on_piece]) {
+        let area = Area::from_regions(&regions, feature.0).mapped(&|p| {
+            let q = to_flat(p);
+            match reach {
+                Some(_) => straight_into_bends(&sheet.layout, on_piece, !top, q),
+                None => q,
+            }
+        });
+        layout.add_cut(area);
+    }
     // The other flanges that lie in the sketch's plane. One that the first mapping already
     // puts in the right place (it is next to the sketch's flange in the blank too) is left.
-    let thickness = layout.settings.thickness;
-    let origin = plane.from_plane_coords(DVec2::ZERO);
     let probes = [DVec2::ZERO, DVec2::X, DVec2::Y];
     let mut cut = vec![false; layout.pieces.len()];
     cut[on_piece] = true;
@@ -662,6 +682,9 @@ pub(crate) fn apply_sheet_cut(
             continue;
         }
         cut[i] = true;
+        if !reaches(piece) {
+            continue;
+        }
         let through = |p: DVec2| other.to_local(plane.from_plane_coords(p)).truncate();
         if probes.iter().all(|p| through(*p).distance(to_flat(*p)) < 1e-6) {
             continue;
@@ -670,8 +693,6 @@ pub(crate) fn apply_sheet_cut(
         layout.add_cut_on(area, vec![i]);
     }
     if let Some(span) = reach {
-        // Into the sheet from the face the sketch is on
-        let into = frame.z_axis() * if top { -1.0 } else { 1.0 };
         let world = |p: DVec2| plane.from_plane_coords(p);
         for (area, pieces) in cut_beyond(&layout, &cut, &world, into, span, &regions, feature.0) {
             layout.add_cut_on(area, pieces);
@@ -806,6 +827,12 @@ pub(crate) fn cut_from_plane(
         let level = piece.frame.to_local(origin).z;
         if level.abs() < 1e-6 || (level - t).abs() < 1e-6 {
             done[i] = true;
+            // With an end, only a flange the cut goes into from its plane
+            let a = (piece.frame.origin - origin).dot(into);
+            let b = a + t * piece.frame.z_axis().dot(into);
+            if reach.is_some_and(|span| !reaches_into(span, a, b)) {
+                continue;
+            }
             let through = |p: DVec2| piece.frame.to_local(world(p)).truncate();
             out.push((Area::from_regions(regions, owner).mapped(&through), vec![i]));
         }
@@ -814,6 +841,57 @@ pub(crate) fn cut_from_plane(
         out.extend(cut_beyond(layout, &done, world, into, span, regions, owner));
     }
     out
+}
+
+/// Whether a cut reaching over `span` along the way into the sheet goes into a flange that
+/// lies between `a` and `b` along it.
+fn reaches_into(span: (f64, f64), a: f64, b: f64) -> bool {
+    span.1.min(a.max(b)) - span.0.max(a.min(b)) > 1e-6
+}
+
+/// Where a point of a cut's outline, drawn on a face of flange `piece` and given in flat
+/// coordinates as the face's plane maps it, goes in the flat pattern when it lies past the
+/// flange's edge over one of its bends. A straight cut-extrude meets the bend in a line on
+/// the face it leaves the sheet through (`far_top`: the sheet's top side), and SolidWorks'
+/// normal cut makes its wall square to the sheet there: at the angle where that face is as
+/// far from the bend's start as the point, on into the next flange if the bend turns less
+/// than a right angle. A point that is on the flange, or not over a bend, stays.
+fn straight_into_bends(layout: &Layout, piece: usize, far_top: bool, p: DVec2) -> DVec2 {
+    use std::f64::consts::FRAC_PI_2;
+    for (_, b) in layout.bends() {
+        let (s, w) = b.strip_coords(p);
+        if w < -1e-9 || w > b.length + 1e-9 {
+            continue;
+        }
+        // How far past the flange's edge, and which way that is in the flat pattern
+        let (e, out) = if b.parent == piece {
+            (s, b.across)
+        } else if b.child == Some(piece) {
+            (b.width() - s, -b.across)
+        } else {
+            continue;
+        };
+        if e <= 1e-9 {
+            continue;
+        }
+        let v = b.values;
+        let radius = if far_top == b.up {
+            v.radius
+        } else {
+            v.radius + v.thickness
+        };
+        let turn = v.angle.min(FRAC_PI_2);
+        let over = radius * turn.sin();
+        let flat = if e <= over {
+            (e / radius).asin() / v.angle * v.allowance
+        } else if v.angle < FRAC_PI_2 {
+            v.allowance + (e - over) / v.angle.cos()
+        } else {
+            turn / v.angle * v.allowance + (e - over)
+        };
+        return p + out * (flat - e);
+    }
+    p
 }
 
 /// How far out from its edge an edge flange is set, evaluated.
