@@ -2055,8 +2055,6 @@ function importPart(doc, dir) {
           const flangeNames = built.names.filter(n => pieces.includes(n));
           const others = cornersWithOthers(f.name, flangeNames, radius);
           if (others) built.names.push(others);
-          // The pieces themselves: the names built also hold their outlines' planes and sketches
-          const pieces = ops.map((o, i) => pieceName(i));
           if (ops.length === edges.length && edges.length > 1 && pieces.every(n => flangeNames.includes(n))) {
             built.names.push(...corners(f.name + " corners", gap, edges.map((e, i) => ({ name: pieces[i], start: mm(e.start), end: mm(e.end) })), radius));
           }
