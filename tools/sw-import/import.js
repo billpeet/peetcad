@@ -490,12 +490,14 @@ function importPart(doc, dir) {
 
     // The entity ids PeetCAD gave what was drawn, found again from SolidWorks' coordinates
     const ids = new Map(drawn.filter(d => d.as).map(d => [d.as, d]));
-    const points = new Map(), segments = new Map();
+    const points = new Map(), segments = new Map(), drawnSegments = [];
     for (const o of own) {
       const d = ids.get(o.as);
       if (!d) continue;
       if (o.point) { points.set(spot(o.point), d.id); continue; }
-      segments.set(o.g.id.join("."), { id: d.id, g: o.g, start: o.turned ? d.end : d.start, end: o.turned ? d.start : d.end, center: d.center, turned: !!o.turned });
+      const found = { id: d.id, g: o.g, start: o.turned ? d.end : d.start, end: o.turned ? d.start : d.end, center: d.center, turned: !!o.turned };
+      segments.set(o.g.id.join("."), found);
+      drawnSegments.push(found);
       const set = (p, id) => { if (p && id !== undefined && !points.has(spot(p))) points.set(spot(p), id); };
       set(o.g.start, o.turned ? d.end : d.start);
       set(o.g.end, o.turned ? d.start : d.end);
@@ -520,7 +522,8 @@ function importPart(doc, dir) {
     const shapeOf = g => g.type === "line" && g.start && g.end ? "line " + [spot(g.start), spot(g.end)].sort().join(" ")
       : g.type === "arc" && g.center ? `arc ${spot(g.center)} ${Math.round(g.radius * 1e7)} ${g.start && g.end ? [spot(g.start), spot(g.end)].sort().join(" ") : ""}` : null;
     const byShape = new Map();
-    for (const found of segments.values()) { const key = shapeOf(found.g); if (key && !byShape.has(key)) byShape.set(key, found); }
+    // All that were drawn: SolidWorks can list two segments under one id (Battery Bracket's Sketch15, an arc and a line)
+    for (const found of drawnSegments) { const key = shapeOf(found.g); if (key && !byShape.has(key)) byShape.set(key, found); }
     const segmentOf = e => e.type ? byShape.get(shapeOf(e)) : segments.get(e.id.join("."));
 
     // Which way round the sketch's axes are in PeetCAD's sketch: horizontal there may be vertical here
@@ -541,15 +544,22 @@ function importPart(doc, dir) {
       }
       else if (d.kind === "vertex" && d.point) item = { type: "project", vertex: { at: mm(d.point).map(tidy) } };
       else if (d.kind === "feature" && d.type === "RefPlane" && planes.has(d.name)) item = { type: "project", plane: planes.get(d.name) };
+      return projectItem(item);
+    };
+    const projectItem = item => {
       if (!item) return undefined;
       const key = JSON.stringify(item);
       if (!projected.has(key)) {
         const reply = peet.apply({ op: "draw", sketch: name, draw: [item] });
         const made = reply.ok && (reply.drawn || [])[0];
-        projected.set(key, made ? { id: made.id !== undefined ? made.id : (made.curves || made.points || [])[0], point: item.vertex !== undefined } : null);
+        projected.set(key, made ? { id: made.id !== undefined ? made.id : (made.curves || made.points || [])[0], start: made.start, end: made.end, point: item.vertex !== undefined } : null);
       }
       return projected.get(key) || undefined;
     };
+    // A point of SolidWorks' that is not the sketch's own is a model vertex its relation refers to (Battery
+    // Bracket's Sketch8 measures its flange's height from the far corner of the flange's edge): it is
+    // projected from where it is, if the model has a vertex there
+    const vertexAt = e => e && e.x !== undefined ? projectItem({ type: "project", vertex: { at: fromSketch(sf, e).map(tidy) } }) : undefined;
 
     const dimensions = new Map((f.dimensions || []).map(d => [d.fullName, d]));
     const byEquation = new Set((cur.equations || []).filter(e => !e.disabled).map(e => (/^\s*"([^"]+@[^"]+)"\s*=/.exec(e.expression) || [])[1]).filter(Boolean));
@@ -557,13 +567,27 @@ function importPart(doc, dir) {
     const items = [];
     for (const r of s.relations) {
       if (r.suppressed) { drop("suppressed"); continue; }
-      const pts = [], segs = [];
+      const pts = [], segs = [], hidden = [];
       for (const e of r.entities || []) {
         if (!e) continue;
-        if (e.kind === "sketchPoint") { const id = pointOf(e); if (id !== undefined) pts.push({ id, e: e.x !== undefined ? e : byId.get(e.id.join(".")) }); }
-        else if (e.kind === "sketchSegment") { const g = segmentOf(e); if (g) segs.push(g); }
+        if (e.kind === "sketchPoint") {
+          let id = pointOf(e);
+          if (id === undefined && !byId.has(e.id.join("."))) { const v = vertexAt(e); if (v) id = v.id; }
+          if (id !== undefined) pts.push({ id, e: e.x !== undefined ? e : byId.get(e.id.join(".")) });
+        }
+        else if (e.kind === "sketchSegment") {
+          const g = segmentOf(e);
+          if (g) segs.push(g);
+          // A line of SolidWorks' that is not the sketch's own is a model edge a dimension is measured to
+          // (Battery Bracket's Sketch15 sets its outline 10 mm in from the sheet's corners): it is projected
+          // from where it is
+          else if (r.type === "distance" && !(r.defined || []).length && e.type === "line" && e.start && e.end) {
+            const p = projectItem({ type: "project", edge: { at: mid(fromSketch(sf, e.start), fromSketch(sf, e.end)).map(tidy) } });
+            if (p && p.id !== undefined) hidden.push(p);
+          }
+        }
       }
-      const outside = [];
+      const outside = [...hidden];
       let lost = false;
       for (const d of r.defined || []) { const p = project(d); if (p && p.id !== undefined) outside.push(p); else lost = true; }
       if (lost) { drop(`${r.type} to something outside the sketch that could not be projected`); continue; }
@@ -581,7 +605,24 @@ function importPart(doc, dir) {
           if (level(r.type.slice(0, 4) === "hori" ? "horizontal" : "vertical") && anyPoints.length === 2) item = { type: level(r.type.slice(0, 4) === "hori" ? "horizontal" : "vertical"), of: anyPoints };
           break;
         case "coincident": if (all.length === 2 && anyPoints.length >= 1) item = { type: "coincident", of: [anyPoints[0], all.find(x => x !== anyPoints[0])] }; break;
-        case "colinear": case "useedge": if (anyLines.length === 2) item = { type: "collinear", of: anyLines }; break;
+        case "useedge": {
+          // A line on a model edge (Convert Entities, or the edge an edge flange's outline stands on): SolidWorks
+          // lists the line and its copy of the edge, which are found as one line. It is tied end to end to the
+          // edge, projected from under it, and follows it.
+          const line = lines.length && lines.every(l => l.id === lines[0].id) && outLines.length === 0 ? lines[0] : null;
+          const edge = line && line.g.start && line.g.end
+            ? projectItem({ type: "project", edge: { at: mid(fromSketch(sf, line.g.start), fromSketch(sf, line.g.end)).map(tidy) } }) : null;
+          if (edge && edge.start !== undefined && edge.end !== undefined) {
+            const at = (peet.ask({ op: "feature", feature: name }).entities || []).find(x => x.id === edge.id);
+            const a = sk.toPeet(line.g.start);
+            const swap = at && at.from && at.to && Math.hypot(at.to[0] - a[0], at.to[1] - a[1]) < Math.hypot(at.from[0] - a[0], at.from[1] - a[1]);
+            item = { type: "coincident", of: [line.start, swap ? edge.end : edge.start] };
+            items.push({ ...item, also: true });
+            item = { type: "coincident", of: [line.end, swap ? edge.start : edge.end] };
+          } else if (anyLines.length === 2 && anyLines[0] !== anyLines[1]) item = { type: "collinear", of: anyLines };
+          break;
+        }
+        case "colinear": if (anyLines.length === 2) item = { type: "collinear", of: anyLines }; break;
         case "parallel": case "perpendicular": if (anyLines.length === 2) item = { type: r.type, of: anyLines }; break;
         case "tangent": if (segs.length + outLines.length === 2 && rounds.length >= 1) item = { type: "tangent", of: [...segs.map(g => g.id), ...outLines] }; break;
         case "concentric": if (rounds.length === 2) item = { type: "concentric", of: rounds.map(g => g.id) }; break;
@@ -651,9 +692,9 @@ function importPart(doc, dir) {
 
     const shape = () => JSON.stringify((peet.ask({ op: "feature", feature: name }).entities || []).map(e => [e.id, e.from, e.to, e.center, e.radius, e.at].map(x => Array.isArray(x) ? x.map(v => +v.toFixed(4)) : typeof x === "number" ? +x.toFixed(4) : x)));
     const before = shape();
-    const clean = item => { const { sw, supplementary, ...rest } = item; return rest; };
+    const clean = item => { const { sw, supplementary, also, ...rest } = item; return rest; };
     const keep = item => {
-      tally.kept++;
+      if (!item.also) tally.kept++;
       if (item.sw) sk.dimensions.set(item.sw, item.name);
       if (item.sw && item.supplementary) (sk.supplementary || (sk.supplementary = new Set())).add(item.sw);
     };
@@ -670,7 +711,7 @@ function importPart(doc, dir) {
         mark = save();
         const reply = peet.apply({ op: "draw", sketch: name, draw: [clean(item)] });
         if (fits(reply)) keep(item);
-        else { restore(mark); drop(`${item.type}: ${!reply.ok ? "refused" : reply.definition === "over_defined" ? "over-defines the sketch" : "moves the sketch"}`); }
+        else { restore(mark); if (!item.also) drop(`${item.type}: ${!reply.ok ? "refused" : reply.definition === "over_defined" ? "over-defines the sketch" : "moves the sketch"}`); }
       }
     }
     if (fs.existsSync(backup)) fs.unlinkSync(backup);
