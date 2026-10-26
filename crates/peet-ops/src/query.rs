@@ -385,6 +385,57 @@ pub fn parameters(doc: &Document) -> Value {
     json!({ "units": params.units.length.suffix(), "parameters": list })
 }
 
+/// The part's dimensions by address (`Width@Sketch1`), of one feature or all; with `name`,
+/// the one dimension at that address.
+pub fn dimensions(
+    doc: &Document,
+    feature: Option<FeatureId>,
+    name: Option<&str>,
+) -> Result<Value, String> {
+    let model = &doc.model;
+    let list = match (name, feature) {
+        (Some(name), _) => vec![model.find_dimension(name).ok_or_else(|| {
+            format!(
+                "No dimension of the part is called '{name}'. The 'dimensions' query lists them."
+            )
+        })?],
+        (None, Some(id)) => model.dimensions_of(id),
+        (None, None) => model.dimensions(),
+    };
+    let several = model.configurations().len() > 1;
+    let list: Vec<Value> = list
+        .iter()
+        .filter(|d| feature.is_none_or(|f| d.feature == f))
+        .map(|d| {
+            let mut v = json!({
+                "address": d.address,
+                "name": d.name,
+                "feature": model.name_of(d.feature),
+                "value": crate::fields::scalar_out(&d.value, d.kind, doc),
+            });
+            if let Some(field) = d.field {
+                v["field"] = json!(field);
+            }
+            if !d.driving {
+                v["driven"] = json!(true);
+            }
+            if several && model.value_differs(d.feature, &d.slot) {
+                let values: serde_json::Map<String, Value> = model
+                    .configurations()
+                    .iter()
+                    .filter_map(|c| {
+                        let s = model.value_in(d.feature, &d.slot, c.id)?;
+                        Some((c.name.clone(), crate::fields::scalar_out(&s, d.kind, doc)))
+                    })
+                    .collect();
+                v["configurations"] = Value::Object(values);
+            }
+            v
+        })
+        .collect();
+    Ok(json!({ "dimensions": list }))
+}
+
 pub fn bodies(doc: &Document) -> Value {
     let units = &doc.model.parameters.units;
     let list: Vec<Value> = doc

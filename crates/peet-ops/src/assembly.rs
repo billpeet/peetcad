@@ -460,6 +460,8 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
         | Op::Sketch { .. }
         | Op::Draw { .. }
         | Op::SetDimension { .. }
+        | Op::Set { .. }
+        | Op::NameDimension { .. }
         | Op::SetText { .. }
         | Op::Rename { .. }
         | Op::Suppress { .. }

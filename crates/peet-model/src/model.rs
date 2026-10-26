@@ -496,6 +496,7 @@ impl Model {
                 suppression_expression: None,
                 visible: true,
                 kind,
+                dimension_names: BTreeMap::new(),
             }),
         );
         if let Some(r) = &mut self.rollback {
@@ -817,7 +818,7 @@ impl Model {
         let max = self.features.iter().map(|f| f.id.0).max().unwrap_or(0);
         self.next_id = self.next_id.max(max.saturating_add(1));
         self.rollback = self.rollback.filter(|&b| b < self.features.len());
-        self.parameters.evaluate();
+        self.refresh_dimension_values();
         self.validate_configurations()?;
         if self.assembly.is_some() && !self.features.is_empty() {
             return Err(

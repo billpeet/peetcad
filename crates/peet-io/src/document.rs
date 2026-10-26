@@ -54,7 +54,8 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 /// - Model 11: user names for faces and edges. Schema 10 models, including nested
 ///   assembly definitions, are read as [`peet_model::ModelV10`] and converted.
 /// - Model 12: an edge flange can have a relief of its own (two more fields of the
-///   feature). Schema 11 models, including nested assembly definitions, are read as
+///   feature), and a feature can name its numeric values (`D2@Sketch10`, one more field of
+///   every feature). Schema 11 models, including nested assembly definitions, are read as
 ///   [`peet_model::ModelV11`] and converted; schemas 8 to 10 read the old flange too.
 pub const METADATA_SCHEMA: u16 = 1;
 pub const MODEL_SCHEMA: u16 = 12;

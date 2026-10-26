@@ -330,7 +330,20 @@ impl Engine {
     /// into the model.
     pub fn regenerate(&mut self, model: &mut Model) -> &Evaluation {
         let start = Instant::now();
+        model.refresh_dimension_values();
         let params_key = hash::of(&model.parameters);
+        // The values of dimensions read by address are not part of the table's own hash:
+        // only the sketches whose expressions might read them depend on them (the other
+        // features are keyed on their evaluated values).
+        let dimensions_key = hash::of(
+            &model
+                .parameters
+                .dimensions
+                .0
+                .iter()
+                .map(|(a, q)| (a, q.value, q.kind()))
+                .collect::<Vec<_>>(),
+        );
         let built = model.rollback_index();
         let mut run = Run {
             bodies: Vec::new(),
@@ -338,6 +351,7 @@ impl Engine {
             states: HashMap::with_capacity(model.len()),
             out_keys: HashMap::new(),
             stats: Stats::default(),
+            dimensions_key,
         };
         for index in 0..model.len() {
             let feature = model.feature_arc(index);
@@ -807,6 +821,19 @@ impl Engine {
                     },
                 ),
                 Ok((plane, projected)) => {
+                    // A sketch whose expressions may read other features' dimensions
+                    // (`Width@Sketch1`, `"Dia.@Sketch1"`) is solved again when they change.
+                    let reads_others = projected.constraints().any(|(_, c)| {
+                        c.dimension
+                            .as_ref()
+                            .and_then(|d| d.expression.as_deref())
+                            .is_some_and(|e| e.contains(['@', '"']))
+                    });
+                    let params_key = if reads_others {
+                        hash::combine(params_key, run.dimensions_key)
+                    } else {
+                        params_key
+                    };
                     let key = hash::of(&(1u8, &projected, params_key, &plane));
                     match self.cache.get(&id).filter(|c| c.key == key) {
                         Some(c) => {
@@ -1622,6 +1649,8 @@ struct Run {
     states: HashMap<FeatureId, FeatureState>,
     out_keys: HashMap<FeatureId, u64>,
     stats: Stats,
+    /// The hash of the values of the dimensions expressions read by address.
+    dimensions_key: u64,
 }
 
 fn reused(state: &FeatureState) -> FeatureState {
@@ -2206,7 +2235,12 @@ impl<'m> Ctx<'m, '_> {
     /// Where a pattern's copies go (the original excluded).
     fn pattern_motions(&self, def: &PatternDef) -> Result<Vec<pattern::Motion>, String> {
         let count = |s: &crate::Scalar, what: &str| {
-            let n = self.scalar(s, ScalarKind::Number, &format!("{what} count"))?;
+            let mut n = self.scalar(s, ScalarKind::Number, &format!("{what} count"))?;
+            // A count an expression gives is rounded to the nearest whole number, as
+            // SolidWorks rounds an equation's value for a pattern's instances (7.8 is 8).
+            if s.expression.is_some() {
+                n = n.round();
+            }
             if n.is_finite() && n.fract() == 0.0 && (2.0..=10_000.0).contains(&n) {
                 Ok(n as u32)
             } else {

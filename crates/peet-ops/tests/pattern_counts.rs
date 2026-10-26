@@ -173,7 +173,7 @@ fn count_expressions_survive_save_reopen_and_configuration_overrides() {
 }
 
 #[test]
-fn invalid_count_results_fail_without_rounding_or_making_copies_and_recover() {
+fn invalid_counts_fail_without_making_copies_and_recover() {
     let mut doc = plate();
     row(&mut doc, json!("if(width > 0, 3, 2)"));
     for value in [json!(2.5), json!(1), json!(0), json!(-2), json!(10001)] {
@@ -194,14 +194,21 @@ fn invalid_count_results_fail_without_rounding_or_making_copies_and_recover() {
         assert!(!reply.ok, "{value}: {}", reply.json);
         assert_eq!(doc.model, before);
     }
+    // A count an expression gives is rounded to the nearest whole number, as SolidWorks
+    // rounds an equation's value for a pattern's instances; out of range after that, it fails.
     ok(
         &mut doc,
-        json!({"op":"edit", "feature":"LPattern1", "count":"if(width > 299mm, 2.5, 2)"}),
+        json!({"op":"edit", "feature":"LPattern1", "count":"if(width > 299mm, 2.5, 1.6)"}),
     );
     volume(&doc, 2);
     ok(
         &mut doc,
         json!({"op":"set_parameter", "name":"width", "value":"300mm"}),
+    );
+    volume(&doc, 3);
+    ok(
+        &mut doc,
+        json!({"op":"edit", "feature":"LPattern1", "count":"if(width > 299mm, 1.4, 2)"}),
     );
     assert!(matches!(status(&doc, "LPattern1"), Status::Failed(_)));
     volume(&doc, 1);

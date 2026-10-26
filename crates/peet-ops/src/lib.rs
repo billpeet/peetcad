@@ -254,6 +254,71 @@ fn check_copies(doc: &Document, kind: &FeatureKind) -> Result<(), String> {
     Ok(())
 }
 
+/// Sets a value by its name: a parameter, or a dimension by its address. Returns the
+/// undo label.
+fn set_named(
+    model: &mut Model,
+    doc: &Document,
+    done: &mut Done,
+    target: &str,
+    value: &Input,
+    configurations: Option<&Configs>,
+) -> Result<String, String> {
+    if doc
+        .model
+        .parameters
+        .entries
+        .iter()
+        .any(|p| p.name == target)
+    {
+        let scope = configurations.cloned().unwrap_or_default().resolve(doc)?;
+        model
+            .set_parameter(target, &value.text(), &scope)
+            .map_err(|e| format!("{target}: {e}"))?;
+        return Ok(format!("Set {target}"));
+    }
+    let d = doc.model.find_dimension(target).ok_or_else(|| {
+        if target.contains('@') {
+            format!(
+                "No dimension of the part is called '{target}'. The 'dimensions' query lists their addresses."
+            )
+        } else {
+            format!(
+                "There is no parameter called '{target}'. A dimension is set by its address NAME@FEATURE (\"Width@Sketch1\"), which the 'dimensions' query lists."
+            )
+        }
+    })?;
+    if !d.driving {
+        return Err(format!(
+            "{} is a reference dimension: it measures the sketch and can't be set.",
+            d.address
+        ));
+    }
+    match d.field {
+        None => {
+            if let Some(s) = model.feature_mut(d.feature).and_then(|f| f.sketch_mut()) {
+                sketch::set_dimension(&mut s.sketch, doc, &d.name, value)?;
+            }
+            done.sketch = Some(d.feature);
+        }
+        Some(field) => {
+            let scalar = value
+                .scalar(d.kind, doc)
+                .map_err(|e| format!("{}: {e}", d.address))?;
+            if let Some((.., s)) = model
+                .feature_mut(d.feature)
+                .and_then(|f| f.kind.slots_mut().into_iter().find(|(n, ..)| *n == field))
+            {
+                *s = scalar;
+            }
+        }
+    }
+    rescope(model, doc, d.feature, configurations, &[d.slot])?;
+    done.feature = Some(d.feature);
+    done.data.insert("dimension".to_owned(), json!(d.address));
+    Ok(format!("Set {}", d.address))
+}
+
 fn add(doc: &Document, model: &mut Model, new: &[New]) -> Result<Vec<FeatureId>, String> {
     let mut ids = Vec::new();
     for n in new {
@@ -398,6 +463,10 @@ fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, V
         Query::Features => object(query::features(doc)),
         Query::Feature(f) => object(query::feature(doc, f.resolve(doc)?)),
         Query::Parameters => object(query::parameters(doc)),
+        Query::Dimensions { feature, name } => {
+            let feature = feature.as_ref().map(|f| f.resolve(doc)).transpose()?;
+            object(query::dimensions(doc, feature, name.as_deref())?)
+        }
         Query::Configurations => object(query::configurations(doc)),
         Query::Bodies => object(query::bodies(doc)),
         Query::Faces { body } => object(query::faces(doc, *body)?),
@@ -1008,6 +1077,24 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.feature = Some(id);
             done.sketch = Some(id);
             format!("Edit {}", model.name_of(id))
+        }
+        Op::Set {
+            name,
+            value,
+            configurations,
+        } => {
+            let target = name.trim();
+            set_named(&mut model, doc, &mut done, target, value, configurations.as_ref())?
+        }
+        Op::NameDimension {
+            feature,
+            dimension,
+            name,
+        } => {
+            let id = feature.resolve(doc)?;
+            model.name_dimension(id, dimension, name)?;
+            done.feature = Some(id);
+            format!("Name {dimension} of {} {name}", model.name_of(id))
         }
         Op::SetText {
             sketch,

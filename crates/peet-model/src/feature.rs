@@ -1959,6 +1959,7 @@ impl From<FeatureV11> for Feature {
             suppression_expression: f.suppression_expression,
             visible: f.visible,
             kind: f.kind.into(),
+            dimension_names: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1994,6 +1995,7 @@ impl From<FeatureV9> for Feature {
             suppressed: f.suppressed,
             visible: f.visible,
             kind: f.kind.into(),
+            dimension_names: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -2013,6 +2015,11 @@ pub struct Feature {
     /// Whether the feature's own geometry (a sketch, a reference plane) is drawn.
     pub visible: bool,
     pub kind: FeatureKind,
+    /// Names given to the feature's numeric values, by field (`length` → `D2@Sketch10`).
+    /// A value not listed has its default name (see [`crate::dimensions`]). A sketch's
+    /// dimensions keep their names in the sketch.
+    #[serde(default)]
+    pub dimension_names: std::collections::BTreeMap<String, String>,
 }
 
 impl Feature {
@@ -2196,6 +2203,7 @@ impl From<FeatureV8> for Feature {
             suppressed: f.suppressed,
             visible: f.visible,
             kind: f.kind.into(),
+            dimension_names: std::collections::BTreeMap::new(),
         }
     }
 }

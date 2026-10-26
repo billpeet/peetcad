@@ -1175,7 +1175,7 @@ fn one(
                 .add_dimension(k, measured)
                 .map_err(|e| e.to_string())?;
             if let Some(name) = name {
-                expr::check_name(name).map_err(|e| e.message)?;
+                expr::check_dimension_name(name, false).map_err(|e| e.message)?;
                 if sketch.dimension_by_name(name).is_some() {
                     return Err(format!("the sketch already has a dimension '{name}'"));
                 }

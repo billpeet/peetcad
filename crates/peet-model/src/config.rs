@@ -577,7 +577,7 @@ impl Model {
         }
         self.configurations.values = values;
         self.configurations.active = id;
-        self.parameters.evaluate();
+        self.refresh_dimension_values();
         true
     }
 

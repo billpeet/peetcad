@@ -119,7 +119,7 @@ scalar_field!(Number, ScalarKind::Number, "number");
 scalar_field!(
     PatternCount,
     ScalarKind::Number,
-    "whole number from 2 to 10000 (original included), or an expression returning one"
+    "whole number from 2 to 10000 (original included), or an expression, whose value is rounded to the nearest whole number"
 );
 
 /// A length that falls back to the body's default when absent.
