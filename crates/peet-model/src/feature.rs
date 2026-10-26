@@ -1243,6 +1243,16 @@ impl FeatureKind {
                     out.extend(f.name.features());
                 }
                 point_deps(&m.center, &mut out);
+                for mate in &m.mates {
+                    for geom in [&mate.moved, &mate.to] {
+                        match geom {
+                            crate::MateGeom::Face(f) => out.extend(f.name.features()),
+                            crate::MateGeom::Edge(e) => out.extend(e.features()),
+                            crate::MateGeom::Vertex(v) => out.extend(v.features()),
+                            crate::MateGeom::Plane(p) => plane_deps(p, &mut out),
+                        }
+                    }
+                }
             }
             Self::InsertPart(p) => {
                 if let Some(plane) = &p.mirror {
@@ -1343,6 +1353,11 @@ impl FeatureKind {
             Self::MoveBody(m) => {
                 let mut v: Vec<&Scalar> = m.translate.iter().chain(&m.rotate).collect();
                 v.push(&m.copies);
+                for mate in &m.mates {
+                    if let crate::MateKind::Distance(s) | crate::MateKind::Angle(s) = &mate.kind {
+                        v.push(s);
+                    }
+                }
                 v
             }
             Self::StructuralMember(m) => vec![&m.rotate],

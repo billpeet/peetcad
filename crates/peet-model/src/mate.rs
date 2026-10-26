@@ -193,6 +193,135 @@ impl Mate {
     }
 }
 
+// ---- Mates of a moved body ----
+
+/// A mate that places the bodies a [`crate::MoveBodyFeature`] moves, as SolidWorks'
+/// Move/Copy Body places them by constraints: between geometry of a moved body and
+/// geometry of the rest of the part (another body, or a reference plane). The bodies are
+/// solved into place at every rebuild, as an assembly's components are, starting from
+/// the move's own distances and angles: so they follow the part when it changes, and
+/// what the mates leave free stays as the move has it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BodyMate {
+    /// Its name ("Distance2"), for messages.
+    pub name: String,
+    /// Coincident, concentric, parallel, distance or angle (perpendicular is an angle
+    /// of 90°). As an assembly's mate of the same kind, with `to` its first end.
+    pub kind: MateKind,
+    /// On a body the feature moves, where the body is before the move.
+    pub moved: MateGeom,
+    /// On the rest of the part: another body, or a reference plane.
+    pub to: MateGeom,
+    /// Two flat faces with their outward normals the same way (SolidWorks' aligned);
+    /// otherwise against each other (anti-aligned).
+    pub aligned: bool,
+    /// The distance or angle measured the other way: for a distance from a flat face,
+    /// the moved end is behind it instead of in front of it.
+    pub flip: bool,
+}
+
+impl BodyMate {
+    pub fn new(name: impl Into<String>, kind: MateKind, moved: MateGeom, to: MateGeom) -> Self {
+        Self {
+            name: name.into(),
+            kind,
+            moved,
+            to,
+            aligned: false,
+            flip: false,
+        }
+    }
+}
+
+/// Where the moved bodies go: the motion, nearest to `start`, that makes `mates` hold
+/// between the bodies `moved` (as they are before the move) and the part's `rest` and
+/// reference `planes`. With it, each mate that can't hold and why; the others still do.
+pub(crate) fn solve_body(
+    mates: &[BodyMate],
+    moved: Vec<Arc<Body>>,
+    rest: Vec<Arc<Body>>,
+    planes: Vec<(PlaneRef, peet_math::Plane)>,
+    start: Frame,
+    params: &Parameters,
+) -> (Frame, Vec<(String, String)>) {
+    let (part, body) = (CompId(0), CompId(1));
+    let placed = |id, name: &str, frame, fixed, bodies: Vec<Arc<Body>>, planes| Placed {
+        id,
+        name: name.to_owned(),
+        frame,
+        fixed,
+        bodies: bodies
+            .into_iter()
+            .map(|b| (Vec::new(), b, Frame::WORLD))
+            .collect(),
+        planes,
+    };
+    let components = vec![
+        placed(
+            part,
+            "the part",
+            Frame::WORLD,
+            true,
+            rest,
+            planes
+                .into_iter()
+                .map(|(r, p)| (Vec::new(), r, p))
+                .collect(),
+        ),
+        placed(body, "the moved body", start, false, moved, Vec::new()),
+    ];
+    let mut failed = Vec::new();
+    let mut joined = Vec::new();
+    let mut reversed = Vec::new();
+    for (i, m) in mates.iter().enumerate() {
+        if matches!(m.kind, MateKind::Fasten(_) | MateKind::Width { .. }) {
+            failed.push((
+                m.name.clone(),
+                format!(
+                    "A {} mate can't place a moved body: use coincident, concentric, parallel, distance or angle.",
+                    m.kind.word()
+                ),
+            ));
+            continue;
+        }
+        let id = MateId(i as u32);
+        if m.flip {
+            reversed.push(id);
+        }
+        joined.push(Mate {
+            id,
+            name: m.name.clone(),
+            kind: m.kind.clone(),
+            a: MateEnd {
+                path: vec![part],
+                geom: Some(m.to.clone()),
+            },
+            b: MateEnd {
+                path: vec![body],
+                geom: Some(m.moved.clone()),
+            },
+            flip: m.aligned,
+            suppressed: false,
+        });
+    }
+    let refs: Vec<&Mate> = joined.iter().collect();
+    let solved = solve(
+        &refs,
+        components,
+        params,
+        0,
+        &mut Memo::default(),
+        None,
+        &reversed,
+    );
+    for m in &joined {
+        if let Some(Status::Failed(why)) = solved.statuses.get(&m.id) {
+            failed.push((m.name.clone(), why.replace("components", "bodies")));
+        }
+    }
+    (solved.frames.get(&body).copied().unwrap_or(start), failed)
+}
+
 // ---- Geometry of an end ----
 
 /// What an end is, in its component's coordinates.
@@ -1235,7 +1364,9 @@ fn turned_over(frame: Frame, through: DVec3, axis: DVec3) -> Frame {
 /// Solves the mates. `components` are those that are not suppressed, where they are;
 /// `mates` are in the assembly's order. `key` identifies the mates and the components
 /// (not where they are): what `memo` remembers is used again while it stays the same.
-/// `drag` pulls a component as the mates are solved.
+/// `drag` pulls a component as the mates are solved. The distances and angles of the
+/// mates in `reversed` are measured the other way (SolidWorks' "flip dimension").
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn solve(
     mates: &[&Mate],
     mut components: Vec<Placed>,
@@ -1243,6 +1374,7 @@ pub(crate) fn solve(
     key: u64,
     memo: &mut Memo,
     drag: Option<Drag>,
+    reversed: &[MateId],
 ) -> Solved {
     if memo.key != key {
         *memo = Memo {
@@ -1306,7 +1438,20 @@ pub(crate) fn solve(
                 }
                 width_equations(mode, a, b, width - tab_width, params)?
             } else {
-                equations(&mate.kind, a, b, params)?
+                let mut protos = equations(&mate.kind, a, b, params)?;
+                if reversed.contains(&mate.id) {
+                    for p in &mut protos {
+                        let measured = match mate.kind {
+                            MateKind::Distance(_) => p.kind == EqKind::Offset,
+                            MateKind::Angle(_) => p.kind == EqKind::Dot,
+                            _ => false,
+                        };
+                        if measured {
+                            p.target = -p.target;
+                        }
+                    }
+                }
+                protos
             };
             Ok((a, b, protos))
         })();
