@@ -321,9 +321,12 @@ with their defaults' types):
   out by `position_offset`) takes nothing from it and gets no relief, as in SolidWorks.
   Where a flange's edge runs to a corner of its face sharper than square and its bend
   starts inside the sheet, the bend ends on a slant from the face's corner to the
-  flange's end, as SolidWorks' does. `outline` is a sketch of the flange's shape (on a plane turned about
+  flange's end, as SolidWorks' does. Where a flange's edge runs down to the bend its face
+  hangs from (a lip on a wall's side) and its bend starts inside the sheet, the strip its
+  bend takes runs on through that bend, which is cut away there, as in SolidWorks. `outline` is a sketch of the flange's shape (on a plane turned about
   the edge): the flange is as wide and as long as its region and cut to it, from its foot
-  out. `up_to` (a vertex, a reference point or `"origin"`) runs the flange up to that point
+  out; an outline that reaches the end of its edge meets a flange at that corner as a
+  flange without one does. `up_to` (a vertex, a reference point or `"origin"`) runs the flange up to that point
   in place of its `length`, its end through the point square to the flange, as
   SolidWorks' "Up To Vertex"; copies of it are as long as it came out. `position_offset` sets the flange out from its edge, the sheet
   running on flat to the bend (negative: in). `position` is SolidWorks': at an angle other than 90 a

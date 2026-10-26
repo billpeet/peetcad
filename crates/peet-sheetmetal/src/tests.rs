@@ -2082,6 +2082,112 @@ fn a_flange_shaped_to_an_outline() {
 }
 
 #[test]
+fn an_outline_to_the_corner_meets_the_flange_there() {
+    // A wall outside the right edge takes the radius off the plate's top edge, which then
+    // runs from x = 0 to W - R. A flange on it shaped to an outline that reaches the end of
+    // that edge is carried on to the corner and meets the wall there, as one without an
+    // outline does, and ends where the outline does (Louvre Filter Bracket).
+    let mut layout = plate_layout(settings(0.5));
+    layout
+        .add_edge_flange(
+            2,
+            &EdgeSite {
+                piece: 0,
+                a: DVec2::new(W, 0.0),
+                b: DVec2::new(W, H),
+                top: true,
+            },
+            &flange(20.0, FlangePosition::MaterialOutside),
+        )
+        .unwrap();
+    let world = [
+        DVec3::new(10.0, H, 0.0),
+        DVec3::new(W - R, H, 0.0),
+        DVec3::new(W - R, H, 20.0),
+        DVec3::new(10.0, H, 20.0),
+    ];
+    let outline = |frame: &peet_math::Frame| {
+        let flat: Vec<DVec2> = world
+            .iter()
+            .map(|p| frame.to_local(*p).truncate())
+            .collect();
+        Area::polygon(&flat, |i| CurveTag::Sketch {
+            owner: 9,
+            entity: i as u32,
+        })
+    };
+    let site = EdgeSite {
+        piece: 0,
+        a: DVec2::new(W - R, H),
+        b: DVec2::new(0.0, H),
+        top: true,
+    };
+    layout
+        .add_edge_flange_outlined(
+            3,
+            0,
+            &site,
+            &flange(20.0, FlangePosition::MaterialInside),
+            FlangeOwn::default(),
+            &outline,
+        )
+        .unwrap();
+    assert_eq!(layout.corners.len(), 1);
+    let (solid, body) = built(layout);
+    let lip = body.layout.attachments[1].pieces[1];
+    let b = piece_bounds(&solid, &body, lip);
+    // To the outline, not set back from the edge's end by the radius again
+    assert_close(b.max.x, W - R, 1e-6);
+    assert_close(b.min.x, 10.0, 1e-6);
+}
+
+#[test]
+fn a_lip_on_a_wall_cuts_through_the_walls_bend() {
+    // A lip on the side edge of a wall, which runs down to the wall's bend: the strip the
+    // lip's bend takes from the wall runs on through the wall's bend, which SolidWorks
+    // cuts away there.
+    let mut layout = plate_layout(settings(0.44));
+    layout
+        .add_edge_flange(
+            2,
+            &top_edge(true),
+            &flange(30.0, FlangePosition::MaterialInside),
+        )
+        .unwrap();
+    let (solid, body) = built(layout.clone());
+    let wall = layout.attachments[0].pieces[1];
+    let site = solid
+        .edge_ids()
+        .filter_map(|e| body.edge_site(&solid, e).ok())
+        .find(|s| {
+            let fl = &body.layout.pieces[wall];
+            let (p, q) = (
+                fl.frame.to_world(s.a.extend(0.0)),
+                fl.frame.to_world(s.b.extend(0.0)),
+            );
+            s.piece == wall
+                && close(p.x, 0.0, 1e-9)
+                && close(q.x, 0.0, 1e-9)
+                && (p.z - q.z).abs() > 1.0
+        })
+        .expect("the wall's side edge");
+    let before = measure::volume(&solid);
+    layout
+        .add_edge_flange(3, &site, &flange(10.0, FlangePosition::MaterialInside))
+        .unwrap();
+    let (solid, body) = built(layout);
+    // The wall's bend now starts where the lip's bend ends, R + T in from the side
+    let bend = body.layout.attachments[0].pieces[0];
+    assert_close(piece_bounds(&solid, &body, bend).min.x, R + T, 1e-6);
+    // What the lip adds, less the end of the wall's bend it took away
+    let section = PI / 4.0 * ((R + T).powi(2) - R * R);
+    let wall_height = 30.0 - (R + T);
+    let lip = wall_height * ((10.0 - (R + T)) * T + section);
+    let taken = wall_height * (R + T) * T + (R + T) * section;
+    assert_close(measure::volume(&solid), before + lip - taken, 1e-3);
+}
+
+#[test]
 fn a_profile_bend_with_its_own_model() {
     // SolidWorks' sketched bends can each have a deduction of their own: a shallow bend
     // whose body deduction would make its allowance negative takes a smaller one.

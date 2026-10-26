@@ -380,6 +380,12 @@ function importPart(doc, dir) {
           items.push({ type: "arc", center: toPeet(g.center), start: toPeet(start), end: toPeet(end), ...construction, as });
           ends.push([as + ".start", toPeet(start)], [as + ".end", toPeet(end)]);
           own.push({ g, as, turned: !ccw });
+        } else if (g.type === "spline" && g.points && g.points.length >= 2) {
+          // SolidWorks' spline points are the points it runs through
+          const points = g.points.map(toPeet);
+          items.push({ type: "spline", points, ...construction, as });
+          ends.push([as + ".start", points[0]], [as + ".end", points[points.length - 1]]);
+          own.push({ g, as, turned: false });
         } else if (g.type === "text" && sameHand) {
           // Its point is the sketch point with the text's id. The export has no font, height or angle:
           // they are fitted to SolidWorks' faces of the feature that uses the sketch, once it is drawn.
@@ -1992,7 +1998,9 @@ function importPart(doc, dir) {
         if (built.ok && notes.length) built.warning = [...new Set(notes)].join("; ");
         const gap = (v.GapDistance || 0) * MM;
         if (built.ok) {
-          const flangeNames = [...built.names];
+          // The flanges themselves, without the planes, sketches and cuts their outlines brought
+          const pieces = ops.map((o, i) => pieceName(i));
+          const flangeNames = built.names.filter(n => pieces.includes(n));
           const others = cornersWithOthers(f.name, flangeNames, radius);
           if (others) built.names.push(others);
           if (flangeNames.length === edges.length && edges.length > 1) {
@@ -2588,7 +2596,7 @@ function importPart(doc, dir) {
   const boxOff = box && swBox ? Math.max(...box.map((x, i) => Math.abs(x - swBox[i]))) : null;
   const volumeOff = total.volume_mm3 && swVolume ? Math.abs(total.volume_mm3 - swVolume) / swVolume : null;
   const flat = bodies.find(b => b.flat_size);
-  const swFlat = config.flatDxf ? dxfSize(path.join(path.dirname(doc.__file), config.flatDxf)) : null;
+  let swFlat = config.flatDxf ? dxfSize(path.join(path.dirname(doc.__file), config.flatDxf)) : null;
   const sizeOff = (p, q) => Math.max(...[...p].sort((a, b) => a - b).map((x, i) => Math.abs(x - [...q].sort((a, b) => a - b)[i])));
   let flatOff = flat && swFlat ? sizeOff(flat.flat_size, swFlat) : null;
   // SolidWorks wrote some flat DXFs of the folded part seen square to two of its axes, not of its blank: the
@@ -2600,6 +2608,16 @@ function importPart(doc, dir) {
       return [[0, 1], [0, 2], [1, 2]].some(([i, j]) => sizeOff([size[i], size[j]], swFlat) < 2e-2 && size[3 - i - j] > thickness + 1e-2);
     });
     if (seen) { flatOff = null; report.notes.push("SolidWorks' flat DXF is a view of the folded part, not its blank: the flat size is not compared"); }
+  }
+  // SolidWorks draws some blanks turned in the DXF: measured square to the drawing's own edges, as PeetCAD
+  // measures its blank, if that is nearer
+  if (flatOff !== null && flatOff >= 1e-2) {
+    const square = dxfSquareSize(path.join(path.dirname(doc.__file), config.flatDxf));
+    if (square && sizeOff(flat.flat_size, square.size) < flatOff) {
+      report.notes.push(`SolidWorks drew the blank turned by ${square.angle}° in its flat DXF (${swFlat.join(" × ")} as drawn): its size is measured square to its edges`);
+      swFlat = square.size;
+      flatOff = sizeOff(flat.flat_size, swFlat);
+    }
   }
   report.solidworks = { bodies: sw.length, volume_mm3: +swVolume.toFixed(3), area_mm2: +swArea.toFixed(3), box: swBox && swBox.map(tidy), flat_size: swFlat };
   report.peetcad = { bodies: bodies.length, volume_mm3: total.volume_mm3, area_mm2: total.area_mm2, box, flat_size: flat && flat.flat_size, sheet_metal: bodies.some(b => b.sheet_metal) };
@@ -2864,6 +2882,49 @@ function dxfSize(file) {
   const at = name => { const i = lines.indexOf(name); return i < 0 ? null : [parseFloat(lines[i + 2]), parseFloat(lines[i + 4])]; };
   const min = at("$EXTMIN"), max = at("$EXTMAX");
   return min && max ? [tidy(max[0] - min[0]), tidy(max[1] - min[1])] : null;
+}
+
+/**
+ * The size of a DXF drawing measured square to its own edges, where SolidWorks drew the blank turned
+ * (Peaked Angled Roof's, by the 3° its fixed face leans): the angle most of the length of its lines runs
+ * at, modulo 90°, and the drawing's size turned back by it. Null if the drawing is square already.
+ */
+function dxfSquareSize(file) {
+  if (!fs.existsSync(file)) return null;
+  const lines = fs.readFileSync(file, "latin1").split(/\r?\n/).map(l => l.trim());
+  const start = lines.indexOf("ENTITIES");
+  if (start < 0) return null;
+  const entities = [];
+  for (let i = start + 1; i + 1 < lines.length; i += 2) {
+    const [code, value] = [lines[i], lines[i + 1]];
+    if (code === "0") { if (value === "ENDSEC") break; entities.push({ type: value, g: {} }); continue; }
+    const e = entities[entities.length - 1];
+    if (e) (e.g[code] = e.g[code] || []).push(parseFloat(value));
+  }
+  const points = [], length = new Map();
+  for (const { type, g } of entities) {
+    if (type === "LINE" && g["11"]) {
+      const a = [g["10"][0], g["20"][0]], b = [g["11"][0], g["21"][0]];
+      points.push(a, b);
+      const angle = ((Math.atan2(b[1] - a[1], b[0] - a[0]) * 180 / Math.PI) % 90 + 90) % 90;
+      const key = Math.round(angle * 1000) % 90000;
+      length.set(key, (length.get(key) || 0) + Math.hypot(b[0] - a[0], b[1] - a[1]));
+    } else if ((type === "ARC" || type === "CIRCLE") && g["40"]) {
+      const [from, to] = type === "ARC" ? [g["50"][0], g["51"][0]] : [0, 360];
+      const sweep = ((to - from) % 360 + 360) % 360 || 360;
+      for (let k = 0; k <= 90; k++) {
+        const t = (from + sweep * k / 90) * Math.PI / 180;
+        points.push([g["10"][0] + g["40"][0] * Math.cos(t), g["20"][0] + g["40"][0] * Math.sin(t)]);
+      }
+    } else if (g["10"] && g["20"]) g["10"].forEach((x, k) => g["20"][k] !== undefined && points.push([x, g["20"][k]]));
+  }
+  const best = [...length].sort((a, b) => b[1] - a[1])[0];
+  if (!best || best[0] === 0 || points.length === 0) return null;
+  const angle = -best[0] / 1000 * Math.PI / 180, c = Math.cos(angle), s = Math.sin(angle);
+  const turned = points.map(([x, y]) => [c * x - s * y, s * x + c * y]);
+  const size = i => Math.max(...turned.map(p => p[i])) - Math.min(...turned.map(p => p[i]));
+  const degrees = best[0] / 1000;
+  return { angle: tidy(Math.min(degrees, 90 - degrees)), size: [tidy(size(0)), tidy(size(1))] };
 }
 
 // ---- Main ----
