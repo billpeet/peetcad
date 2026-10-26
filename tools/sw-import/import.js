@@ -331,7 +331,7 @@ function importPart(doc, dir) {
    * `onFace`, if given, is the one place to put the sketch: a face parallel to it anywhere along its normal,
    * the sketch projected onto it.
    */
-  function importSketch(f, { name = f.name, needFace = false, draw = null, onFace = null } = {}) {
+  function importSketch(f, { name = f.name, needFace = false, draw = null, onFace = null, holes = null } = {}) {
     const s = withBlocks(f.sketch);
     if (!s || s.error) return { error: "the sketch was not exported" };
     if (s.is3D) return { error: "a 3D sketch" };
@@ -366,7 +366,7 @@ function importPart(doc, dir) {
       const ends = [];
       s.segments.forEach((g, i) => {
         const as = "e" + i;
-        const construction = g.construction ? { construction: true } : {};
+        const construction = g.construction || holes ? { construction: true } : {};
         if (g.type === "line" && g.start && g.end) {
           items.push({ type: "line", from: toPeet(g.start), to: toPeet(g.end), ...construction, as });
           ends.push([as + ".start", toPeet(g.start)], [as + ".end", toPeet(g.end)]);
@@ -416,6 +416,15 @@ function importPart(doc, dir) {
         groups.get(key).push(label);
       }
       for (const labels of groups.values()) for (let i = 1; i < labels.length; i++) items.push({ type: "coincident", of: [labels[0], labels[i]] });
+      // A hole wizard's sketch: a circle of the hole's size on each of its points, which keeps to the
+      // point when the sketch's dimensions move it
+      if (holes) holes.points.forEach((p, k) => {
+        const key = toPeet(p).map(v => v.toFixed(4)).join(",");
+        const mine = s.points.findIndex(q => spot(q) === spot(p));
+        const label = groups.has(key) ? groups.get(key)[0] : mine >= 0 && items.some(x => x.as === "p" + mine) ? "p" + mine : null;
+        items.push({ type: "circle", center: toPeet(p), radius: tidy(holes.radius), as: "h" + k });
+        if (label) items.push({ type: "coincident", of: ["h" + k + ".center", label] });
+      });
     }
     if (items.length === 0) return { error: left.size ? `only ${[...left].join(" and ")}, which PeetCAD sketches don't have` : "nothing in it" };
 
@@ -552,7 +561,9 @@ function importPart(doc, dir) {
     };
 
     const dimensions = new Map((f.dimensions || []).map(d => [d.fullName, d]));
-    const byEquation = new Set((cur.equations || []).filter(e => !e.disabled).map(e => (/^\s*"([^"]+@[^"]+)"\s*=/.exec(e.expression) || [])[1]).filter(Boolean));
+    // An equation sets these, so they drive the sketch even where SolidWorks calls them driven; one whose equation
+    // is disabled keeps the value it set and still drives it (VIC CT Metering Panel's D5, another value elsewhere)
+    const byEquation = new Set((cur.equations || []).map(e => (/^\s*"([^"]+@[^"]+)"\s*=/.exec(e.expression) || [])[1]).filter(Boolean));
     const names = new Set();
     const items = [];
     for (const r of s.relations) {
@@ -1071,6 +1082,32 @@ function importPart(doc, dir) {
    * front of its corner. Kept if PeetCAD's rounds come to the area SolidWorks' have. False if a corner's
    * edge is not in the part or the corner can't be broken so.
    */
+  /**
+   * A break corner on faces, as SolidWorks' is when its entities are faces: every corner of each, found
+   * again when the part changes (Weather Shield Door's, whose corners are where a cut is in one
+   * configuration and where another cut is in the other). Kept only if what it rounds or cuts comes to
+   * what SolidWorks' does.
+   */
+  function cornersOfFaces(f) {
+    const v = values(f);
+    if (f.type !== "BreakCorner" || !sheetBody() || !(v.Distance > 0)) return false;
+    const entities = v.Entities || [];
+    if (!entities.length || !entities.every(e => e && e.kind === "face" && e.surface === "plane" && e.point && e.normal)) return false;
+    const theirs = facesOf(f.name);
+    if (!theirs.length) return false;
+    const kind = theirs.some(x => x.cylinder) ? "fillet" : "chamfer";
+    const faces = entities.map(e => ({ at: mm(e.point).map(tidy), normal: unit(e.normal).map(tidy) }));
+    const mark = peet.script.length;
+    const built = build(f, { op: "break_corner", name: f.name, kind, size: tidy(v.Distance * MM), edges: [], faces });
+    if (!built.ok) { peet.script.length = mark; return false; }
+    const area = theirs.reduce((t, x) => t + x.area * 1e6, 0);
+    const ours = (peet.ask({ op: "faces" }).faces || []).filter(x => (x.made_by || []).some(m => built.names.includes(m.feature))).reduce((t, x) => t + x.area_mm2, 0);
+    if (Math.abs(ours - area) > 1e-3 * area + 0.01) { peet.apply({ op: "delete", features: built.names }); peet.script.length = mark; return false; }
+    made.set(f.name, built.names);
+    record(f, "imported");
+    return true;
+  }
+
   function breakCorners(f) {
     if (!sheetBody() || !thickness) return false;
     const edges = (peet.ask({ op: "edges" }).edges || []).filter(e => e.curve === "line" && e.from && e.to && Math.abs(len(sub(e.to, e.from)) - thickness) < 1e-3);
@@ -1292,7 +1329,7 @@ function importPart(doc, dir) {
   }
 
   function roundCorners(f) {
-    if (breakCorners(f)) return;
+    if (cornersOfFaces(f) || breakCorners(f)) return;
     const rounds = facesOf(f.name).filter(face => face.cylinder);
     const flats = facesOf(f.name).filter(face => face.plane && face.normal);
     if (rounds.length + flats.length === 0) return record(f, "not supported", "none of its faces is left in SolidWorks' body to copy");
@@ -1872,11 +1909,10 @@ function importPart(doc, dir) {
     if (!f.suppressed || STRUCTURE.test(f.type) || f.type === "SheetMetal" || f.type === "RefPlane") return handleLive(f);
     // One that is live in another configuration is left for that configuration: there SolidWorks' body has
     // it, so the side a flange bends to and the like can be checked, and the part is the size it is drawn for.
-    if (cur === config && !SKETCH.test(f.type) && liveElsewhere(f.name)) return record(f, LATER);
-    // So is a sketch on something left for later: made now, it would be on whatever is there instead
-    // (Meter Bracket's Sketch69, on the right-hand return, which is where the left-hand one is)
-    const later = p => byName.get(p) && byName.get(p).suppressed && !SKETCH.test(byName.get(p).type) && liveElsewhere(p);
-    if (cur === config && SKETCH.test(f.type) && liveElsewhere(f.name) && (f.parents || []).some(later)) return record(f, LATER);
+    // So is a sketch: where it is suppressed, SolidWorks' export has it as it was last solved, not where it
+    // is (Weather Shield Door's Sketch18, 100 mm off), and made now it would be on whatever is there instead
+    // of what it is on (Meter Bracket's Sketch69, on the left-hand return where the right-hand one is).
+    if (cur === config && liveElsewhere(f.name)) return record(f, LATER);
     const before = report.features.length, had = made.has(f.name);
     handleLive({ ...f, suppressed: false });
     const names = made.get(f.name);
@@ -2582,8 +2618,15 @@ function importPart(doc, dir) {
         if (!diameter || points.length === 0) return record(f, "failed", "its size or its positions were not exported");
         if (where.sketch.is3D) return holesOn3D(f, v, points, diameter);
         if (sheetBody()) {
+          // The hole's own sketch with its relations and dimensions, so that the holes go where another
+          // configuration puts them (VIC CT Metering Panel's, left and right hinged); failing that, the circles
+          let sk = { error: true };
+          if (relations && (where.dimensions || []).length) {
+            sk = importSketch(where, { name: f.name + " sketch", needFace: true, holes: { points, radius: diameter / 2 } });
+            if (!sk.error) sketches.set(where.name, sk);
+          }
           const draw = toPeet => points.map(p => ({ type: "circle", center: toPeet(p), radius: tidy(diameter / 2) }));
-          const sk = importSketch(where, { name: f.name + " sketch", needFace: true, draw });
+          if (sk.error) sk = importSketch(where, { name: f.name + " sketch", needFace: true, draw });
           if (sk.error) return record(f, "failed", sk.error);
           const reach = reachOf(v.EndCondition, (v.HoleDepth || v.ThruHoleDepth || 0) * MM, false);
           const built = sheetCut(f, sk.name, reach, sk.frame);
@@ -3224,10 +3267,25 @@ function importPart(doc, dir) {
         byName = maps.get(other);
         const before = report.features.length;
         const had = new Set(made.keys());
+        // Where each SolidWorks feature is in the tree (one under another, where that one is)
+        const order = new Map();
+        other.features.forEach((top, i) => { const walk = g => { order.set(g.name, i); (g.sub || []).forEach(walk); }; walk(top); });
+        const tree = () => (peet.ask({ op: "features" }).features || []).map(x => x.name);
         for (const f of other.features) {
           if (f.suppressed || STRUCTURE.test(f.type) || f.type === "SheetMetal" || f.type === "RefPlane" || made.has(f.name) || sketches.has(f.name)) continue;
           if (report.features.some(x => x.name === f.name && x.result !== "suppressed" && x.result !== LATER)) continue;   // tried already, where it was live
+          const was = new Set(tree());
           handle(f);
+          // What it made goes where SolidWorks has it in the tree, not at the end: before what was made of
+          // the features after it (Weather Shield Door's Cut-Extrude2, whose corners Break-Corner1 rounds)
+          const added = tree().filter(n => !was.has(n));
+          if (!added.length) continue;
+          const after = new Set();
+          for (const [swName, names] of made) if (order.get(swName) > order.get(f.name)) names.forEach(n => after.add(n));
+          for (const [swName, sk] of sketches) if (order.get(swName) > order.get(f.name)) after.add(sk.name);
+          const ahead = tree().find(n => after.has(n) && was.has(n));
+          if (!ahead) continue;
+          for (const n of added) if (!peet.apply({ op: "move", feature: n, before: ahead }).ok) break;
         }
         // What was imported here is suppressed in the active configuration now, where SolidWorks has it
         // suppressed: the configurations still to come are copies of it, and are not rebuilt with it there
