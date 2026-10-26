@@ -15,7 +15,10 @@ use std::marker::PhantomData;
 
 use crate::value::{HoleStandard, RevolveAxis};
 use peet_document::Document;
-use peet_model::feature::{AxisDef, CoordSystemDef, FeatureKind, PatternDef, PlaneDef, PointDef};
+use peet_model::feature::{
+    AxisDef, CoordSystemDef, FeatureKind, PatternBound, PatternDef, PatternKeeps, PatternUpTo,
+    PlaneDef, PointDef,
+};
 use peet_model::{
     AxisRef, BaseFlangeFeature, BendModelDef, BreakCornerFeature, CornerFeature,
     EdgeFlangeFeature, EdgeRef,
@@ -41,7 +44,8 @@ use crate::args::{
 };
 use crate::select;
 use crate::value::{
-    AxisSel, Bend, EdgeSel, End, FaceSel, FeatureSel, Input, PlaneSel, PointSel, Regions, VertexSel,
+    AxisSel, Bend, BoundSel, EdgeSel, End, FaceSel, FeatureSel, Input, PlaneSel, PointSel, Regions,
+    VertexSel,
 };
 
 // ---- Kinds of field ----
@@ -815,6 +819,7 @@ fn second_direction() -> LinearDirection {
         spacing: Scalar::new(20.0),
         count: Scalar::new(2.0),
         flip: false,
+        up_to: None,
     }
 }
 
@@ -887,6 +892,161 @@ macro_rules! second_field {
 second_field!(Spacing2, Length, spacing);
 second_field!(Count2, PatternCount, count);
 second_field!(Flip2, Flag, flip);
+
+impl Words for PatternKeeps {
+    fn all() -> &'static [Self] {
+        &[PatternKeeps::Spacing, PatternKeeps::Count]
+    }
+}
+
+fn bound_out(b: &PatternBound, doc: &Document) -> Value {
+    match b {
+        PatternBound::Plane(p) => json!({ "plane": plane_out(p, doc) }),
+        PatternBound::Point(p) => json!({ "point": match p {
+            PointRef::Origin => json!("origin"),
+            PointRef::Feature(id) => json!(doc.model.name_of(*id)),
+            PointRef::Vertex(v) => vertex_out(v, doc),
+        } }),
+    }
+}
+
+fn bound_ref(b: &BoundSel, doc: &Document) -> Result<PatternBound, String> {
+    Ok(match b {
+        BoundSel::Plane(p) => PatternBound::Plane(select::plane(doc, p)?.0),
+        BoundSel::Point(p) => PatternBound::Point(select::point(doc, p)?),
+    })
+}
+
+/// What a linear pattern runs up to (SolidWorks' "up to reference"): giving it makes the
+/// count (or the spacing) follow from where the reference is, and `null` sets both again.
+pub(crate) struct UpTo;
+
+impl Field for UpTo {
+    type Arg = Option<BoundSel>;
+    type Target = Option<Box<PatternUpTo>>;
+    const NULLABLE: bool = true;
+    fn describe() -> String {
+        "{\"plane\": plane or flat face} or {\"point\": vertex or reference point} the pattern runs up to, or null for the count as given".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        or_null(v, BoundSel::parse)
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        match arg {
+            Some(b) => {
+                let to = bound_ref(b, doc)?;
+                match target {
+                    Some(u) => u.to = to,
+                    None => {
+                        *target = Some(Box::new(PatternUpTo {
+                            to,
+                            offset: Scalar::new(0.0),
+                            reverse_offset: false,
+                            seed: None,
+                            keeps: PatternKeeps::Spacing,
+                        }));
+                    }
+                }
+            }
+            None => *target = None,
+        }
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target
+            .as_ref()
+            .map_or(Value::Null, |u| bound_out(&u.to, doc))
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.as_ref().map(|u| u.to.clone().into()))
+    }
+}
+
+/// Where on the seed a pattern that runs up to a reference measures from: `null` for the
+/// seed's centre.
+pub(crate) struct UpToSeedF;
+
+impl Field for UpToSeedF {
+    type Arg = Option<BoundSel>;
+    type Target = Option<Box<PatternUpTo>>;
+    const NULLABLE: bool = true;
+    fn describe() -> String {
+        "{\"plane\": ...} or {\"point\": ...} on the seed to measure from, or null for the seed's centre (needs up_to)".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        or_null(v, BoundSel::parse)
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        let u = target.as_mut().ok_or_else(up_to_first)?;
+        u.seed = arg.as_ref().map(|b| bound_ref(b, doc)).transpose()?;
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target
+            .as_ref()
+            .and_then(|u| u.seed.as_ref())
+            .map_or(Value::Null, |b| bound_out(b, doc))
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        target.as_ref().map(|u| u.seed.clone().map(Into::into))
+    }
+}
+
+fn up_to_first() -> String {
+    "the pattern doesn't run up to a reference: give 'up_to' too".to_owned()
+}
+
+/// A field of a linear pattern's run up to a reference, which needs `up_to`.
+macro_rules! up_to_field {
+    ($name:ident, $inner:ty, $member:ident, $text:literal) => {
+        pub(crate) struct $name;
+        impl Field for $name {
+            type Arg = <$inner as Field>::Arg;
+            type Target = Option<Box<PatternUpTo>>;
+            fn describe() -> String {
+                format!("{} ({})", <$inner>::describe(), $text)
+            }
+            fn parse(v: &Value) -> Result<Self::Arg, String> {
+                <$inner>::parse(v)
+            }
+            fn assign(
+                arg: &Self::Arg,
+                target: &mut Self::Target,
+                doc: &Document,
+            ) -> Result<(), String> {
+                let u = target.as_mut().ok_or_else(up_to_first)?;
+                <$inner>::assign(arg, &mut u.$member, doc)
+            }
+            fn read(target: &Self::Target, doc: &Document) -> Value {
+                target
+                    .as_ref()
+                    .map_or(Value::Null, |u| <$inner>::read(&u.$member, doc))
+            }
+            fn arg(target: &Self::Target, doc: &Document) -> Option<Self::Arg> {
+                target.as_ref().and_then(|u| <$inner>::arg(&u.$member, doc))
+            }
+        }
+    };
+}
+
+up_to_field!(
+    UpToOffset,
+    Length,
+    offset,
+    "how far short of the reference the last copy is; needs up_to"
+);
+up_to_field!(
+    UpToReverse,
+    Flag,
+    reverse_offset,
+    "the last copy past the reference by the offset; needs up_to"
+);
+up_to_field!(
+    UpToKeeps,
+    Choice<PatternKeeps>,
+    keeps,
+    "which is given, the other following from the reference; needs up_to"
+);
 
 fn field_arg<F: Field>(a: &mut Args, name: &str) -> Result<Option<F::Arg>, String> {
     let value = if F::NULLABLE {
@@ -1307,7 +1467,7 @@ feature_args! {
     LinearPattern: FeatureKind::Pattern(f) => &mut **f,
         PatternFeature {
             seeds,
-            def: PatternDef::Linear { first: LinearDirection { direction, spacing, count, flip }, second },
+            def: PatternDef::Linear { first: LinearDirection { direction, spacing, count, flip, up_to }, second },
         } => {
     features: Vec<FeatureSel> as Features = seeds,
     direction: AxisSel as AxisF = direction,
@@ -1315,6 +1475,17 @@ feature_args! {
     /// How many, the original included.
     count: Input as PatternCount = count,
     flip: bool as Flag = flip,
+    /// A plane or point the pattern runs up to (SolidWorks' up to reference), or null
+    /// for the spacing and count as given.
+    up_to: Option<BoundSel> as UpTo = up_to,
+    /// How far short of the reference the last copy is.
+    up_to_offset: Input as UpToOffset = up_to,
+    /// The last copy past the reference by the offset.
+    up_to_reverse: bool as UpToReverse = up_to,
+    /// Where on the seed to measure from, or null for its centre.
+    up_to_seed: Option<BoundSel> as UpToSeedF = up_to,
+    /// Which is given (spacing or count): the other follows from the reference.
+    up_to_keeps: PatternKeeps as UpToKeeps = up_to,
     /// `Some(None)`: a row, not a grid.
     direction2: Option<AxisSel> as Direction2 = second,
     spacing2: Input as Spacing2 = second,

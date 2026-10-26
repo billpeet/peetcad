@@ -384,6 +384,12 @@ with their defaults' types):
   mitre's face sets only that mitre's `gap`.
 - `linear_pattern` becomes a grid with `direction2`, `spacing2`, `count2`; `"direction2":
   null` makes it a row again.
+- `linear_pattern`'s `up_to` (`{"plane": ...}` or `{"point": ...}`) runs its first
+  direction up to a reference, as SolidWorks' "Up to reference": the copies span the
+  distance from the seed's centre (the middle of the box round its faces, or `up_to_seed`)
+  to the reference, less `up_to_offset` (more with `up_to_reverse`). `up_to_keeps`
+  `"spacing"` (default) gives as many copies as fit, one exactly at the end included;
+  `"count"` spreads `count` copies evenly. `"up_to": null` sets both again.
 - `count` for linear and circular part patterns, and a grid's `count2`, accept a number
   or an expression such as `"iif(width > 299mm, 3, 2)"` or `"int(width / 100mm)"`.
   Counts include the original and must evaluate to unitless whole numbers from 2 to

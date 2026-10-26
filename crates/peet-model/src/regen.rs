@@ -1166,7 +1166,7 @@ impl Engine {
             }
             FeatureKind::Pattern(p) => {
                 let inputs = (|| {
-                    let motions = ctx.pattern_motions(&p.def)?;
+                    let motions = ctx.pattern_motions(&p.def, &p.seeds)?;
                     let seeds = ctx.seeds(&p.seeds)?;
                     Ok((motions, seeds))
                 })();
@@ -2053,7 +2053,7 @@ impl<'m> Ctx<'m, '_> {
             let copies = match &feature.kind {
                 FeatureKind::Pattern(p) => {
                     let mut motions = vec![original];
-                    motions.extend(self.pattern_motions(&p.def)?);
+                    motions.extend(self.pattern_motions(&p.def, &p.seeds)?);
                     Some((motions, &p.seeds))
                 }
                 FeatureKind::Mirror(m) => {
@@ -2203,8 +2203,112 @@ impl<'m> Ctx<'m, '_> {
         Ok(out)
     }
 
+    /// The spacing and count of a linear pattern direction that runs up to a reference, as
+    /// SolidWorks has them: the distance along the direction from the seed (its centre, or
+    /// its reference) to the reference, less the offset, is what the copies span. Given the
+    /// spacing, as many copies as fit (one exactly at the end counts); given the count,
+    /// spread evenly over it.
+    fn up_to_reference(
+        &self,
+        u: &crate::feature::PatternUpTo,
+        d: &crate::feature::LinearDirection,
+        dir: DVec3,
+        seeds: &[FeatureId],
+        what: &str,
+    ) -> Result<(f64, u32), String> {
+        use crate::feature::{PatternBound, PatternKeeps};
+        let centre = self.seed_centre(seeds)?;
+        // How far along the direction from the seed's centre a bound is
+        let along = |b: &PatternBound| -> Result<f64, String> {
+            match b {
+                PatternBound::Point(p) => Ok((self.point(p)? - centre).dot(dir)),
+                PatternBound::Plane(p) => {
+                    let plane = self.plane(p)?;
+                    let n = plane.normal();
+                    let across = dir.dot(n);
+                    if across.abs() < 1e-9 {
+                        return Err(
+                            "the plane runs along the direction: pick one across it".to_owned()
+                        );
+                    }
+                    Ok((plane.origin() - centre).dot(n) / across)
+                }
+            }
+        };
+        let to = along(&u.to)?;
+        let from = match &u.seed {
+            Some(b) => along(b).map_err(|m| format!("the seed's reference: {m}"))?,
+            None => 0.0,
+        };
+        let offset = self.scalar(&u.offset, ScalarKind::Length, "Offset")?;
+        let span = to - from - if u.reverse_offset { -offset } else { offset };
+        if span <= 1e-9 {
+            return Err(format!(
+                "the reference, less the offset, is not ahead of the seed ({span:.4} mm along the direction): flip the direction, or the offset"
+            ));
+        }
+        match u.keeps {
+            PatternKeeps::Spacing => {
+                let spacing = self.scalar(&d.spacing, ScalarKind::Length, "Spacing")?;
+                if spacing <= 1e-9 {
+                    return Err("the spacing must be more than zero".to_owned());
+                }
+                let n = (span / spacing + 1e-9).floor() + 1.0;
+                if n > 10_000.0 {
+                    return Err(format!("{n} copies would fit, and 10000 is the most"));
+                }
+                Ok((spacing, n as u32))
+            }
+            PatternKeeps::Count => {
+                let n = self.scalar(&d.count, ScalarKind::Number, &format!("{what} count"))?;
+                if !(n.is_finite() && n.fract() == 0.0 && (2.0..=10_000.0).contains(&n)) {
+                    return Err(format!(
+                        "the count must be a whole number between 2 and 10000 (it is {n})"
+                    ));
+                }
+                Ok((span / (n - 1.0), n as u32))
+            }
+        }
+    }
+
+    /// The middle of the box round the faces that `seeds` made (SolidWorks' centroid of a
+    /// pattern's seed, which its later releases call the bounding box centre).
+    fn seed_centre(&self, seeds: &[FeatureId]) -> Result<DVec3, String> {
+        let mut lo = DVec3::splat(f64::INFINITY);
+        let mut hi = DVec3::splat(f64::NEG_INFINITY);
+        for body in self.bodies {
+            for face in body.solid.face_ids() {
+                if !body.face_name(face).features().any(|f| seeds.contains(&f)) {
+                    continue;
+                }
+                for &l in &body.solid.face(face).loops {
+                    for c in body.solid.loop_coedges(l) {
+                        let edge = body.solid.edge(body.solid.coedge(c).edge);
+                        for k in 0..=8 {
+                            let p = edge.point_at_fraction(f64::from(k) / 8.0);
+                            lo = lo.min(p);
+                            hi = hi.max(p);
+                        }
+                    }
+                }
+            }
+        }
+        if lo.x.is_finite() {
+            Ok((lo + hi) / 2.0)
+        } else {
+            Err(
+                "the seed has no faces in the part to measure from: pick a reference on the seed"
+                    .to_owned(),
+            )
+        }
+    }
+
     /// Where a pattern's copies go (the original excluded).
-    fn pattern_motions(&self, def: &PatternDef) -> Result<Vec<pattern::Motion>, String> {
+    fn pattern_motions(
+        &self,
+        def: &PatternDef,
+        seeds: &[FeatureId],
+    ) -> Result<Vec<pattern::Motion>, String> {
         let count = |s: &crate::Scalar, what: &str| {
             let n = self.scalar(s, ScalarKind::Number, &format!("{what} count"))?;
             if n.is_finite() && n.fract() == 0.0 && (2.0..=10_000.0).contains(&n) {
@@ -2221,9 +2325,16 @@ impl<'m> Ctx<'m, '_> {
                     let axis = self
                         .axis(&d.direction)
                         .map_err(|m| format!("{what}: {m}"))?;
-                    let spacing = self.scalar(&d.spacing, ScalarKind::Length, "Spacing")?;
                     let sign = if d.flip { -1.0 } else { 1.0 };
-                    Ok::<_, String>((axis.dir * spacing * sign, count(&d.count, what)?))
+                    let dir = axis.dir * sign;
+                    if let Some(u) = &d.up_to {
+                        let (spacing, n) = self
+                            .up_to_reference(u, d, dir, seeds, what)
+                            .map_err(|m| format!("Up to reference ({what}): {m}."))?;
+                        return Ok((dir * spacing, n));
+                    }
+                    let spacing = self.scalar(&d.spacing, ScalarKind::Length, "Spacing")?;
+                    Ok::<_, String>((dir * spacing, count(&d.count, what)?))
                 };
                 let (s1, n1) = step(first, "direction")?;
                 let (s2, n2) = match second {

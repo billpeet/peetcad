@@ -620,6 +620,40 @@ impl PointSel {
     }
 }
 
+/// What a linear pattern runs up to, or measures its seed from: `{"plane": plane}` (a
+/// standard or reference plane, or a flat face) or `{"point": point}` (a vertex or a
+/// reference point).
+#[derive(Clone, Debug, PartialEq)]
+pub enum BoundSel {
+    Plane(Box<PlaneSel>),
+    Point(Box<PointSel>),
+}
+
+impl From<peet_model::feature::PatternBound> for BoundSel {
+    fn from(b: peet_model::feature::PatternBound) -> Self {
+        match b {
+            peet_model::feature::PatternBound::Plane(p) => Self::Plane(Box::new(p.into())),
+            peet_model::feature::PatternBound::Point(p) => Self::Point(Box::new(p.into())),
+        }
+    }
+}
+
+impl BoundSel {
+    pub(crate) fn parse(v: &Value) -> Result<Self, String> {
+        if let Some(m) = v.as_object().filter(|m| m.len() == 1) {
+            if let Some(p) = m.get("plane") {
+                return PlaneSel::parse(p).map(|p| Self::Plane(Box::new(p)));
+            }
+            if let Some(p) = m.get("point") {
+                return PointSel::parse(p).map(|p| Self::Point(Box::new(p)));
+            }
+        }
+        Err(format!(
+            "expected {{\"plane\": a plane or flat face}} or {{\"point\": a vertex or reference point}}, not {v}"
+        ))
+    }
+}
+
 /// How far an extrusion goes.
 #[derive(Clone, Debug, PartialEq)]
 pub enum End {

@@ -411,6 +411,22 @@ mod tests {
     }
 
     #[test]
+    fn schema_11_patterns_still_open() {
+        // Linear patterns as schema 11 wrote them: before a direction could run up to a
+        // reference.
+        let (part, _) = peet_model::samples::chassis();
+        assert!(part.features().any(|f| matches!(
+            &f.kind,
+            peet_model::FeatureKind::Pattern(p)
+                if matches!(p.def, peet_model::PatternDef::Linear { .. })
+        )));
+        let mut w = Writer::new();
+        w.section(SectionKind::MODEL, 11, &peet_model::ModelV11::of(&part))
+            .unwrap();
+        assert_eq!(open(&w.finish()).unwrap().model, part);
+    }
+
+    #[test]
     fn schema_11_models_still_open() {
         // A sheet metal part with an edge flange, on its own and inside an assembly, as
         // schema 11 wrote it: before the flange had a relief of its own.

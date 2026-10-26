@@ -253,6 +253,37 @@ parameter or `edit` the count, then check `bodies` again. Counts can differ betw
 configurations with `edit`'s `configurations`, just like spacing or an angle. A numeric
 count clears its expression.
 
+**Up to a reference.** When a row must fill the part as it changes size (slots along a
+rail whose length differs between configurations), give the linear pattern `up_to`: a
+`{"plane": ...}` (a standard or reference plane, or a flat face) or a `{"point": ...}`
+(a vertex or reference point) across the direction, ahead of the seed. This is
+SolidWorks' "Up to reference". The copies span the distance along the direction from
+the seed's centre to the reference, less `up_to_offset`. The seed's centre is the middle
+of the box round its faces; `up_to_seed` measures from a plane or point on the seed
+instead. With `up_to_keeps` `"spacing"` (the default), `spacing` is kept and the count is
+as many copies as fit; one landing exactly at the end counts. With `"count"`, `count` is
+kept and the spacing spreads the copies evenly. `up_to_reverse` puts the last copy past
+the reference by the offset. The stored `count` (or `spacing`) is ignored while `up_to` is
+set; count the copies' faces in `faces` to see how many there are. A reference behind the
+seed fails with "flip the direction"; do what it says. `"up_to": null` goes back to the
+count as given. Set `up_to` before (or with) the other `up_to_` fields: they fail without
+it. `up_to` is for the first direction only.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-50, -50], "to": [50, 50]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 4}
+{"op": "sketch", "name": "Seed", "on": "top", "draw": [{"type": "circle", "center": [15, 0], "radius": 1}]}
+{"op": "cut", "sketch": "Seed", "end": "mid_plane", "depth": 20}
+{"op": "plane", "from": "right", "distance": 40, "name": "End"}
+{"op": "linear_pattern", "features": ["Cut-Extrude1"], "direction": "x", "spacing": 5, "up_to": {"plane": "End"}, "up_to_offset": 2}
+{"op": "edit", "feature": "End", "distance": 31}
+{"op": "linear_pattern", "name": "Even", "features": ["Cut-Extrude1"], "direction": "y", "count": 4, "up_to": {"point": {"at": [50, 50, 0]}}, "up_to_offset": 5, "up_to_keeps": "count"}
+{"op": "faces"}
+```
+
+The first row has five holes with `End` at 40 and four once it is at 31; `Even` spreads
+four holes over the 45 mm from the seed to 5 short of the corner.
+
 ## Moving and copying bodies
 
 `move_body` is SolidWorks' Move/Copy Body: it moves whole bodies, where the patterns
