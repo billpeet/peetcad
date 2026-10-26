@@ -247,6 +247,37 @@ fn a_cut_goes_through_every_flange_in_its_plane() {
 }
 
 #[test]
+fn a_shape_over_the_far_flange_cuts_only_that_flange() {
+    // A hat section: walls up from the plate and a lip turned out from the top of each.
+    // Holes over both lips, sketched on one, go through the lips and nowhere else: the far
+    // lip's holes, taken into the blank through the near lip, land on the plate (Top Hat).
+    let (mut p, _, _) = plate(100.0, 60.0);
+    for y in [60.0, 0.0] {
+        let (_, e) = edge(&p, DVec3::new(0.0, y, T), DVec3::new(100.0, y, T));
+        edge_flange(&mut p, e, |f| f.length = Scalar::new(30.0));
+        p.rebuild();
+        let (_, e) = edge(&p, DVec3::new(0.0, y, 30.0), DVec3::new(100.0, y, 30.0));
+        edge_flange(&mut p, e, |f| f.length = Scalar::new(20.0));
+        p.rebuild();
+    }
+    p.assert_ok();
+    let (lo, hi) = bounds(&p);
+    assert!(lo.y < -10.0 && hi.y > 70.0, "the lips turn out: {lo} {hi}");
+    let before = p.volume();
+    let lip = p.on_face(DVec3::Z, DVec3::new(50.0, 70.0, 30.0));
+    let holes = p.sketch(lip, |s| {
+        for (x, y) in [(20.0, 70.0), (80.0, 70.0), (20.0, -10.0), (80.0, -10.0)] {
+            s.add_circle(DVec2::new(x, y), 2.0);
+        }
+    });
+    let cut = p.model.add_sheet_cut(holes);
+    p.rebuild();
+    p.assert_ok();
+    assert!(matches!(p.status(cut), Status::Ok));
+    assert_close(before - p.volume(), 4.0 * std::f64::consts::PI * 4.0 * T);
+}
+
+#[test]
 fn corners_are_broken_and_follow_the_part() {
     // A plate with a wall. The wall's two top corners are rounded and one corner of the
     // plate is chamfered, each by the edge through the sheet at the corner.

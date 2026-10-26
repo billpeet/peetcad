@@ -155,12 +155,22 @@ them by number, such as `outline.0.start`. The application exposes the supportin
 opening a sketch for editing. Scripts use `project` explicitly after creating the sketch
 on the face; those references work the same way.
 
-Straight edges project unless viewed end-on. Circular edges must be parallel to the
-sketch plane; tilted circles, ellipses and freeform edges are refused. Pick supported
+Straight edges project unless viewed end-on. Circular edges project parallel to the
+sketch plane (to an arc or circle) or seen edge-on (to the line they cover: a bend's
+end seen from the sheet, for a distance to where the bend starts); tilted circles,
+ellipses and freeform edges are refused. Pick supported
 edges individually when a face includes an unsupported boundary. A missing source
 fails the sketch; suppression of a source suppresses its dependent sketches. Replace
 a projection with `delete` of its entity id, then project the replacement and recreate
 its relations. Use `feature` to inspect `projections`, locked entities, and failures.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Side", "length": 20, "edge": {"between": [[0, 0, 2], [100, 0, 2]]}}
+{"op": "sketch", "name": "Hole", "on": {"at": [50, 30, 2], "normal": [0, 0, 1]}, "draw": [{"type": "project", "edge": {"at": [0, 0.87868, 0.87868]}, "as": "bend_end"}, {"type": "circle", "center": [10, 20], "radius": 2, "as": "hole"}, {"type": "distance", "of": ["hole.center", "bend_end"], "value": 10}]}
+{"op": "sheet_cut", "sketch": "Hole"}
+```
 
 `collinear` adds parallel and point-on-line relations; `coradial` adds concentric and
 equal-radius relations. Remove both returned relation ids to remove either composite

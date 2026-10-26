@@ -639,18 +639,17 @@ pub(crate) fn apply_sheet_cut(
         .map(|i| profile.regions[i].clone())
         .collect();
     let to_flat = |p: DVec2| frame.to_local(plane.from_plane_coords(p)).truncate();
-    let area = Area::from_regions(&regions, feature.0).mapped(&to_flat);
     let mut layout = sheet.layout.clone();
-    layout.add_cut(area);
-    // The other flanges that lie in the sketch's plane. One that the first mapping already
-    // puts in the right place (it is next to the sketch's flange in the blank too) is left.
+    // The other flanges that lie in the sketch's plane, each with its own way into the flat
+    // pattern. One that the first mapping already puts in the right place (it is next to
+    // the sketch's flange in the blank too) is left to that mapping.
     let thickness = layout.settings.thickness;
     let origin = plane.from_plane_coords(DVec2::ZERO);
     let probes = [DVec2::ZERO, DVec2::X, DVec2::Y];
     let mut cut = vec![false; layout.pieces.len()];
     cut[on_piece] = true;
-    for i in 0..layout.pieces.len() {
-        let piece = &layout.pieces[i];
+    let mut others: Vec<(usize, Frame)> = Vec::new();
+    for (i, piece) in layout.pieces.iter().enumerate() {
         if i == on_piece || !piece.is_flange() {
             continue;
         }
@@ -666,6 +665,31 @@ pub(crate) fn apply_sheet_cut(
         if probes.iter().all(|p| through(*p).distance(to_flat(*p)) < 1e-6) {
             continue;
         }
+        others.push((i, other));
+    }
+    // A shape that lies over another flange in the plane and not over the sketch's own is
+    // that flange's alone, as SolidWorks cuts square through the sheet: through the sketch's
+    // flange it would land wherever that flange's place in the blank puts it (on the base,
+    // for a hole in the lip across from the one sketched on).
+    let own: Vec<_> = regions
+        .iter()
+        .filter(|r| {
+            let Some(c) = crate::extrude::interior_point(r) else {
+                return true;
+            };
+            layout.pieces[on_piece].covers(to_flat(c))
+                || !others.iter().any(|(i, other)| {
+                    let at = other.to_local(plane.from_plane_coords(c)).truncate();
+                    layout.pieces[*i].covers(at)
+                })
+        })
+        .cloned()
+        .collect();
+    if !own.is_empty() {
+        layout.add_cut(Area::from_regions(&own, feature.0).mapped(&to_flat));
+    }
+    for (i, other) in others {
+        let through = |p: DVec2| other.to_local(plane.from_plane_coords(p)).truncate();
         let area = Area::from_regions(&regions, feature.0).mapped(&through);
         layout.add_cut_on(area, vec![i]);
     }

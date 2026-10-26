@@ -148,7 +148,7 @@ pub fn default_regions(profile: &Profile) -> Vec<usize> {
 }
 
 /// A point strictly inside a region (the centroid of its largest triangle).
-fn interior_point(region: &Region) -> Option<DVec2> {
+pub(crate) fn interior_point(region: &Region) -> Option<DVec2> {
     let (lo, hi) = region.outer.bounds();
     let tris = triangulate_region(region, (lo.distance(hi) * 1e-3).max(1e-6));
     tris.triangles

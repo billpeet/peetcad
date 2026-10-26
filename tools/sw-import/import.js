@@ -494,7 +494,7 @@ function importPart(doc, dir) {
       const d = ids.get(o.as);
       if (!d) continue;
       if (o.point) { points.set(spot(o.point), d.id); continue; }
-      segments.set(o.g.id.join("."), { id: d.id, g: o.g, start: o.turned ? d.end : d.start, end: o.turned ? d.start : d.end, center: d.center });
+      segments.set(o.g.id.join("."), { id: d.id, g: o.g, start: o.turned ? d.end : d.start, end: o.turned ? d.start : d.end, center: d.center, turned: !!o.turned });
       const set = (p, id) => { if (p && id !== undefined && !points.has(spot(p))) points.set(spot(p), id); };
       set(o.g.start, o.turned ? d.end : d.start);
       set(o.g.end, o.turned ? d.start : d.end);
@@ -532,6 +532,12 @@ function importPart(doc, dir) {
       if (!d) return undefined;
       let item = null;
       if (d.kind === "edge" && d.curve === "line" && d.start && d.end) item = { type: "project", edge: { at: mid(mm(d.start), mm(d.end)).map(tidy) } };
+      else if (d.kind === "edge" && d.curve === "circle" && d.start && d.end && d.circle) {
+        // An arc (a bend's end), found by the middle of it
+        const c = mm(d.circle.slice(0, 3)), r = d.circle[6] * MM;
+        const half = add(sub(mm(d.start), c), sub(mm(d.end), c)), n = Math.hypot(...half);
+        if (n > 1e-6 * r) item = { type: "project", edge: { at: add(c, mul(half, r / n)).map(tidy) } };
+      }
       else if (d.kind === "vertex" && d.point) item = { type: "project", vertex: { at: mm(d.point).map(tidy) } };
       else if (d.kind === "feature" && d.type === "RefPlane" && planes.has(d.name)) item = { type: "project", plane: planes.get(d.name) };
       if (!item) return undefined;
@@ -584,7 +590,19 @@ function importPart(doc, dir) {
         case "fixed": if (all.length === 1) item = { type: "fix", of: all }; break;
         case "symmetric": if (anyPoints.length === 2 && anyLines.length === 1) item = { type: "symmetric", of: [...anyPoints, anyLines[0]] }; break;
         case "diameter": case "radius": if (rounds.length === 1 && dim) item = { type: r.type, of: [rounds[0].id], value: tidy(dim.value * MM) }; break;
-        case "angle": if (anyLines.length === 2 && dim) item = { type: "angle", of: anyLines, value: tidy(dim.value * 180 / Math.PI) }; break;
+        case "angle": {
+          if (anyLines.length !== 2 || !dim) break;
+          item = { type: "angle", of: anyLines, value: tidy(dim.value * 180 / Math.PI) };
+          // SolidWorks' angle is between the lines, on the side its dimension is drawn; PeetCAD's is
+          // between the lines' directions, start to end: the other one where the lines run so
+          if (lines.length === 2) {
+            const way = l => { const d = [l.g.end.x - l.g.start.x, l.g.end.y - l.g.start.y]; return l.turned ? d.map(v => -v) : d; };
+            const [a, b] = lines.map(way);
+            const now = Math.acos(Math.max(-1, Math.min(1, (a[0] * b[0] + a[1] * b[1]) / Math.hypot(...a) / Math.hypot(...b)))) * 180 / Math.PI;
+            if (Math.abs(now - (180 - item.value)) < Math.abs(now - item.value)) { item.value = tidy(180 - item.value); item.supplementary = true; }
+          }
+          break;
+        }
         case "doubledistance": {
           const centre = lines.find(l => l.g.construction), other = lines.find(l => l !== centre);
           const point = anyPoints[0] !== undefined ? anyPoints[0] : other && other.start;
@@ -632,8 +650,12 @@ function importPart(doc, dir) {
 
     const shape = () => JSON.stringify((peet.ask({ op: "feature", feature: name }).entities || []).map(e => [e.id, e.from, e.to, e.center, e.radius, e.at].map(x => Array.isArray(x) ? x.map(v => +v.toFixed(4)) : typeof x === "number" ? +x.toFixed(4) : x)));
     const before = shape();
-    const clean = item => { const { sw, ...rest } = item; return rest; };
-    const keep = item => { tally.kept++; if (item.sw) sk.dimensions.set(item.sw, item.name); };
+    const clean = item => { const { sw, supplementary, ...rest } = item; return rest; };
+    const keep = item => {
+      tally.kept++;
+      if (item.sw) sk.dimensions.set(item.sw, item.name);
+      if (item.sw && item.supplementary) (sk.supplementary || (sk.supplementary = new Set())).add(item.sw);
+    };
     const backup = peet.file + ".before";
     const save = () => { fs.copyFileSync(peet.file, backup); return peet.script.length; };
     const restore = mark => { fs.copyFileSync(backup, peet.file); peet.script.length = mark; };
@@ -1949,11 +1971,25 @@ function importPart(doc, dir) {
           if (!o.outline || rectangular.has(f.name)) return;
           const piece = pieceName(i);
           const sf = frameOf(o.outline.sketch.sketch.modelToSketch);
+          // On a face of the part where SolidWorks' profile plane is (the end face along the edge, for a
+          // flange with its material outside), as SolidWorks has it: its origin is the model's, so the
+          // outline stays where it is drawn when another configuration moves the edge. A plane turned
+          // about the edge moves its origin with the edge, and the outline's distances can then solve to
+          // the wrong side.
+          const middle = mid(o.found.from, o.found.to).map(tidy);
+          const face = [sf.n, mul(sf.n, -1)].map(n => ({ at: middle, normal: n.map(tidy) })).find(sel => {
+            const p = probe(sel);
+            return p && Math.abs(dot(p.n, sf.n)) > 0.9999 && Math.abs(dot(sub(p.o, sf.o), sf.n)) < 1e-4;
+          });
+          if (face) {
+            const sk = importSketch(o.outline.sketch, { name: piece + " outline", onFace: face });
+            if (!sk.error) { o.native = { plane: null, sketch: sk.name, sk }; outlined.push(sk.name); return; }
+          }
           const plane = piece + " outline plane";
           if (!planeAbout(plane, { between: [o.found.from.map(tidy), o.found.to.map(tidy)] }, sf)) return;
           const sk = importSketch(o.outline.sketch, { name: piece + " outline", onFace: plane });
           if (sk.error) { peet.apply({ op: "delete", features: [plane, plane + " turned"] }); return; }
-          o.native = { plane, sketch: sk.name };
+          o.native = { plane, sketch: sk.name, sk };
           outlined.push(plane, plane + " turned", sk.name);
         });
         const withOutline = o => o.native ? { outline: o.native.sketch } : {};
@@ -1982,6 +2018,8 @@ function importPart(doc, dir) {
         }
         if (built.ok && outlined.length) {
           built.names.push(...outlined.filter(n => peet.ask({ op: "feature", feature: n }).ok));
+          // Its dimensions take each configuration's values, as a sketch's do
+          for (const o of ops) if (o.native && !sketches.has(o.outline.sketch.name)) sketches.set(o.outline.sketch.name, o.native.sk);
           // Made to its outline, so the stand-in's notes do not apply
           for (let k = notes.length - 1; k >= 0; k--) if (/its outline reaches further/.test(notes[k])) notes.splice(k, 1);
           if (!ops.some(o => o.outline && !o.native)) built.warning = notes.length ? [...new Set(notes)].join("; ") : built.warning;
@@ -2766,6 +2804,10 @@ function importPart(doc, dir) {
       const maps = new Map(all.map(c => [c, flatten(c)]));
       const done = new Set();
       const entries = new Map();
+      // Features imported for another configuration and suppressed at once in the active one, which the
+      // configurations added after are copies of: SwName -> how many had been added then
+      const early = new Map();
+      const addedAt = new Map();
       /** Makes a configuration agree with SolidWorks' for what has been imported so far. */
       const settle = c => {
         const entry = entries.get(c), there = maps.get(c);
@@ -2774,8 +2816,12 @@ function importPart(doc, dir) {
           for (const d of (feature && feature.dimensions) || []) {
             const was = sk.values && sk.values.get(d.fullName), peetName = sk.dimensions && sk.dimensions.get(d.fullName);
             if (was === undefined || Math.abs(was - d.value) < 1e-10 || done.has(c.name + "|" + d.fullName)) continue;
+            // A reference dimension (driven, and set by no equation) only measures what the rest makes
+            const ref = d.fullName.split("@").slice(0, 2).join("@");
+            if (d.drivenState === 1 && !peetName && !(c.equations || []).some(e => !e.disabled && e.expression.replace(/\s/g, "").startsWith(`"${ref}"=`))) continue;
             done.add(c.name + "|" + d.fullName);
-            const value = tidy(d.valueType === 1 ? d.value * 180 / Math.PI : d.value * MM);
+            let value = tidy(d.valueType === 1 ? d.value * 180 / Math.PI : d.value * MM);
+            if (sk.supplementary && sk.supplementary.has(d.fullName)) value = tidy(180 - value);
             // A formula gives the value in every configuration. A dimension that follows a parameter gets
             // its value through the parameter.
             if (formulas.has(d.fullName)) continue;
@@ -2792,9 +2838,11 @@ function importPart(doc, dir) {
         for (const [swName, names] of made) {
           const feature = there.get(swName);
           if (!feature || done.has(c.name + "|suppress|" + swName)) continue;
-          // What was imported asleep is suppressed everywhere, and woken where SolidWorks has it live
+          // What was imported asleep is suppressed everywhere, and woken where SolidWorks has it live. One
+          // suppressed early in the active configuration is suppressed in the copies made of it since.
           const on = !!feature.suppressed;
-          if (on === asleep.has(swName)) continue;
+          const copied = early.has(swName) && (c === config || addedAt.get(c) > early.get(swName));
+          if (on === (asleep.has(swName) || copied)) continue;
           done.add(c.name + "|suppress|" + swName);
           if (names.every(n => peet.apply({ op: "suppress", feature: n, on, configurations: [c.name] }).ok)) { if (entry) entry.suppressed++; }
           else if (entry) entry.missing.push(`${swName} ${on ? "suppressed" : "brought back"}`);
@@ -2805,15 +2853,29 @@ function importPart(doc, dir) {
         report.configurations.push(entry);
         entries.set(other, entry);
         if (!peet.apply({ op: "add_configuration", name: other.name, copy: config.name }).ok) { entry.verdict = "could not be added"; entries.delete(other); continue; }
+        addedAt.set(other, addedAt.size + 1);
         settle(other);
         // What is live here and was suppressed where it has been looked at so far
         cur = other;
         byName = maps.get(other);
         const before = report.features.length;
+        const had = new Set(made.keys());
         for (const f of other.features) {
           if (f.suppressed || STRUCTURE.test(f.type) || f.type === "SheetMetal" || f.type === "RefPlane" || made.has(f.name) || sketches.has(f.name)) continue;
           if (report.features.some(x => x.name === f.name && x.result !== "suppressed" && x.result !== LATER)) continue;   // tried already, where it was live
           handle(f);
+        }
+        // What was imported here is suppressed in the active configuration now, where SolidWorks has it
+        // suppressed: the configurations still to come are copies of it, and are not rebuilt with it there
+        // (Top Hat's Edge-Flange3, whose outline turns inside out where its edge is short)
+        const home = maps.get(config);
+        for (const [swName, names] of made) {
+          const there = home.get(swName);
+          if (had.has(swName) || asleep.has(swName) || !there || !there.suppressed) continue;
+          if (names.every(n => peet.apply({ op: "suppress", feature: n, on: true, configurations: [config.name] }).ok)) {
+            early.set(swName, addedAt.size);
+            done.add(config.name + "|suppress|" + swName);
+          }
         }
         entry.added = report.features.slice(before).filter(x => /^imported/.test(x.result) && !SKETCH.test(x.type)).length;
         for (const x of report.features.slice(before)) if (x.result === "failed" || x.result === "not supported") entry.missing.push(`${x.name}: ${x.result}`);
@@ -2830,6 +2892,23 @@ function importPart(doc, dir) {
       }
       cur = config;
       byName = maps.get(config);
+      // A linear pattern whose count differs between configurations (SolidWorks' "up to reference", whose
+      // reference the export does not have) gets its count from a parameter, set in each configuration to
+      // SolidWorks' count there
+      for (const [swName] of made) {
+        const counts = all.filter(c => c === config || entries.has(c)).map(c => {
+          const x = maps.get(c).get(swName);
+          const d = x && x.type === "LPattern" && (x.dimensions || []).find(d => d.valueType === 2 && d.fullName.split("@")[1] === swName);
+          return d ? { c, d } : null;
+        }).filter(Boolean);
+        if (new Set(counts.map(k => k.d.value)).size < 2) continue;
+        const parameter = promote(counts[0].d.fullName.split("@").slice(0, 2).join("@"));
+        for (const { c, d } of counts) {
+          const entry = entries.get(c);
+          if (!parameter || !peet.apply({ op: "set_parameter", name: parameter, value: String(d.value), configurations: c.name }).ok) { if (entry) entry.missing.push(`${swName}'s count = ${d.value}`); }
+          else if (entry) entry.dimensions++;
+        }
+      }
       // Features imported for a later configuration are suppressed where SolidWorks has them suppressed,
       // the active configuration included
       for (const c of all) if (c === config || entries.has(c)) settle(c);

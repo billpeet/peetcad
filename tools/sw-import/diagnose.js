@@ -2,7 +2,10 @@
 // Says where an imported part differs from SolidWorks: the area of its flat faces, feature by feature and
 // direction by direction, in both. A difference in volume shows up as a face that is larger or smaller.
 //
-//   node diagnose.js <export.swx.json> <imported .peet> [--peet <peet executable>]
+//   node diagnose.js <export.swx.json> <imported .peet> [--peet <peet executable>] [--configuration <name>]
+//
+// With --configuration, SolidWorks' body in that configuration is compared, and the part is
+// switched to it (in a copy) first.
 "use strict";
 const fs = require("fs");
 const path = require("path");
@@ -13,13 +16,21 @@ const at = args.indexOf("--peet");
 const repo = path.resolve(__dirname, "..", "..");
 const peetExe = at >= 0 ? args.splice(at, 2)[1]
   : [path.join(repo, "target", "release", "peet.exe"), path.join(repo, "target", "debug", "peet.exe"), "peet"].find(p => p === "peet" || fs.existsSync(p));
+const cat = args.indexOf("--configuration");
+const configName = cat >= 0 ? args.splice(cat, 2)[1] : null;
 if (args.length !== 2) {
   console.error("Usage: node diagnose.js <export.swx.json> <imported .peet> [--peet <peet executable>]");
   process.exit(2);
 }
 const doc = JSON.parse(fs.readFileSync(args[0], "utf8"));
-const config = doc.configurations.find(c => c.name === doc.activeConfiguration) || doc.configurations[0];
-const reply = spawnSync(peetExe, ["faces", "-f", args[1], "-q", "--headless"], { encoding: "utf8", maxBuffer: 1 << 28 });
+const config = doc.configurations.find(c => c.name === (configName || doc.activeConfiguration)) || doc.configurations[0];
+let part = args[1];
+if (configName) {
+  part = path.join(require("os").tmpdir(), `diagnose-${process.pid}.peet`);
+  spawnSync(peetExe, ["configuration", `configuration=${configName}`, "-f", args[1], "-o", part, "-q", "--headless"], { encoding: "utf8" });
+}
+const reply = spawnSync(peetExe, ["faces", "-f", part, "-q", "--headless"], { encoding: "utf8", maxBuffer: 1 << 28 });
+if (configName) fs.rmSync(part, { force: true });
 const faces = JSON.parse((reply.stdout || "").split("\n").find(l => l.startsWith("{")) || "{}").faces || [];
 
 const direction = n => n.map(v => Math.abs(v) < 0.02 ? 0 : +v.toFixed(2)).join(",");

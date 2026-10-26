@@ -427,7 +427,18 @@ edge:
   pattern, so it can run across bends, and the body stays sheet metal.
 - It cuts every flange that has a face in the sketch's plane, not only the one the
   sketch is on: holes drawn over two tabs or two lips that lie in one plane go through
-  both, in one `sheet_cut`.
+  both, in one `sheet_cut`. Each shape cuts only the flange it is over, so a hole over
+  the far lip of a hat section does not also land on the base.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-50, -75], "to": [50, 75]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Walls", "length": 40, "edges": [{"between": [[-50, -75, 2], [-50, 75, 2]]}, {"between": [[50, 75, 2], [50, -75, 2]]}]}
+{"op": "edge_flange", "name": "Lips", "length": 20, "edges": [{"between": [[-50, -75, 40], [-50, 75, 40]]}, {"between": [[50, 75, 40], [50, -75, 40]]}]}
+{"op": "sketch", "name": "Holes", "on": {"at": [-60, 0, 40], "normal": [0, 0, 1]}, "draw": [{"type": "circle", "center": [-60, 55], "radius": 3.5}, {"type": "circle", "center": [-60, -55], "radius": 3.5}, {"type": "circle", "center": [60, 55], "radius": 3.5}, {"type": "circle", "center": [60, -55], "radius": 3.5}]}
+{"op": "sheet_cut", "sketch": "Holes"}
+{"op": "mass"}
+```
 - **A cut through more than its own sheet**, as SolidWorks' cut-extrude goes: `end`
   `through_all`, or `blind` with a `depth` from the sketch's face. It goes into the
   sheet from that face (`reverse` the other way, `both` both ways) and cuts every flange
