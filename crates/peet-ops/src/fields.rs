@@ -26,7 +26,8 @@ use peet_model::{
 };
 use peet_model::{
     BlendFeature, BlendKind, ConvertToSheetFeature, DraftFeature, HoleEnd, HoleFeature, HoleFit,
-    HoleKind, InsertPartFeature, LoftFeature, METRIC, MemberCorner, MoveBodyFeature, PartSource,
+    BodyMate, HoleKind, InsertPartFeature, LoftFeature, METRIC, MateGeom, MateKind, MemberCorner,
+    MoveBodyFeature, PartSource,
     RevolveAxisRef, RevolveFeature, ShellFeature, StructuralMemberFeature, SweepFeature,
 };
 use peet_sheetmetal::corner::{CornerKind, CornerRelief};
@@ -41,7 +42,8 @@ use crate::args::{
 };
 use crate::select;
 use crate::value::{
-    AxisSel, Bend, EdgeSel, End, FaceSel, FeatureSel, Input, PlaneSel, PointSel, Regions, VertexSel,
+    AxisSel, Bend, EdgeSel, End, FaceSel, FeatureSel, GeomSel, Input, PlaneSel, PointSel, Regions,
+    VertexSel,
 };
 
 // ---- Kinds of field ----
@@ -1463,6 +1465,207 @@ feature_args! {
     }
 }
 
+/// One end of a mate that places a moved body: geometry of a body, or a reference plane.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BodyMateEndSel {
+    Geom(GeomSel),
+    Plane(PlaneSel),
+}
+
+impl BodyMateEndSel {
+    fn parse(v: &Value) -> Result<Self, String> {
+        if let Some(p) = v
+            .as_object()
+            .filter(|m| m.len() == 1)
+            .and_then(|m| m.get("plane"))
+        {
+            return PlaneSel::parse(p).map(Self::Plane);
+        }
+        GeomSel::parse(v)
+            .map(Self::Geom)
+            .map_err(|_| format!("expected {{\"face\": selector}}, {{\"edge\": selector}}, {{\"vertex\": selector}} or {{\"plane\": plane}}, not {v}"))
+    }
+
+    fn resolve(&self, doc: &Document) -> Result<MateGeom, String> {
+        Ok(match self {
+            Self::Geom(GeomSel::Face(f)) => MateGeom::Face(select::face_ref(doc, f)?),
+            Self::Geom(GeomSel::Edge(e)) => MateGeom::Edge(select::edge_ref(doc, e)?),
+            Self::Geom(GeomSel::Vertex(v)) => MateGeom::Vertex(select::vertex_ref(doc, v)?),
+            Self::Plane(p) => MateGeom::Plane(select::plane(doc, p)?.0),
+        })
+    }
+
+    fn of(g: &MateGeom) -> Self {
+        match g {
+            MateGeom::Face(f) => Self::Geom(GeomSel::Face(FaceSel::Ref(f.clone()))),
+            MateGeom::Edge(e) => Self::Geom(GeomSel::Edge(EdgeSel::Ref(e.clone()))),
+            MateGeom::Vertex(v) => Self::Geom(GeomSel::Vertex(VertexSel::Ref(v.clone()))),
+            MateGeom::Plane(p) => Self::Plane(p.clone().into()),
+        }
+    }
+}
+
+fn mate_geom_out(g: &MateGeom, doc: &Document) -> Value {
+    match g {
+        MateGeom::Face(f) => face_out(f, doc),
+        MateGeom::Edge(e) => edge_out(e, doc),
+        MateGeom::Vertex(v) => vertex_out(v, doc),
+        MateGeom::Plane(p) => json!({ "plane": plane_out(p, doc) }),
+    }
+}
+
+/// What a mate that places a moved body asks for.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BodyMateType {
+    Coincident,
+    Concentric,
+    Parallel,
+    Distance(Input),
+    /// In degrees; perpendicular is 90.
+    Angle(Input),
+}
+
+/// A mate that places a moved body, as an operation gives it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BodyMateSel {
+    pub name: Option<String>,
+    pub kind: BodyMateType,
+    /// On a body the move moves.
+    pub moved: BodyMateEndSel,
+    /// On the rest of the part, or a reference plane.
+    pub to: BodyMateEndSel,
+    pub aligned: bool,
+    pub flip: bool,
+}
+
+impl BodyMateSel {
+    fn parse(v: &Value) -> Result<Self, String> {
+        let mut a = Args::new(
+            "mate",
+            v.as_object().cloned().ok_or_else(|| {
+                format!("expected a mate {{\"type\": ..., \"moved\": ..., \"to\": ...}}, not {v}")
+            })?,
+        );
+        let word = a.required("type", |v| text(v).map(str::to_owned))?;
+        let value = |a: &mut Args, key: &str| {
+            a.parsed(key, Input::parse)?
+                .ok_or_else(|| format!("A {word} mate needs a '{key}' field."))
+        };
+        let kind = match word.as_str() {
+            "coincident" => BodyMateType::Coincident,
+            "concentric" => BodyMateType::Concentric,
+            "parallel" => BodyMateType::Parallel,
+            "perpendicular" => BodyMateType::Angle(Input::Base(90.0)),
+            "distance" => BodyMateType::Distance(value(&mut a, "distance")?),
+            "angle" => BodyMateType::Angle(value(&mut a, "angle")?),
+            other => {
+                return Err(format!(
+                    "type: '{other}' can't place a body: use coincident, concentric, parallel, perpendicular, distance or angle."
+                ));
+            }
+        };
+        let out = Self {
+            name: a.string("name")?,
+            kind,
+            moved: a.required("moved", BodyMateEndSel::parse)?,
+            to: a.required("to", BodyMateEndSel::parse)?,
+            aligned: a.parsed("aligned", boolean)?.unwrap_or(false),
+            flip: a.parsed("flip", boolean)?.unwrap_or(false),
+        };
+        a.check()?;
+        Ok(out)
+    }
+}
+
+/// The mates that place a moved body.
+pub(crate) struct BodyMates;
+
+impl Field for BodyMates {
+    type Arg = Vec<BodyMateSel>;
+    type Target = Vec<BodyMate>;
+    fn describe() -> String {
+        "list of mates, each {\"type\": coincident | concentric | parallel | perpendicular | distance | angle, \"moved\": end on a moved body, \"to\": end on the rest of the part, \"distance\" or \"angle\" (for those types), \"aligned\": bool, \"flip\": bool, \"name\"}; an end is {\"face\" | \"edge\" | \"vertex\": selector} or {\"plane\": plane}".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        each(list(v)?, BodyMateSel::parse)
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        let mut out = Vec::with_capacity(arg.len());
+        for (i, m) in arg.iter().enumerate() {
+            let kind = match &m.kind {
+                BodyMateType::Coincident => MateKind::Coincident,
+                BodyMateType::Concentric => MateKind::Concentric,
+                BodyMateType::Parallel => MateKind::Parallel,
+                BodyMateType::Distance(v) => MateKind::Distance(v.scalar(ScalarKind::Length, doc)?),
+                BodyMateType::Angle(v) => MateKind::Angle(v.scalar(ScalarKind::Angle, doc)?),
+            };
+            let name = m.name.clone().unwrap_or_else(|| {
+                let word = kind.word();
+                format!("{}{}{}", word[..1].to_uppercase(), &word[1..], i + 1)
+            });
+            let on = |e: String| format!("{name}: {e}");
+            out.push(BodyMate {
+                moved: m.moved.resolve(doc).map_err(on)?,
+                to: m.to.resolve(doc).map_err(on)?,
+                aligned: m.aligned,
+                flip: m.flip,
+                name,
+                kind,
+            });
+        }
+        *target = out;
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target
+            .iter()
+            .map(|m| {
+                let mut out = Map::new();
+                out.insert("name".to_owned(), json!(m.name));
+                out.insert("type".to_owned(), json!(m.kind.word()));
+                match &m.kind {
+                    MateKind::Distance(s) => {
+                        out.insert(
+                            "distance".to_owned(),
+                            scalar_out(s, ScalarKind::Length, doc),
+                        );
+                    }
+                    MateKind::Angle(s) => {
+                        out.insert("angle".to_owned(), scalar_out(s, ScalarKind::Angle, doc));
+                    }
+                    _ => {}
+                }
+                out.insert("moved".to_owned(), mate_geom_out(&m.moved, doc));
+                out.insert("to".to_owned(), mate_geom_out(&m.to, doc));
+                out.insert("aligned".to_owned(), json!(m.aligned));
+                out.insert("flip".to_owned(), json!(m.flip));
+                Value::Object(out)
+            })
+            .collect()
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(
+            target
+                .iter()
+                .map(|m| BodyMateSel {
+                    name: Some(m.name.clone()),
+                    kind: match &m.kind {
+                        MateKind::Concentric => BodyMateType::Concentric,
+                        MateKind::Parallel => BodyMateType::Parallel,
+                        MateKind::Distance(s) => BodyMateType::Distance(input_of(s)),
+                        MateKind::Angle(s) => BodyMateType::Angle(input_of(s)),
+                        _ => BodyMateType::Coincident,
+                    },
+                    moved: BodyMateEndSel::of(&m.moved),
+                    to: BodyMateEndSel::of(&m.to),
+                    aligned: m.aligned,
+                    flip: m.flip,
+                })
+                .collect(),
+        )
+    }
+}
+
 feature_args! {
     /// Bodies moved and turned, or moved copies of them.
     MoveBody: FeatureKind::MoveBody(f) => &mut **f,
@@ -1473,6 +1676,7 @@ feature_args! {
             center,
             copy,
             copies,
+            mates,
         } => {
     /// A face of each body to move. None: every body.
     bodies: Vec<FaceSel> as Faces = bodies,
@@ -1491,6 +1695,9 @@ feature_args! {
     copy: bool as Flag = copy,
     /// How many copies, each moved once more than the last.
     copies: Input as Number = copies,
+    /// Mates that place the moved bodies (SolidWorks' constraints): they are solved from
+    /// where the distances and angles put them, at every rebuild.
+    mates: Vec<BodyMateSel> as BodyMates = mates,
     }
 }
 

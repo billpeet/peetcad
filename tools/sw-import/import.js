@@ -1836,6 +1836,83 @@ function importPart(doc, dir) {
   }
 
   /**
+   * The mates SolidWorks places a moved body by (Move/Copy Body's constraints), as move_body's `mates`: each end
+   * found among the part's faces and edges, on the moved body where it is before the move (SolidWorks gives the
+   * ends where the move put them: `motion`, the move found from its body, takes them back). `{ mates }`, or
+   * `{ why }` if one can't be had.
+   */
+  function bodyMates(f, body, motion) {
+    const live = (f.sub || []).filter(x => x.mate && !x.suppressed);
+    if (!live.length) return { why: "it has no mates" };
+    const R = motion.m, t = motion.t;
+    const turn = x => [0, 1, 2].map(r => dot(R[r], x));
+    const back = x => [0, 1, 2].map(c => R[0][c] * x[0] + R[1][c] * x[1] + R[2][c] * x[2]);
+    const faces = peet.ask({ op: "faces" }).faces || [];
+    const edges = peet.ask({ op: "edges" }).edges || [];
+    const CLOSE = 1e-3, along = (a, b) => Math.abs(Math.abs(dot(unit(a), unit(b))) - 1) < 1e-6;
+    // An end: what it is (a plane, an axis or a point) and its selector, on the moved body or on the rest
+    const find = (e, moved) => {
+      if (!e.params || e.params.length < 6) return null;
+      const ent = e.entity || {};
+      const p0 = mm(e.params.slice(0, 3)), d0 = unit(e.params.slice(3, 6)), r = (e.params[6] || 0) * MM;
+      const P = moved ? back(sub(p0, t)) : p0, D = moved ? back(d0) : d0;
+      const A = ent.point && (moved ? back(sub(mm(ent.point), t)) : mm(ent.point));
+      const mine = x => (moved ? x.body === body : x.body !== body);
+      const nearest = list => list.sort((a, b) => (A ? len(sub(a.at, A)) - len(sub(b.at, A)) : b.area - a.area))[0];
+      // swSelectType_e: 2 a face, 1 an edge
+      if (e.referenceType === 2) {
+        const round = ent.surface ? ent.surface === "cylinder" : r > 0;
+        const hits = faces.filter(x => mine(x) && (round
+          ? x.surface === "cylinder" && x.axis && x.axis_point && along(x.axis, D) && len(cross(sub(x.axis_point, P), D)) < CLOSE && Math.abs(x.radius - r) < CLOSE
+          : x.surface === "plane" && x.normal && x.center && along(x.normal, D) && Math.abs(dot(sub(x.center, P), D)) < CLOSE));
+        const hit = nearest(hits.map(x => ({ x, at: x.center, area: x.area_mm2 })));
+        if (!hit) return null;
+        const x = hit.x;
+        return round ? { kind: "line", p: x.axis_point, d: unit(x.axis), sel: { face: { body: x.body, index: x.index } } }
+          : { kind: "plane", p: x.center, d: unit(x.normal), sel: { face: { body: x.body, index: x.index } } };
+      }
+      if (e.referenceType === 1 && (ent.curve === "circle" || r > 0)) {
+        const hits = edges.filter(x => mine(x) && x.curve === "circle" && x.center && x.axis && along(x.axis, D) && len(sub(x.center, P)) < CLOSE && Math.abs(x.radius - r) < CLOSE);
+        if (hits.length !== 1) return null;
+        const x = hits[0];
+        return { kind: "line", p: x.center, d: unit(x.axis), sel: { edge: { body: x.body, index: x.index } } };
+      }
+      return null;
+    };
+    const mates = [];
+    for (const s of live) {
+      const kind = s.mate.type;
+      if (!/^(coincident|concentric|parallel|perpendicular|distance|angle)$/.test(kind)) return { why: `${s.name} is a ${kind} mate, which PeetCAD's body mates don't have` };
+      const ends = s.mate.entities || [];
+      if (ends.length !== 2) return { why: `${s.name} doesn't have two ends` };
+      // Which end is on the moved body
+      let pair = null;
+      for (const [im, it] of [[1, 0], [0, 1]]) {
+        const moved = find(ends[im], true), to = find(ends[it], false);
+        if (moved && to) { pair = { moved, to }; break; }
+      }
+      if (!pair) return { why: `the ends of ${s.name} were not found on the moved body and the rest of the part` };
+      const { moved, to } = pair;
+      // Where the moved end is once moved, to tell which way round and which side
+      const md = turn(moved.d), mp = add(turn(moved.p), t);
+      const op = { type: kind, name: s.name, moved: moved.sel, to: to.sel };
+      if (moved.kind === "plane" && to.kind === "plane" && dot(md, to.d) > 0) op.aligned = true;
+      const dim = s.dimensions && s.dimensions[0] && s.dimensions[0].value;
+      if (kind === "distance") {
+        const offset = to.kind === "plane" ? dot(sub(mp, to.p), to.d) : moved.kind === "plane" ? dot(sub(to.p, mp), md) : null;
+        op.distance = tidy(dim != null ? dim * MM : Math.abs(offset || 0));
+        if (offset != null && offset < 0) op.flip = true;
+      } else if (kind === "angle") {
+        if (dim == null) return { why: `${s.name} has no angle` };
+        op.angle = tidy(dim * 180 / Math.PI);
+        if (Math.abs(dot(md, to.d) + Math.cos(dim)) < Math.abs(dot(md, to.d) - Math.cos(dim))) op.flip = true;
+      }
+      mates.push(op);
+    }
+    return { mates };
+  }
+
+  /**
    * The axis a feature turns about, as a selector for an axis: an axis SolidWorks names that was imported, a
    * standard axis, or the axis of a round face of the part along the line of a revolve it was made from (a
    * temporary axis). Null if none is found.
@@ -2654,11 +2731,26 @@ function importPart(doc, dir) {
           return record(f, "imported", "nothing to do: it leaves the body where it is");
         }
         const op = { op: "move_body", name: f.name, bodies: [picked.pick], dx, dy, dz, rx, ry, rz, ...(v.Copy ? { copy: true, copies: v.NumberOfCopies || 1 } : {}) };
-        const built = build(f, op);
+        // Placed by mates: the same mates, solved from where they put it, so that it follows the part. Where
+        // they can't be had, or don't all hold, it is moved where they put it (a stand-in).
+        let mated = null, why = null;
+        if (v.TransformType === 1 && !v.Copy) {
+          const found = bodyMates(f, picked.body, best);
+          why = found.why || null;
+          if (found.mates) {
+            const tried = build(f, { ...op, mates: found.mates });
+            if (tried.ok && !tried.warning) mated = tried;
+            else {
+              why = tried.ok ? tried.warning : tried.message;
+              if (tried.ok) peet.apply({ op: "delete", features: tried.names });
+            }
+          }
+        }
+        const built = mated || build(f, op);
         if (built.ok) {
           moves.set(f.name, v.Copy ? built.names : source);
           if (best.matched < best.of) built.warning = `${best.matched} of the body's ${best.of} flat and round faces are where SolidWorks has them`;
-          if (v.TransformType === 1) built.warning = (built.warning ? built.warning + "; " : "") + "SolidWorks places it by mates, which PeetCAD's move doesn't have: it is moved where they put it";
+          if (v.TransformType === 1 && !mated) built.warning = (built.warning ? built.warning + "; " : "") + `SolidWorks places it by mates, which could not be used (${why || "copies"}): it is moved where they put it`;
         }
         return finish(f, built);
       }

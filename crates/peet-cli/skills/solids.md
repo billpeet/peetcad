@@ -283,6 +283,43 @@ axis) where it belongs, or to repeat a body that is not one feature.
 Here the pin, drawn along -Y, is turned to stand along +Z (a turn of -90 about X takes
 -Y to +Z) and lifted 10; the plate gets two copies, 50 and 100 along X.
 
+### Placing a body by mates
+
+A body that must stay against another (a screw in its nut, a pin in its hole) is placed
+by `mates`, SolidWorks' Move/Copy Body constraints, not by distances: the mates are
+solved at every rebuild, so the body follows when the part changes.
+
+- Each mate has a `type` (`coincident`, `concentric`, `parallel`, `perpendicular`,
+  `distance` with `distance`, `angle` with `angle`), `moved`, an end on a body the move
+  moves, and `to`, an end on another body or a reference plane. An end is `{"face": ...}`,
+  `{"edge": ...}` (a round edge is its axis), `{"vertex": ...}` or `{"plane": ...}`.
+- Pick `moved` before the move: as the body is drawn. Pick it by what made it (`feature`
+  and `side`) so the mate survives changes.
+- `rx` ... `dz` say where the solve starts: the body goes to the nearest place the mates
+  allow, and what they leave free (a screw's turn about its axis) stays as those put it.
+  Turn the body roughly the right way with them, or a mate may settle the wrong way round.
+- Two flat faces mate against each other (normals opposed); `"aligned": true` makes them
+  face the same way. A `distance` from a flat face of `to` is measured in front of it,
+  the way its normal points; `"flip": true` puts the moved end behind it.
+- A mate that can't hold with those before it is left out, and the feature warns naming
+  it: the body is where the others put it. Mates can't place copies.
+
+```jsonl
+{"op": "set_parameter", "name": "t", "value": "5mm"}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 20]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": "t"}
+{"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [10, 10], "radius": 3}]}
+{"op": "extrude", "sketch": "Sketch2", "operation": "cut", "end": "through_all", "reverse": true}
+{"op": "sketch", "on": "front", "name": "Pin", "draw": [{"type": "circle", "center": [30, 30], "radius": 3}]}
+{"op": "extrude", "sketch": "Pin", "depth": 12, "operation": "new_body"}
+{"op": "move_body", "bodies": [{"feature": "Extrude2", "side": "end"}], "rx": -90, "mates": [{"type": "concentric", "moved": {"face": {"feature": "Extrude2", "side": "side"}}, "to": {"face": {"feature": "Cut-Extrude1", "side": "side"}}}, {"type": "distance", "distance": 2, "moved": {"face": {"feature": "Extrude2", "side": "start"}}, "to": {"face": {"feature": "Extrude1", "side": "end"}}}]}
+{"op": "set_parameter", "name": "t", "value": "8mm"}
+{"op": "bodies"}
+```
+
+The pin stands in the hole with its end 2 above the plate; making the plate 8 thick lifts
+it with the top face.
+
 ## Another part's bodies
 
 `insert_part` puts the bodies of another part's file into this one: SolidWorks' Insert

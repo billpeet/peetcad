@@ -422,7 +422,13 @@ with their defaults' types):
   `center` (default the origin), in that order, then moves them by `dx`, `dy`, `dz`. A
   moved body keeps its faces' names. With `"copy": true` the bodies stay and `copies` moved
   copies are made, each moved once more than the last. A sheet metal body moved this way
-  loses its flat pattern.
+  loses its flat pattern. `mates` places the bodies instead by SolidWorks' constraints, solved
+  at every rebuild from where the distances and angles put them: each is `{"type":
+  coincident | concentric | parallel | perpendicular | distance | angle, "moved": end, "to":
+  end}`, with `distance` or `angle`, `aligned` (two flat faces the same way), `flip` (the
+  distance or angle the other way) and `name`; an end is `{"face" | "edge" | "vertex":
+  selector}` on a moved body as it was before the move, or on another body, or
+  `{"plane": plane}`. A mate that can't hold is left out with a warning.
 - `structural_member` (SolidWorks' weldment structural member) sweeps `profile` (a
   sketch, drawn with its origin on the line) along every line of the `paths` sketches, a
   body per line, the profile turned square to each line by the smallest turn from its

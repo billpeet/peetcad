@@ -8,6 +8,12 @@
 //! bodies, the k-th moved k times, whose faces carry [`FaceRole::Instance`] with their
 //! number.
 //!
+//! **By mates.** SolidWorks' Move/Copy Body can instead place the bodies by constraints:
+//! mates between their faces, edges and corners and the rest of the part's
+//! ([`BodyMate`]). Then the move's distances and angles are only where the solve starts:
+//! the bodies go to the nearest place the mates allow, at every rebuild, so they follow
+//! the part when it changes.
+//!
 //! **Inserted parts.** SolidWorks' Insert Part and Mirror Part: the bodies of another
 //! part, read from its file when the feature is made (and again when asked to), kept in
 //! the model as they were last read, so the part still opens if the file is gone. A
@@ -25,6 +31,7 @@ use crate::FeatureError;
 use crate::extrude::stamp;
 use crate::feature::{FeatureId, PlaneRef, PointRef, Scalar};
 use crate::import::ImportedSolid;
+use crate::mate::BodyMate;
 use crate::naming::{Body, FaceName, FaceRef, FaceRole, find_face};
 use crate::sheet::Applied;
 
@@ -43,6 +50,9 @@ pub struct MoveBodyFeature {
     pub copy: bool,
     /// How many copies, each moved once more than the last.
     pub copies: Scalar,
+    /// Mates that place the moved bodies, solved from where `translate` and `rotate`
+    /// put them. None: they go where those put them.
+    pub mates: Vec<BodyMate>,
 }
 
 impl MoveBodyFeature {
@@ -54,8 +64,52 @@ impl MoveBodyFeature {
             center: PointRef::Origin,
             copy: false,
             copies: Scalar::new(1.0),
+            mates: Vec::new(),
         }
     }
+}
+
+/// The motion that puts the bodies a move picks where its mates hold, nearest to
+/// `start`, with a warning naming the mates that can't. `planes` are the reference
+/// planes the mates name, where they are.
+pub(crate) fn mated_motion(
+    bodies: &[Arc<Body>],
+    def: &MoveBodyFeature,
+    start: &Frame,
+    planes: Vec<(PlaneRef, peet_math::Plane)>,
+    params: &peet_sketch::expr::Parameters,
+) -> Result<(Frame, Option<String>), FeatureError> {
+    if def.copy {
+        return Err(FeatureError(
+            "Mates place moved bodies, not copies: leave copy off, or take the mates out."
+                .to_owned(),
+        ));
+    }
+    let chosen = picked(bodies, &def.bodies, "move")?;
+    let (moved, rest): (Vec<_>, Vec<_>) = bodies
+        .iter()
+        .enumerate()
+        .partition(|(i, _)| chosen.contains(i));
+    let strip = |v: Vec<(usize, &Arc<Body>)>| v.into_iter().map(|(_, b)| b.clone()).collect();
+    let (motion, failed) = crate::mate::solve_body(
+        &def.mates,
+        strip(moved),
+        strip(rest),
+        planes,
+        *start,
+        params,
+    );
+    let warning = (!failed.is_empty()).then(|| {
+        let each: Vec<String> = failed
+            .iter()
+            .map(|(name, why)| format!("{name}: {why}"))
+            .collect();
+        format!(
+            "Not every mate holds, so the bodies are where the others put them. {}",
+            each.join(" ")
+        )
+    });
+    Ok((motion, warning))
 }
 
 /// The motion of a move: turned about X, then Y, then Z (degrees) through `center`, then

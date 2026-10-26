@@ -528,6 +528,11 @@ pub fn edges(doc: &Document, body: Option<usize>) -> Result<Value, String> {
                     Curve3::Nurbs(_) => "freeform",
                 }),
             );
+            if let Curve3::Circle(c) = &edge.curve {
+                m.insert("center".to_owned(), point3_out(c.frame.origin, units));
+                m.insert("axis".to_owned(), direction_out(c.frame.z_axis()));
+                m.insert("radius".to_owned(), length_out(c.radius, units));
+            }
             m.insert(
                 "from".to_owned(),
                 point3_out(b.solid.vertex(edge.start).point, units),

@@ -542,6 +542,7 @@ impl Engine {
             key,
             &mut self.mates,
             drag,
+            &[],
         );
         // ---- The patterns ----
         // After the mates: each copy goes where its original now is, moved by its place
@@ -1445,27 +1446,58 @@ impl Engine {
                     } else {
                         0
                     };
+                    // The reference planes the mates name, where they are now
+                    let mut planes = Vec::new();
+                    for mate in &m.mates {
+                        for geom in [&mate.moved, &mate.to] {
+                            if let crate::MateGeom::Plane(
+                                r @ (PlaneRef::Standard(_) | PlaneRef::Feature(_)),
+                            ) = geom
+                            {
+                                let plane =
+                                    ctx.plane(r).map_err(|e| format!("{}: {e}", mate.name))?;
+                                planes.push((r.clone(), plane));
+                            }
+                        }
+                    }
                     Ok((
                         crate::bodies::body_motion(DVec3::from(by), turn, center),
                         copies,
+                        planes,
                     ))
                 })();
                 match inputs {
                     Err(e) => fail(e, Output::None),
-                    Ok((motion, copies)) => {
+                    Ok((motion, copies, planes)) => {
                         let key = hash::of(&(
                             23u8,
                             id,
                             &**m,
                             run.body_key,
-                            format!("{motion:?}"),
+                            format!("{motion:?} {planes:?}"),
                             copies,
+                            params_key,
                         ));
                         self.solid_feature(id, key, run, |bodies| {
+                            let (motion, mated) = if m.mates.is_empty() {
+                                (motion, None)
+                            } else {
+                                crate::bodies::mated_motion(
+                                    bodies,
+                                    m,
+                                    &motion,
+                                    planes,
+                                    &model.parameters,
+                                )?
+                            };
                             let out = crate::bodies::apply_move_body(
                                 id, bodies, m, &motion, copies, key,
                             )?;
                             let warning = lost_sheet(model, bodies, &out.0, &feature.name);
+                            let warning = match (mated, warning) {
+                                (Some(a), Some(b)) => Some(format!("{a} {b}")),
+                                (a, b) => a.or(b),
+                            };
                             Ok((out.0, warning))
                         })
                     }
