@@ -943,7 +943,12 @@ fn a_redundant_relation_leaves_a_fully_defined_sketch_fully_defined() {
     // imply. SolidWorks accepts it and calls the sketch fully defined; so does PeetCAD.
     let mut s = Sketch::new();
     let shape = crate::shapes::rectangle(&mut s, v(0.0, 0.0), v(20.0, 10.0));
-    let [bottom, right, top, left] = [shape.curves[0], shape.curves[1], shape.curves[2], shape.curves[3]];
+    let [bottom, right, top, left] = [
+        shape.curves[0],
+        shape.curves[1],
+        shape.curves[2],
+        shape.curves[3],
+    ];
     let corner = pts(&s, bottom).0;
     add!(s, K::Coincident(corner, Sketch::ORIGIN));
     dim!(s, K::Length(bottom), 20.0);
