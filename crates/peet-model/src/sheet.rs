@@ -639,12 +639,24 @@ pub(crate) fn apply_sheet_cut(
         .map(|i| profile.regions[i].clone())
         .collect();
     let to_flat = |p: DVec2| frame.to_local(plane.from_plane_coords(p)).truncate();
+    // Into the sheet from the face the sketch is on
+    let into = frame.z_axis() * if top { -1.0 } else { 1.0 };
+    let thickness = sheet.layout.settings.thickness;
+    let origin = plane.from_plane_coords(DVec2::ZERO);
+    // With an end, the cut is SolidWorks' cut-extrude: straight from the sketch, so a flange
+    // it doesn't reach into is left, its own included (a cut going off the sheet's face), and
+    // where it ends in a bend it is made normal to the sheet where its wall leaves the sheet.
+    let reaches = |piece: &peet_sheetmetal::Piece| {
+        reach.is_none_or(|span| {
+            let a = (piece.frame.origin - origin).dot(into);
+            let b = a + thickness * piece.frame.z_axis().dot(into);
+            reaches_into(span, a, b)
+        })
+    };
     let mut layout = sheet.layout.clone();
     // The other flanges that lie in the sketch's plane, each with its own way into the flat
     // pattern. One that the first mapping already puts in the right place (it is next to
     // the sketch's flange in the blank too) is left to that mapping.
-    let thickness = layout.settings.thickness;
-    let origin = plane.from_plane_coords(DVec2::ZERO);
     let probes = [DVec2::ZERO, DVec2::X, DVec2::Y];
     let mut cut = vec![false; layout.pieces.len()];
     cut[on_piece] = true;
@@ -661,6 +673,9 @@ pub(crate) fn apply_sheet_cut(
             continue;
         }
         cut[i] = true;
+        if !reaches(piece) {
+            continue;
+        }
         let through = |p: DVec2| other.to_local(plane.from_plane_coords(p)).truncate();
         if probes.iter().all(|p| through(*p).distance(to_flat(*p)) < 1e-6) {
             continue;
@@ -685,8 +700,12 @@ pub(crate) fn apply_sheet_cut(
         })
         .cloned()
         .collect();
-    if !own.is_empty() {
-        layout.add_cut(Area::from_regions(&own, feature.0).mapped(&to_flat));
+    if !own.is_empty() && reaches(&layout.pieces[on_piece]) {
+        let mut area = Area::from_regions(&own, feature.0).mapped(&to_flat);
+        if reach.is_some() {
+            area = straight_into_bends(&sheet.layout, on_piece, !top, area);
+        }
+        layout.add_cut(area);
     }
     for (i, other) in others {
         let through = |p: DVec2| other.to_local(plane.from_plane_coords(p)).truncate();
@@ -694,8 +713,6 @@ pub(crate) fn apply_sheet_cut(
         layout.add_cut_on(area, vec![i]);
     }
     if let Some(span) = reach {
-        // Into the sheet from the face the sketch is on
-        let into = frame.z_axis() * if top { -1.0 } else { 1.0 };
         let world = |p: DVec2| plane.from_plane_coords(p);
         for (area, pieces) in cut_beyond(&layout, &cut, &world, into, span, &regions, feature.0) {
             layout.add_cut_on(area, pieces);
@@ -830,6 +847,12 @@ pub(crate) fn cut_from_plane(
         let level = piece.frame.to_local(origin).z;
         if level.abs() < 1e-6 || (level - t).abs() < 1e-6 {
             done[i] = true;
+            // With an end, only a flange the cut goes into from its plane
+            let a = (piece.frame.origin - origin).dot(into);
+            let b = a + t * piece.frame.z_axis().dot(into);
+            if reach.is_some_and(|span| !reaches_into(span, a, b)) {
+                continue;
+            }
             let through = |p: DVec2| piece.frame.to_local(world(p)).truncate();
             out.push((Area::from_regions(regions, owner).mapped(&through), vec![i]));
         }
@@ -838,6 +861,131 @@ pub(crate) fn cut_from_plane(
         out.extend(cut_beyond(layout, &done, world, into, span, regions, owner));
     }
     out
+}
+
+/// Whether a cut reaching over `span` along the way into the sheet goes into a flange that
+/// lies between `a` and `b` along it.
+fn reaches_into(span: (f64, f64), a: f64, b: f64) -> bool {
+    span.1.min(a.max(b)) - span.0.max(a.min(b)) > 1e-6
+}
+
+/// A cut's outline, drawn on a face of flange `piece` and mapped into flat coordinates as
+/// the face's plane maps it, with what lies past the flange's edge over one of its bends
+/// moved to where it cuts the bend. A straight cut-extrude meets the bend in a line on the
+/// face it leaves the sheet through (`far_top`: the sheet's top side), and SolidWorks'
+/// normal cut makes its wall square to the sheet there: at the angle where that face is as
+/// far from the bend's start as the outline, on into the next flange if the bend turns less
+/// than a right angle. What is on the flange, or not over a bend, stays. A line that runs
+/// past an end of a bend is split there, and where the two sides move apart a line along
+/// the end of the bend joins them.
+fn straight_into_bends(layout: &Layout, piece: usize, far_top: bool, area: Area) -> Area {
+    use peet_sheetmetal::layout::Edge2;
+    let bends: Vec<_> = layout
+        .bends()
+        .filter(|(_, b)| b.parent == piece || b.child == Some(piece))
+        .map(|(_, b)| *b)
+        .collect();
+    if bends.is_empty() {
+        return area;
+    }
+    // How far past the flange's edge `p` is over bend `b`, and which way that is
+    let past = |b: &peet_sheetmetal::layout::Bend, p: DVec2| {
+        let (s, _) = b.strip_coords(p);
+        if b.parent == piece {
+            (s, b.across)
+        } else {
+            (b.width() - s, -b.across)
+        }
+    };
+    let over = |p: DVec2| {
+        bends.iter().find(|b| {
+            let (_, w) = b.strip_coords(p);
+            (-1e-9..=b.length + 1e-9).contains(&w) && past(b, p).0 > 1e-9
+        })
+    };
+    let moved = |b: &peet_sheetmetal::layout::Bend, p: DVec2| {
+        let (e, out) = past(b, p);
+        if e <= 1e-9 {
+            return p;
+        }
+        let v = b.values;
+        let radius = if far_top == b.up {
+            v.radius
+        } else {
+            v.radius + v.thickness
+        };
+        let turn = v.angle.min(std::f64::consts::FRAC_PI_2);
+        let reach = radius * turn.sin();
+        let flat = if e <= reach {
+            (e / radius).asin() / v.angle * v.allowance
+        } else if v.angle < std::f64::consts::FRAC_PI_2 {
+            v.allowance + (e - reach) / v.angle.cos()
+        } else {
+            turn / v.angle * v.allowance + (e - reach)
+        };
+        p + out * (flat - e)
+    };
+    let ends = |e: &Edge2| {
+        let (a, b) = (e.curve.start(), e.curve.end());
+        if e.reversed { (b, a) } else { (a, b) }
+    };
+    let mut loops = Vec::new();
+    for l in area.loops {
+        let mut out: Vec<Edge2> = Vec::new();
+        for edge in l {
+            // Lines split where they run past an end of a bend
+            let parts = match edge.curve {
+                Curve::Line { .. } => {
+                    let (a, b) = ends(&edge);
+                    let mut ts = vec![0.0, 1.0];
+                    for bend in &bends {
+                        let (_, wa) = bend.strip_coords(a);
+                        let (_, wb) = bend.strip_coords(b);
+                        for w in [0.0, bend.length] {
+                            let t = (w - wa) / (wb - wa);
+                            if (wb - wa).abs() > 1e-12
+                                && t > 1e-9
+                                && t < 1.0 - 1e-9
+                                && past(bend, a.lerp(b, t)).0 > 1e-9
+                            {
+                                ts.push(t);
+                            }
+                        }
+                    }
+                    ts.sort_by(f64::total_cmp);
+                    ts.windows(2)
+                        .map(|t| Edge2::line(a.lerp(b, t[0]), a.lerp(b, t[1]), edge.tag))
+                        .collect()
+                }
+                _ => vec![edge],
+            };
+            for part in parts {
+                let Some(bend) = over(part.curve.point_at(0.5)) else {
+                    out.push(part);
+                    continue;
+                };
+                let one = Area {
+                    loops: vec![vec![part]],
+                }
+                .mapped(&|p| moved(bend, p));
+                out.extend(one.loops.into_iter().flatten());
+            }
+        }
+        // Join what moved apart
+        let mut joined: Vec<Edge2> = Vec::new();
+        let n = out.len();
+        for (i, e) in out.iter().enumerate() {
+            joined.push(e.clone());
+            let next = &out[(i + 1) % n];
+            let (_, end) = ends(e);
+            let (start, _) = ends(next);
+            if end.distance(start) > 1e-9 {
+                joined.push(Edge2::line(end, start, e.tag));
+            }
+        }
+        loops.push(joined);
+    }
+    Area { loops }
 }
 
 /// How far out from its edge an edge flange is set, evaluated.

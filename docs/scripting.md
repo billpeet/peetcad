@@ -340,8 +340,11 @@ with their defaults' types):
   further, as SolidWorks' cut-extrude does: into the sheet from the sketch's face
   (`reverse` away from it, `both` both ways), through the flanges parallel to the sketch
   that lie wholly within the reach, and across the flanges square to it where the
-  sketch's outline crosses them, on across the bend at the end of one it goes past. The
-  default `end`, `sheet`, is through its own sheet only. Its sketch can also be on a plane
+  sketch's outline crosses them, on across the bend at the end of one it goes past. Its
+  own sheet is cut only if the reach goes into it (`reverse` alone leaves it), and an
+  outline that ends over a bend ends in it where the straight cut leaves the sheet's far
+  face, square to the sheet (SolidWorks' normal cut). The default `end`, `sheet`, is
+  through its own sheet only, carried across bends in the flat pattern. Its sketch can also be on a plane
   or on the sheet's edge (a face through the thickness): with a reach it then cuts from
   there, against the sketch's normal, whatever its reach takes in; without one, only the
   flanges with a face in the sketch's plane. Its copies in a pattern or a mirror cut each

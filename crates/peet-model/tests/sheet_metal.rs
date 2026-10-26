@@ -556,9 +556,9 @@ fn sample_enclosure_builds() {
 #[test]
 fn a_cut_through_the_flanges_in_its_way() {
     // A channel: flanges up from the plate's two long edges. A notch sketched on the plate
-    // at one end, going up through everything (as SolidWorks' cut-extrude does), trims
-    // the ends of both sides as well as the plate's.
-    let notched = |end: peet_model::SheetCutEnd, depth: f64| {
+    // at one end, going through everything both ways (as SolidWorks' cut-extrude does),
+    // trims the ends of both sides as well as the plate's.
+    let notched = |end: peet_model::SheetCutEnd, depth: f64, reverse: bool, both: bool| {
         let (mut p, _, _) = plate(100.0, 60.0);
         for (a, b) in [
             (DVec3::new(0.0, 0.0, T), DVec3::new(100.0, 0.0, T)),
@@ -569,6 +569,7 @@ fn a_cut_through_the_flanges_in_its_way() {
             p.rebuild();
             p.assert_ok();
         }
+        let whole = p.volume();
         let top = p.on_face(DVec3::Z, DVec3::new(50.0, 30.0, T));
         let notch = p.sketch(top.clone(), |s| {
             shapes::rectangle(s, DVec2::new(-5.0, -5.0), DVec2::new(10.0, 65.0));
@@ -579,17 +580,97 @@ fn a_cut_through_the_flanges_in_its_way() {
         };
         def.end = end;
         def.depth = Scalar::new(depth);
-        def.reverse = true;
+        def.reverse = reverse;
+        def.both = both;
         p.rebuild();
         p.assert_ok();
-        bounds(&p)
+        (bounds(&p).0, whole - p.volume())
     };
-    let (lo, _) = notched(peet_model::SheetCutEnd::ThroughAll, 0.0);
+    use peet_model::SheetCutEnd::{Blind, Sheet, ThroughAll};
+    let (lo, all) = notched(ThroughAll, 0.0, false, true);
     assert_close(lo.x, 10.0);
+    // Up from the plate only: the sides' ends go, and the plate, which the cut doesn't go
+    // into, is left whole.
+    let (lo, up) = notched(ThroughAll, 0.0, true, false);
+    assert!(lo.x < 1.0, "{lo}");
+    assert!(up > 0.0 && all - up > 10.0 * 50.0 * T, "{up} {all}");
     // Only as far as a depth: the sides' tops are left at the end.
-    let (lo, _) = notched(peet_model::SheetCutEnd::Blind, 8.0);
+    let (lo, _) = notched(Blind, 8.0, false, true);
     assert!(lo.x < 1.0, "{lo}");
     // Through its own sheet only, as before.
-    let (lo, _) = notched(peet_model::SheetCutEnd::Sheet, 0.0);
+    let (lo, removed) = notched(Sheet, 0.0, false, false);
     assert!(lo.x < 1.0, "{lo}");
+    assert!(removed > 0.0);
+}
+
+#[test]
+fn a_cut_that_ends_in_a_bend() {
+    // A flange up from the plate's far edge, and a cut sketched on the plate that reaches
+    // 1 mm past where the bend starts. Cut as SolidWorks' cut-extrude does, straight down:
+    // its end wall meets the bend's underside (its outside, radius R + T) at asin(1 / (R + T))
+    // and is made square to the sheet there, so that much of the bend goes with the plate.
+    let (mut p, _, _) = plate(100.0, 60.0);
+    let (_, e) = edge(&p, DVec3::new(100.0, 60.0, T), DVec3::new(0.0, 60.0, T));
+    edge_flange(&mut p, e, |f| f.length = Scalar::new(20.0));
+    p.rebuild();
+    p.assert_ok();
+    let sheet = p.bodies()[0].sheet.as_ref().unwrap();
+    let (_, bend) = sheet.layout.bends().next().unwrap();
+    let start = sheet.layout.pieces[bend.parent]
+        .frame
+        .to_world(bend.origin.extend(T))
+        .dot(DVec3::Y)
+        .abs();
+    let whole = p.volume();
+    let top = p.on_face(DVec3::Z, DVec3::new(50.0, 30.0, T));
+    let window = p.sketch(top, |s| {
+        shapes::rectangle(s, DVec2::new(10.0, 10.0), DVec2::new(30.0, start + 1.0));
+    });
+    let cut = p.model.add_sheet_cut(window);
+    let FeatureKind::SheetCut(def) = &mut p.model.feature_mut(cut).unwrap().kind else {
+        unreachable!()
+    };
+    def.end = peet_model::SheetCutEnd::Blind;
+    def.depth = Scalar::new(10.0);
+    p.rebuild();
+    p.assert_ok();
+    let angle = (1.0 / (R + T)).asin();
+    let wedge = angle / 2.0 * ((R + T).powi(2) - R * R);
+    assert_close(whole - p.volume(), 20.0 * ((start - 10.0) * T + wedge));
+}
+
+#[test]
+fn a_cut_that_ends_in_a_bend_and_runs_past_its_end() {
+    // The flange takes only the middle of the edge. The cut's far side, 1 mm past where
+    // the bend starts, runs on past both ends of the bend: there it stays on the plate,
+    // and over the bend it moves into the bend, with the sheet left in one piece.
+    let (mut p, _, _) = plate(100.0, 60.0);
+    let (_, e) = edge(&p, DVec3::new(100.0, 60.0, T), DVec3::new(0.0, 60.0, T));
+    edge_flange(&mut p, e, |f| {
+        f.length = Scalar::new(20.0);
+        f.offset_start = Scalar::new(-30.0);
+        f.offset_end = Scalar::new(-30.0);
+    });
+    p.rebuild();
+    p.assert_ok();
+    let sheet = p.bodies()[0].sheet.as_ref().unwrap();
+    let (_, bend) = sheet.layout.bends().next().unwrap();
+    let start = sheet.layout.pieces[bend.parent]
+        .frame
+        .to_world(bend.origin.extend(T))
+        .dot(DVec3::Y)
+        .abs();
+    let top = p.on_face(DVec3::Z, DVec3::new(50.0, 30.0, T));
+    let window = p.sketch(top, |s| {
+        shapes::rectangle(s, DVec2::new(10.0, 10.0), DVec2::new(90.0, start + 1.0));
+    });
+    let cut = p.model.add_sheet_cut(window);
+    let FeatureKind::SheetCut(def) = &mut p.model.feature_mut(cut).unwrap().kind else {
+        unreachable!()
+    };
+    def.end = peet_model::SheetCutEnd::Blind;
+    def.depth = Scalar::new(10.0);
+    p.rebuild();
+    p.assert_ok();
+    assert!(matches!(p.status(cut), Status::Ok), "{:?}", p.status(cut));
 }

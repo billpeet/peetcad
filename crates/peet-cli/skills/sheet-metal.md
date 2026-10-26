@@ -447,13 +447,23 @@ edge:
   end if the reach goes past it. That is how to notch the ends of a channel's sides from
   its base, or put one hole through both sides of a U. Flanges at other angles are left.
   The default `end` is `sheet`: its own sheet and the flanges in its sketch's plane.
+- With an `end`, the sketch's own sheet is cut only if the reach goes into it: `reverse`
+  alone cuts the flanges on the far side of the sketch's face and leaves the sheet the
+  sketch is on whole. To cut that sheet too, use `both`.
+- With an `end`, an outline drawn past the flange's edge over a bend ends in the bend
+  where the straight cut leaves the sheet's far face, square to the sheet there, as
+  SolidWorks' normal cut does: 1 mm past a bend's start, on the inside of a 90° bend of
+  radius R and thickness t, takes the bend up to asin(1 / (R + t)). Without an `end`, the
+  outline is carried on across the bend in the flat pattern as drawn.
 
 ```jsonl
 {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
 {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
 {"op": "edge_flange", "name": "Side", "length": 20, "edges": [{"between": [[0, 0, 2], [100, 0, 2]]}, {"between": [[100, 60, 2], [0, 60, 2]]}]}
 {"op": "sketch", "name": "Notch", "on": {"at": [50, 30, 2], "normal": [0, 0, 1]}, "draw": [{"type": "rectangle", "from": [-5, -5], "to": [10, 65]}]}
-{"op": "sheet_cut", "sketch": "Notch", "end": "through_all", "reverse": true}
+{"op": "sheet_cut", "sketch": "Notch", "end": "through_all", "both": true}
+{"op": "sketch", "name": "Gap", "on": {"at": [50, 30, 2], "normal": [0, 0, 1]}, "draw": [{"type": "rectangle", "from": [40, 10], "to": [60, 58]}]}
+{"op": "sheet_cut", "sketch": "Gap", "end": "blind", "depth": 10}
 ```
 
 - **A cut sketched off the sheet's faces**, as SolidWorks' cut-extrude can be: on a plane
