@@ -1104,6 +1104,20 @@ impl FeatureKind {
         }
     }
 
+    /// The features whose suppression suppresses this one: those it refers to, but for a
+    /// sketch only what it is drawn on. What a sketch projects from something suppressed
+    /// stays where it was, as SolidWorks leaves a sketch's relations to it dangling.
+    pub fn suppressed_with(&self) -> Vec<FeatureId> {
+        match self {
+            Self::Sketch(s) => {
+                let mut out = Vec::new();
+                plane_deps(&s.plane, &mut out);
+                out
+            }
+            _ => self.dependencies(),
+        }
+    }
+
     /// The features this one refers to directly, without duplicates.
     pub fn dependencies(&self) -> Vec<FeatureId> {
         let mut out = Vec::new();
