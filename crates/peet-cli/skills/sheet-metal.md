@@ -448,6 +448,21 @@ edge:
 - "The corner's sides are too short" gives the largest size that fits there. Two
   corners at the ends of one side share it: their sizes together can't exceed it.
 - It follows the part: a flange made longer takes its broken corners with it.
+- **Every corner of a face:** `faces` (flat faces of the sheet, with `edges` empty or
+  not) breaks each corner of each face, as SolidWorks' break corner on a face does. The
+  corners are found again at each rebuild, so a notch cut later, or one that another
+  configuration moves, gets its corners broken where it is. Edges through the sheet at
+  the face's corners that are not between two sides (where a bend starts) are left. It
+  fails only if the faces have no corner at all.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [120, 80]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "sketch", "on": {"at": [60, 40, 2], "normal": [0, 0, 1]}, "name": "Notch", "draw": [{"type": "rectangle", "from": [50, 70], "to": [70, 90]}]}
+{"op": "sheet_cut", "sketch": "Notch"}
+{"op": "break_corner", "name": "All round", "size": 4, "edges": [], "faces": [{"at": [10, 10, 2], "normal": [0, 0, 1]}]}
+{"op": "bodies"}
+```
 
 ## Cuts and forms
 

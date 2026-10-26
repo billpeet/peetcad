@@ -1602,28 +1602,71 @@ pub(crate) fn apply_break_corner(
     size: f64,
     seed: u64,
 ) -> Result<Applied, FeatureError> {
-    if def.edges.is_empty() {
+    if def.edges.is_empty() && def.faces.is_empty() {
         return Err(FeatureError(
-            "Pick the corners to break: the short edges through the sheet where two sides of a flat face meet."
+            "Pick the corners to break: the short edges through the sheet where two sides of a flat face meet, or flat faces to break every corner of."
                 .to_owned(),
         ));
     }
-    let mut index = None;
-    let mut cuts = Vec::new();
-    for (n, edge) in def.edges.iter().enumerate() {
+    // The corners: those picked, then every corner of the faces picked (the edges through
+    // the sheet at their vertices), each once. (body, edge, whether it came from a face)
+    let mut corners: Vec<(usize, peet_kernel::EdgeId, bool)> = Vec::new();
+    for edge in &def.edges {
         let found = find_edge(bodies, edge).ok_or_else(|| {
             FeatureError(
                 "A corner it refers to no longer exists. Edit it and pick the corners again."
                     .to_owned(),
             )
         })?;
-        if index.is_some_and(|i| i != found.body) {
+        corners.push((found.body, found.id, false));
+    }
+    for face in &def.faces {
+        let found = find_face(bodies, face).ok_or_else(|| {
+            FeatureError(format!(
+                "A face it refers to no longer exists ({}). Edit it and pick the faces again.",
+                model.describe_face(&face.name)
+            ))
+        })?;
+        let solid = &bodies[found.body].solid;
+        let t = bodies[found.body]
+            .sheet
+            .as_ref()
+            .map_or(0.0, |s| s.layout.settings.thickness);
+        let mut around = Vec::new();
+        let mut vertices = Vec::new();
+        for &l in &solid.face(found.id).loops {
+            for c in solid.loop_coedges(l) {
+                around.push(solid.coedge(c).edge);
+                vertices.push(solid.coedge_start(c));
+            }
+        }
+        for e in solid.edge_ids() {
+            let edge = solid.edge(e);
+            let through = solid
+                .vertex(edge.start)
+                .point
+                .distance(solid.vertex(edge.end).point);
+            if around.contains(&e)
+                || !(vertices.contains(&edge.start) || vertices.contains(&edge.end))
+                || !matches!(edge.curve, peet_kernel::Curve3::Line(_))
+                || (through - t).abs() > 1e-6
+                || corners.iter().any(|&(b, x, _)| b == found.body && x == e)
+            {
+                continue;
+            }
+            corners.push((found.body, e, true));
+        }
+    }
+    let mut index = None;
+    let mut cuts = Vec::new();
+    for (n, &(at, edge, of_face)) in corners.iter().enumerate() {
+        if index.is_some_and(|i| i != at) {
             return Err(FeatureError(
                 "The corners must all be on one sheet metal body.".to_owned(),
             ));
         }
-        index = Some(found.body);
-        let body = &bodies[found.body];
+        index = Some(at);
+        let body = &bodies[at];
         let sheet = body.sheet.as_ref().ok_or_else(|| {
             FeatureError(
                 "Break corner is for sheet metal bodies. Use Fillet or Chamfer on a solid."
@@ -1635,11 +1678,19 @@ pub(crate) fn apply_break_corner(
             part: n as u32,
             index: i,
         };
-        cuts.push(
-            sheet
-                .corner_break(&body.solid, found.id, def.kind, size, tag)
-                .map_err(|m| FeatureError(format!("Corner {}: {m}", n + 1)))?,
-        );
+        match sheet.corner_break(&body.solid, edge, def.kind, size, tag) {
+            Ok(cut) => cuts.push(cut),
+            // A face's edge through the sheet that is not a corner of two sides (where a
+            // bend or a curve meets it) is not one of its corners.
+            Err(_) if of_face => {}
+            Err(m) => return Err(FeatureError(format!("Corner {}: {m}", n + 1))),
+        }
+    }
+    if cuts.is_empty() {
+        return Err(FeatureError(
+            "The faces picked have no corners to break: two straight sides meeting at an edge through the sheet."
+                .to_owned(),
+        ));
     }
     let index = index.expect("there are corners");
     // Two corners at the ends of one side share it: what they take of it must not overlap.

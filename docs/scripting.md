@@ -283,13 +283,22 @@ profile geometry; `face` projects every boundary edge, addressed as `label.0`, e
 Vertices project to points and planes to their intersection line with the sketch.
 Straight edges and circles/arcs parallel to the sketch plane are supported; a circle or
 arc seen edge-on (its plane square to the sketch's) projects to the line it covers. Parallel
-planes, collapsed edges and other projected curve types fail with a diagnostic.
+planes, collapsed edges and other projected curve types fail with a diagnostic. A
+projection whose source is suppressed (in a configuration, say) or gone stays where it
+was and the sketch gets a warning, as SolidWorks leaves a dangling relation; the sketch
+is not suppressed with its source unless it is drawn on it.
 Relations and dimensions use the projected ids like other sketch entities. Delete a
 projection by its root entity id to remove its source and attached relations.
 The `feature` query returns `projections` and marks reference entities `locked`.
 The application adds the supporting face's boundary references when opening a sketch
 for editing, so Smart Dimension and relations can select its edges and corners.
 Scripts obtain those references with an explicit `project` item.
+
+A new dimension value (`set_dimension`, a parameter, a configuration) moves an
+under-defined sketch as SolidWorks does: moved whole, if that satisfies it (a profile
+placed by a distance to the model keeps its shape); otherwise the points held by the most
+relations and dimensions stay put and the rest moves; only if that can't satisfy the sketch is the
+change spread over everything by least squares.
 
 `collinear` creates parallel plus point-on-line relations; `coradial` creates concentric
 plus equal-radius relations. Each returns both relation ids. `doubled_distance` is twice
@@ -402,7 +411,9 @@ with their defaults' types):
   sheet metal body by `size`. `edges` are the corners: the edges through the sheet where
   two straight sides of a flat face meet (for a fillet, also a straight side and an arc,
   or two arcs: the round touches both). The body stays sheet metal. An inside corner,
-  of the outline or of a cutout, gains the sheet an outside one loses.
+  of the outline or of a cutout, gains the sheet an outside one loses. `faces` (flat faces)
+  breaks every corner of each, found again at each rebuild, as SolidWorks' break corner on
+  a face does.
 - `corner` sets how flanges that run to one corner meet: `kind` (`butt`, `overlap`,
   `open`, `plain`), `gap` (for `open`, measured from each flange's inner face), and
   `relief`, what is cut from the blank where their bends meet

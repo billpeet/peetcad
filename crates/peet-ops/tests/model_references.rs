@@ -191,8 +191,11 @@ fn bad_projection_is_atomic_and_can_be_deleted() {
     assert!(sketch(&doc, "Ref").projections.is_empty());
 }
 
+/// What a sketch projects from something suppressed or gone stays where it was, with a
+/// warning, as SolidWorks leaves a sketch's relations to it dangling: the sketch, and
+/// what is made from it, are not suppressed with it.
 #[test]
-fn suppression_and_missing_sources_do_not_use_stale_geometry() {
+fn suppressed_and_missing_sources_leave_the_projection_where_it_was() {
     let mut doc = Document::default();
     base(&mut doc);
     ok(
@@ -201,16 +204,24 @@ fn suppression_and_missing_sources_do_not_use_stale_geometry() {
     );
     let id = doc.model.features().find(|f| f.name == "Ref").unwrap().id;
     let stock = doc.model.features().find(|f| f.name == "Stock").unwrap().id;
+    let before = sketch(&doc, "Ref").sketch.clone();
     ok(
         &mut doc,
         json!({"op":"suppress","feature":"Stock","on":true}),
     );
-    assert!(doc.evaluation().state(id).unwrap().status.is_suppressed());
+    let status = &doc.evaluation().state(id).unwrap().status;
+    assert!(status.is_built(), "{status:?}");
+    assert!(
+        status.message().unwrap().contains("no longer there"),
+        "{status:?}"
+    );
+    assert_eq!(sketch(&doc, "Ref").sketch, before);
     ok(
         &mut doc,
         json!({"op":"suppress","feature":"Stock","on":false}),
     );
-    assert!(doc.evaluation().state(id).unwrap().status.is_built());
+    let status = &doc.evaluation().state(id).unwrap().status;
+    assert!(status.is_built() && status.message().is_none(), "{status:?}");
     let mut model = doc.model.clone();
     model.feature_mut(stock).unwrap().kind =
         peet_model::FeatureKind::Point(peet_model::PointDef::Coordinates {
@@ -221,9 +232,13 @@ fn suppression_and_missing_sources_do_not_use_stale_geometry() {
     let mut engine = peet_model::Engine::new();
     engine.regenerate(&mut model);
     let status = &engine.evaluation().state(id).unwrap().status;
-    assert!(status.is_failed(), "{status:?}");
-    assert!(status.message().unwrap().contains("projected edge"));
+    assert!(status.is_built(), "{status:?}");
+    assert!(
+        status.message().unwrap().contains("no longer there"),
+        "{status:?}"
+    );
 }
+
 #[test]
 fn collinear_and_midpoint_against_projected_edge() {
     let mut doc = Document::default();

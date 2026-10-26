@@ -1420,10 +1420,12 @@ feature_args! {
 feature_args! {
     /// Corners of a sheet metal body rounded or cut straight across.
     BreakCorner: FeatureKind::BreakCorner(f) => &mut **f,
-        BreakCornerFeature { edges, kind, size } => {
+        BreakCornerFeature { edges, kind, size, faces } => {
     edges: Vec<EdgeSel> as Edges = edges,
     kind: BreakKind as Choice<BreakKind> = kind,
     size: Input as Length = size,
+    /// Flat faces whose every corner is broken, found again at each rebuild.
+    faces: Vec<FaceSel> as Faces = faces,
     }
 }
 

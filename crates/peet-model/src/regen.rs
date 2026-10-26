@@ -369,7 +369,7 @@ impl Engine {
                 Some(Status::Suppressed)
             } else {
                 // What it uses, in tree order, so the message names the first.
-                let mut parents = feature.kind.dependencies();
+                let mut parents = feature.kind.suppressed_with();
                 parents.sort_by_key(|p| model.index_of(*p));
                 parents
                     .into_iter()
@@ -798,21 +798,40 @@ impl Engine {
         let state = match &feature.kind {
             FeatureKind::Sketch(s) => match ctx.plane(&s.plane).and_then(|plane| {
                 let mut sketch = s.sketch.clone();
+                // What is projected from something no longer there (suppressed, or gone)
+                // stays where it was, as SolidWorks leaves a dangling relation.
+                let mut dangling = 0usize;
                 for projection in &s.projections {
                     use crate::projection::{Shape, Source, intersect_plane, project_edge};
                     let shape = match &projection.source {
-                        Source::Point(p) => Shape::Point(plane.to_plane_coords(ctx.point(p)?)),
-                        Source::Plane(p) => intersect_plane(plane, ctx.plane(p)?)?,
-                        Source::Edge(e) => {
-                            let found = find_edge(ctx.bodies, e).ok_or(
-                                "The projected edge no longer exists. Replace its projection.",
-                            )?;
-                            project_edge(ctx.bodies[found.body].solid.edge(found.id), plane)?
-                        }
+                        Source::Point(p) => match ctx.point(p) {
+                            Ok(at) => Shape::Point(plane.to_plane_coords(at)),
+                            Err(_) => {
+                                dangling += 1;
+                                continue;
+                            }
+                        },
+                        Source::Plane(p) => match ctx.plane(p) {
+                            Ok(other) => intersect_plane(plane, other)?,
+                            Err(_) => {
+                                dangling += 1;
+                                continue;
+                            }
+                        },
+                        Source::Edge(e) => match find_edge(ctx.bodies, e) {
+                            Some(found) => project_edge(
+                                ctx.bodies[found.body].solid.edge(found.id),
+                                plane,
+                            )?,
+                            None => {
+                                dangling += 1;
+                                continue;
+                            }
+                        },
                     };
                     shape.update(&mut sketch, projection.entity)?;
                 }
-                Ok((plane, sketch))
+                Ok((plane, sketch, dangling))
             }) {
                 Err(e) => fail(
                     e,
@@ -821,7 +840,7 @@ impl Engine {
                         definition: SketchStatus::Under,
                     },
                 ),
-                Ok((plane, projected)) => {
+                Ok((plane, projected, dangling)) => {
                     // A sketch whose expressions may read other features' dimensions
                     // (`Width@Sketch1`, `"Dia.@Sketch1"`) is solved again when they change.
                     let reads_others = projected.constraints().any(|(_, c)| {
@@ -835,7 +854,7 @@ impl Engine {
                     } else {
                         params_key
                     };
-                    let key = hash::of(&(1u8, &projected, params_key, &plane));
+                    let key = hash::of(&(1u8, &projected, params_key, &plane, dangling));
                     match self.cache.get(&id).filter(|c| c.key == key) {
                         Some(c) => {
                             if projected != s.sketch || plane != s.placement {
@@ -845,11 +864,17 @@ impl Engine {
                             reused(&c.state)
                         }
                         None => {
-                            let (state, sketch) = solve_sketch(&projected, plane, model, &s.sketch);
+                            let (mut state, sketch) =
+                                solve_sketch(&projected, plane, model, &s.sketch);
+                            if dangling > 0 && state.status == Status::Ok {
+                                state.status = Status::Warning(format!(
+                                    "{dangling} of what it projects is no longer there (suppressed, or gone), so it stays where it was. Replace the projection if it should follow something else."
+                                ));
+                            }
                             let out_key = hash::of(&(&sketch, &plane));
                             // Keyed on the solved sketch: that is what the model holds
                             // from now on.
-                            let key = hash::of(&(1u8, &sketch, params_key, &plane));
+                            let key = hash::of(&(1u8, &sketch, params_key, &plane, dangling));
                             run.out_keys.insert(id, out_key);
                             self.cache.insert(
                                 id,
