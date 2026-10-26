@@ -560,6 +560,18 @@ function importPart(doc, dir) {
       return projected.get(key) || undefined;
     };
 
+    /** The model edge a line lies on, projected, with the line's ends coincident with its ends: one item, and the other in `also`. */
+    const convertedEdge = l => {
+      if (!l.g.start || !l.g.end) return null;
+      const made = project({ kind: "edge", curve: "line", start: mul(fromSketch(sf, l.g.start), 1 / MM), end: mul(fromSketch(sf, l.g.end), 1 / MM) });
+      if (!made || made.point) return null;
+      const entities = peet.ask({ op: "feature", feature: name }).entities || [];
+      const edge = entities.find(e => e.id === made.id), line = entities.find(e => e.id === l.id);
+      if (!edge || !line || edge.start === undefined || line.start === undefined) return null;
+      const d = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
+      const same = d(line.from, edge.from) + d(line.to, edge.to) <= d(line.from, edge.to) + d(line.to, edge.from);
+      return { type: "coincident", of: [line.start, same ? edge.start : edge.end], also: { type: "coincident", of: [line.end, same ? edge.end : edge.start] } };
+    };
     const dimensions = new Map((f.dimensions || []).map(d => [d.fullName, d]));
     // An equation sets these, so they drive the sketch even where SolidWorks calls them driven; one whose equation
     // is disabled keeps the value it set and still drives it (VIC CT Metering Panel's D5, another value elsewhere)
@@ -592,7 +604,12 @@ function importPart(doc, dir) {
           if (level(r.type.slice(0, 4) === "hori" ? "horizontal" : "vertical") && anyPoints.length === 2) item = { type: level(r.type.slice(0, 4) === "hori" ? "horizontal" : "vertical"), of: anyPoints };
           break;
         case "coincident": if (all.length === 2 && anyPoints.length >= 1) item = { type: "coincident", of: [anyPoints[0], all.find(x => x !== anyPoints[0])] }; break;
-        case "colinear": case "useedge": if (anyLines.length === 2) item = { type: "collinear", of: anyLines }; break;
+        case "colinear": case "useedge":
+          // A line converted from a model edge (both its entities are the line, drawn where the edge is): its
+          // ends on the edge's, so that it follows the edge (nVent's flange outline, 65 mm or 800 mm long)
+          if (r.type === "useedge" && lines.length >= 1 && lines.every(l => l.id === lines[0].id) && outLines.length === 0) item = convertedEdge(lines[0]);
+          else if (anyLines.length === 2) item = { type: "collinear", of: anyLines };
+          break;
         case "parallel": case "perpendicular": if (anyLines.length === 2) item = { type: r.type, of: anyLines }; break;
         case "tangent": if (segs.length + outLines.length === 2 && rounds.length >= 1) item = { type: "tangent", of: [...segs.map(g => g.id), ...outLines] }; break;
         case "concentric": if (rounds.length === 2) item = { type: "concentric", of: rounds.map(g => g.id) }; break;
@@ -662,7 +679,7 @@ function importPart(doc, dir) {
 
     const shape = () => JSON.stringify((peet.ask({ op: "feature", feature: name }).entities || []).map(e => [e.id, e.from, e.to, e.center, e.radius, e.at].map(x => Array.isArray(x) ? x.map(v => +v.toFixed(4)) : typeof x === "number" ? +x.toFixed(4) : x)));
     const before = shape();
-    const clean = item => { const { sw, supplementary, ...rest } = item; return rest; };
+    const clean = item => { const { sw, supplementary, also, ...rest } = item; return also ? [rest, also] : [rest]; };
     const keep = item => {
       tally.kept++;
       if (item.sw) sk.dimensions.set(item.sw, item.name);
@@ -674,12 +691,12 @@ function importPart(doc, dir) {
     const fits = reply => reply.ok && reply.definition !== "over_defined" && shape() === before;
 
     let mark = save();
-    if (fits(peet.apply({ op: "draw", sketch: name, draw: items.map(clean) }))) items.forEach(keep);
+    if (fits(peet.apply({ op: "draw", sketch: name, draw: items.flatMap(clean) }))) items.forEach(keep);
     else {
       restore(mark);
       for (const item of items) {
         mark = save();
-        const reply = peet.apply({ op: "draw", sketch: name, draw: [clean(item)] });
+        const reply = peet.apply({ op: "draw", sketch: name, draw: clean(item) });
         if (fits(reply)) keep(item);
         else { restore(mark); drop(`${item.type}: ${!reply.ok ? "refused" : reply.definition === "over_defined" ? "over-defines the sketch" : "moves the sketch"}`); }
       }
