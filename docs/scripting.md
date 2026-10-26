@@ -376,7 +376,9 @@ with their defaults' types):
   sheet metal body by `size`. `edges` are the corners: the edges through the sheet where
   two straight sides of a flat face meet (for a fillet, also a straight side and an arc,
   or two arcs: the round touches both). The body stays sheet metal. An inside corner,
-  of the outline or of a cutout, gains the sheet an outside one loses.
+  of the outline or of a cutout, gains the sheet an outside one loses. `faces` (flat faces)
+  breaks every corner of each, found again at each rebuild, as SolidWorks' break corner on
+  a face does.
 - `corner` sets how flanges that run to one corner meet: `kind` (`butt`, `overlap`,
   `open`, `plain`), `gap` (for `open`, measured from each flange's inner face), and
   `relief`, what is cut from the blank where their bends meet

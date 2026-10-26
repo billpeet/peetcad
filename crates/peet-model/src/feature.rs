@@ -752,6 +752,10 @@ pub struct BreakCornerFeature {
     pub kind: BreakKind,
     /// A fillet's radius, or a chamfer's distance along each side.
     pub size: Scalar,
+    /// Flat faces of the sheet whose every corner is broken, as SolidWorks' break corner
+    /// on a face: the corners are found again at each rebuild, so they follow the face
+    /// when a cut or a configuration changes it.
+    pub faces: Vec<FaceRef>,
 }
 
 impl BreakCornerFeature {
@@ -760,6 +764,37 @@ impl BreakCornerFeature {
             edges,
             kind: BreakKind::Fillet,
             size: Scalar::new(2.0),
+            faces: Vec::new(),
+        }
+    }
+}
+
+/// A break corner as files of model schemas 8 to 11 hold it: before corners by face.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct BreakCornerFeatureV11 {
+    edges: Vec<EdgeRef>,
+    kind: BreakKind,
+    size: Scalar,
+}
+
+impl From<BreakCornerFeatureV11> for BreakCornerFeature {
+    fn from(b: BreakCornerFeatureV11) -> Self {
+        Self {
+            edges: b.edges,
+            kind: b.kind,
+            size: b.size,
+            faces: Vec::new(),
+        }
+    }
+}
+
+impl From<&BreakCornerFeature> for BreakCornerFeatureV11 {
+    /// The old layout, which has no room for faces.
+    fn from(b: &BreakCornerFeature) -> Self {
+        Self {
+            edges: b.edges.clone(),
+            kind: b.kind,
+            size: b.size.clone(),
         }
     }
 }
@@ -1197,6 +1232,9 @@ impl FeatureKind {
             Self::BreakCorner(b) => {
                 for e in &b.edges {
                     out.extend(e.features());
+                }
+                for f in &b.faces {
+                    out.extend(f.name.features());
                 }
             }
             Self::Form(f) => out.push(f.sketch),
@@ -1709,7 +1747,7 @@ pub(crate) enum FeatureKindV9 {
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
     ConvertToSheet(Box<ConvertToSheetFeatureV11>),
-    BreakCorner(Box<BreakCornerFeature>),
+    BreakCorner(Box<BreakCornerFeatureV11>),
 }
 impl From<FeatureKindV9> for FeatureKind {
     fn from(k: FeatureKindV9) -> Self {
@@ -1740,7 +1778,7 @@ impl From<FeatureKindV9> for FeatureKind {
             FeatureKindV9::Sweep(v) => Self::Sweep(v),
             FeatureKindV9::Loft(v) => Self::Loft(v),
             FeatureKindV9::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((*v).into())),
-            FeatureKindV9::BreakCorner(v) => Self::BreakCorner(v),
+            FeatureKindV9::BreakCorner(v) => Self::BreakCorner(Box::new((*v).into())),
         }
     }
 }
@@ -1774,7 +1812,7 @@ impl From<FeatureKind> for FeatureKindV9 {
             FeatureKind::Sweep(v) => Self::Sweep(v),
             FeatureKind::Loft(v) => Self::Loft(v),
             FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((&*v).into())),
-            FeatureKind::BreakCorner(v) => Self::BreakCorner(v),
+            FeatureKind::BreakCorner(v) => Self::BreakCorner(Box::new((&*v).into())),
             FeatureKind::MoveBody(_)
             | FeatureKind::InsertPart(_)
             | FeatureKind::StructuralMember(_) => {
@@ -1864,7 +1902,7 @@ pub(crate) enum FeatureKindV11 {
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
     ConvertToSheet(Box<ConvertToSheetFeatureV11>),
-    BreakCorner(Box<BreakCornerFeature>),
+    BreakCorner(Box<BreakCornerFeatureV11>),
 }
 
 impl From<FeatureKindV11> for FeatureKind {
@@ -1896,7 +1934,7 @@ impl From<FeatureKindV11> for FeatureKind {
             FeatureKindV11::Sweep(v) => Self::Sweep(v),
             FeatureKindV11::Loft(v) => Self::Loft(v),
             FeatureKindV11::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((*v).into())),
-            FeatureKindV11::BreakCorner(v) => Self::BreakCorner(v),
+            FeatureKindV11::BreakCorner(v) => Self::BreakCorner(Box::new((*v).into())),
         }
     }
 }
@@ -1930,7 +1968,7 @@ impl From<FeatureKind> for FeatureKindV11 {
             FeatureKind::Sweep(v) => Self::Sweep(v),
             FeatureKind::Loft(v) => Self::Loft(v),
             FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((&*v).into())),
-            FeatureKind::BreakCorner(v) => Self::BreakCorner(v),
+            FeatureKind::BreakCorner(v) => Self::BreakCorner(Box::new((&*v).into())),
             FeatureKind::MoveBody(_)
             | FeatureKind::InsertPart(_)
             | FeatureKind::StructuralMember(_) => {
@@ -2111,7 +2149,7 @@ pub(crate) enum FeatureKindV8 {
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
     ConvertToSheet(Box<ConvertToSheetFeatureV11>),
-    BreakCorner(Box<BreakCornerFeature>),
+    BreakCorner(Box<BreakCornerFeatureV11>),
 }
 impl From<FeatureKindV8> for FeatureKind {
     fn from(kind: FeatureKindV8) -> Self {
@@ -2147,7 +2185,7 @@ impl From<FeatureKindV8> for FeatureKind {
             FeatureKindV8::Sweep(v) => Self::Sweep(v),
             FeatureKindV8::Loft(v) => Self::Loft(v),
             FeatureKindV8::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((*v).into())),
-            FeatureKindV8::BreakCorner(v) => Self::BreakCorner(v),
+            FeatureKindV8::BreakCorner(v) => Self::BreakCorner(Box::new((*v).into())),
         }
     }
 }
@@ -2184,7 +2222,7 @@ impl From<&FeatureKind> for FeatureKindV8 {
             FeatureKind::Sweep(v) => Self::Sweep(v.clone()),
             FeatureKind::Loft(v) => Self::Loft(v.clone()),
             FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((&**v).into())),
-            FeatureKind::BreakCorner(v) => Self::BreakCorner(v.clone()),
+            FeatureKind::BreakCorner(v) => Self::BreakCorner(Box::new((&**v).into())),
             FeatureKind::MoveBody(_)
             | FeatureKind::InsertPart(_)
             | FeatureKind::StructuralMember(_) => {
