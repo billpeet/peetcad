@@ -1873,6 +1873,10 @@ function importPart(doc, dir) {
     // One that is live in another configuration is left for that configuration: there SolidWorks' body has
     // it, so the side a flange bends to and the like can be checked, and the part is the size it is drawn for.
     if (cur === config && !SKETCH.test(f.type) && liveElsewhere(f.name)) return record(f, LATER);
+    // So is a sketch on something left for later: made now, it would be on whatever is there instead
+    // (Meter Bracket's Sketch69, on the right-hand return, which is where the left-hand one is)
+    const later = p => byName.get(p) && byName.get(p).suppressed && !SKETCH.test(byName.get(p).type) && liveElsewhere(p);
+    if (cur === config && SKETCH.test(f.type) && liveElsewhere(f.name) && (f.parents || []).some(later)) return record(f, LATER);
     const before = report.features.length, had = made.has(f.name);
     handleLive({ ...f, suppressed: false });
     const names = made.get(f.name);
@@ -2597,6 +2601,14 @@ function importPart(doc, dir) {
         return finish(f, built);
       }
 
+      case "SketchHole": {
+        // SolidWorks' simple hole: a circle sketched on a face and cut to an end condition, as a cut-extrude is
+        const before = report.features.length;
+        handleLive({ ...f, type: "ICE", definition: { ...f.definition, values: { ...v, IsBossFeature: false, BothDirections: false, "GetEndCondition(true)": v.Type, "GetDepth(true)": v.Depth } } });
+        for (const x of report.features.slice(before)) if (x.name === f.name) x.type = f.type;
+        return;
+      }
+
       case "CirPattern": {
         const seeds = [];
         for (const p of v.PatternFeatureArray || []) {
@@ -3275,6 +3287,11 @@ function importPart(doc, dir) {
         const boxDiff = now.min && theirBox ? Math.max(...[...now.min, ...now.max].map((x, i) => Math.abs(x - theirBox[i]))) : null;
         entry.difference = { volume: off, box_mm: boxDiff };
         entry.verdict = off !== null && off < 1e-5 && boxDiff < 1e-3 ? "matches" : off !== null && off < 0.05 && boxDiff < 1e-3 ? "same size, volume differs" : "differs";
+        // A configuration with every feature suppressed has no body in SolidWorks: nor should it here
+        if (!step && !(other.bodies || []).length) {
+          entry.difference = { volume: now.volume_mm3 ? 1 : 0, box_mm: 0 };
+          entry.verdict = now.volume_mm3 ? "differs" : "matches";
+        }
         entry.missing = [...new Set(entry.missing)];
       }
       peet.apply({ op: "configuration", configuration: config.name });
