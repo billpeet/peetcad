@@ -603,6 +603,40 @@ impl Layout {
         if relief_type != ReliefType::Tear && trim > MIN_LENGTH {
             let rw = relief_ratio * t;
             let depth = trim + relief_ratio * t;
+            // Where the edge ends but its face goes on past the end (on in a curve, or round
+            // an inside corner), the bend would tear the sheet beside it: SolidWorks relieves
+            // it there too, past the end of the edge.
+            let step = 100.0 * MIN_LENGTH;
+            // A face that goes on in a curve leaves a sliver outside the edge's line there:
+            // the relief then starts outside it. (Round an inside corner the sheet beyond
+            // is the face's own, and is kept.)
+            let goes_on = |at: DVec2, away: DVec2| {
+                self.sheet_at(site.piece, at + away * step + inward * step.min(trim / 2.0))
+            };
+            let beyond = |at: DVec2, away: DVec2, u: [f64; 2]| {
+                let outside = !self.sheet_at(site.piece, at + away * (rw / 2.0) - inward * step);
+                let o = if outside { rw } else { 0.0 };
+                let base = if u[0] < 0.0 {
+                    wall::RELIEF_START
+                } else {
+                    wall::RELIEF_END
+                };
+                relief(
+                    relief_type,
+                    site.a - inward * o,
+                    d,
+                    inward,
+                    u,
+                    depth + o,
+                    |i| tag(base + i),
+                )
+            };
+            if o0 <= MIN_LENGTH && goes_on(site.a, -d) {
+                reliefs.push(beyond(site.a, -d, [-rw, 0.0]));
+            }
+            if o1 <= MIN_LENGTH && goes_on(site.b, d) {
+                reliefs.push(beyond(site.b, d, [len, len + rw]));
+            }
             if o0 > MIN_LENGTH {
                 reliefs.push(relief(
                     relief_type,

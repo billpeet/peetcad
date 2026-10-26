@@ -135,9 +135,14 @@ pub struct Corner {
     /// start of its span, 1: the end).
     pub attachments: [usize; 2],
     pub ends: [usize; 2],
-    /// The face's corner point.
+    /// The face's corner point (for flanges on two faces, the middle of the bend between
+    /// their ends).
     pub at: DVec2,
     pub spec: CornerSpec,
+    /// For flanges on the edges of two faces that a bend joins, which meet across that
+    /// bend in one plane (the lips round the side of a channel): the bend. They are
+    /// mitred, whatever the corner's kind, and nothing is relieved.
+    pub across: Option<usize>,
 }
 
 /// Name numbers for the walls of corner reliefs: `part` is this plus the end of the
@@ -190,6 +195,56 @@ impl Layout {
                             ends: [eo, en],
                             at: *po,
                             spec,
+                            across: None,
+                        });
+                    }
+                }
+            }
+        }
+        // Flanges on in-line edges of two faces joined by a bend, each ending at the bend
+        // (one at either side of it), whose flats lie in one plane: SolidWorks mitres them
+        for (i, old) in self.attachments[..new].iter().enumerate() {
+            if old.parent == n.parent || !self.makes_corners(old) {
+                continue;
+            }
+            let Some((bend, b)) = self.bends().find(|(_, b)| {
+                (b.parent == old.parent && b.child == Some(n.parent))
+                    || (b.parent == n.parent && b.child == Some(old.parent))
+            }) else {
+                continue;
+            };
+            if old.along().perp_dot(n.along()).abs() > 1e-6
+                || b.along.dot(old.along()).abs() > 1e-6
+                || !self.coplanar(old.pieces[1], n.pieces[1])
+            {
+                continue;
+            }
+            // The ends on the parent's side and the child's, each near its side of the bend
+            // (an edge of the parent can run on under the bend, to the outline it was cut from)
+            let reach = 2.0 * (b.values.radius + b.values.thickness);
+            let old_is_parent = b.parent == old.parent;
+            let old_ends = ends(old);
+            for (eo, po) in old_ends.iter().enumerate() {
+                for (en, pn) in new_ends.iter().enumerate() {
+                    let (pp, pc) = if old_is_parent {
+                        (*po, *pn)
+                    } else {
+                        (*pn, *po)
+                    };
+                    let ((sp, wp), (sc, wc)) = (b.strip_coords(pp), b.strip_coords(pc));
+                    let on_bend = |w: f64| (-MIN_LENGTH..=b.length + MIN_LENGTH).contains(&w);
+                    if (pc - pp).perp_dot(old.along()).abs() <= MIN_LENGTH
+                        && sp.abs() <= reach
+                        && (sc - b.width()).abs() <= reach
+                        && on_bend(wp)
+                        && on_bend(wc)
+                    {
+                        found.push(Corner {
+                            attachments: [i, new],
+                            ends: [eo, en],
+                            at: (pp + pc) / 2.0,
+                            spec,
+                            across: Some(bend),
                         });
                     }
                 }
@@ -231,9 +286,14 @@ impl Layout {
         struct EndCut {
             end: usize,
             planes: Vec<(DVec2, f64)>,
+            /// A mitre across a bend: its wall is told apart from a square end's.
+            across: bool,
         }
         let mut per_flat: Vec<(usize, Vec<EndCut>)> = Vec::new();
         let mut bend_ends: Vec<(usize, usize, f64)> = Vec::new();
+        // First bends mitred with their flats (across a bend): the bend, its end, the
+        // flat's half-planes
+        let mut bend_mitres: Vec<(usize, bool, Vec<(DVec2, f64)>)> = Vec::new();
         let mut push =
             |flat: usize, cut: EndCut| match per_flat.iter_mut().find(|(f, _)| *f == flat) {
                 Some(s) => s.1.push(cut),
@@ -247,7 +307,10 @@ impl Layout {
             let mut planes_of: Vec<[Vec<(DVec2, f64)>; 2]> = Vec::new();
             for k in 0..flats {
                 let (fa, fb) = (a.pieces[2 * k + 1], b.pieces[2 * k + 1]);
-                let planes = if k > 0 && self.coplanar(fa, fb) {
+                if c.across.is_some() && !self.coplanar(fa, fb) {
+                    break;
+                }
+                let planes = if (k > 0 || c.across.is_some()) && self.coplanar(fa, fb) {
                     // Lips in one plane: mitred along the line that halves the corner.
                     match self.miter(c, k) {
                         Some(p) => p,
@@ -286,6 +349,7 @@ impl Layout {
                     EndCut {
                         end: c.ends[0],
                         planes: planes[0].clone(),
+                        across: c.across.is_some(),
                     },
                 );
                 push(
@@ -293,8 +357,23 @@ impl Layout {
                     EndCut {
                         end: c.ends[1],
                         planes: planes[1].clone(),
+                        across: c.across.is_some(),
                     },
                 );
+                if k == 0 && c.across.is_some() {
+                    // The mitre runs on across each flange's bend, straight in the flat
+                    // pattern, as SolidWorks cuts it (the bend's end folds to a freeform face)
+                    for (att, end, planes) in
+                        [(a, c.ends[0], &planes[0]), (b, c.ends[1], &planes[1])]
+                    {
+                        let bend = att.pieces[0];
+                        // Whether the end is at the start of the bend's own line
+                        let at_start = self.pieces[bend]
+                            .bend()
+                            .is_some_and(|bv| (end == 0) == (bv.along.dot(att.along()) > 0.0));
+                        bend_mitres.push((bend, at_start, planes.clone()));
+                    }
+                }
                 planes_of.push(planes);
             }
             // Later bends end square, where the tighter of the flats on either side of
@@ -329,6 +408,9 @@ impl Layout {
                 }
             }
 
+            if c.across.is_some() {
+                continue;
+            }
             // The relief, cut from the face and both first bends.
             let (sa, sb) = (a.pieces[0], b.pieces[0]);
             let flush = match (c.spec.relief, planes_of.first()) {
@@ -399,10 +481,11 @@ impl Layout {
                 (p(u[1], lo.y), tag(wall::FLANGE_FOLD)),
             ];
             for c in &cuts {
-                let end_tag = tag(if c.end == 0 {
-                    wall::FLANGE_START
-                } else {
-                    wall::FLANGE_END
+                let end_tag = tag(match (c.end, c.across) {
+                    (0, false) => wall::FLANGE_START,
+                    (_, false) => wall::FLANGE_END,
+                    (0, true) => wall::MITRE_START,
+                    (_, true) => wall::MITRE_END,
                 });
                 for &(n, k) in &c.planes {
                     poly = clip(&poly, n, k, end_tag);
@@ -410,6 +493,58 @@ impl Layout {
             }
             if poly.len() >= 3 {
                 out.pieces[flat].outline = polygon_area(&poly);
+            }
+        }
+        // Each bend once, with the mitres at either end
+        let mut mitred: Vec<usize> = bend_mitres.iter().map(|m| m.0).collect();
+        mitred.dedup();
+        for bend in mitred {
+            let piece = &out.pieces[bend];
+            let Some(bv) = piece.bend().copied() else {
+                continue;
+            };
+            let ends: Vec<_> = bend_mitres.iter().filter(|m| m.0 == bend).collect();
+            let (mut lo, mut hi) = rect_extent(&piece.outline, bv.origin, bv.along, bv.across);
+            // Run on past the end first: the mitre can be beyond it (where the flat's fold
+            // line meets the mitre further out than the edge's end)
+            let more = bv.width() + t;
+            for &&(_, at_start, _) in &ends {
+                if at_start {
+                    lo.x -= more;
+                } else {
+                    hi.x += more;
+                }
+            }
+            let tag = |index: u8| CurveTag::Generated {
+                owner: piece.origin.owner,
+                part: piece.origin.part,
+                index,
+            };
+            let far = if bv.child.is_some() {
+                wall::BEND_CHILD
+            } else {
+                wall::TIP
+            };
+            let p = |x: f64, y: f64| bv.origin + bv.along * x + bv.across * y;
+            // As `rect` makes it: each point with the tag of the edge that starts there
+            let mut poly: Vec<(DVec2, CurveTag)> = vec![
+                (p(lo.x, lo.y), tag(wall::BEND_PARENT)),
+                (p(hi.x, lo.y), tag(wall::BEND_END)),
+                (p(hi.x, hi.y), tag(far)),
+                (p(lo.x, hi.y), tag(wall::BEND_START)),
+            ];
+            for (_, at_start, planes) in ends {
+                let end_tag = tag(if *at_start {
+                    wall::BEND_START
+                } else {
+                    wall::BEND_END
+                });
+                for &(n, k) in planes {
+                    poly = clip(&poly, n, k, end_tag);
+                }
+            }
+            if poly.len() >= 3 {
+                out.pieces[bend].outline = polygon_area(&poly);
             }
         }
         for (bend, end, reach) in bend_ends {

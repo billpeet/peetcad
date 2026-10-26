@@ -208,6 +208,16 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
   and miter flanges always use the body's. A flange whose bend is wholly outside the
   sheet (`bend_outside`, or set out by `position_offset`) gets no relief at all, as in
   SolidWorks: it takes nothing from the sheet.
+- A flange whose edge ends where its face goes on (round an inside corner, or on in a
+  curve) gets a relief past that end of the edge as well, even without an offset: the
+  bend would tear the sheet beside it otherwise. SolidWorks makes the same one.
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "polyline", "closed": true, "points": [[0, 0], [100, 0], [100, 40], [40, 40], [40, 80], [0, 80]]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
+  {"op": "edge_flange", "name": "Lip", "length": 20, "edges": [{"between": [[100, 40, 2], [40, 40, 2]]}]}
+  {"op": "bodies"}
+  ```
 
   ```jsonl
   {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 150]}]}
@@ -350,12 +360,30 @@ after the flanges it is about.
   {"op": "corner", "name": "Corner Relief1", "kind": "open", "gap": 0.7, "relief": "circular", "relief_size": 6}
   {"op": "bodies"}
   ```
+- **Flanges round a bend.** Flanges on edges of two faces that a bend joins, in line
+  across it (the lips along the side of a channel or a U), each running to the bend,
+  meet in one plane: they are mitred there by themselves, as SolidWorks mitres them, the
+  mitre running on across each flange's bend. The `gap` (0.1 by default) is split
+  either side of the line that halves the corner. To set it, give `corner` a mitre's face
+  (the slanted end face of one of the flanges, from `faces`); `kind` and `relief` don't
+  apply there, and that face picks no other corner. For a SolidWorks flange feature on
+  such edges, its own gap, undivided:
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
+  {"op": "edge_flange", "name": "Web", "length": 30, "edges": [{"between": [[0, 0, 2], [100, 0, 2]]}]}
+  {"op": "edge_flange", "name": "Side", "length": 20, "edges": [{"between": [[0, 60, 2], [0, 2.2, 2]]}, {"between": [[0, 2, 2.2], [0, 2, 30]]}]}
+  {"op": "corner", "faces": [{"at": [1, 11.170711, 11.1], "normal": [0, -0.707107, 0.707107]}], "gap": 1}
+  {"op": "bodies"}
+  ```
 - Without `faces` it is every corner the part has when it is applied; corners made by
   flanges added later keep the default. `faces` picks corners: the end face of a flange
   at a corner picks that corner, a flange's top or bottom face picks the corners at both
   its ends.
 - "The part has no corners where two flanges meet": the flanges are set back from the
-  corner (an `offset_start` or `offset_end`), or are on different faces. Nothing to do.
+  corner (an `offset_start` or `offset_end`), or are on different faces that no bend
+  joins. Nothing to do.
 
 ## Breaking corners
 

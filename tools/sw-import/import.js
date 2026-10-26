@@ -832,13 +832,26 @@ function importPart(doc, dir) {
     return all ? found / all : 0;
   }
 
-  function corners(name, gap, pieces) {
+  function corners(name, gap, pieces, radius = 0) {
     const picks = [];
     const faces = () => peet.ask({ op: "faces" }).faces || [];
     let all = null;
     for (let i = 0; i < pieces.length; i++) for (let j = i + 1; j < pieces.length; j++) {
-      const shared = [pieces[i].start, pieces[i].end].find(p => [pieces[j].start, pieces[j].end].some(q => len(sub(p, q)) < 1e-3));
-      if (!shared) continue;
+      let shared = [pieces[i].start, pieces[i].end].find(p => [pieces[j].start, pieces[j].end].some(q => len(sub(p, q)) < 1e-3));
+      // Edges of two faces that a bend joins, in line across it (the lips round the side of a channel):
+      // their ends are the bend apart, and the flanges are mitred with the whole gap between them
+      let across = false;
+      if (!shared) {
+        const [di, dj] = [pieces[i], pieces[j]].map(p => unit(sub(p.end, p.start)));
+        const near = ((thickness || 0) + radius) * 2;
+        for (const p of [pieces[i].start, pieces[i].end]) for (const q of [pieces[j].start, pieces[j].end]) {
+          const gapAt = sub(q, p);
+          if (shared || len(gapAt) > near || Math.abs(dot(di, dj)) > 1e-6) continue;
+          // Square to both edges, so the two run on in line round the bend
+          if (Math.abs(dot(gapAt, di)) > 1e-3 * near + 1e-6 && Math.abs(dot(gapAt, dj)) > 1e-3 * near + 1e-6) { shared = mid(p, q); across = true; }
+        }
+        if (!shared) continue;
+      }
       all = all || faces();
       // The end face of one of the two pieces at this corner picks the corner: a face that PeetCAD names
       // after that piece and that is square to the piece's own edge. (Where one piece runs past the
@@ -848,7 +861,7 @@ function importPart(doc, dir) {
       const ends = [];
       for (const piece of [pieces[i], pieces[j]]) {
         const along = unit(sub(piece.end, piece.start));
-        ends.push(...all.filter(face => face.surface === "plane" && Math.abs(dot(face.normal, along)) > 0.999
+        ends.push(...all.filter(face => face.surface === "plane" && Math.abs(dot(face.normal, along)) > (across ? 0.5 : 0.999)
           && (face.made_by || []).some(m => m.feature === piece.name && m.side === "wall")
           && Math.abs(dot(sub(face.center, shared), along)) < 0.25 * len(sub(piece.end, piece.start))));
       }
@@ -857,7 +870,8 @@ function importPart(doc, dir) {
       // inner face by the gap times the cosine of half the face's angle at the corner
       const away = piece => { const far = len(sub(piece.start, shared)) < 1e-3 ? piece.end : piece.start; return unit(sub(far, shared)); };
       const angle = Math.acos(Math.max(-1, Math.min(1, dot(away(pieces[i]), away(pieces[j])))));
-      if (ends[0]) picks.push({ face: { at: ends[0].center.map(tidy), normal: ends[0].normal.map(tidy) }, gap: tidy(Math.max(gap, 0) * Math.cos(angle / 2)) });
+      const g = across ? Math.max(gap, 0) : Math.max(gap, 0) * Math.cos(angle / 2);
+      if (ends[0]) picks.push({ face: { at: ends[0].center.map(tidy), normal: ends[0].normal.map(tidy) }, gap: tidy(g) });
     }
     // One corner feature for each gap
     const byGap = new Map();
@@ -1995,8 +2009,10 @@ function importPart(doc, dir) {
           const flangeNames = [...built.names];
           const others = cornersWithOthers(f.name, flangeNames, radius);
           if (others) built.names.push(others);
-          if (flangeNames.length === edges.length && edges.length > 1) {
-            built.names.push(...corners(f.name + " corners", gap, edges.map((e, i) => ({ name: flangeNames[i], start: mm(e.start), end: mm(e.end) }))));
+          // The pieces themselves: the names built also hold their outlines' planes and sketches
+          const pieces = ops.map((o, i) => pieceName(i));
+          if (ops.length === edges.length && edges.length > 1 && pieces.every(n => flangeNames.includes(n))) {
+            built.names.push(...corners(f.name + " corners", gap, edges.map((e, i) => ({ name: pieces[i], start: mm(e.start), end: mm(e.end) })), radius));
           }
         }
         if (built.ok) flanges.set(f.name, { name: f.name, common, gap, pieces: edges.map((e, i) => ({ start: mm(e.start), end: mm(e.end), offsets: ops[i].offsets, outline: ops[i].outline })) });
@@ -2417,7 +2433,9 @@ function importPart(doc, dir) {
             const key = d.map(x => x.toFixed(4)).join(",");
             votes.set(key, { d, n: ((votes.get(key) || {}).n || 0) + 1 });
           }
-          const best = [...votes.values()].sort((a, b) => b.n - a.n)[0];
+          // Copies both ways (a grid whose second direction is the first's opposite) tie: then the way the
+          // edge goes, as SolidWorks reads it, settles it
+          const best = [...votes.values()].sort((a, b) => b.n - a.n || (along ? dot(b.d, along) - dot(a.d, along) : 0))[0];
           return best ? best.d : null;
         };
         const direction = (axis, reversed, spacing, alone) => {
