@@ -183,7 +183,8 @@ pub enum ConstraintKind {
     Equal(EntityId, EntityId),
     /// Two circles/arcs sharing a centre.
     Concentric(EntityId, EntityId),
-    /// A point at the midpoint of a line.
+    /// A point at the midpoint of a line, or of an arc (on it, halfway round from its start
+    /// to its end). `line` is the line or arc.
     Midpoint {
         point: EntityId,
         line: EntityId,
@@ -216,6 +217,17 @@ pub enum ConstraintKind {
     Angle(EntityId, EntityId),
     /// Twice the perpendicular point-to-line distance, for centreline dimensions.
     DoubledDistance(EntityId, EntityId),
+
+    // ---- Relations added later (last, so that saved sketches keep their meaning) ----
+    /// A copy in a linear sketch pattern: `copy` is `seed` moved `k` times as far as
+    /// `first` (the pattern's first copy) is from it, `k` the whole number their places
+    /// give. With `copy` the same as `first`, it says that `first` is `seed` moved: the same
+    /// size, the same way round. Points, lines or circles, all of one kind.
+    Patterned {
+        seed: EntityId,
+        copy: EntityId,
+        first: EntityId,
+    },
 }
 
 impl ConstraintKind {
@@ -241,6 +253,8 @@ impl ConstraintKind {
             PointOnCurve { point, curve } => vec![point, curve],
             Midpoint { point, line } => vec![point, line],
             Symmetric { a, b, axis } => vec![a, b, axis],
+            Patterned { seed, copy, first } if copy == first => vec![seed, copy],
+            Patterned { seed, copy, first } => vec![seed, copy, first],
         }
     }
 
@@ -288,6 +302,7 @@ impl ConstraintKind {
             Radius(_) => "Radius",
             Diameter(_) => "Diameter",
             Angle(..) => "Angle",
+            Patterned { .. } => "Patterned",
         }
     }
 }
@@ -853,7 +868,7 @@ impl Sketch {
                         || (k(a).is_circular() && k(b).is_circular()))
             }
             Concentric(a, b) => a != b && k(a).is_circular() && k(b).is_circular(),
-            Midpoint { point, line } => k(point) == K::Point && k(line) == K::Line,
+            Midpoint { point, line } => k(point) == K::Point && matches!(k(line), K::Line | K::Arc),
             Symmetric { a, b, axis } => {
                 k(a) == K::Point && k(b) == K::Point && a != b && k(axis) == K::Line
             }
@@ -869,6 +884,13 @@ impl Sketch {
                 a != b && matches!((k(a), k(b)), (K::Point, K::Line) | (K::Line, K::Point))
             }
             Radius(c) | Diameter(c) => k(c).is_circular(),
+            Patterned { seed, copy, first } => {
+                seed != copy
+                    && seed != first
+                    && matches!(k(seed), K::Point | K::Line | K::Circle)
+                    && k(copy) == k(seed)
+                    && k(first) == k(seed)
+            }
         };
         if ok {
             Ok(())
@@ -1070,12 +1092,15 @@ fn expected_kinds(kind: &ConstraintKind) -> &'static str {
         Tangent(..) => "a line and a circle/arc, or two circles/arcs",
         Equal(..) => "two lines, or two circles/arcs",
         Concentric(..) => "two circles/arcs",
-        Midpoint { .. } => "a point and a line",
+        Midpoint { .. } => "a point and a line or arc",
         Symmetric { .. } => "two points and a line",
         Fix { .. } => "a point",
         Distance(..) => "two points, or a point and a line",
         DoubledDistance(..) => "a point and a line",
         Radius(_) | Diameter(_) => "a circle or arc",
+        Patterned { .. } => {
+            "a point, line or circle, a copy of it, and the pattern's first copy, all of one kind"
+        }
     }
 }
 

@@ -525,6 +525,11 @@ fn map_ids(kind: ConstraintKind, f: impl Fn(EntityId) -> EntityId) -> Constraint
         Diameter(a) => Diameter(f(a)),
         Angle(a, b) => Angle(f(a), f(b)),
         DoubledDistance(a, b) => DoubledDistance(f(a), f(b)),
+        Patterned { seed, copy, first } => Patterned {
+            seed: f(seed),
+            copy: f(copy),
+            first: f(first),
+        },
     }
 }
 
