@@ -145,3 +145,22 @@ fn up_to_fields_need_up_to() {
         reply.json
     );
 }
+
+#[test]
+fn no_room_for_a_copy_says_so() {
+    // As a count of 1 does. (SolidWorks' Gear tray has such a pattern, count 1, suppressed
+    // in every configuration.)
+    let mut doc = plate();
+    let reply = apply_json(
+        &mut doc,
+        &json!({"op":"linear_pattern", "features":["Cut-Extrude1"], "direction":"x", "spacing":30,
+                "up_to":{"plane":"End"}}),
+        Undo::Step,
+    );
+    assert!(
+        reply.json.to_string().contains("no room for a copy"),
+        "{}",
+        reply.json
+    );
+    assert_holes(&doc, 1);
+}

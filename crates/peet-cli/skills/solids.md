@@ -265,7 +265,9 @@ as many copies as fit; one landing exactly at the end counts. With `"count"`, `c
 kept and the spacing spreads the copies evenly. `up_to_reverse` puts the last copy past
 the reference by the offset. The stored `count` (or `spacing`) is ignored while `up_to` is
 set; count the copies' faces in `faces` to see how many there are. A reference behind the
-seed fails with "flip the direction"; do what it says. `"up_to": null` goes back to the
+seed fails with "flip the direction"; do what it says. One nearer than a spacing fails
+with "no room for a copy", as a count of 1 does: move the reference, or suppress the
+pattern. `"up_to": null` goes back to the
 count as given. Set `up_to` before (or with) the other `up_to_` fields: they fail without
 it. `up_to` is for the first direction only.
 

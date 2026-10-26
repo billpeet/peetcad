@@ -2254,6 +2254,12 @@ impl<'m> Ctx<'m, '_> {
                     return Err("the spacing must be more than zero".to_owned());
                 }
                 let n = (span / spacing + 1e-9).floor() + 1.0;
+                // As a count of 1 does, it fails: there is nothing to copy
+                if n < 2.0 {
+                    return Err(format!(
+                        "there is no room for a copy: the reference, less the offset, is {span:.4} mm on, less than the spacing"
+                    ));
+                }
                 if n > 10_000.0 {
                     return Err(format!("{n} copies would fit, and 10000 is the most"));
                 }
