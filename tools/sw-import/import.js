@@ -1977,13 +1977,13 @@ function importPart(doc, dir) {
           });
           if (face) {
             const sk = importSketch(o.outline.sketch, { name: piece + " outline", onFace: face });
-            if (!sk.error) { o.native = { plane: null, sketch: sk.name }; outlined.push(sk.name); return; }
+            if (!sk.error) { o.native = { plane: null, sketch: sk.name, sk }; outlined.push(sk.name); return; }
           }
           const plane = piece + " outline plane";
           if (!planeAbout(plane, { between: [o.found.from.map(tidy), o.found.to.map(tidy)] }, sf)) return;
           const sk = importSketch(o.outline.sketch, { name: piece + " outline", onFace: plane });
           if (sk.error) { peet.apply({ op: "delete", features: [plane, plane + " turned"] }); return; }
-          o.native = { plane, sketch: sk.name };
+          o.native = { plane, sketch: sk.name, sk };
           outlined.push(plane, plane + " turned", sk.name);
         });
         const withOutline = o => o.native ? { outline: o.native.sketch } : {};
@@ -2012,6 +2012,8 @@ function importPart(doc, dir) {
         }
         if (built.ok && outlined.length) {
           built.names.push(...outlined.filter(n => peet.ask({ op: "feature", feature: n }).ok));
+          // Its dimensions take each configuration's values, as a sketch's do
+          for (const o of ops) if (o.native && !sketches.has(o.outline.sketch.name)) sketches.set(o.outline.sketch.name, o.native.sk);
           // Made to its outline, so the stand-in's notes do not apply
           for (let k = notes.length - 1; k >= 0; k--) if (/its outline reaches further/.test(notes[k])) notes.splice(k, 1);
           if (!ops.some(o => o.outline && !o.native)) built.warning = notes.length ? [...new Set(notes)].join("; ") : built.warning;
