@@ -17,6 +17,11 @@
 //! its target. So the constraints hold exactly, the dragged geometry gets as close to the
 //! cursor as they allow, and everything else moves as little as possible.
 //!
+//! A dimension given a new value in a sketch that is not fully defined moves the geometry
+//! the way SolidWorks does: what the most relations and dimensions hold stays put, and the
+//! rest moves (`solve_holding_still`). Only failing that is the change spread by least
+//! squares.
+//!
 //! If a cluster cannot be solved, or the "solution" collapses a curve to nothing (the least
 //! squares escape of conflicting constraints), its geometry is left as it was, so a
 //! conflicting edit never scrambles the sketch. [`Solver::analyze`] then explains which constraints clash
@@ -360,6 +365,34 @@ impl Solver {
             st.drag_problems.clear();
         }
 
+        // The geometry each variable is part of: a point's two coordinates go together.
+        let mut group: Vec<u32> = (0..st.n_vars as u32).collect();
+        for class in &st.classes {
+            if class.slot != NONE && (class.slot as usize + 1) < st.n_vars {
+                group[class.slot as usize + 1] = class.slot;
+            }
+        }
+        // How many equations each point (or radius) takes part in, over the whole sketch.
+        let mut held_by = vec![0usize; st.n_vars];
+        for eq in &eqs[..n_hard] {
+            let mut seen: Vec<u32> = Vec::new();
+            for &s in &eq.slots {
+                if s != NONE && (s as usize) < st.n_vars && !seen.contains(&group[s as usize]) {
+                    seen.push(group[s as usize]);
+                    held_by[group[s as usize] as usize] += 1;
+                }
+            }
+        }
+        // Which equations are dimensions'.
+        let dimensions: Vec<bool> = eqs[..n_hard]
+            .iter()
+            .map(|eq| match eq.owner {
+                Owner::Constraint(c) => sketch
+                    .constraint(ConstraintId(c))
+                    .is_some_and(|c| c.dimension.is_some()),
+                _ => false,
+            })
+            .collect();
         let mut keep = vec![false; st.n_vars];
         let mut iterations = 0;
         let mut saved = Vec::new();
@@ -392,9 +425,26 @@ impl Solver {
                 )
             });
             let converged = if soft.is_empty() {
-                let outcome = problem.solve(eqs, vals, HARD);
-                iterations += outcome.iterations;
-                outcome.converged
+                let still = solve_holding_still(
+                    &cluster.vars,
+                    &cluster.eqs,
+                    &group,
+                    &held_by,
+                    &dimensions,
+                    |vals| {
+                        st.sizes.iter().any(|size| {
+                            size.eval(vals) < COLLAPSED && size.eval(&initial) >= 100.0 * COLLAPSED
+                        })
+                    },
+                    eqs,
+                    vals,
+                );
+                iterations += still.1;
+                still.0 || {
+                    let outcome = problem.solve(eqs, vals, HARD);
+                    iterations += outcome.iterations;
+                    outcome.converged
+                }
             } else {
                 let mut key = Vec::with_capacity(soft.len() * 2);
                 for &e in soft {
@@ -460,6 +510,74 @@ impl Solver {
         report.unsatisfied = unsatisfied.into_iter().map(ConstraintId).collect();
         report
     }
+}
+
+/// Solves a cluster that a changed value left unsatisfied the way SolidWorks does: the
+/// geometry held by the most constraints stays where it is and the rest moves. A
+/// rectangle with its width and height dimensioned from one corner keeps that corner, and
+/// a new width moves the side across from it, not both sides half way.
+///
+/// Points (and radii) are ranked by how many of the sketch's equations they take part in
+/// (`held_by`, by the first slot of each, which `group` gives). Those of the top rank are held still and the rest solved for; if that works, the
+/// next rank is held as well, and so on while it still works. Returns whether any of it
+/// worked (the values are then the last solution found; otherwise they are as they were)
+/// and the iterations used. A fully defined cluster comes out where it would anyway.
+fn solve_holding_still(
+    vars: &[u32],
+    cluster_eqs: &[u32],
+    group: &[u32],
+    held_by: &[usize],
+    dimensions: &[bool],
+    collapsed: impl Fn(&[f64]) -> bool,
+    eqs: &[Eq],
+    vals: &mut [f64],
+) -> (bool, usize) {
+    // Only where what is unsatisfied is dimensions, given new values: geometry moved out
+    // of its relations is put back the least distance, as before.
+    let changed = |e: &u32| eqs[*e as usize].residual(vals).abs() > SKIP;
+    if !cluster_eqs
+        .iter()
+        .filter(|e| changed(e))
+        .all(|&e| dimensions[e as usize])
+    {
+        return (false, 0);
+    }
+    let score = |v: u32| held_by[group[v as usize] as usize];
+    let mut ranks: Vec<usize> = vars.iter().map(|&v| score(v)).collect();
+    ranks.sort_unstable_by(|a, b| b.cmp(a));
+    ranks.dedup();
+    let start: Vec<f64> = vars.iter().map(|&v| vals[v as usize]).collect();
+    let mut found: Option<Vec<f64>> = None;
+    let mut iterations = 0;
+    // Holding every rank still leaves nothing to solve for.
+    for &rank in ranks.iter().take(ranks.len().saturating_sub(1)) {
+        for (&v, &x) in vars.iter().zip(&start) {
+            vals[v as usize] = x;
+        }
+        let free: Vec<u32> = vars.iter().copied().filter(|&v| score(v) < rank).collect();
+        let free_set: std::collections::HashSet<u32> = free.iter().copied().collect();
+        let (moving, held): (Vec<u32>, Vec<u32>) = cluster_eqs
+            .iter()
+            .partition(|&&e| eqs[e as usize].slots.iter().any(|s| free_set.contains(s)));
+        if held
+            .iter()
+            .any(|&e| eqs[e as usize].residual(vals).abs() > SKIP)
+        {
+            break;
+        }
+        let mut problem = Problem::new(free, moving, eqs, Space::Equations);
+        let outcome = problem.solve(eqs, vals, HARD);
+        iterations += outcome.iterations;
+        if !outcome.converged || collapsed(vals) {
+            break;
+        }
+        found = Some(vars.iter().map(|&v| vals[v as usize]).collect());
+    }
+    let solved = found.is_some();
+    for (&v, &x) in vars.iter().zip(found.as_ref().unwrap_or(&start)) {
+        vals[v as usize] = x;
+    }
+    (solved, iterations)
 }
 
 /// Drags one cluster: alternates a linearised step towards the soft targets (phase a) with

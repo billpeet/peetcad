@@ -126,6 +126,16 @@ etch or cut out a label, `extrude` it to emboss one. Put the sketch on the face 
 - Geometry is drawn where you put it and a sketch need not be fully defined: an
   `under_defined` sketch builds as drawn. Add dimensions to what must stay exact or
   follow a parameter.
+- **Which way a new value moves an under-defined sketch:** as SolidWorks, what the most
+  relations and dimensions hold stays put and the rest moves. Width and height measured
+  from one corner of a rectangle: a new width moves the far side, and the corner stays.
+  To choose what stays, tie it down (`coincident` with `"origin"`, or a dimension to it).
+
+```jsonl
+{"op": "sketch", "on": "top", "name": "Plate", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 20], "as": "r"}, {"type": "horizontal_distance", "of": ["r.top.end", "r.top.start"], "value": 40, "name": "width"}, {"type": "vertical_distance", "of": ["r.top.start", "r.right.start"], "value": 20, "name": "height"}]}
+{"op": "set_dimension", "sketch": "Plate", "name": "width", "value": 60}
+{"op": "feature", "feature": "Plate"}
+```
 - The reply's `definition` must not be `over_defined`: that is two relations or
   dimensions that contradict each other (the sketch's status is then `warning`). Take
   one out with `{"type": "remove", "dimensions": ["d2"]}` (or `"relations": [ids]`; the
@@ -159,8 +169,10 @@ Straight edges project unless viewed end-on. Circular edges project parallel to 
 sketch plane (to an arc or circle) or seen edge-on (to the line they cover: a bend's
 end seen from the sheet, for a distance to where the bend starts); tilted circles,
 ellipses and freeform edges are refused. Pick supported
-edges individually when a face includes an unsupported boundary. A missing source
-fails the sketch; suppression of a source suppresses its dependent sketches. Replace
+edges individually when a face includes an unsupported boundary. What is projected
+from something suppressed or gone stays where it was, with a warning, as SolidWorks
+leaves a dangling relation: the sketch is not suppressed with it (one drawn on a
+suppressed face is). Replace
 a projection with `delete` of its entity id, then project the replacement and recreate
 its relations. Use `feature` to inspect `projections`, locked entities, and failures.
 

@@ -355,6 +355,58 @@ fn dimensions() {
     assert!((circ(&s, a).1 - 6.0).abs() < 1e-9);
 }
 
+/// A rectangle whose width and height are both measured from its top right corner, and
+/// nothing else: a new width moves the left side, as SolidWorks does, and the corner the
+/// dimensions share stays put. The same for a new height and the bottom.
+#[test]
+fn a_changed_dimension_moves_what_less_holds() {
+    let mut s = Sketch::new();
+    let shape = shapes::rectangle(&mut s, v(0.0, 0.0), v(30.0, 20.0));
+    let [bottom, right, top, _] = [
+        shape.curves[0],
+        shape.curves[1],
+        shape.curves[2],
+        shape.curves[3],
+    ];
+    let (top_right, top_left) = pts(&s, top);
+    let (bottom_right, _) = pts(&s, right);
+    let bottom_left = pts(&s, bottom).0;
+    let width = dim!(s, K::HorizontalDistance(top_left, top_right), 30.0);
+    let height = dim!(s, K::VerticalDistance(top_right, bottom_right), 20.0);
+    assert_solved(&mut s);
+    s.constraint_mut(width)
+        .unwrap()
+        .dimension
+        .as_mut()
+        .unwrap()
+        .value = 40.0;
+    assert_solved(&mut s);
+    assert!(
+        s.point(top_right).distance(v(30.0, 20.0)) < 1e-9,
+        "{:?}",
+        s.point(top_right)
+    );
+    assert!(s.point(bottom_right).distance(v(30.0, 0.0)) < 1e-9);
+    assert!(
+        s.point(top_left).distance(v(-10.0, 20.0)) < 1e-9,
+        "{:?}",
+        s.point(top_left)
+    );
+    s.constraint_mut(height)
+        .unwrap()
+        .dimension
+        .as_mut()
+        .unwrap()
+        .value = 50.0;
+    assert_solved(&mut s);
+    assert!(s.point(top_right).distance(v(30.0, 20.0)) < 1e-9);
+    assert!(
+        s.point(bottom_left).distance(v(-10.0, -30.0)) < 1e-9,
+        "{:?}",
+        s.point(bottom_left)
+    );
+}
+
 #[test]
 fn signs_are_kept() {
     let mut s = Sketch::new();

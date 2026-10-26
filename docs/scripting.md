@@ -254,13 +254,21 @@ profile geometry; `face` projects every boundary edge, addressed as `label.0`, e
 Vertices project to points and planes to their intersection line with the sketch.
 Straight edges and circles/arcs parallel to the sketch plane are supported; a circle or
 arc seen edge-on (its plane square to the sketch's) projects to the line it covers. Parallel
-planes, collapsed edges and other projected curve types fail with a diagnostic.
+planes, collapsed edges and other projected curve types fail with a diagnostic. A
+projection whose source is suppressed (in a configuration, say) or gone stays where it
+was and the sketch gets a warning, as SolidWorks leaves a dangling relation; the sketch
+is not suppressed with its source unless it is drawn on it.
 Relations and dimensions use the projected ids like other sketch entities. Delete a
 projection by its root entity id to remove its source and attached relations.
 The `feature` query returns `projections` and marks reference entities `locked`.
 The application adds the supporting face's boundary references when opening a sketch
 for editing, so Smart Dimension and relations can select its edges and corners.
 Scripts obtain those references with an explicit `project` item.
+
+A new dimension value (`set_dimension`, a parameter, a configuration) moves an
+under-defined sketch as SolidWorks does: the points held by the most relations and
+dimensions stay put and the rest moves; only if that can't satisfy the sketch is the
+change spread over everything by least squares.
 
 `collinear` creates parallel plus point-on-line relations; `coradial` creates concentric
 plus equal-radius relations. Each returns both relation ids. `doubled_distance` is twice
