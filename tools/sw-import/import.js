@@ -87,7 +87,10 @@ function withBlocks(sketch) {
   if (!sketch || !sketch.blocks || !sketch.blocks.some(b => (b.segments || []).length)) return sketch;
   const segments = [...sketch.segments];
   sketch.blocks.forEach((block, k) => (block.segments || []).forEach((g, i) => segments.push({ ...inBlock(block, g), id: ["block" + k, i] })));
-  return { ...sketch, segments, blockInstances: 0, blocksDrawn: sketch.blocks.length };
+  // Its points too (its origin, say), which relations and dimensions go to
+  const points = [...sketch.points];
+  sketch.blocks.forEach((block, k) => (block.points || []).forEach((p, i) => points.push({ ...inBlock(block, p), id: ["block" + k, i] })));
+  return { ...sketch, segments, points, blockInstances: 0, blocksDrawn: sketch.blocks.length };
 }
 /** A point or segment of a block's definition where the block instance puts it in its sketch. */
 function inBlock(block, g) {
@@ -246,6 +249,10 @@ function importPart(doc, dir) {
       if (c === config) report.notes.push(`${x.name} fails to rebuild in SolidWorks (error ${x.errorCode}) and is not in its body: it is taken as suppressed here.`);
     }
   }
+  // The features suppressed in some configuration, and so PeetCAD's features that stand for them
+  const sometimesOff = new Set();
+  for (const c of doc.configurations) (function walk(list) { for (const x of list || []) { if (x.suppressed) sometimesOff.add(x.name); walk(x.sub); } })(c.features);
+  const switched = { has: name => !!name && [...sometimesOff].some(n => name === n || name.startsWith(n + " ")) };
   /** A configuration's features by name, sub-features included. */
   const flatten = c => { const m = new Map(); (function walk(list) { for (const x of list || []) { if (!m.has(x.name)) m.set(x.name, x); walk(x.sub); } })(c.features); return m; };
   // The configuration being imported from: the active one first, then each other one for the features
@@ -515,7 +522,10 @@ function importPart(doc, dir) {
       const mine = byId.get(e.id.join("."));
       // A point at the origin that is not one of the sketch's own is the origin itself, which SolidWorks
       // does not list among a sketch's points
-      if (!mine && e.x !== undefined && Math.abs(e.x) < 1e-12 && Math.abs(e.y) < 1e-12) return originOk ? "origin" : undefined;
+      // (A block's point at its own origin is given there too: it is found where the block puts it.)
+      const atZero = e.x !== undefined && Math.abs(e.x) < 1e-12 && Math.abs(e.y) < 1e-12;
+      if (atZero && (s.blocks || []).some(b => (b.points || []).some(q => q.id.join(".") === e.id.join(".") && Math.abs(q.x) < 1e-12 && Math.abs(q.y) < 1e-12))) return undefined;
+      if (!mine && atZero) return originOk ? "origin" : undefined;
       const p = e.x !== undefined ? e : mine;   // the first export has ids only
       return p ? points.get(spot(p)) : undefined;
     };
@@ -550,7 +560,13 @@ function importPart(doc, dir) {
     const project = d => {
       if (!d) return undefined;
       let item = null;
-      if (d.kind === "edge" && d.curve === "line" && d.start && d.end) item = { type: "project", edge: { at: mid(mm(d.start), mm(d.end)).map(tidy) } };
+      if (d.kind === "edge" && d.curve === "line" && d.start && d.end) {
+        // The edge with SolidWorks' ends if PeetCAD has one (a midpoint or an end of it is then the
+        // same), else the one through the middle of SolidWorks'
+        const whole = projectItem({ type: "project", edge: { between: [mm(d.start).map(tidy), mm(d.end).map(tidy)] } });
+        if (whole && whole.id !== undefined) return whole;
+        item = { type: "project", edge: { at: mid(mm(d.start), mm(d.end)).map(tidy) } };
+      }
       else if (d.kind === "edge" && d.curve === "circle" && d.start && d.end && d.circle) {
         // An arc (a bend's end), found by the middle of it
         const c = mm(d.circle.slice(0, 3)), r = d.circle[6] * MM;
@@ -569,7 +585,16 @@ function importPart(doc, dir) {
     // projected. Its copy is where the edge is seen from the sketch, so the edge may be off the sketch's plane.
     let edgesNow = null;
     const flat = p => { const d = sub(p, pf.o); return [dot(d, pf.x), dot(d, pf.y), dot(d, pf.n)]; };
-    const modelEdges = () => edgesNow || (edgesNow = (peet.ask({ op: "edges" }).edges || []).map(e => ({ ...e, a: flat(e.from), b: flat(e.to), m: flat(e.middle) })));
+    // Not an edge of a feature that is suppressed in some configuration: the sketch would lose it there,
+    // where SolidWorks' copy stays where it was
+    const modelEdges = () => {
+      if (edgesNow) return edgesNow;
+      const unsure = new Set();
+      for (const face of peet.ask({ op: "faces" }).faces || []) if ((face.made_by || []).some(m => switched.has(m.feature))) unsure.add(face.body + "|" + face.index);
+      edgesNow = (peet.ask({ op: "edges" }).edges || []).filter(e => !(e.faces || []).some(i => unsure.has(e.body + "|" + i)))
+        .map(e => ({ ...e, a: flat(e.from), b: flat(e.to), m: flat(e.middle) }));
+      return edgesNow;
+    };
     const hidden = e => {
       const near = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
       let best = null, item = null;
@@ -584,6 +609,12 @@ function importPart(doc, dir) {
         const off = q => Math.abs(d[0] * (q[1] - s0[1]) - d[1] * (q[0] - s0[0])) / l;
         const along = q => ((q[0] - s0[0]) * d[0] + (q[1] - s0[1]) * d[1]) / l;
         for (const x of modelEdges()) {
+          // A circular edge seen edge on (a shaft's end seen from its side) covers a line: taken where no
+          // straight edge does
+          if (x.curve === "circle" && off(x.a) < 1e-3 && off(x.m) < 1e-3 && near(x.a, x.m) > 1e-6) {
+            consider(1e6 + Math.abs(x.m[2]), { type: "project", edge: { at: x.middle } });
+            continue;
+          }
           if (x.curve !== "line" || Math.hypot(x.a[0] - x.b[0], x.a[1] - x.b[1]) < 1e-6) continue;
           if (off(x.a) > 1e-3 || off(x.b) > 1e-3 || Math.abs(x.a[2] - x.b[2]) > 1e-3) continue;
           // Over the copy (or part of it), the nearest to the sketch first, then the one whose ends are the copy's
@@ -655,7 +686,14 @@ function importPart(doc, dir) {
       }
       let outside = [];
       let lost = false;
-      for (const d of r.defined || []) { const p = project(d); if (p && p.id !== undefined) outside.push(p); else lost = true; }
+      for (const d of r.defined || []) {
+        const p = project(d);
+        if (p && p.id !== undefined) {
+          outside.push(p);
+          // A vertex where the sketch sees it, in the sketch's own coordinates (metres)
+          if (p.point && d.point) { const q = sub(mm(d.point), sf.o); seen.push({ id: p.id, e: { x: dot(q, sf.x) / MM, y: dot(q, sf.y) / MM } }); }
+        } else lost = true;
+      }
       // The hidden copies stand for what the relation is defined by where the export has nothing for it, or
       // where what it has could not be projected
       if (copies.length && (!r.defined || (lost && copies.length === r.defined.length))) {
@@ -785,8 +823,9 @@ function importPart(doc, dir) {
         case "distance": {
           if (!dim) break;
           const value = tidy(dim.value * MM);
-          const two = [...pts, ...seen];
-          if (two.length === 2 && outside.length === seen.length) {
+          // The two points measured between: the sketch's own, vertices', and circles' centres
+          const two = [...pts, ...seen, ...rounds.filter(g => g.center !== undefined && g.g.center).map(g => ({ id: g.center, e: g.g.center }))];
+          if (two.length === 2 && anyPoints.length + rounds.length === 2 && anyLines.length === 0) {
             // Between two points SolidWorks measures along x, along y or straight, and the export does not
             // say which: it is the one whose size the points are apart
             const dx = Math.abs(two[0].e.x - two[1].e.x), dy = Math.abs(two[0].e.y - two[1].e.y), v = dim.value;
@@ -803,7 +842,8 @@ function importPart(doc, dir) {
           else if (anyPoints.length === 1 && anyLines.length === 1) item = { type: "distance", of: [anyPoints[0], anyLines[0]], value };
           else if (lines.length === 2) item = { type: "distance", of: [lines[0].start, lines[1].id], value };
           else if (lines.length === 1 && outLines.length === 1) item = { type: "distance", of: [lines[0].start, outLines[0]], value };
-          else if (lines.length === 1 && all.length === 1) item = { type: "length", of: [lines[0].id], value };
+          // A line's length: the dimension ties that line alone (not a line and something not found)
+          else if (lines.length === 1 && all.length === 1 && (r.entities || []).length === 1) item = { type: "length", of: [lines[0].id], value };
           break;
         }
       }
