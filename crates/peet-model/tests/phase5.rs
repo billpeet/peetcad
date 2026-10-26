@@ -273,7 +273,11 @@ fn pattern_of_a_cut_that_runs_off_its_flange() {
     let whole = p.volume();
     let top = p.on_face(DVec3::Z, DVec3::new(50.0, 30.0, T));
     let slot = sketch_at(&mut p, top, |s, to| {
-        shapes::rectangle(s, to(DVec3::new(10.0, 50.0, T)), to(DVec3::new(14.0, 90.0, T)));
+        shapes::rectangle(
+            s,
+            to(DVec3::new(10.0, 50.0, T)),
+            to(DVec3::new(14.0, 90.0, T)),
+        );
     });
     let cut = p.model.add_sheet_cut(slot);
     p.rebuild();
