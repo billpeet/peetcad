@@ -680,6 +680,10 @@ function importPart(doc, dir) {
       }
       return item ? projectItem(item) : undefined;
     };
+    // A point of SolidWorks' that is not the sketch's own is a model vertex its relation refers to (Battery
+    // Bracket's Sketch8 measures its flange's height from the far corner of the flange's edge): it is
+    // projected from where it is, if the model has a vertex there
+    const vertexAt = e => e && e.x !== undefined ? projectItem({ type: "project", vertex: { at: fromSketch(sf, e).map(tidy) } }) : undefined;
 
     const dimensions = new Map((f.dimensions || []).map(d => [d.fullName, d]));
     const byEquation = new Set((cur.equations || []).filter(e => !e.disabled).map(e => (/^\s*"([^"]+@[^"]+)"\s*=/.exec(e.expression) || [])[1]).filter(Boolean));
@@ -919,7 +923,7 @@ function importPart(doc, dir) {
     // A relation PeetCAD makes of more than one (`with`) is kept or dropped as one
     const clean = item => { const { sw, supplementary, with: also, ...rest } = item; return [rest, ...(also || [])]; };
     const keep = item => {
-      tally.kept++;
+      if (!item.also) tally.kept++;
       if (item.sw) sk.dimensions.set(item.sw, item.name);
       if (item.sw && item.supplementary) (sk.supplementary || (sk.supplementary = new Set())).add(item.sw);
     };
@@ -936,7 +940,7 @@ function importPart(doc, dir) {
         mark = save();
         const reply = peet.apply({ op: "draw", sketch: name, draw: clean(item) });
         if (fits(reply)) keep(item);
-        else { restore(mark); drop(`${item.type}: ${!reply.ok ? "refused" : reply.definition === "over_defined" ? "over-defines the sketch" : "moves the sketch"}`); }
+        else { restore(mark); if (!item.also) drop(`${item.type}: ${!reply.ok ? "refused" : reply.definition === "over_defined" ? "over-defines the sketch" : "moves the sketch"}`); }
       }
     }
     if (fs.existsSync(backup)) fs.unlinkSync(backup);
@@ -3781,10 +3785,14 @@ function importPart(doc, dir) {
         const before = report.features.length;
         const had = new Set(made.keys());
         for (const f of other.features) {
+          // A feature between an Unfold and its Fold is cut in the flat here too (Top Hat's Cut-Extrude2)
+          if (!f.suppressed && f.type === "UnFold") unfolded = values(f).FixedFace || {};
+          if (!f.suppressed && f.type === "Fold") unfolded = null;
           if (f.suppressed || STRUCTURE.test(f.type) || f.type === "SheetMetal" || f.type === "RefPlane" || made.has(f.name) || sketches.has(f.name)) continue;
           if (report.features.some(x => x.name === f.name && x.result !== "suppressed" && x.result !== LATER)) continue;   // tried already, where it was live
           handle(f);
         }
+        unfolded = null;
         // What was imported here is suppressed in the active configuration now, where SolidWorks has it
         // suppressed: the configurations still to come are copies of it, and are not rebuilt with it there
         // (Top Hat's Edge-Flange3, whose outline turns inside out where its edge is short)

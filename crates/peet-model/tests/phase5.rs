@@ -261,6 +261,52 @@ fn dimples_from_a_sketch() {
 }
 
 #[test]
+fn pattern_of_a_cut_that_runs_off_its_flange() {
+    // A slot drawn on the plate that runs past its edge, over the bend and into the
+    // flange in the flat pattern, as a cut made with the part unfolded does. Its middle is
+    // off the plate, as are its copies': each copy cuts what the original does.
+    let (mut p, _) = plate();
+    let e = edge(&p, DVec3::new(0.0, H, T), DVec3::new(W, H, T));
+    p.model.add_edge_flange(Some(e));
+    p.rebuild();
+    p.assert_ok();
+    let whole = p.volume();
+    let top = p.on_face(DVec3::Z, DVec3::new(50.0, 30.0, T));
+    let slot = sketch_at(&mut p, top, |s, to| {
+        shapes::rectangle(
+            s,
+            to(DVec3::new(10.0, 50.0, T)),
+            to(DVec3::new(14.0, 90.0, T)),
+        );
+    });
+    let cut = p.model.add_sheet_cut(slot);
+    p.rebuild();
+    p.assert_ok();
+    let one = whole - p.volume();
+    assert!(one > 4.0 * 10.0 * T, "{one}");
+    let pattern = p.model.add_pattern(
+        vec![cut],
+        PatternDef::Linear {
+            first: LinearDirection {
+                direction: AxisRef::Standard(StdAxis::X),
+                spacing: Scalar::new(20.0),
+                count: Scalar::new(3.0),
+                flip: false,
+            },
+            second: None,
+        },
+    );
+    p.rebuild();
+    p.assert_ok();
+    assert!(
+        matches!(p.status(pattern), Status::Ok),
+        "{:?}",
+        p.status(pattern)
+    );
+    assert_close(whole - p.volume(), 3.0 * one);
+}
+
+#[test]
 fn pattern_and_mirror_of_sheet_cuts() {
     let (mut p, _) = plate();
     let top = p.on_face(DVec3::Z, DVec3::new(50.0, 30.0, T));
