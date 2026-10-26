@@ -105,7 +105,8 @@ pub enum DofStatus {
     Under,
     /// Fully defined: shown in black/white.
     Fully,
-    /// Involved in redundant or conflicting constraints: shown in red.
+    /// Involved in conflicting constraints: shown in red. (Redundant ones don't make
+    /// geometry over-defined.)
     Over,
 }
 
@@ -159,14 +160,26 @@ impl Analysis {
             .unwrap_or_default()
     }
 
-    /// True if nothing can move and nothing clashes.
+    /// True if nothing can move and nothing conflicts. Redundant constraints don't
+    /// count against it.
     pub fn is_fully_defined(&self) -> bool {
-        self.dof == 0 && self.diagnoses.is_empty()
+        self.dof == 0 && !self.is_over_defined()
     }
 
-    /// True if any constraint is redundant or conflicting.
+    /// True if any constraint conflicts with others. As in SolidWorks, a constraint
+    /// that is redundant (implied by the others, and satisfied) does not over-define the
+    /// sketch: it is accepted, adds nothing, and is listed in [`Analysis::diagnoses`] so
+    /// it can be cleaned up.
     pub fn is_over_defined(&self) -> bool {
-        !self.diagnoses.is_empty()
+        self.conflicts() > 0
+    }
+
+    /// How many constraints conflict with others.
+    pub fn conflicts(&self) -> usize {
+        self.diagnoses
+            .iter()
+            .filter(|d| d.status == ConstraintStatus::Conflicting)
+            .count()
     }
 }
 

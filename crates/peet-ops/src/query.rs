@@ -280,8 +280,23 @@ fn sketch_detail(doc: &Document, sketch: &Sketch) -> (Vec<Value>, Vec<Value>, Ve
     let mut dimensions = Vec::new();
     for (id, c) in sketch.constraints() {
         let of: Vec<u32> = c.kind.entities().iter().map(|e| e.0).collect();
+        // Implied by the others (accepted, adds nothing), or contradicting them.
+        let status = match analysis.constraint_status(id) {
+            peet_sketch::solver::ConstraintStatus::Ok => None,
+            peet_sketch::solver::ConstraintStatus::Redundant => Some("redundant"),
+            peet_sketch::solver::ConstraintStatus::Conflicting => Some("conflicting"),
+        };
         match &c.dimension {
-            None => relations.push(json!({ "id": id.0, "type": c.kind.label(), "of": of })),
+            None => {
+                let mut m = Map::new();
+                m.insert("id".to_owned(), json!(id.0));
+                m.insert("type".to_owned(), json!(c.kind.label()));
+                m.insert("of".to_owned(), json!(of));
+                if let Some(status) = status {
+                    m.insert(status.to_owned(), json!(true));
+                }
+                relations.push(Value::Object(m));
+            }
             Some(d) => {
                 let value = if c.kind.is_angular() {
                     json!(round(d.value))
@@ -298,6 +313,9 @@ fn sketch_detail(doc: &Document, sketch: &Sketch) -> (Vec<Value>, Vec<Value>, Ve
                 }
                 if !d.driving {
                     m.insert("driven".to_owned(), json!(true));
+                }
+                if let Some(status) = status {
+                    m.insert(status.to_owned(), json!(true));
                 }
                 dimensions.push(Value::Object(m));
             }

@@ -1149,6 +1149,25 @@ fn what_the_skills_say_about_operations_is_true() {
     assert_eq!(ran.replies[1]["feature"]["status"], "ok");
     assert!(ran.replies[2]["error"].as_str().unwrap().contains("d9"));
 
+    // A relation the others already imply is accepted, as in SolidWorks: the sketch is
+    // as defined as it was, and the relation is marked redundant.
+    let ran = peet_with(
+        &["run", "-q"],
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [80, 50], "as": "r"}, {"type": "coincident", "of": ["r.bottom.start", "origin"]}, {"type": "length", "of": ["r.bottom"], "value": 80}, {"type": "length", "of": ["r.left"], "value": 50}, {"type": "equal", "of": ["r.bottom", "r.top"]}]}
+{"op": "feature", "feature": "Sketch1"}
+"#,
+    );
+    assert_eq!(ran.code, OK, "{}", ran.err);
+    assert_eq!(ran.replies[0]["definition"], "fully_defined");
+    assert_eq!(ran.replies[0]["created"][0]["status"], "ok");
+    let relations = ran.replies[1]["relations"].as_array().unwrap();
+    let redundant: Vec<&Value> = relations
+        .iter()
+        .filter(|r| r["redundant"] == true)
+        .collect();
+    assert_eq!(redundant.len(), 1, "{relations:?}");
+    assert_eq!(redundant[0]["type"], "Equal");
+
     // A flange on an edge of the top face goes up; on one of the bottom face, down.
     let ran = peet_with(
         &["run", "-q"],

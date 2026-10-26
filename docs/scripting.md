@@ -266,6 +266,11 @@ Scripts obtain those references with an explicit `project` item.
 plus equal-radius relations. Each returns both relation ids. `doubled_distance` is twice
 the perpendicular distance from a point to a line, with its own editable dimension name.
 
+A relation or dimension that the others already imply is accepted, as in SolidWorks: the
+sketch stays `under_defined` or `fully_defined`, and the `feature` query marks it
+`redundant`. Only relations and dimensions that contradict each other make a sketch
+`over_defined`; the `feature` query marks those `conflicting`.
+
 A spline passes through its points and has no other shape of its own: its points take
 `coincident`, `fix` and dimensions like a line's ends, and moving them moves the curve.
 There are no tangent handles yet, and a spline takes no `tangent` relation; nothing can

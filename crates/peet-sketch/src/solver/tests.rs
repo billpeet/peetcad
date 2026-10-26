@@ -909,7 +909,9 @@ fn coincident_cycle_is_redundant() {
     assert_eq!(d.constraint, ac);
     assert_eq!(d.status, ConstraintStatus::Redundant);
     assert_eq!(d.involved, vec![ab, bc]);
-    assert_eq!(an.entity_status(a), DofStatus::Over);
+    // Redundant, not conflicting: the sketch is not over-defined (as in SolidWorks).
+    assert_eq!(an.entity_status(a), DofStatus::Under);
+    assert!(!an.is_over_defined());
 }
 
 #[test]
@@ -931,8 +933,43 @@ fn identical_horizontals_are_redundant() {
     );
     assert_eq!(an.constraint_status(h1), ConstraintStatus::Ok);
     assert_eq!(an.constraint_status(h2), ConstraintStatus::Redundant);
-    assert_eq!(an.entity_status(l), DofStatus::Over);
+    assert_eq!(an.entity_status(l), DofStatus::Under);
+    assert!(!an.is_over_defined());
+}
+
+#[test]
+fn a_redundant_relation_leaves_a_fully_defined_sketch_fully_defined() {
+    // A fixed square, then an equal relation its horizontals and verticals already
+    // imply. SolidWorks accepts it and calls the sketch fully defined; so does PeetCAD.
+    let mut s = Sketch::new();
+    let shape = crate::shapes::rectangle(&mut s, v(0.0, 0.0), v(20.0, 10.0));
+    let [bottom, right, top, left] = [shape.curves[0], shape.curves[1], shape.curves[2], shape.curves[3]];
+    let corner = pts(&s, bottom).0;
+    add!(s, K::Coincident(corner, Sketch::ORIGIN));
+    dim!(s, K::Length(bottom), 20.0);
+    dim!(s, K::Length(left), 10.0);
+    assert_solved(&mut s);
+    assert!(dof_of(&s).is_fully_defined());
+    let eq = add!(s, K::Equal(bottom, top));
+    assert_solved(&mut s);
+    let an = dof_of(&s);
+    assert_eq!(an.dof, 0);
+    assert!(an.is_fully_defined(), "{:?}", an.diagnoses);
+    assert_eq!(an.constraint_status(eq), ConstraintStatus::Redundant);
+    assert_eq!(an.conflicts(), 0);
+    for e in [bottom, right, top, left] {
+        assert_eq!(an.entity_status(e), DofStatus::Fully);
+    }
+
+    // A length on the top that disagrees with the bottom's conflicts.
+    let mut s2 = s.clone();
+    let wrong = dim!(s2, K::Length(top), 25.0);
+    let mut solver = Solver::new();
+    assert!(!solver.solve(&mut s2).converged);
+    let an = solver.analyze(&s2);
     assert!(an.is_over_defined());
+    assert_eq!(an.constraint_status(wrong), ConstraintStatus::Conflicting);
+    assert_eq!(an.entity_status(top), DofStatus::Over);
 }
 
 #[test]

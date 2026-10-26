@@ -409,7 +409,7 @@ impl SketchEditor {
         }
     }
 
-    /// Applies an edit, then solves. If the result is over defined or can't be solved,
+    /// Applies an edit, then solves. If the result conflicts or can't be solved,
     /// the edit is rolled back and the user is told which constraints clash.
     ///
     /// `what` names the change for messages ("Horizontal", "Trim").
@@ -420,7 +420,9 @@ impl SketchEditor {
         edit: impl FnOnce(&mut Sketch) -> Result<T, String>,
     ) -> Option<T> {
         let before = item.sketch.clone();
-        let previous_diagnoses = self.analysis.diagnoses.len();
+        // A relation the others already imply is accepted, as SolidWorks does; one that
+        // conflicts is not.
+        let previous_conflicts = self.analysis.conflicts();
         let degenerate_before = degenerate_curves(&before);
         let result = match edit(&mut item.sketch) {
             Ok(r) => r,
@@ -434,7 +436,7 @@ impl SketchEditor {
         let report = self.solver.solve(&mut item.sketch);
         let analysis = self.solver.analyze(&item.sketch);
         let ms = peet_platform::elapsed_ms(start);
-        if !report.converged || analysis.diagnoses.len() > previous_diagnoses {
+        if !report.converged || analysis.conflicts() > previous_conflicts {
             let explanation = self.explain_problem(&item.sketch, &analysis, &report);
             item.sketch = before;
             self.resolve(item);

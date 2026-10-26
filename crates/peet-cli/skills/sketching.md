@@ -130,6 +130,17 @@ etch or cut out a label, `extrude` it to emboss one. Put the sketch on the face 
   dimensions that contradict each other (the sketch's status is then `warning`). Take
   one out with `{"type": "remove", "dimensions": ["d2"]}` (or `"relations": [ids]`; the
   ids are in the reply that made them and in `peet feature`).
+- A relation or dimension that the others already imply (an `equal` on a rectangle's
+  opposite sides) is accepted, as in SolidWorks: it holds, adds nothing, and leaves the
+  sketch `under_defined` or `fully_defined` as it was. `peet feature` marks it
+  `"redundant": true`, and one that contradicts the others `"conflicting": true`. A
+  redundant dimension becomes a conflict as soon as its value disagrees, so don't give
+  one a value of its own: make it `"driven": true`, or leave it out.
+
+```jsonl
+{"op": "sketch", "on": "top", "name": "Plate", "draw": [{"type": "rectangle", "from": [0, 0], "to": [80, 50], "as": "r"}, {"type": "coincident", "of": ["r.bottom.start", "origin"]}, {"type": "length", "of": ["r.bottom"], "value": 80}, {"type": "length", "of": ["r.left"], "value": 50}, {"type": "equal", "of": ["r.bottom", "r.top"]}]}
+{"op": "feature", "feature": "Plate"}
+```
 
 ## Editing what is drawn
 

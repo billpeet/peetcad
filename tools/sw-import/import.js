@@ -572,6 +572,9 @@ function importPart(doc, dir) {
       const anyLines = [...lines.map(l => l.id), ...outLines], anyPoints = [...pts.map(p => p.id), ...outPoints];
       const all = [...anyPoints, ...segs.map(g => g.id), ...outLines];
       const dim = r.dimension && dimensions.get(r.dimension);
+      // Two things SolidWorks ties that are one in PeetCAD's sketch (ends the importer joined when it drew
+      // them, or a line SolidWorks lists twice) are tied already
+      if (!dim && all.length === 2 && all[0] === all[1] && /^(coincident|colinear|useedge|parallel|samelength|concentric|coradial|horizontal|vertical|horizpoints|vertpoints)$/.test(r.type)) { tally.kept++; continue; }
       let item = null;
       switch (r.type) {
         case "horizontal": case "vertical":
