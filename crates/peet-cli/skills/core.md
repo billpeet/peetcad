@@ -129,7 +129,8 @@ script. Otherwise one `peet` call per part is simpler.
 - **Pointing at existing geometry** (a sketch on a face, the edge for a flange or a
   fillet, anything taking a plane, face, edge or vertex): `peet skills selectors`.
 - **Solid features** (extrude and cut directions, revolve, sweep, loft, holes, fillets,
-  shell, patterns, freeform faces, bodies from a STEP file): `peet skills solids`.
+  shell, patterns, moving and copying bodies, another part's bodies, weldment frames,
+  freeform faces, bodies from a STEP file): `peet skills solids`.
 - **Sheet metal** (base flange, flanges, cuts, converting a solid to sheet metal, flat
   pattern, DXF, materials, checks): `peet skills sheet-metal`.
 - **Putting parts together** (an assembly: inserting parts as components, placing them,

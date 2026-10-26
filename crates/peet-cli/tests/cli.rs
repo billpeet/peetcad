@@ -147,6 +147,52 @@ fn a_part_is_built_changed_asked_about_and_exported() {
 }
 
 #[test]
+fn an_inserted_part_is_mirrored_and_follows_its_file_when_asked() {
+    let dir = Folder::new("insert");
+    let right = dir.path("bracket-rh.peet");
+    let left = dir.path("bracket-lh.peet");
+    let made = peet(&[
+        "op",
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [10, 0], "to": [50, 20]}]}"#,
+        r#"{"op": "extrude", "sketch": "Sketch1", "depth": 5}"#,
+        "--new",
+        "-f",
+        &right,
+    ]);
+    assert_eq!(made.code, OK, "{}", made.err);
+    let inserted = peet(&[
+        "op",
+        &format!(
+            r#"{{"op": "insert_part", "file": {}, "mirror": "right", "name": "LH"}}"#,
+            json!(right)
+        ),
+        r#"{"op": "bodies"}"#,
+        "--new",
+        "-f",
+        &left,
+    ]);
+    assert_eq!(inserted.code, OK, "{}", inserted.out);
+    let body = &inserted.replies[1]["bodies"][0];
+    assert_eq!(body["min"], json!([-50.0, 0.0, 0.0]));
+    assert_eq!(body["volume_mm3"], json!(4000.0));
+    // The original changes: the mirror image follows once it is read again.
+    assert_eq!(
+        peet(&["edit", "feature=Extrude1", "depth=8", "-f", &right]).code,
+        OK
+    );
+    let updated = peet(&[
+        "op",
+        r#"{"op": "update_links"}"#,
+        r#"{"op": "bodies"}"#,
+        "-f",
+        &left,
+    ]);
+    assert_eq!(updated.code, OK, "{}", updated.out);
+    assert_eq!(updated.replies[0]["updated"], json!(["LH"]));
+    assert_eq!(updated.replies[1]["bodies"][0]["max"][2], json!(8.0));
+}
+
+#[test]
 fn a_failed_operation_stops_the_run_and_nothing_is_saved() {
     let dir = Folder::new("fail");
     let part = dir.path("panel.peet");

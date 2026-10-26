@@ -482,6 +482,7 @@ pub fn faces(doc: &Document, body: Option<usize>) -> Result<Value, String> {
                     m.insert("surface".to_owned(), json!("cylinder"));
                     m.insert("radius".to_owned(), length_out(c.radius, units));
                     m.insert("axis".to_owned(), direction_out(c.axis()));
+                    m.insert("axis_point".to_owned(), point3_out(c.frame.origin, units));
                 }
                 Surface::Cone(_) => {
                     m.insert("surface".to_owned(), json!("cone"));

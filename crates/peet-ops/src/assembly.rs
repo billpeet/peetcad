@@ -434,7 +434,6 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
             | Op::Component { .. }
             | Op::SetPart { .. }
             | Op::OpenComponent { .. }
-            | Op::UpdateLinks
             | Op::Link { .. }
             | Op::Unlink { .. }
             | Op::Drag { .. }
@@ -495,6 +494,13 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
         ),
         _ => false,
     };
+    // A part's inserted parts are read again with update_links too.
+    let for_assembly = for_assembly
+        || (*op == Op::UpdateLinks
+            && !doc
+                .model
+                .features()
+                .any(|f| matches!(f.kind, peet_model::FeatureKind::InsertPart(_))));
     let word = op.word();
     if doc.is_assembly() && for_part {
         Some(format!(

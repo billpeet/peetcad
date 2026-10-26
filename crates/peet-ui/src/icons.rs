@@ -308,6 +308,10 @@ impl Icon {
             FeatureKind::Loft(l) if l.operation == Operation::Cut => Self::CutLoft,
             FeatureKind::Loft(_) => Self::Loft,
             FeatureKind::ConvertToSheet(_) => Self::ConvertToSheet,
+            FeatureKind::MoveBody(_) => Self::LinearPattern,
+            FeatureKind::InsertPart(p) if p.mirror.is_some() => Self::MirrorFeature,
+            FeatureKind::InsertPart(_) => Self::ImportStep,
+            FeatureKind::StructuralMember(_) => Self::Sweep,
         }
     }
 

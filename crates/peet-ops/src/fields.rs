@@ -26,7 +26,8 @@ use peet_model::{
 };
 use peet_model::{
     BlendFeature, BlendKind, ConvertToSheetFeature, DraftFeature, HoleEnd, HoleFeature, HoleFit,
-    HoleKind, LoftFeature, METRIC, RevolveAxisRef, RevolveFeature, ShellFeature, SweepFeature,
+    HoleKind, InsertPartFeature, LoftFeature, METRIC, MemberCorner, MoveBodyFeature, PartSource,
+    RevolveAxisRef, RevolveFeature, ShellFeature, StructuralMemberFeature, SweepFeature,
 };
 use peet_sheetmetal::corner::{CornerKind, CornerRelief};
 use peet_sheetmetal::{
@@ -275,7 +276,8 @@ words!(
     BreakKind,
     FormKind,
     HoleKind,
-    HoleFit
+    HoleFit,
+    MemberCorner
 );
 
 impl Words for BlendKind {
@@ -484,6 +486,31 @@ reference_field!(OptPoint, Option<PointSel>, Option<PointRef>, required: false, 
         Some(PointRef::Vertex(v)) => vertex_out(v, doc),
     },
     arg: |p, _| p.clone().map(Into::into));
+reference_field!(AtPoint, PointSel, PointRef, required: false, nullable: false,
+    "\"origin\" (if absent), a reference point or a vertex selector",
+    parse: PointSel::parse,
+    assign: |a, doc| select::point(doc, a),
+    read: |p, doc| match p {
+        PointRef::Origin => json!("origin"),
+        PointRef::Feature(id) => json!(doc.model.name_of(*id)),
+        PointRef::Vertex(v) => vertex_out(v, doc),
+    },
+    arg: |p, _| p.clone().into());
+reference_field!(MirrorPlane, Option<PlaneSel>, Option<PlaneRef>, required: false, nullable: true,
+    "plane, or null (if absent) for none",
+    parse: |v| or_null(v, PlaneSel::parse),
+    assign: |a, doc| Ok(match a {
+        Some(p) => Some(select::plane(doc, p)?.0),
+        None => None,
+    }),
+    read: |p, doc| p.as_ref().map_or(Value::Null, |p| plane_out(p, doc)),
+    arg: |p, _| p.clone().map(Into::into));
+reference_field!(PartFile, String, PartSource, required: true, nullable: false,
+    "a part's file (.peet), read when it is set: a path from the working folder or the part's own",
+    parse: |v| text(v).map(str::to_owned),
+    assign: |a, doc| crate::links::part_source(a, doc),
+    read: |s, _| json!(s.path),
+    arg: |s, _| s.path.clone());
 reference_field!(FaceF, FaceSel, FaceRef, required: true, nullable: false, "face",
     parse: FaceSel::parse,
     assign: |a, doc| select::face_ref(doc, a),
@@ -1436,6 +1463,64 @@ feature_args! {
     }
 }
 
+feature_args! {
+    /// Bodies moved and turned, or moved copies of them.
+    MoveBody: FeatureKind::MoveBody(f) => &mut **f,
+        MoveBodyFeature {
+            bodies,
+            translate: [dx, dy, dz],
+            rotate: [rx, ry, rz],
+            center,
+            copy,
+            copies,
+        } => {
+    /// A face of each body to move. None: every body.
+    bodies: Vec<FaceSel> as Faces = bodies,
+    /// How far along X, after turning.
+    dx: Input as Length = dx,
+    dy: Input as Length = dy,
+    dz: Input as Length = dz,
+    /// Degrees about the X axis through `center`, turned first.
+    rx: Input as Angle = rx,
+    /// Then about Y.
+    ry: Input as Angle = ry,
+    /// Then about Z.
+    rz: Input as Angle = rz,
+    center: PointSel as AtPoint = center,
+    /// Leave the bodies where they are and make moved copies.
+    copy: bool as Flag = copy,
+    /// How many copies, each moved once more than the last.
+    copies: Input as Number = copies,
+    }
+}
+
+feature_args! {
+    /// A profile swept along the lines of path sketches, a body for each line.
+    StructuralMember: FeatureKind::StructuralMember(f) => &mut **f,
+        StructuralMemberFeature { profile, paths, corner, trim, rotate } => {
+    /// The section, drawn with its origin where each line goes through it.
+    profile: FeatureSel as SketchF = profile,
+    /// Sketches whose lines (not construction lines) the members follow.
+    paths: Vec<FeatureSel> as Sketches = paths,
+    /// How two members end where their lines meet at an angle.
+    corner: MemberCorner as Choice<MemberCorner> = corner,
+    /// Trim members that end on earlier structural members to their outside.
+    trim: bool as Flag = trim,
+    /// Degrees the profile is turned about each line.
+    rotate: Input as Angle = rotate,
+    }
+}
+
+feature_args! {
+    /// The bodies of another part, as they are in its file, or their mirror image.
+    InsertPart: FeatureKind::InsertPart(f) => &mut **f, InsertPartFeature { source, mirror } => {
+    /// The part's file, read when it is set (and by update_links).
+    file: String as PartFile = source,
+    /// Mirror the part's bodies in this plane.
+    mirror: Option<PlaneSel> as MirrorPlane = mirror,
+    }
+}
+
 // ---- New features ----
 
 fn no_plane() -> PlaneRef {
@@ -1750,6 +1835,15 @@ feature_ops! {
     Hole(Hole) "hole"
         "Drill a hole at every point of a sketch: plain, counterbored or countersunk, to a standard size or given ones."
         => Some(FeatureKind::Hole(Box::new(HoleFeature::new(NO_SKETCH)))),
+    MoveBody(MoveBody) "move_body"
+        "Move and turn bodies, or make moved copies of them (SolidWorks' move/copy body)."
+        => Some(FeatureKind::MoveBody(Box::new(MoveBodyFeature::new(Vec::new())))),
+    StructuralMember(StructuralMember) "structural_member"
+        "Sweep a profile along every line of path sketches, a body for each (SolidWorks' weldment structural member): mitred where lines of it meet, trimmed to earlier members."
+        => Some(FeatureKind::StructuralMember(Box::new(StructuralMemberFeature::new(NO_SKETCH, Vec::new())))),
+    InsertPart(InsertPart) "insert_part"
+        "Insert the bodies of another part's file, or their mirror image in a plane (SolidWorks' insert part and mirror part)."
+        => Some(FeatureKind::InsertPart(Box::new(InsertPartFeature::new(PartSource::default())))),
     SketchPlane(SketchPlane) "sketch_plane"
         "Move a sketch to another plane (an edit only: sketches are added with 'sketch')."
         => None,
@@ -1793,6 +1887,9 @@ fn word_of(kind: &FeatureKind) -> Option<&'static str> {
         FeatureKind::Sweep(_) => "sweep",
         FeatureKind::Loft(_) => "loft",
         FeatureKind::ConvertToSheet(_) => "convert_to_sheet",
+        FeatureKind::MoveBody(_) => "move_body",
+        FeatureKind::InsertPart(_) => "insert_part",
+        FeatureKind::StructuralMember(_) => "structural_member",
         // An imported body is what its file says: it has nothing to set.
         FeatureKind::Import(_) => return None,
     })
