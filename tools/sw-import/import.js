@@ -3679,6 +3679,15 @@ function importPart(doc, dir) {
       addresses = null;
       return hasAddress(ref);
     };
+    // A SolidWorks sketch imported under another name (a hole wizard's placement sketch is the hole's own
+    // sketch in PeetCAD): its dimension's address there
+    const renamed = ref => {
+      const [short, owner] = ref.split("@");
+      const sk = sketches.get(owner);
+      if (!sk || !sk.name || sk.name === owner) return null;
+      const address = `${(sk.dimensions && sk.dimensions.get(ref)) || short}@${sk.name}`;
+      return hasAddress(address) ? address : null;
+    };
     // Global variables whose equation is disabled keep the value they had, which SolidWorks reads
     const disabledGlobals = new Map((config.equations || []).filter(e => e.disabled && e.globalVariable).map(e => [(/^\s*"([^"]+)"/.exec(e.expression) || [])[1], e.value]).filter(([n]) => n));
     const translate = text => {
@@ -3688,6 +3697,7 @@ function importPart(doc, dir) {
         if (/^(un)?suppressed$/i.test(ref)) return /^un/i.test(ref) ? "0" : "1";
         if (ref.includes("@")) {
           if (ref.split("@").length > 2) { failed = "it reads a value of another document"; return "0"; }
+          if (!hasAddress(ref)) { const other = renamed(ref); if (other) return `"${other}"`; }
           if (!hasAddress(ref) && !sheetSize(ref) && !sketchOfOwn(ref)) { failed = "it reads a dimension that was not imported"; return "0"; }
           return `"${ref}"`;
         }
