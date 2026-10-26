@@ -748,6 +748,7 @@ impl SketchEditor {
         segment: Option<EntityId>,
     ) {
         let baseline = self.analysis.diagnoses.len();
+        // Inference adds nothing the sketch already has, redundant or not.
         for r in relations {
             let snapshot = item.sketch.clone();
             let added = infer::apply(&mut item.sketch, std::slice::from_ref(r), point, segment);
