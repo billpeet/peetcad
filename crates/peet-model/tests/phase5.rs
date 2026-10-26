@@ -292,6 +292,7 @@ fn pattern_of_a_cut_that_runs_off_its_flange() {
                 spacing: Scalar::new(20.0),
                 count: Scalar::new(3.0),
                 flip: false,
+                up_to: None,
             },
             second: None,
         },
