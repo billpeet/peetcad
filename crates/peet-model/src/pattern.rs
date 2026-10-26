@@ -553,12 +553,17 @@ fn sheet_copies(
                     .then_some((i, p.frame, top))
             })
         });
+        // A copy in the original's plane that lands on no flange there is placed in the flat
+        // pattern through the original's flange, which says nothing of where it is on the
+        // flanges that are not in line with that one: it cuts only those that are.
+        let mut stray = false;
         let target = if moved_n.cross(n).length() <= 1e-9 && off.abs() <= 1e-6 {
             let own = under
                 .is_none_or(|q| layout.pieces[on.piece].covers(on.frame.to_local(q).truncate()));
             if own {
                 Some((on.piece, on.frame, on.top))
             } else {
+                stray = holding.is_none();
                 holding.or(Some((on.piece, on.frame, on.top)))
             }
         } else if matches!(seed, Seed::SheetCut { .. }) {
@@ -649,7 +654,22 @@ fn sheet_copies(
                     skipped.push(format!("copy {} of {name} (it is off the sheet)", k + 2));
                     continue;
                 }
-                if piece == on.piece {
+                if stray {
+                    // The pieces placed as the original's flange is: it, and the bends and
+                    // flanges in its plane that the flat pattern lays out in line with it
+                    let in_line: Vec<usize> = layout
+                        .pieces
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, p)| {
+                            probes.iter().all(|q| {
+                                p.frame.to_local(world(*q)).truncate().distance(to_flat(*q)) < 1e-6
+                            })
+                        })
+                        .map(|(i, _)| i)
+                        .collect();
+                    layout.add_cut_on(area, in_line);
+                } else if piece == on.piece {
                     layout.add_cut(area);
                 } else {
                     layout.add_cut_on(area, vec![piece]);
