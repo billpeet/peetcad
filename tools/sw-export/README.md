@@ -30,7 +30,8 @@ For each configuration:
 
 - `features`: the tree in order, each with its type, suppression, parents and children,
   and its `dimensions` with their values in this configuration.
-  - `sketch`: points, segments (lines, arcs, ellipses, splines, text), relations with the
+  - `sketch`: points, segments (lines, arcs, ellipses, splines, and text with its
+    `format`: font, bold, italic, height, width factor, spacing), relations with the
     entities and the dimension each one ties (`defined` holds the model edge, vertex or
     plane a relation refers to outside the sketch), what the sketch is on, and the
     transform from model space to the sketch.
@@ -38,6 +39,19 @@ For each configuration:
     `IEdgeFlangeFeatureData`, …), read by reflection, so the names are the API's own and
     are documented in the SolidWorks API help. Methods that take a flag are read both
     ways: `GetDepth(true)`, `GetDepth(false)`. `unreadable` lists what threw.
+    The interop assemblies can be older than the SolidWorks the exporter runs on (the
+    ones in use are SolidWorks 2018's, revision 26): what they don't know is read by
+    name, from the type information the running SolidWorks gives (`dispatchType`), and
+    listed in `lateBound`. So a member SolidWorks added later (a linear pattern's
+    `D1EndCondition`, from 2019) is written under its own name with no change here, and a
+    feature with no data interface in the interop (a corner relief) gets a definition if
+    this SolidWorks has one. A few methods are read for each index, from 0 until one
+    fails: `GetTransform[i]` (a pattern's instances) and `Get…AtIndex[i]` (add a name to
+    `IndexedReads` for more); `GetFaces[i]` for each of a fillet's face sets, 0 to 5
+    (`FixedIndexes`). A method whose one argument is a second answer gives it as
+    `Name.out` (a reference axis's `GetSelections`). An object with no case of its own is
+    written with its `type` and its `values`, two levels deep (a structural member's
+    `Groups`).
   - `planeTransform` for a reference plane and `mate` (type, alignment, the entities
     mated) for a mate.
 - `equations`, with their values.
@@ -83,7 +97,7 @@ Run against SolidWorks 2026 on the whole template library (201 parts, 29 assembl
 all complete, in about 80 minutes, twice. The flat sizes in the DXF files agree with the
 flat-pattern configurations' bodies and with the bend deduction by hand.
 
-`formatVersion` is 4. What each version added:
+`formatVersion` is 5. What each version added:
 
 - **2:** a definition has its `Is…` methods (`IsBossFeature` is the only thing that tells a
   boss-extrude from a cut-extrude; a part's first extrude is `IsBaseExtrude`) and its
@@ -103,10 +117,23 @@ flat-pattern configurations' bodies and with the bend deduction by hand.
   `tightBox`, from its extreme points: `box` (GetBodyBox) can be loose by a hundredth of
   a millimetre round a freeform face. A corner relief has `namedDimensions` if any of
   `D1` to `D6` answers by name.
+- **5:** what the running SolidWorks has and the interop assemblies don't is read by name
+  (`lateBound`, above): a linear pattern's "up to reference" (`D1EndCondition` 1, with
+  `D1EndReference`, `D1EndRefOffset`, `D1EndRefReverseOffset`, `D1EndUseSeedReference`,
+  `D1EndSeedReference`, `D1EndUseSpacing`), each instance's `GetTransform[i]`, a base
+  flange's end conditions and relief, an edge flange's angle reference. A sketch text
+  has its `format` (`typeFace`, `bold`, `italic`, `charHeight` in metres, `widthFactor`,
+  `charSpacingFactor`, `escapement`, …). An object with no case of its own has its
+  `type` and `values` in place of `"kind": "unknown"`. None of this is checked against
+  SolidWorks yet: a value that can't be read is left out (or listed in `unreadable`),
+  and never stops the document.
 
-A corner relief has no definition: the API has no data interface for one, only the calls
-that make one (`AddCornerReliefType`, `AddCornerReliefCorner`, `FinishCornerRelief`). Its
-shape is in the faces it leaves in the body (each face says which feature made it). A
+In the interop assemblies (SolidWorks 2018) a corner relief has no definition: there is
+no data interface for one, only the calls that make one (`AddCornerReliefType`,
+`AddCornerReliefCorner`, `FinishCornerRelief`). SolidWorks 2026's API has
+`ICornerReliefFeatureData` (`CornerCount`, `CornerType`, `GetCornerAtIndex`), which the
+fifth version reads by name if the running SolidWorks gives it. Its shape is also in the
+faces it leaves in the body (each face says which feature made it). A
 3D sketch's points and segments are in the model's coordinates (its `modelToSketch` is
 the identity).
 

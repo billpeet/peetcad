@@ -11,6 +11,7 @@ using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
+using ComTypes = System.Runtime.InteropServices.ComTypes;
 
 namespace PeetSwExport;
 
@@ -24,7 +25,7 @@ using Json = Dictionary<string, object?>;
 internal static class Program
 {
     /// <summary>Raise this when the output changes shape, so the importer can tell exports apart.</summary>
-    private const int FormatVersion = 4;
+    private const int FormatVersion = 5;
     private const string FlatPatternSuffix = "SM-FLAT-PATTERN";
     private const int MaxRestarts = 5;
 
@@ -470,23 +471,34 @@ internal static class Program
             InterfacesByFeatureType[type] = interfaces = matched.ToArray();
             Log($"  {type}: {(interfaces.Length == 0 ? "no data interface" : string.Join(", ", interfaces.Select(i => i.Name)))}");
         }
-        if (interfaces.Length == 0)
+        // What the running SolidWorks says the definition is, which can be newer than the interop assemblies
+        // this is built against: their members are read by name (late bound) after the interop's own
+        var dispatch = DispatchTypeOf(definition);
+        if (interfaces.Length == 0 && (dispatch == null || dispatch.Members.Count == 0))
             return null;
 
         var values = new Json();
         var failed = new List<string>();
         var result = new Json { ["interfaces"] = interfaces.Select(i => i.Name).ToList(), ["values"] = values };
+        if (dispatch != null)
+            result["dispatchType"] = dispatch.Name;
 
         // The edges, faces and sketches a definition refers to can only be read between these two calls, which
         // roll the model back to the feature and forward again. A suppressed feature has nothing to roll back to.
-        MethodInfo? release = null;
+        Action? release = null;
         if (readSelections) {
             var owner = interfaces.FirstOrDefault(i => i.GetMethod("AccessSelections") != null && i.GetMethod("ReleaseSelectionAccess") != null);
             if (owner != null) {
                 var accessed = Try(() => owner.GetMethod("AccessSelections")!.Invoke(definition, new object?[] { doc, null }));
                 result["selectionsRead"] = accessed is true;
                 if (accessed is true)
-                    release = owner.GetMethod("ReleaseSelectionAccess");
+                    release = () => owner.GetMethod("ReleaseSelectionAccess")!.Invoke(definition, null);
+            }
+            else if (dispatch != null && dispatch.Has("AccessSelections") && dispatch.Has("ReleaseSelectionAccess")) {
+                var accessed = Try(() => InvokeLate(definition, "AccessSelections", false, doc, new DispatchWrapper(null)));
+                result["selectionsRead"] = accessed is true;
+                if (accessed is true)
+                    release = () => InvokeLate(definition, "ReleaseSelectionAccess", false);
             }
         }
 
@@ -511,6 +523,15 @@ internal static class Program
                     if (method.IsSpecialName || !(method.Name.StartsWith("Get") || Regex.IsMatch(method.Name, "^Is[A-Z]")) || method.ReturnType == typeof(void))
                         continue;
                     var parameters = method.GetParameters();
+                    // A method that gives a second value through its one argument (a reference axis's
+                    // GetSelections gives the selections, and their types through the argument)
+                    if (parameters.Length == 1 && parameters[0].ParameterType == typeof(object).MakeByRefType()) {
+                        var given = new object?[] { null };
+                        Read(method.Name, () => method.Invoke(definition, given));
+                        if (values.ContainsKey(method.Name))
+                            values[method.Name + ".out"] = Describe(given[0]);
+                        continue;
+                    }
                     // A flag (forward or reverse, first or second direction) is tried both ways. What an index or
                     // an out parameter means differs from method to method, so those are left alone.
                     if (parameters.Length > 2 || parameters.Any(p => p.ParameterType != typeof(bool)))
@@ -520,10 +541,18 @@ internal static class Program
                             () => method.Invoke(definition, arguments));
                 }
             }
+            // What this SolidWorks offers that the interop assemblies don't know (the "up to reference" of a
+            // linear pattern, from SolidWorks 2019, for one), and the values per index (a pattern's
+            // transform of each instance)
+            if (dispatch != null) {
+                var late = ReadLate(definition, dispatch, values, failed);
+                if (late.Count > 0)
+                    result["lateBound"] = late;
+            }
         }
         finally {
             if (release != null)
-                Try(() => release.Invoke(definition, null));
+                Try(() => { release(); return null; });
         }
 
         if (failed.Count > 0)
@@ -541,6 +570,213 @@ internal static class Program
                 failed.Add(key);
             }
         }
+    }
+
+    // ---- Late binding: what the running SolidWorks offers, by name ----
+    //
+    // The interop assemblies the exporter is built against can be older than the SolidWorks it runs on, and
+    // then have no member for what was added since. Every SolidWorks object also answers IDispatch, whose type
+    // information lists the members this SolidWorks has: those are read by name. To export something new,
+    // nothing needs adding here if it is a value on a definition (or on an object a definition gives): it is
+    // read and written under the API's own name. Indexed reads are limited to the names in IndexedReads.
+
+    [ComImport, Guid("00020400-0000-0000-C000-000000000046"), InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    private interface IDispatchInfo
+    {
+        [PreserveSig] int GetTypeInfoCount(out int count);
+        [PreserveSig] int GetTypeInfo(int index, int lcid, out ComTypes.ITypeInfo? info);
+    }
+
+    /// <summary>A member that reads a value: a property, or a method taking nothing, a flag or an index.</summary>
+    private sealed class LateMember
+    {
+        public LateMember(string name, bool property, VarEnum argument) => (Name, Property, Argument) = (name, property, argument);
+        public string Name { get; }
+        public bool Property { get; }
+        public VarEnum Argument { get; }
+    }
+
+    private sealed class DispatchType
+    {
+        public DispatchType(string name) => Name = name;
+        public string Name { get; }
+        public List<LateMember> Members { get; } = new();
+        public HashSet<string> All { get; } = new(StringComparer.Ordinal);
+        public bool Has(string name) => All.Contains(name);
+    }
+
+    private static readonly Dictionary<string, DispatchType> DispatchTypes = new(StringComparer.Ordinal);
+
+    /// <summary>Methods taking an index that are read for each index from 0 until one fails or gives nothing.</summary>
+    private static readonly Regex IndexedReads = new("^(GetTransform|Get[A-Za-z]*AtIndex|GetPathSegmentAt)$");
+    /// <summary>Methods taking an index (an enumeration) that are read for each of its values, from 0.</summary>
+    private static readonly Dictionary<string, int> FixedIndexes = new(StringComparer.Ordinal) {
+        // A fillet's faces by set (swSimpleFilletWhichFaces_e): 3 to 5 are a full round fillet's
+        ["GetFaces"] = 6
+    };
+    private const int MaxIndex = 256;
+    private const int MaxDescribeDepth = 2;
+    [ThreadStatic] private static int describeDepth;
+
+    /// <summary>What the object's IDispatch says it is and which of its members read a value. Null if it can't say.</summary>
+    private static DispatchType? DispatchTypeOf(object? value)
+    {
+        if (value == null || !Marshal.IsComObject(value))
+            return null;
+        try {
+            if (value is not IDispatchInfo dispatch || dispatch.GetTypeInfoCount(out var count) != 0 || count < 1)
+                return null;
+            if (dispatch.GetTypeInfo(0, 0, out var info) != 0 || info == null)
+                return null;
+            info.GetDocumentation(-1, out var name, out _, out _, out _);
+            if (DispatchTypes.TryGetValue(name, out var known))
+                return known;
+            var type = new DispatchType(name);
+            info.GetTypeAttr(out var attrPointer);
+            ComTypes.TYPEATTR attr;
+            try {
+                attr = Marshal.PtrToStructure<ComTypes.TYPEATTR>(attrPointer);
+            }
+            finally {
+                info.ReleaseTypeAttr(attrPointer);
+            }
+            var elementSize = Marshal.SizeOf<ComTypes.ELEMDESC>();
+            for (var i = 0; i < attr.cFuncs; i++) {
+                info.GetFuncDesc(i, out var funcPointer);
+                try {
+                    var func = Marshal.PtrToStructure<ComTypes.FUNCDESC>(funcPointer);
+                    if ((func.wFuncFlags & (short)ComTypes.FUNCFLAGS.FUNCFLAG_FRESTRICTED) != 0)
+                        continue;
+                    info.GetDocumentation(func.memid, out var member, out _, out _, out _);
+                    type.All.Add(member);
+                    // IGetX and IX are the pointer forms of GetX and X, for C++ callers
+                    if (Regex.IsMatch(member, "^I[A-Z]"))
+                        continue;
+                    // The arguments, less a dual interface's hidden return value; any out argument rules it out
+                    var arguments = new List<VarEnum>();
+                    var returns = false;
+                    var output = false;
+                    for (var k = 0; k < func.cParams; k++) {
+                        var element = Marshal.PtrToStructure<ComTypes.ELEMDESC>(func.lprgelemdescParam + k * elementSize);
+                        var flags = element.desc.paramdesc.wParamFlags;
+                        if ((flags & ComTypes.PARAMFLAG.PARAMFLAG_FRETVAL) != 0)
+                            returns = true;
+                        else if ((flags & ComTypes.PARAMFLAG.PARAMFLAG_FOUT) != 0)
+                            output = true;
+                        else
+                            arguments.Add((VarEnum)element.tdesc.vt);
+                    }
+                    var result = (VarEnum)func.elemdescFunc.tdesc.vt;
+                    returns = returns || (result != VarEnum.VT_VOID && result != VarEnum.VT_HRESULT);
+                    if (!returns || output || arguments.Count > 1)
+                        continue;
+                    var argument = arguments.Count == 0 ? VarEnum.VT_EMPTY : arguments[0];
+                    if (argument is not (VarEnum.VT_EMPTY or VarEnum.VT_BOOL or VarEnum.VT_I4 or VarEnum.VT_I2 or VarEnum.VT_INT))
+                        continue;
+                    var property = func.invkind == ComTypes.INVOKEKIND.INVOKE_PROPERTYGET;
+                    if (!property && (func.invkind != ComTypes.INVOKEKIND.INVOKE_FUNC || !Regex.IsMatch(member, "^(Get|Is)[A-Z]")))
+                        continue;
+                    // An indexed value only where the index is known to count instances or items
+                    if (argument is (VarEnum.VT_I4 or VarEnum.VT_I2 or VarEnum.VT_INT) && !IndexedReads.IsMatch(member) && !FixedIndexes.ContainsKey(member))
+                        continue;
+                    if (type.Members.All(m => m.Name != member))
+                        type.Members.Add(new LateMember(member, property, argument));
+                }
+                finally {
+                    info.ReleaseFuncDesc(funcPointer);
+                }
+            }
+            DispatchTypes[name] = type;
+            Log($"  {name}: {type.Members.Count} members by name");
+            return type;
+        }
+        catch (Exception ex) {
+            Log("  The type of an object could not be read: " + ex.Message);
+            return null;
+        }
+    }
+
+    private static object? InvokeLate(object target, string name, bool property, params object?[] arguments) =>
+        target.GetType().InvokeMember(name, property ? BindingFlags.GetProperty : BindingFlags.InvokeMethod, null, target, arguments);
+
+    /// <summary>
+    /// Reads the members of <paramref name="dispatch"/> that <paramref name="values"/> doesn't have yet, under the
+    /// names the interop path gives them (<c>Name</c>, <c>Name(true)</c>, <c>Name[2]</c>). Returns the names read.
+    /// </summary>
+    private static List<string> ReadLate(object target, DispatchType dispatch, Json values, List<string> failed)
+    {
+        var read = new List<string>();
+        foreach (var member in dispatch.Members) {
+            switch (member.Argument) {
+                case VarEnum.VT_EMPTY:
+                    One(member.Name, () => InvokeLate(target, member.Name, member.Property));
+                    break;
+                case VarEnum.VT_BOOL:
+                    foreach (var flag in new[] { true, false })
+                        One($"{member.Name}({(flag ? "true" : "false")})", () => InvokeLate(target, member.Name, member.Property, flag));
+                    break;
+                default:
+                    if (values.ContainsKey(member.Name + "[0]"))
+                        break;
+                    // Every value of an enumeration, or each index until one fails or gives nothing
+                    var all = FixedIndexes.TryGetValue(member.Name, out var count);
+                    for (var i = 0; i < (all ? count : MaxIndex); i++) {
+                        object? value;
+                        try {
+                            value = InvokeLate(target, member.Name, member.Property, i);
+                        }
+                        catch (Exception) {
+                            if (all)
+                                continue;
+                            break;
+                        }
+                        if (value == null) {
+                            if (all)
+                                continue;
+                            break;
+                        }
+                        values[$"{member.Name}[{i}]"] = Describe(value);
+                        read.Add($"{member.Name}[{i}]");
+                    }
+                    break;
+            }
+        }
+        return read;
+
+        void One(string key, Func<object?> get)
+        {
+            if (values.ContainsKey(key))
+                return;
+            try {
+                values[key] = Describe(get());
+                read.Add(key);
+            }
+            catch (Exception) {
+                failed.Add(key);
+            }
+        }
+    }
+
+    /// <summary>An object the exporter has no case for, by its type's name and the values it reads, some levels deep.</summary>
+    private static Json DescribeUnknown(object value)
+    {
+        var dispatch = DispatchTypeOf(value);
+        var result = new Json { ["kind"] = dispatch == null ? "unknown" : "object", ["type"] = dispatch?.Name };
+        if (dispatch == null || describeDepth >= MaxDescribeDepth)
+            return result;
+        describeDepth++;
+        try {
+            var values = new Json();
+            var failed = new List<string>();
+            ReadLate(value, dispatch, values, failed);
+            result["values"] = values;
+            if (failed.Count > 0)
+                result["unreadable"] = failed;
+        }
+        finally {
+            describeDepth--;
+        }
+        return result;
     }
 
     private static IEnumerable<object[]> FlagCombinations(int count) => count switch {
@@ -644,12 +880,45 @@ internal static class Program
                     item["points"] = ArrayOf(((SketchSpline)segment).GetPoints2()).Select(Point).ToList();
                     break;
                 case swSketchSegments_e.swSketchTEXT:
-                    item["text"] = ((SketchText)segment).Text;
+                    var text = (SketchText)segment;
+                    item["text"] = text.Text;
+                    item["format"] = TryJson(() => TextFormatOf(text), "format of a text");
                     break;
             }
             segments.Add(item);
         }
         return segments;
+    }
+
+    /// <summary>
+    /// A sketch text's font and style. Heights and lengths in metres, angles in radians; the factors are 1 as
+    /// the font has it.
+    /// </summary>
+    private static Json? TextFormatOf(SketchText text)
+    {
+        if (text.GetTextFormat() is not TextFormat format)
+            return null;
+        return new Json {
+            // Whether the text follows the document's font rather than its own
+            ["useDocumentFormat"] = Try(() => text.GetUseDocTextFormat()),
+            ["typeFace"] = Try(() => format.TypeFaceName),
+            ["bold"] = Try(() => format.Bold),
+            ["italic"] = Try(() => format.Italic),
+            ["underline"] = Try(() => format.Underline),
+            ["strikeout"] = Try(() => format.Strikeout),
+            ["charHeight"] = Try(() => format.CharHeight),
+            ["charHeightInPoints"] = Try(() => format.IsHeightSpecifiedInPts() ? format.CharHeightInPts : null),
+            ["widthFactor"] = Try(() => format.WidthFactor),
+            ["charSpacingFactor"] = Try(() => format.CharSpacingFactor),
+            ["lineSpacing"] = Try(() => format.LineSpacing),
+            ["lineLength"] = Try(() => format.LineLength),
+            ["obliqueAngle"] = Try(() => format.ObliqueAngle),
+            ["escapement"] = Try(() => format.Escapement),
+            ["upsideDown"] = Try(() => format.UpsideDown),
+            ["backwards"] = Try(() => format.BackWards),
+            ["vertical"] = Try(() => format.Vertical),
+            ["coordinates"] = Try(() => text.GetCoordinates())
+        };
     }
 
     private static List<object?>? Defined(SketchRelation relation)
@@ -864,7 +1133,8 @@ internal static class Program
         catch (Exception ex) {
             return new Json { ["kind"] = "unreadable", ["error"] = ex.Message };
         }
-        return new Json { ["kind"] = "unknown" };
+        // Anything else (a structural member's group, a corner of a corner relief) by what it says it is
+        return DescribeUnknown(value);
     }
 
     /// <summary>A copy in another format, beside the JSON. The source document is not saved.</summary>
