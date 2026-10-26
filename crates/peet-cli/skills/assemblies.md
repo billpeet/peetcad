@@ -491,9 +491,16 @@ peet components -f received.peet
 - `warnings` in the reply says what was left out, assumed or mended (a face that can't
   be read, units not given). "lay up to … mm off its faces … and was moved onto them"
   means the file gave edges a tolerance, as SolidWorks does, and PeetCAD refitted them
-  onto their faces: the shape moved by at most that much, and the body is sound. An
-  edge more than 0.01 mm off fails the import ("leaves the surface of face"): export
-  the file again with a finer tolerance.
+  onto their faces: the shape moved by at most that much, and the body is sound.
+  "was repaired: … vertices moved … split … faces added to close the gaps" means the
+  file gave vertices a tolerance too (SolidWorks does, up to a millimetre, for a body
+  it imported from elsewhere: a small fillet squeezed into an edge): the body is sound,
+  but differs from the file by up to the distance named, so check its volume if that
+  matters. "The body #… was left out, and the rest imported without it" means a body
+  could not be made a valid solid: the reply's `bodies` is fewer than the file has.
+  Export that body again with a finer tolerance, or model it. If no body can be made
+  valid the import fails with the reason ("leaves the surface of face", "doesn't
+  close up").
 
 Done when `components` shows every component with `"status": "ok"` and the `min` and
 `max` that were asked for, `mates` shows every mate `"ok"`, `freedom` is what was

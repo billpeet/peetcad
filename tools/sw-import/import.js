@@ -2562,6 +2562,8 @@ function importPart(doc, dir) {
       fallback = config.step;
       report.fallback = { step: config.step };
       report.notes.push(`Nothing could be built from SolidWorks' features, so the part is SolidWorks' own body from ${config.step}: it has the right shape and can't be driven.`);
+      const left = (imported.warnings || []).filter(w => / was left out/.test(w));
+      if (left.length) report.notes.push(`${left.length} of the STEP file's bodies could not be made valid solids and were left out: ${left.join(" ")}`);
       if (config.flatDxf) {
         const sheetMetal = peet.apply({ op: "convert_to_sheet" });
         report.fallback.sheet_metal = sheetMetal.ok ? true : sheetMetal.error;
@@ -2852,7 +2854,11 @@ function measureStep(dir, name, configuration) {
   if (!file) return null;
   const reply = spawnSync(peetExe, ["op", JSON.stringify({ op: "import_step", path: path.join(dir, file) }), JSON.stringify({ op: "mass" }), "--no-save", "-q"], { encoding: "utf8", maxBuffer: 1 << 28 });
   try {
-    const total = JSON.parse((reply.stdout || "").trim().split("\n").pop()).total;
+    const lines = (reply.stdout || "").trim().split("\n");
+    // A body PeetCAD had to leave out makes the file no measure of SolidWorks' part
+    const imported = JSON.parse(lines[0]);
+    if ((imported.warnings || []).some(w => / was left out/.test(w))) return null;
+    const total = JSON.parse(lines.pop()).total;
     return total && total.volume_mm3 > 0 && total.min ? { volume: total.volume_mm3, box: [...total.min, ...total.max] } : null;
   } catch { return null; }
 }

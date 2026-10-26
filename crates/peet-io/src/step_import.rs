@@ -105,8 +105,9 @@
 //!
 //! **Validity.** Every solid is checked with [`peet_kernel::validate::validate`] before it
 //! is returned. A body that fails (edges not shared between faces, vertices off their
-//! curves, a hole across a seam) makes the import fail with the reasons, rather than
-//! handing the rest of the program a broken solid.
+//! curves, a hole across a seam) is never handed to the rest of the program: it is
+//! repaired or left out (below), and the import fails with the reasons if nothing is
+//! left.
 //!
 //! Before that, *tolerant edges* are healed. Parasolid, and so SolidWorks, lets an edge
 //! carry its own tolerance, and writes a curve that comes only within it of the edge's
@@ -124,6 +125,16 @@
 //! would miss its vertices, is left alone and the body fails as before; the kernel's
 //! check itself is not loosened, so PeetCAD's own modelling stays exact.
 //!
+//! A body that still fails is built again with its *tolerant vertices* repaired (see
+//! [`repair`]): Parasolid gives a vertex a tolerance too, and a body SolidWorks imported
+//! from another program can have vertices a millimetre from where their faces meet,
+//! with small fillets squeezed out into an edge. Vertices are moved to where their faces
+//! meet, or, where the faces don't, split, with Coons patches closing the gaps; edges
+//! whose faces meet along them are moved onto them. Each repaired body gets a warning.
+//! A body that is still not a valid solid is left out, with a warning, and the rest of
+//! the file is imported; only if no body can be imported does the import fail. Bodies
+//! that are valid as the file has them are never repaired.
+//!
 //! [`EDGE_ON_SURFACE`]: peet_kernel::validate::EDGE_ON_SURFACE
 //!
 //! **Assemblies.** Parts placed in assemblies (`ITEM_DEFINED_TRANSFORMATION` under a
@@ -135,6 +146,7 @@
 //! that is not a rigid motion is ignored with a warning.
 
 mod heal;
+mod repair;
 
 use std::collections::{HashMap, HashSet};
 use std::f64::consts::{FRAC_PI_2, PI, TAU};
@@ -193,6 +205,10 @@ const LINE_STEPS: usize = 4;
 /// A loop's lifted parameters must come back to where they started, or a whole number of
 /// turns away, to within this (radians).
 const WINDING_SLACK: f64 = 1e-6;
+
+/// More than [`WINDING_SLACK`] (radians) is allowed where it is no more than
+/// [`VERTEX_MERGE`] on the surface, but never more than this.
+const CLOSE_SLACK: f64 = 1e-3;
 
 /// A new seam stays at least this far (radians) from the face's holes: more than the
 /// slack the kernel's validation allows a hole at a seam.
@@ -360,6 +376,8 @@ pub fn read(text: &str) -> Result<StepImport> {
     let mut merged_vertices = 0;
     let mut turned_shells = 0;
     let mut bad_placements = 0;
+    // Bodies that could not be made valid solids: the rest are imported without them.
+    let mut skipped: Vec<(u32, StepImportError)> = Vec::new();
     for (id, shell) in solids {
         let reps = structure.item_reps.get(&id).cloned().unwrap_or_default();
         let units = match reps.first() {
@@ -377,17 +395,6 @@ pub fn read(text: &str) -> Result<StepImport> {
             None => file.expect(id, &["MANIFOLD_SOLID_BREP", "BREP_WITH_VOIDS"], None)?,
             Some(shell) => file.expect(shell, &["CLOSED_SHELL", "ORIENTED_CLOSED_SHELL"], None)?,
         };
-        let mut builder = Builder::new(&file, units);
-        let mut built = match shell {
-            None => builder.brep(&brep)?,
-            Some(shell) => {
-                let model = file.expect(id, &["SHELL_BASED_SURFACE_MODEL"], None)?;
-                builder.closed_shell(shell, &model)?
-            }
-        };
-        merged_vertices += builder.merged;
-        turned_shells += usize::from(built.outer_was_inside_out);
-
         let own_name = brep.text(0).trim();
         let name = if !own_name.is_empty() {
             own_name.to_owned()
@@ -398,8 +405,41 @@ pub fn read(text: &str) -> Result<StepImport> {
         } else {
             "Body".to_owned()
         };
-        // Tolerant edges (see the module docs) are given curves that lie on their faces.
-        let healed = heal::heal_edges(&mut built.solid);
+        let model = match shell {
+            None => None,
+            Some(_) => Some(file.expect(id, &["SHELL_BASED_SURFACE_MODEL"], None)?),
+        };
+        // The body as the file has it (tolerant edges healed); failing that, with its
+        // tolerant vertices and edges repaired (see the module docs). A body that is
+        // still not a valid solid is left out.
+        let attempt = |repair: bool| -> Result<(Built, usize, heal::Healed)> {
+            let mut builder = Builder::new(&file, units);
+            builder.repairs = repair;
+            let mut built = match (shell, &model) {
+                (Some(shell), Some(model)) => builder.closed_shell(shell, model)?,
+                _ => builder.brep(&brep)?,
+            };
+            let healed = heal::heal_edges(&mut built.solid);
+            if let Err(problems) = validate(&built.solid) {
+                return Err(invalid(&name, id, &problems));
+            }
+            Ok((built, builder.merged, healed))
+        };
+        let (built, merged, mut healed) = match attempt(false) {
+            Ok(done) => done,
+            Err(first) => match attempt(true) {
+                Ok(done) => done,
+                Err(_) => {
+                    skipped.push((shell.unwrap_or(id), first));
+                    continue;
+                }
+            },
+        };
+        merged_vertices += merged;
+        turned_shells += usize::from(built.outer_was_inside_out);
+        let repaired = built.repaired;
+        healed.edges += repaired.refitted;
+        healed.worst = healed.worst.max(repaired.refit_worst);
         if healed.edges > 0 {
             warnings.push(format!(
                 "{} of the body \"{name}\" lay up to {:.1e} mm off {} faces (the file gives \
@@ -414,27 +454,8 @@ pub fn read(text: &str) -> Result<StepImport> {
                 if healed.edges == 1 { "was" } else { "were" },
             ));
         }
-        if let Err(problems) = validate(&built.solid) {
-            let list: Vec<&str> = problems
-                .iter()
-                .take(3)
-                .map(|p| p.message.as_str())
-                .collect();
-            let more = problems.len().saturating_sub(list.len());
-            return Err(error(format!(
-                "The body \"{name}\" (entity #{id}) in this STEP file is not a closed, valid \
-                 solid, so PeetCAD can't import it: {}{}. Try exporting it again as a solid, \
-                 with a finer tolerance if the other program offers one.",
-                list.join("; "),
-                if more > 0 {
-                    format!(
-                        "; and {more} more problem{}",
-                        if more == 1 { "" } else { "s" }
-                    )
-                } else {
-                    String::new()
-                }
-            )));
+        if repaired.any() {
+            warnings.push(repaired.describe(&name));
         }
 
         shapes.push((
@@ -472,6 +493,17 @@ pub fn read(text: &str) -> Result<StepImport> {
                 solid,
             });
         }
+    }
+    if bodies.is_empty()
+        && let Some((_, first)) = skipped.first()
+    {
+        return Err(first.clone());
+    }
+    for (id, e) in &skipped {
+        warnings.push(format!(
+            "The body #{id} was left out, and the rest imported without it: it could not be \
+             made a valid solid. {e}"
+        ));
     }
     if assumed_units {
         warnings.push(
@@ -520,6 +552,30 @@ pub fn read(text: &str) -> Result<StepImport> {
         nodes,
         roots,
     })
+}
+
+/// The error for a body that is not a valid solid, naming its first few problems.
+fn invalid(name: &str, id: u32, problems: &[peet_kernel::validate::Problem]) -> StepImportError {
+    let list: Vec<&str> = problems
+        .iter()
+        .take(3)
+        .map(|p| p.message.as_str())
+        .collect();
+    let more = problems.len().saturating_sub(list.len());
+    error(format!(
+        "The body \"{name}\" (entity #{id}) in this STEP file is not a closed, valid \
+         solid, so PeetCAD can't import it: {}{}. Try exporting it again as a solid, \
+         with a finer tolerance if the other program offers one.",
+        list.join("; "),
+        if more > 0 {
+            format!(
+                "; and {more} more problem{}",
+                if more == 1 { "" } else { "s" }
+            )
+        } else {
+            String::new()
+        }
+    ))
 }
 
 // ---- Part 21 syntax ----
@@ -1854,6 +1910,8 @@ struct Hit {
 struct Built {
     solid: Solid,
     outer_was_inside_out: bool,
+    /// What repairing its tolerant vertices and edges did.
+    repaired: repair::Repaired,
 }
 
 /// Reads one brep into raw vertices, edges and faces, brings them into the kernel's form
@@ -1870,6 +1928,10 @@ struct Builder<'a> {
     shells: Vec<Vec<RawFace>>,
     /// Pairs of duplicate vertices merged.
     merged: usize,
+    /// Whether tolerant vertices and edges are repaired (see [`repair`]).
+    repairs: bool,
+    /// What repairing tolerant vertices and edges did.
+    repaired: repair::Repaired,
 }
 
 impl<'a> Builder<'a> {
@@ -1884,6 +1946,8 @@ impl<'a> Builder<'a> {
             edge_ids: HashMap::new(),
             shells: Vec::new(),
             merged: 0,
+            repairs: false,
+            repaired: repair::Repaired::default(),
         }
     }
 
@@ -2559,6 +2623,9 @@ impl<'a> Builder<'a> {
 
     /// The solid the shells read so far bound: the first the outside, the others voids.
     fn built(&mut self) -> Result<Built> {
+        if self.repairs {
+            self.repaired = self.repair();
+        }
         self.split_at_poles()?;
         for s in 0..self.shells.len() {
             // Cutting a face in two adds one to the shell: the count is not fixed.
@@ -2601,6 +2668,7 @@ impl<'a> Builder<'a> {
         Ok(Built {
             solid,
             outer_was_inside_out,
+            repaired: self.repaired,
         })
     }
 
@@ -2764,7 +2832,15 @@ impl<'a> Builder<'a> {
             let winding = (end - start)[axis] / TAU;
             let periodic = axis == 0 || surface.is_periodic_v();
             let whole = if periodic { winding.round() } else { 0.0 };
-            if !((winding - whole).abs() * TAU <= WINDING_SLACK && whole.abs() <= 8.0) {
+            // What is left over, in the parameter and as a distance on the surface: a loop
+            // whose edges end a little apart (tolerant vertices) comes back a little off.
+            let rest = (winding - whole) * TAU;
+            let mut along = start;
+            along[axis] += rest;
+            let closes = rest.abs() <= WINDING_SLACK
+                || (rest.abs() <= CLOSE_SLACK
+                    && surface.point(along).distance(surface.point(start)) <= VERTEX_MERGE);
+            if !(closes && whole.abs() <= 8.0) {
                 return Err(error(
                     "The STEP file has a face whose boundary doesn't close up on its surface, \
                      so the body is not a solid PeetCAD can import. Try exporting it again.",
