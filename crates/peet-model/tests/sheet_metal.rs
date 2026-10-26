@@ -607,3 +607,39 @@ fn a_cut_that_ends_in_a_bend() {
     let wedge = angle / 2.0 * ((R + T).powi(2) - R * R);
     assert_close(whole - p.volume(), 20.0 * ((start - 10.0) * T + wedge));
 }
+
+#[test]
+fn a_cut_that_ends_in_a_bend_and_runs_past_its_end() {
+    // The flange takes only the middle of the edge. The cut's far side, 1 mm past where
+    // the bend starts, runs on past both ends of the bend: there it stays on the plate,
+    // and over the bend it moves into the bend, with the sheet left in one piece.
+    let (mut p, _, _) = plate(100.0, 60.0);
+    let (_, e) = edge(&p, DVec3::new(100.0, 60.0, T), DVec3::new(0.0, 60.0, T));
+    edge_flange(&mut p, e, |f| {
+        f.length = Scalar::new(20.0);
+        f.offset_start = Scalar::new(-30.0);
+        f.offset_end = Scalar::new(-30.0);
+    });
+    p.rebuild();
+    p.assert_ok();
+    let sheet = p.bodies()[0].sheet.as_ref().unwrap();
+    let (_, bend) = sheet.layout.bends().next().unwrap();
+    let start = sheet.layout.pieces[bend.parent]
+        .frame
+        .to_world(bend.origin.extend(T))
+        .dot(DVec3::Y)
+        .abs();
+    let top = p.on_face(DVec3::Z, DVec3::new(50.0, 30.0, T));
+    let window = p.sketch(top, |s| {
+        shapes::rectangle(s, DVec2::new(10.0, 10.0), DVec2::new(90.0, start + 1.0));
+    });
+    let cut = p.model.add_sheet_cut(window);
+    let FeatureKind::SheetCut(def) = &mut p.model.feature_mut(cut).unwrap().kind else {
+        unreachable!()
+    };
+    def.end = peet_model::SheetCutEnd::Blind;
+    def.depth = Scalar::new(10.0);
+    p.rebuild();
+    p.assert_ok();
+    assert!(matches!(p.status(cut), Status::Ok), "{:?}", p.status(cut));
+}
