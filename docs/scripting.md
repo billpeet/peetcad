@@ -162,11 +162,39 @@ nonzero plain number is true. Only the selected branch is evaluated, and its uni
 must suit the field using it. Both branches' names must exist and their dependencies
 must be free of cycles. Comparisons use the same unit adoption as addition: a bare
 number adopts the other operand's units in the document's units. `int(x)` is `floor(x)`,
-rounding down in document units. Part pattern counts also accept expressions.
+rounding down in document units. Part pattern counts also accept expressions; a count
+an expression gives is rounded to the nearest whole number, as SolidWorks rounds one.
+Function names are not case sensitive (`IIF`, `INT`).
 
 ```jsonl
 {"op": "set_parameter", "name": "width", "value": "300mm"}
 {"op": "set_parameter", "name": "depth", "value": "iif(width > 299mm, 8mm, 4mm)"}
+```
+
+### Dimensions by name
+
+Every number of a part has an address `NAME@FEATURE`, as SolidWorks names its
+dimensions: a sketch dimension by its name (`Width@Sketch1`, `d1@Sketch1`), and any other
+feature's numeric value as `d1`, `d2`, … in the order of its fields (`d1@Extrude1`), by
+a name it was given, or by its field (`depth@Extrude1`). A feature's value can be given a
+whole address as its name (`D2@Sketch10`: SolidWorks keeps an edge flange's length in its
+profile sketch). Expressions read dimensions by address; a name that is not `word@word`
+is quoted, as in SolidWorks' equations (`"Dia.@Sketch1" / 4`). A `"` after a number or
+a `)` is inches. Names are the same in every configuration; an address reads and sets the
+active configuration's value, and `set` takes `configurations`. Before each rebuild every
+dimension's value is worked out (a sketch's reference dimension has the value the last
+rebuild measured).
+
+| Operation | Fields |
+|---|---|
+| `set` | `name` (an address, or a parameter), `value`, `configurations` (as for `edit`; a parameter: as for `set_parameter`). A reference dimension can't be set |
+| `name_dimension` | `feature`, `dimension` (its name or field), `name`. A sketch dimension's name has no `"` or `@`; another feature's value may take a whole address |
+| `dimensions` | `feature`, `name`: every address, its feature, field, value, `driven` for a reference dimension, and each configuration's value where they differ |
+
+```jsonl
+{"op": "set", "name": "Width@Sketch1", "value": 450, "configurations": "all"}
+{"op": "set", "name": "D1@LPattern2", "value": "int((\"Width@Sketch1\" - 25) / 175mm + 0.999999) + 1"}
+{"op": "name_dimension", "feature": "Edge-Flange1", "dimension": "length", "name": "D2@Sketch10"}
 ```
 
 ## Selectors
@@ -480,7 +508,7 @@ it restores the per-configuration manual flags. `suppress` changes those saved f
 invalid rule, and `manual_suppressed`. `features` reports the effective rebuild status.
 `suppressed_in` lists saved manual flags. Syntax errors reject the operation;
 evaluation errors make the feature fail at rebuild and appear in `failures`.
-Rules read parameters, so drive a sketch dimension and its rule from a shared parameter.
+Rules read parameters and dimensions by address (`"Height@Sketch1" > 1500`).
 SolidWorks suppression strings must be translated to 1 for suppressed and 0 for
 unsuppressed by the importer.
 
@@ -503,9 +531,9 @@ and exports.
 | `delete_configuration` | `configuration`. A part keeps at least one |
 | `configuration` | `configuration`: make it the active one. Not an undo step |
 
-`suppress`, `set_parameter`, `edit` and `set_dimension` take `configurations`: `"this"`
+`suppress`, `set_parameter`, `edit`, `set_dimension` and `set` take `configurations`: `"this"`
 (the active one), `"all"`, a configuration's name, or a list of names. Left out,
-`suppress` and `set_parameter` mean `"this"`; `edit` and `set_dimension` change a value
+`suppress` and `set_parameter` mean `"this"`; `edit`, `set_dimension` and `set` change a value
 that already differs between configurations in the active one, and a value that doesn't
 in all of them. Only the numeric fields of a feature can differ: an `edit` with
 `configurations` other than `"all"` that changes another field is refused.
@@ -527,6 +555,7 @@ in all of them. Only the numeric fields of a feature can differ: an `edit` with
 | `features` | the tree, each feature's status and what it uses |
 | `feature` (`feature`) | its fields; a sketch's plane, definition, entities, relations and dimensions |
 | `parameters` | named values and units; a parameter that differs between configurations lists its expression in each |
+| `dimensions` (`feature`, `name`) | every dimension's address `NAME@FEATURE` and value: see [Dimensions by name](#dimensions-by-name) |
 | `configurations` | the configurations, the active one, and what differs: the configurations each feature is suppressed in, each parameter's expression in every configuration, and under `values` each feature value and sketch dimension in every configuration |
 | `bodies` | bounds, volume, counts; flat size and thickness for sheet metal |
 | `faces`, `edges` (`body`) | what made each face, normals, centres, a round face's `radius`, `axis` and a point on it (`axis_point`); edge ends and the faces they join |

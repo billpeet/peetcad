@@ -98,6 +98,37 @@ for their limits and an example.
 For features that appear only at certain sizes, read `peet skills configurations`
 for `set_suppression_expression`.
 
+## Dimensions by name
+
+Every number of a part has an address `NAME@FEATURE`, as in SolidWorks: a sketch
+dimension `Width@Sketch1` (its name, or `d1`, `d2`), and any other feature's numeric
+value `d1@Extrude1`, `d2@Extrude1`, … in the order `peet ops FEATURE` lists its fields,
+or by its field (`depth@Extrude1`). Use addresses to drive a part the way FabSys drives
+SolidWorks.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [80, 50], "as": "r"}, {"type": "coincident", "of": ["r.bottom.start", "origin"]}, {"type": "length", "of": ["r.bottom"], "value": 80, "name": "Width"}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "set", "name": "Width@Sketch1", "value": 120}
+{"op": "set", "name": "d1@Extrude1", "value": "\"Width@Sketch1\" / 20"}
+{"op": "name_dimension", "feature": "Extrude1", "dimension": "depth", "name": "Thick"}
+{"op": "dimensions", "feature": "Extrude1"}
+```
+
+- `set` sets a dimension by address, or a parameter by name, to a number or an
+  expression. It takes `configurations` as `edit` does. A reference (driven) dimension
+  can't be set.
+- Any expression reads a dimension by address. Quote it when it isn't `word@word`:
+  `"Dia.@Sketch1"`, `"Bend Radius@Sheet-Metal"`. A quote after a number is inches (`2"`).
+- `dimensions` lists every address with its value (and each configuration's where they
+  differ); `feature` or `name` narrows it.
+- `name_dimension` renames one, found by its name or field. A sketch dimension's name
+  is any text without `"` or `@`. A value of another feature can take a whole address
+  (`D2@Sketch10`) for a SolidWorks name whose feature PeetCAD doesn't have. Expressions
+  using the old name are not changed.
+- A pattern count from an expression is rounded to the nearest whole number, as
+  SolidWorks does. Function names are not case sensitive (`IIF`, `INT`).
+
 ## Several documents in one run
 
 Use this to read from one part while building another, or to make several parts in one

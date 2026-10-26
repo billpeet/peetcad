@@ -203,6 +203,12 @@ pub enum Query {
     /// One feature: its fields, and a sketch's contents.
     Feature(FeatureSel),
     Parameters,
+    /// The part's dimensions by address (`Width@Sketch1`): all, a feature's, or the one
+    /// called `name`.
+    Dimensions {
+        feature: Option<FeatureSel>,
+        name: Option<String>,
+    },
     /// The configurations, which one is active, and what differs between them.
     Configurations,
     /// Bounds, volume, and flat size for sheet metal.
@@ -301,6 +307,21 @@ pub enum Op {
         name: String,
         value: Input,
         configurations: Option<Configs>,
+    },
+    /// Set a value by its name, as SolidWorks' equations and FabSys do: a dimension by its
+    /// address (`"Width@Sketch1"`, `"D1@LPattern2"`, `"depth@Extrude1"`), or a parameter.
+    /// `configurations` as for [`Op::Edit`] (a parameter: as for [`Op::SetParameter`]).
+    Set {
+        name: String,
+        value: Input,
+        configurations: Option<Configs>,
+    },
+    /// Name a dimension of a feature (found by its name or field): `Width`, or for a value
+    /// of a feature that isn't a sketch a whole address (`D2@Sketch10`).
+    NameDimension {
+        feature: FeatureSel,
+        dimension: String,
+        name: String,
     },
     /// Change a sketch text's string or style (SolidWorks' `SetSketchText`). `text` is
     /// its entity id; without one, the sketch's only text.
@@ -634,6 +655,8 @@ impl Op {
             Self::Sketch { .. } => "sketch",
             Self::Draw { .. } => "draw",
             Self::SetDimension { .. } => "set_dimension",
+            Self::Set { .. } => "set",
+            Self::NameDimension { .. } => "name_dimension",
             Self::SetText { .. } => "set_text",
             Self::NameFace { .. } => "name_face",
             Self::NameEdge { .. } => "name_edge",
@@ -695,6 +718,7 @@ impl Op {
                 Query::Features => "features",
                 Query::Feature(_) => "feature",
                 Query::Parameters => "parameters",
+                Query::Dimensions { .. } => "dimensions",
                 Query::Configurations => "configurations",
                 Query::Bodies => "bodies",
                 Query::Faces { .. } => "faces",
@@ -813,6 +837,21 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
         "set_dimension",
         "sketch, name, value, configurations (\"this\", \"all\", a name or a list of names; left out: this one if the dimension already differs between configurations, else all)",
         "Change a sketch dimension (\"d1\") to a number or an expression, in some configurations.",
+    ),
+    (
+        "set",
+        "name (a dimension's address NAME@FEATURE, or a parameter), value, configurations (as for set_dimension and edit; a parameter: as for set_parameter)",
+        "Set a value by its name, as SolidWorks' equations and FabSys do: \"Width@Sketch1\", \"D1@LPattern2\", \"depth@Extrude1\", or a parameter.",
+    ),
+    (
+        "name_dimension",
+        "feature, dimension (its name, or a feature's field), name",
+        "Name a dimension, so that it is NAME@FEATURE (\"Width@Sketch1\"). A value of a feature that isn't a sketch can take a whole address (\"D2@Sketch10\").",
+    ),
+    (
+        "dimensions",
+        "feature, name (an address: just that one)",
+        "The part's dimensions by address NAME@FEATURE, with their values (each configuration's where they differ).",
     ),
     (
         "set_text",
@@ -1235,6 +1274,20 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             value: a.required("value", Input::parse)?,
             configurations: a.parsed("configurations", Configs::parse)?,
         },
+        "set" => Op::Set {
+            name: a.required("name", |v| text(v).map(str::to_owned))?,
+            value: a.required("value", Input::parse)?,
+            configurations: a.parsed("configurations", Configs::parse)?,
+        },
+        "name_dimension" => Op::NameDimension {
+            feature: feature(a, "feature")?,
+            dimension: a.required("dimension", |v| text(v).map(str::to_owned))?,
+            name: a.required("name", |v| text(v).map(str::to_owned))?,
+        },
+        "dimensions" => Op::Query(Query::Dimensions {
+            feature: a.parsed("feature", FeatureSel::parse)?,
+            name: a.string("name")?,
+        }),
         "set_text" => Op::SetText {
             sketch: feature(a, "sketch")?,
             text: a.parsed("text", integer)?,

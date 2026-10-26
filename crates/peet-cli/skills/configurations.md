@@ -38,14 +38,14 @@ the active one.
 
 ## Which configurations a change applies to
 
-`suppress`, `set_parameter`, `edit` and `set_dimension` take `configurations`:
+`suppress`, `set_parameter`, `edit`, `set_dimension` and `set` take `configurations`:
 
 - `"this"`: the active configuration only;
 - `"all"`: every configuration, and the value no longer differs between them;
 - a name or a list of names: those, without making them active.
 
 **Left out, it depends on the operation.** `suppress` and `set_parameter` mean `"this"`.
-`edit` and `set_dimension` change a value that already differs between configurations in
+`edit`, `set_dimension` and `set` (of a dimension) change a value that already differs between configurations in
 the active one, and a value that doesn't in all of them: so say `"this"` (or name the
 configurations) the first time a size is to differ, and nothing after that.
 
@@ -110,8 +110,10 @@ flag. A malformed expression is refused. An unknown name, invalid unit or evalua
 error makes the feature fail at rebuild, and appears in `failures`. Fix the rule or
 its parameter, or clear it. Check each configuration, since their parameter values
 can select different branches. Translate SolidWorks suppression strings to numeric
-results: `"suppressed"` becomes 1 and `"unsuppressed"` becomes 0. Use a named parameter
-for a sketch size that a suppression rule needs to read.
+results: `"suppressed"` becomes 1 and `"unsuppressed"` becomes 0. A rule reads a
+dimension by its address, as SolidWorks' equations do: `"iif(\"Height@Sketch1\" > 1500, 0,
+1)"` (`peet skills core`, "Dimensions by name"). An address reads and `set` sets the
+active configuration's value.
 
 ## Checking and exporting each
 
