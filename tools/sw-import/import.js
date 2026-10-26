@@ -572,7 +572,7 @@ function importPart(doc, dir) {
         if (!e) continue;
         if (e.kind === "sketchPoint") {
           let id = pointOf(e);
-          if (id === undefined && !byId.has(e.id.join("."))) { const v = vertexAt(e); if (v) id = v.id; }
+          if (id === undefined && !byId.has(e.id.join(".")) && !(r.defined || []).length) { const v = vertexAt(e); if (v) id = v.id; }
           if (id !== undefined) pts.push({ id, e: e.x !== undefined ? e : byId.get(e.id.join(".")) });
         }
         else if (e.kind === "sketchSegment") {
