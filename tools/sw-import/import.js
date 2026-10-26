@@ -541,7 +541,9 @@ function importPart(doc, dir) {
         const made = reply.ok && (reply.drawn || [])[0];
         // A circular edge seen face-on comes in as an arc or a circle, which takes what the sketch's arcs take
         const round = !!made && (made.type === "arc" || made.type === "circle");
-        projected.set(key, made ? { id: made.id !== undefined ? made.id : (made.curves || made.points || [])[0], point: item.vertex !== undefined, round, center: round ? made.center : undefined } : null);
+        // A straight edge projects to a line from its start to its end
+        const ends = made && made.type === "line" && item.edge && item.edge.between ? item.edge.between.map((p, i) => ({ id: [made.start, made.end][i], at: flat(p) })) : undefined;
+        projected.set(key, made ? { id: made.id !== undefined ? made.id : (made.curves || made.points || [])[0], point: item.vertex !== undefined, round, center: round ? made.center : undefined, ends } : null);
       }
       return projected.get(key) || undefined;
     };
@@ -627,7 +629,12 @@ function importPart(doc, dir) {
       for (const e of r.entities || []) {
         if (!e) continue;
         if (e.kind === "sketchPoint") { const id = pointOf(e); if (id !== undefined) pts.push({ id, e: e.x !== undefined ? e : byId.get(e.id.join(".")) }); else if (e.x !== undefined) unplaced.push(e); }
-        else if (e.kind === "sketchSegment") { const g = segmentOf(e); if (g) segs.push(g); else if (e.type) unplaced.push(e); }
+        else if (e.kind === "sketchSegment") {
+          const g = segmentOf(e);
+          // A converted edge's hidden copy lies on the segment converted from it: it is the model's edge
+          if (g && segs.includes(g)) copies.push(e);
+          else if (g) segs.push(g); else if (e.type) unplaced.push(e);
+        }
       }
       // What is in a block is given where the block's definition has it: it is found where an instance puts
       // it, the instance nearest what else the relation ties where more than one would do
@@ -675,11 +682,20 @@ function importPart(doc, dir) {
           if (level(r.type.slice(0, 4) === "hori" ? "horizontal" : "vertical") && anyPoints.length === 2) item = { type: level(r.type.slice(0, 4) === "hori" ? "horizontal" : "vertical"), of: anyPoints };
           break;
         case "coincident": if (all.length === 2 && anyPoints.length >= 1) item = { type: "coincident", of: [anyPoints[0], all.find(x => x !== anyPoints[0])] }; break;
-        case "colinear": case "useedge":
+        case "colinear": case "useedge": {
+          // A line converted from an edge is the edge: its ends are the edge's ends, which it follows
+          const edge = outside.length === 1 && outside[0].ends;
+          if (r.type === "useedge" && lines.length === 1 && edge && lines[0].start !== undefined) {
+            const [a, b] = [sk.toPeet(lines[0].g.start), sk.toPeet(lines[0].g.end)];
+            const gap = (p, q) => Math.hypot(p[0] - q.at[0], p[1] - q.at[1]);
+            const [s0, s1] = gap(a, edge[0]) + gap(b, edge[1]) <= gap(a, edge[1]) + gap(b, edge[0]) ? edge : [edge[1], edge[0]];
+            if (gap(a, s0) < 1e-4 && gap(b, s1) < 1e-4) { item = { type: "coincident", of: [lines[0].start, s0.id], with: [{ type: "coincident", of: [lines[0].end, s1.id] }] }; break; }
+          }
           if (anyLines.length === 2) item = { type: "collinear", of: anyLines };
           // An arc on a circular edge (converted from it)
           else if (r.type === "useedge" && anyLines.length === 0 && anyPoints.length === 0 && rounds.length === 2) item = { type: "coradial", of: rounds.map(g => g.id) };
           break;
+        }
         case "parallel": case "perpendicular": if (anyLines.length === 2) item = { type: r.type, of: anyLines }; break;
         case "tangent": if (segs.length + outLines.length === 2 && rounds.length >= 1) item = { type: "tangent", of: [...segs.map(g => g.id), ...outLines] }; break;
         case "concentric": if (rounds.length === 2) item = { type: "concentric", of: rounds.map(g => g.id) }; break;
