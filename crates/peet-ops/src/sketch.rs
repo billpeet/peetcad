@@ -80,6 +80,7 @@ pub enum Relation {
     Midpoint,
     Symmetric,
     Fix,
+    Patterned,
 }
 
 /// What a dimension measures.
@@ -95,7 +96,7 @@ pub enum Measure {
     Angle,
 }
 
-const RELATIONS: [(Relation, &str, &str); 13] = [
+const RELATIONS: [(Relation, &str, &str); 14] = [
     (
         Relation::Coincident,
         "coincident",
@@ -126,13 +127,18 @@ const RELATIONS: [(Relation, &str, &str); 13] = [
         "coradial",
         "two circles or arcs with the same centre and radius",
     ),
-    (Relation::Midpoint, "midpoint", "a point and a line"),
+    (Relation::Midpoint, "midpoint", "a point and a line or arc"),
     (
         Relation::Symmetric,
         "symmetric",
         "two points and the line they mirror across",
     ),
     (Relation::Fix, "fix", "an entity, held where it is"),
+    (
+        Relation::Patterned,
+        "patterned",
+        "the seed and a copy of it in a linear pattern, then the pattern's first copy (left out when the copy is the first): points, lines or circles",
+    ),
 ];
 
 const MEASURES: [(Measure, &str, &str); 8] = [
@@ -741,6 +747,15 @@ fn relation(sketch: &Sketch, kind: Relation, of: &[EntityId]) -> Result<Constrai
         (Relation::Midpoint, &[a, b]) => K::Midpoint { point: b, line: a },
         (Relation::Symmetric, &[a, b, axis]) => K::Symmetric { a, b, axis },
         (Relation::Symmetric, _) => return wrong("two points and a line"),
+        (Relation::Patterned, &[seed, copy]) => K::Patterned {
+            seed,
+            copy,
+            first: copy,
+        },
+        (Relation::Patterned, &[seed, copy, first]) => K::Patterned { seed, copy, first },
+        (Relation::Patterned, _) => {
+            return wrong("the seed and a copy, then the first copy if that is another");
+        }
         (Relation::Fix, _) => return wrong("one entity"),
         _ => return wrong("two entities"),
     })

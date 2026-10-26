@@ -155,6 +155,7 @@ pub(crate) fn constraint_refs(kind: &ConstraintKind) -> ([EntityId; 3], usize, u
         Radius(a) => ([a, z, z], 1, 18),
         Diameter(a) => ([a, z, z], 1, 19),
         Angle(a, b) => ([a, b, z], 2, 20),
+        Patterned { seed, copy, first } => ([seed, copy, first], 3, 22),
     }
 }
 

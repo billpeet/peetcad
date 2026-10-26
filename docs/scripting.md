@@ -233,7 +233,8 @@ A `draw` list holds items with a `type`:
 | `slot` | `from`, `to`, `radius` |
 | `polygon` | `center`, `vertex`, `sides` |
 | `text` | `at`, `string`, `height`, `font`, `angle`, `width`, `spacing`, `align` (part `point`) |
-| `coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `tangent`, `equal`, `concentric`, `collinear`, `coradial`, `midpoint`, `symmetric`, `fix` | `of` (entities) |
+| `coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `tangent`, `equal`, `concentric`, `collinear`, `coradial`, `midpoint` (of a line or an arc), `symmetric`, `fix` | `of` (entities) |
+| `patterned` | `of`: a seed, a copy of it in a linear sketch pattern, and the pattern's first copy where that is another (points, lines or circles) |
 | `distance`, `doubled_distance`, `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle` | `of`, `value`, `name`, `driven` |
 | `fillet` | `corner`, `radius` |
 | `trim`, `extend` | `curve`, `near` |

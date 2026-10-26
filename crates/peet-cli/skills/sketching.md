@@ -130,6 +130,25 @@ etch or cut out a label, `extrude` it to emboss one. Put the sketch on the face 
   dimensions that contradict each other (the sketch's status is then `warning`). Take
   one out with `{"type": "remove", "dimensions": ["d2"]}` (or `"relations": [ids]`; the
   ids are in the reply that made them and in `peet feature`).
+- `midpoint` takes a line or an arc: on an arc the point sits halfway round from its
+  start to its end (a circle has no middle).
+
+### Linear sketch patterns
+
+Draw every copy, then tie each one to its seed with `patterned`, so that the copies
+follow the seed's size and place and stay evenly spaced. `of` is the seed and the copy,
+and for the second copy on, the pattern's first copy (the step): the copy is the seed
+moved a whole number of steps, the number taken from where it is drawn. Points, lines
+and circles, each copy of the same kind as its seed; pattern a rectangle line by line.
+The step itself is free: dimension it (between the seed's and the first copy's centres,
+say). Copies are drawn, so changing how many there are means drawing or deleting them.
+A copy turned about a point (a circular pattern) has no `patterned`.
+
+```jsonl
+{"op":"sketch","on":"top","name":"Holes","draw":[{"type":"circle","center":[10,10],"radius":2,"as":"seed"},{"type":"circle","center":[25,10],"radius":2,"as":"c1"},{"type":"circle","center":[40,10],"radius":2,"as":"c2"},{"type":"circle","center":[55,10],"radius":2,"as":"c3"},{"type":"patterned","of":["seed","c1"]},{"type":"patterned","of":["seed","c2","c1"]},{"type":"patterned","of":["seed","c3","c1"]},{"type":"radius","of":["seed"],"value":2,"name":"hole"},{"type":"horizontal_distance","of":["seed.center","c1.center"],"value":15,"name":"pitch"},{"type":"point","at":[30,30],"as":"m"},{"type":"arc","center":[30,20],"start":[40,20],"end":[20,20],"as":"bow"},{"type":"midpoint","of":["m","bow"]}]}
+{"op":"set_dimension","sketch":"Holes","name":"pitch","value":20}
+{"op":"feature","feature":"Holes"}
+```
 
 ## Editing what is drawn
 

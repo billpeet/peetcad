@@ -89,8 +89,8 @@ pub(super) fn violation(s: &Sketch, c: &Constraint) -> f64 {
         }
         K::Concentric(a, b) => circ(s, a).0.distance(circ(s, b).0),
         K::Midpoint { point, line } => {
-            let (a, b) = line_ab(s, line);
-            s.point(point).distance((a + b) * 0.5)
+            let middle = s.curve(line).unwrap().point_at(0.5);
+            s.point(point).distance(middle)
         }
         K::Symmetric { a, b, axis } => {
             let (pa, pb) = (s.point(a), s.point(b));
@@ -98,6 +98,31 @@ pub(super) fn violation(s: &Sketch, c: &Constraint) -> f64 {
             axis_curve.distance_to_line((pa + pb) * 0.5) + dir(axis).dot(pb - pa).abs()
         }
         K::Fix { point, at } => s.point(point).distance(at),
+        K::Patterned { seed, copy, first } => {
+            // Where each point of the copy should be: the seed's, moved n steps
+            let places = |id| match s.kind(id).unwrap() {
+                EntityKind::Point => vec![s.point(id)],
+                EntityKind::Circle => vec![circ(s, id).0],
+                _ => {
+                    let (a, b) = line_ab(s, id);
+                    vec![a, b]
+                }
+            };
+            let (sp, fp, cp) = (places(seed), places(first), places(copy));
+            let step = fp[0] - sp[0];
+            let n = ((cp[0] - sp[0]).dot(step) / step.length_squared()).round();
+            let size = if kind(seed) == EntityKind::Circle {
+                (circ(s, seed).1 - circ(s, copy).1).abs()
+            } else {
+                0.0
+            };
+            let off = |o: &[DVec2], n: f64| {
+                (0..sp.len())
+                    .map(|i| (o[i] - sp[i] - step * n).length())
+                    .fold(0.0, f64::max)
+            };
+            off(&cp, n).max(off(&fp, 1.0)).max(size)
+        }
         K::Angle(l1, l2) => {
             // atan2 rather than `Sketch::measure` (acos based, only ~1e-8 accurate near
             // 0° and 180°).
@@ -333,6 +358,54 @@ fn midpoint_symmetric_fix() {
     );
     assert_solved(&mut s);
     assert!(s.point(f).distance(v(3.0, -2.0)) < 1e-10);
+}
+
+#[test]
+fn midpoint_of_an_arc() {
+    // A quarter arc counter-clockwise from (10, 0) to (0, 10) round the origin: its middle
+    // is at 45°, not at the opposite point the same equations allow.
+    let mut s = Sketch::new();
+    let a = s.add_arc(v(0.0, 0.0), v(10.0, 0.0), v(0.0, 10.0));
+    let m = s.add_point(v(6.0, 8.0));
+    add!(s, K::Midpoint { point: m, line: a });
+    assert_solved(&mut s);
+    let middle = s.curve(a).unwrap().point_at(0.5);
+    assert!(s.point(m).distance(middle) < 1e-8);
+    // It follows the arc when the arc changes
+    dim!(s, K::Radius(a), 20.0);
+    assert_solved(&mut s);
+    let (c, r) = circ(&s, a);
+    assert!((r - 20.0).abs() < 1e-8);
+    assert!((s.point(m).distance(c) - 20.0).abs() < 1e-8);
+}
+
+#[test]
+fn linear_pattern_follows_its_seed() {
+    // Three circles 10 apart and a line copied twice, a little out of place to start with
+    let mut s = Sketch::new();
+    let seed = s.add_circle(v(0.0, 0.0), 2.0);
+    let first = s.add_circle(v(10.0, 0.1), 2.1);
+    let third = s.add_circle(v(19.8, 0.0), 1.9);
+    add!(s, K::Patterned { seed, copy: first, first });
+    add!(s, K::Patterned { seed, copy: third, first });
+    let l0 = s.add_line(v(0.0, 10.0), v(4.0, 12.0));
+    let l1 = s.add_line(v(5.0, 10.0), v(9.0, 12.1));
+    let l2 = s.add_line(v(10.0, 10.0), v(14.0, 12.0));
+    add!(s, K::Patterned { seed: l0, copy: l1, first: l1 });
+    add!(s, K::Patterned { seed: l0, copy: l2, first: l1 });
+    assert_solved(&mut s);
+    // The seed's size and the step drive the copies
+    dim!(s, K::Radius(seed), 3.0);
+    let (c0, c1) = (circ(&s, seed).0, circ(&s, first).0);
+    dim!(s, K::Distance(s.center(seed).unwrap(), s.center(first).unwrap()), 12.0);
+    assert_solved(&mut s);
+    let (c0n, c1n, c2n) = (circ(&s, seed).0, circ(&s, first).0, circ(&s, third).0);
+    assert!((circ(&s, third).1 - 3.0).abs() < 1e-8);
+    assert!(c2n.distance(c0n + (c1n - c0n) * 2.0) < 1e-8);
+    assert!((c1n.distance(c0n) - 12.0).abs() < 1e-8, "{c0} {c1}");
+    let (a0, b0) = line_ab(&s, l0);
+    let (a2, b2) = line_ab(&s, l2);
+    assert!(((b2 - a2) - (b0 - a0)).length() < 1e-8);
 }
 
 #[test]

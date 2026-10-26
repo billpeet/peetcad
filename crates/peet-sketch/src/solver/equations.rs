@@ -461,6 +461,78 @@ impl Ctx<'_> {
         }
     }
 
+    /// The point slots an entity of a pattern is placed by: a point's own, a line's ends, a
+    /// circle's centre.
+    fn placed_by(&self, id: EntityId) -> Vec<u32> {
+        match *self.geometry(id) {
+            Geometry::Point { .. } => vec![self.map.p(id)],
+            Geometry::Line { start, end } => vec![self.map.p(start), self.map.p(end)],
+            Geometry::Circle { center, .. } => vec![self.map.p(center)],
+            _ => unreachable!("validated as a point, line or circle"),
+        }
+    }
+
+    /// `other`'s points in the order of `seed`'s: a line copied may run either way.
+    fn paired(&self, seed: &[u32], other: Vec<u32>) -> Vec<u32> {
+        if let ([s0, s1], [o0, o1]) = (seed, other.as_slice()) {
+            let p = |s: u32| self.pos(s);
+            let straight = ((p(*o0) - p(*s0)) - (p(*o1) - p(*s1))).length();
+            let crossed = ((p(*o1) - p(*s0)) - (p(*o0) - p(*s1))).length();
+            if crossed < straight {
+                return vec![*o1, *o0];
+            }
+        }
+        other
+    }
+
+    /// `copy` is `seed` moved `k` times as far as `first` is, `k` the nearest whole number
+    /// to what it is now; with `copy` the same as `first`, `first` is `seed` moved.
+    fn patterned(&self, seed: EntityId, copy: EntityId, first: EntityId, out: &mut Vec<Eq>) {
+        let owner = self.owner;
+        let s = self.placed_by(seed);
+        let f = self.paired(&s, self.placed_by(first));
+        let circle = matches!(self.geometry(seed), Geometry::Circle { .. });
+        let same_size = |out: &mut Vec<Eq>| {
+            if circle {
+                out.push(
+                    Eq::new(EqKind::Zero, &[], owner)
+                        .minus_radius(self.radius(seed), -1.0)
+                        .minus_radius(self.radius(copy), 1.0),
+                );
+            }
+        };
+        if copy == first {
+            // Each point moved as the first one is
+            for i in 1..s.len() {
+                for k in 0..2 {
+                    out.push(Eq::linear(
+                        &[(f[i] + k, 1.0), (s[i] + k, -1.0), (f[0] + k, -1.0), (s[0] + k, 1.0)],
+                        0.0,
+                        owner,
+                    ));
+                }
+            }
+            same_size(out);
+            return;
+        }
+        let c = self.paired(&s, self.placed_by(copy));
+        let step = self.pos(f[0]) - self.pos(s[0]);
+        let moved = self.pos(c[0]) - self.pos(s[0]);
+        let n = (moved.dot(step) / step.length_squared().max(TINY)).round();
+        for i in 0..s.len() {
+            for k in 0..2 {
+                // c_i - s_i = n (f_0 - s_0)
+                let terms: Vec<(u32, f64)> = if i == 0 {
+                    vec![(c[0] + k, 1.0), (s[0] + k, n - 1.0), (f[0] + k, -n)]
+                } else {
+                    vec![(c[i] + k, 1.0), (s[i] + k, -1.0), (f[0] + k, -n), (s[0] + k, n)]
+                };
+                out.push(Eq::linear(&terms, 0.0, owner));
+            }
+        }
+        same_size(out);
+    }
+
     fn emit(&self, kind: &ConstraintKind, value: f64, contact: u32, out: &mut Vec<Eq>) {
         use ConstraintKind as K;
         let owner = self.owner;
@@ -559,6 +631,23 @@ impl Ctx<'_> {
                     );
                 }
             }
+            K::Midpoint { point, line } if !self.is_line(line) => {
+                // On the arc, and on the line through its centre square to its chord. Of the
+                // two places that leaves, the solver keeps the one the point is nearer.
+                let Geometry::Arc { center, start, end } = *self.geometry(line) else {
+                    unreachable!("validated as a line or an arc")
+                };
+                let (c, q, s, e) = (p(center), p(point), p(start), p(end));
+                out.push(
+                    Eq::new(EqKind::Dist, &[c, c + 1, q, q + 1], owner)
+                        .minus_radius(self.radius(line), 1.0),
+                );
+                out.push(Eq::new(
+                    EqKind::SymPerp,
+                    &[c, c + 1, q, q + 1, s, s + 1, e, e + 1],
+                    owner,
+                ));
+            }
             K::Midpoint { point, line } => {
                 let (a, b) = self.line_pts(line);
                 let q = p(point);
@@ -615,6 +704,7 @@ impl Ctx<'_> {
                     .minus_radius(self.radius(c), -1.0)
                     .with_k0(value * 0.5),
             ),
+            K::Patterned { seed, copy, first } => self.patterned(seed, copy, first, out),
             K::Angle(l1, l2) => {
                 let (a1, b1) = self.line_pts(l1);
                 let (a2, b2) = self.line_pts(l2);
