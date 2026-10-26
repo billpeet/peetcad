@@ -273,6 +273,9 @@ fn add(doc: &Document, model: &mut Model, new: &[New]) -> Result<Vec<FeatureId>,
         if let FeatureKind::Loft(loft) = &kind {
             sources.extend(loft.sections.iter().skip(1));
         }
+        if let FeatureKind::StructuralMember(m) = &kind {
+            sources.extend(&m.paths);
+        }
         let id = model.add(kind);
         for source in sources {
             if let Some(s) = model.feature_mut(source) {
@@ -467,7 +470,12 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
         }
         Op::UpdateLinks => {
             links::unavailable()?;
-            let (updated, problems) = links::refresh(&mut model, links::folder(doc).as_deref(), 0);
+            let (mut updated, mut problems) =
+                links::refresh(&mut model, links::folder(doc).as_deref(), 0);
+            // A part's inserted parts are read again too.
+            let (inserted, unread) = links::refresh_inserted(&mut model, doc);
+            updated.extend(inserted);
+            problems.extend(unread);
             done.data = links::report(&updated, &problems);
             if updated.is_empty() {
                 return Ok(done);

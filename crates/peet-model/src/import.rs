@@ -49,12 +49,22 @@ pub(crate) fn apply_import(
             }
         )));
     }
+    let solids = def.solids.iter().map(|s| s.solid.clone()).collect();
+    Ok((named_bodies(feature, bodies, solids, seed), None))
+}
+
+/// `bodies` with `solids` added, their faces named by their index in each solid: the
+/// first solid's plainly, the others' with which solid they belong to.
+pub(crate) fn named_bodies(
+    feature: FeatureId,
+    bodies: &[Arc<Body>],
+    solids: Vec<Solid>,
+    seed: u64,
+) -> Vec<Arc<Body>> {
     let mut out = bodies.to_vec();
-    for (i, imported) in def.solids.iter().enumerate() {
-        // The first solid's faces are named plainly; the others say which solid they
-        // belong to.
+    for (i, solid) in solids.into_iter().enumerate() {
         let instance = FaceName::new(feature, FaceRole::Instance(i as u32));
-        let face_names = (0..imported.solid.faces.len() as u32)
+        let face_names = (0..solid.faces.len() as u32)
             .map(|f| {
                 let name = FaceName::new(feature, FaceRole::Imported(f));
                 if i == 0 {
@@ -65,12 +75,12 @@ pub(crate) fn apply_import(
             })
             .collect();
         out.push(Arc::new(Body {
-            solid: imported.solid.clone(),
+            solid,
             face_names,
             origin: feature,
             stamp: stamp(seed, i),
             sheet: None,
         }));
     }
-    Ok((out, None))
+    out
 }

@@ -198,6 +198,16 @@ pub(crate) enum Seed<'a> {
     },
     /// A tab (a base flange added to a sheet metal body): its sketch, moved.
     Tab { plane: Plane, sketch: &'a Sketch },
+    /// A draft of faces of features the pattern also copies: each copy drafts the same
+    /// faces of their copies, about the neutral plane moved with them.
+    Draft {
+        def: &'a crate::dressup::DraftFeature,
+        neutral: Plane,
+        angle: f64,
+        /// The copied features whose faces it drafts, each with its place in the list of
+        /// seeds (which numbers its copies' faces). Filled in once every seed is known.
+        sources: Vec<(FeatureId, usize)>,
+    },
     /// A break corner: what it takes from (or adds to) the sheet, moved.
     BreakCorner { original: FeatureId },
     /// A mitre flange: the same profile along the edges the motion takes the original's to.
@@ -243,7 +253,71 @@ pub(crate) fn apply_copies(
     // flange is copied after it. Each keeps its number for its faces' names.
     let mut order: Vec<usize> = (0..seeds.len()).collect();
     order.sort_by_key(|&i| seeds[i].2);
-    for si in order {
+    // With a draft among them, each copy is made whole before the next, as SolidWorks
+    // makes them: the copied features in order, then the drafts of their faces. Copies
+    // that overlap (the arms of a cross) then meet as the originals did.
+    let drafted = seeds.iter().any(|s| matches!(s.1, Seed::Draft { .. }));
+    if drafted {
+        let solid = |s: &SeedEntry<'_>| {
+            s.3.is_empty()
+                && matches!(
+                    s.1,
+                    Seed::Extrude { .. }
+                        | Seed::Revolve { .. }
+                        | Seed::Hole { .. }
+                        | Seed::Draft { .. }
+                )
+        };
+        if let Some((name, ..)) = seeds.iter().find(|s| !solid(s)) {
+            return Err(FeatureError(format!(
+                "{name}: with a draft, a pattern or a mirror copies only extrusions, cuts, revolves, holes and drafts."
+            )));
+        }
+        for (k, m) in motions.iter().enumerate() {
+            let mut copy = bodies.clone();
+            let mut failed = None;
+            for &si in &order {
+                let (name, seed, ..) = &seeds[si];
+                let key = crate::hash::combine(stamp, si as u64);
+                // The drafts of a cut's own faces shape the cut before it is made
+                let shaping: Vec<&Seed<'_>> = drafts_of(seeds, si);
+                let step = match seed {
+                    Seed::Draft { sources, .. }
+                        if sources.len() == 1 && cut_seed(&seeds[sources[0].1].1) =>
+                    {
+                        continue;
+                    }
+                    Seed::Draft { .. } => draft_copy(feature, model, &copy, seed, m, k + 1, key),
+                    _ if !shaping.is_empty() => drafted_cut_copy(
+                        feature,
+                        &copy,
+                        seed,
+                        &shaping,
+                        m,
+                        copy_number(si, k + 1),
+                        key,
+                    ),
+                    _ => solid_copy(feature, &copy, seed, m, copy_number(si, k + 1), key),
+                };
+                match step {
+                    Ok(b) => copy = b,
+                    Err(e) => {
+                        failed = Some(format!("{name}: {}", e.0));
+                        break;
+                    }
+                }
+            }
+            match failed {
+                None => {
+                    bodies = copy;
+                    made += 1;
+                }
+                Some(why) => skipped.push(format!("copy {} ({why})", k + 2)),
+            }
+        }
+    }
+    // (Without a draft, every copy of one feature is made before the next feature's.)
+    for si in order.into_iter().filter(|_| !drafted) {
         let (name, seed, _, inner) = &seeds[si];
         let key = crate::hash::combine(stamp, si as u64);
         // A copy of a pattern or a mirror: each of its copies, moved on
@@ -326,6 +400,7 @@ pub(crate) fn apply_copies(
                     warning = w;
                 }
             }),
+            Seed::Draft { .. } => unreachable!("copied a copy at a time, above"),
             Seed::SheetCut { .. } | Seed::Form { .. } => sheet_copies(
                 feature,
                 model,
@@ -441,10 +516,122 @@ fn solid_copy(
         }
         _ => unreachable!("copied in the flat pattern"),
     };
-    // Name the copy's faces apart from the other copies'.
+    Ok(numbered(out, feature, copy))
+}
+
+/// Whether a seed is a cut that a draft of its own faces can shape before it is made.
+fn cut_seed(seed: &Seed<'_>) -> bool {
+    matches!(seed, Seed::Extrude { params, .. }
+        if params.operation == crate::Operation::Cut && !params.flip_side)
+}
+
+/// The drafts among `seeds` of the faces of seed `si` alone, if it is a plain cut.
+fn drafts_of<'s, 'a>(seeds: &'s [SeedEntry<'a>], si: usize) -> Vec<&'s Seed<'a>> {
+    if !cut_seed(&seeds[si].1) {
+        return Vec::new();
+    }
+    // In the order they are in the model
+    let mut found: Vec<&SeedEntry<'a>> = seeds
+        .iter()
+        .filter(|s| matches!(&s.1, Seed::Draft { sources, .. } if sources.len() == 1 && sources[0].1 == si))
+        .collect();
+    found.sort_by_key(|s| s.2);
+    found.into_iter().map(|s| &s.1).collect()
+}
+
+/// One copy of a cut whose walls are drafted: the cut's shape, moved, with the drafts
+/// applied to it before it is cut, so that the copy takes out what the original and its
+/// drafts took out. (Drafting the copy's walls in the body instead would meet the walls
+/// of copies next to it: the arms of a cross.)
+fn drafted_cut_copy(
+    feature: FeatureId,
+    bodies: &[Arc<Body>],
+    seed: &Seed<'_>,
+    drafts: &[&Seed<'_>],
+    motion: &Motion,
+    copy: u32,
+    stamp: u64,
+) -> Result<Vec<Arc<Body>>, FeatureError> {
+    let Seed::Extrude {
+        plane,
+        sketch,
+        params,
+        depth,
+        draft,
+        up_to,
+    } = seed
+    else {
+        unreachable!("a cut")
+    };
+    let moved = motion
+        .sketch_plane(plane)
+        .ok_or_else(|| FeatureError("the copy's plane is degenerate".to_owned()))?;
+    let stamp = crate::hash::combine(stamp, u64::from(copy));
+    let input = ExtrudeInput {
+        feature,
+        bodies,
+        plane: &moved,
+        sketch,
+        params,
+        depth: *depth,
+        draft: *draft,
+        up_to: up_to.and_then(|p| motion.plane(&p)),
+        stamp,
+        mirror: motion.is_mirror(),
+    };
+    let (mut tool, names) = crate::extrude::tool(&input)?;
+    for d in drafts {
+        let Seed::Draft {
+            def,
+            neutral,
+            angle,
+            sources,
+        } = d
+        else {
+            continue;
+        };
+        let cut = sources[0].0;
+        let mut faces = Vec::new();
+        for r in &def.faces {
+            let roles: Vec<FaceName> = r
+                .name
+                .origins()
+                .iter()
+                .filter(|o| o.feature == cut)
+                .map(|o| FaceName::new(feature, o.role))
+                .collect();
+            let found = names
+                .iter()
+                .position(|n| roles.iter().any(|r| r == n))
+                .ok_or_else(|| {
+                    FeatureError("a face it drafts is not a wall of the cut".to_owned())
+                })?;
+            faces.push(peet_kernel::FaceId(found as u32));
+        }
+        let plane = motion
+            .plane(neutral)
+            .ok_or_else(|| FeatureError("the copy's neutral plane is degenerate".to_owned()))?;
+        // The cut's shape is the hole: it widens where the hole's walls do.
+        let a = if def.flip { -*angle } else { *angle };
+        tool = peet_kernel::reshape::draft(&tool, &faces, &plane, -a.to_radians())
+            .map_err(|e| crate::dressup::sentence(&e))?;
+    }
+    let out = crate::extrude::combine(&crate::extrude::Combine {
+        feature,
+        bodies,
+        tool,
+        tool_names: names,
+        operation: params.operation,
+        stamp,
+        hint: "Check its direction and depth.",
+    })?;
+    Ok(numbered(out, feature, copy))
+}
+
+/// The bodies with the faces a copy made named apart from the other copies'.
+fn numbered(out: Vec<Arc<Body>>, feature: FeatureId, copy: u32) -> Vec<Arc<Body>> {
     let instance = FaceName::new(feature, FaceRole::Instance(copy));
-    Ok(out
-        .into_iter()
+    out.into_iter()
         .map(|b| {
             let fresh = b.face_names.iter().any(|n| needs_instance(n, feature));
             if !fresh {
@@ -458,7 +645,66 @@ fn solid_copy(
             }
             Arc::new(body)
         })
-        .collect())
+        .collect()
+}
+
+/// One copy of a draft: the faces it drafts, as the `copy`-th copy of the features they
+/// belong to has them, drafted about the neutral plane moved by `motion`.
+fn draft_copy(
+    feature: FeatureId,
+    model: &Model,
+    bodies: &[Arc<Body>],
+    seed: &Seed<'_>,
+    motion: &Motion,
+    copy: usize,
+    stamp: u64,
+) -> Result<Vec<Arc<Body>>, FeatureError> {
+    let Seed::Draft {
+        def,
+        neutral,
+        angle,
+        sources,
+    } = seed
+    else {
+        unreachable!("a draft")
+    };
+    // A face of a copied feature is the pattern's, with the copy's number.
+    let name = |n: &FaceName| -> Result<FaceName, FeatureError> {
+        let parts = n
+            .origins()
+            .iter()
+            .map(|o| {
+                let &(_, si) = sources.iter().find(|(f, _)| *f == o.feature).ok_or_else(|| {
+                    FeatureError(format!(
+                        "it drafts {}, which the pattern doesn't copy: copy the feature that made it too",
+                        model.describe_face(n)
+                    ))
+                })?;
+                Ok(FaceName::merged([
+                    &FaceName::new(feature, o.role),
+                    &FaceName::new(feature, FaceRole::Instance(copy_number(si, copy))),
+                ]))
+            })
+            .collect::<Result<Vec<FaceName>, FeatureError>>()?;
+        Ok(FaceName::merged(&parts))
+    };
+    let mut moved = (*def).clone();
+    for r in &mut moved.faces {
+        r.name = name(&r.name)?;
+        // Neighbours of faces the pattern doesn't copy stay as they are.
+        for n in &mut r.neighbours {
+            if let Ok(m) = name(n) {
+                *n = m;
+            }
+        }
+        r.hint = motion.point(r.hint);
+    }
+    let plane = motion
+        .plane(neutral)
+        .ok_or_else(|| FeatureError("the copy's neutral plane is degenerate".to_owned()))?;
+    let stamp = crate::hash::combine(stamp, u64::from(copy as u32));
+    let (out, _) = crate::dressup::apply_draft(model, bodies, &moved, &plane, *angle, stamp)?;
+    Ok(out)
 }
 
 /// Whether a face was made by `feature` and not yet told which copy it is part of.

@@ -265,6 +265,7 @@ function importPart(doc, dir) {
   const asleep = new Set();      // SolidWorks features imported and then suppressed in every configuration
   const cornerOps = new Map();   // PeetCAD corner feature name -> the operation that made it, for corner reliefs
   const rejoined = new Map();    // SolidWorks CombineBodies name -> the Split whose pieces it joins again
+  const moves = new Map();       // SolidWorks Move/Copy Body name -> the PeetCAD features whose faces its body has
   let unfolded = null;           // between an Unfold and its Fold: the face that stays where it is
   let sheet = null;             // the sheet metal settings in force
   let thickness = null;
@@ -1721,6 +1722,148 @@ function importPart(doc, dir) {
   const elsewhere = doc.configurations.filter(c => c !== config && !c.flatPattern).map(flatten);
   const liveElsewhere = name => elsewhere.some(m => m.has(name) && !m.get(name).suppressed);
 
+  // ---- Bodies: which is which, and where SolidWorks moved them ----
+
+  /**
+   * The PeetCAD features whose faces are on the body SolidWorks calls `name` (named after the last feature that
+   * changed it, "Split1[2]" for a piece): a body moved by a Move/Copy Body is the body it moved.
+   */
+  function bodyFeatures(name) {
+    const base = String(name).replace(/\[\d+\]$/, "");
+    if (moves.has(base)) return moves.get(base);
+    return made.get(base) || null;
+  }
+  /** A face of the body SolidWorks calls `name`, as a selector, with the body's index; null if it is not there. */
+  function bodyPick(name) {
+    const names = bodyFeatures(name);
+    if (!names || !names.length) return null;
+    const face = (peet.ask({ op: "faces" }).faces || []).find(x => (x.made_by || []).some(m => names.includes(m.feature)));
+    return face ? { body: face.body, pick: { body: face.body, index: face.index } } : null;
+  }
+
+  /** The flat and round faces of a body of the part, for matching: directions, a point on each, sizes. */
+  function oursToMatch(body) {
+    return (peet.ask({ op: "faces" }).faces || []).filter(x => x.body === body).flatMap(x =>
+      x.surface === "plane" && x.normal ? [{ kind: "plane", d: unit(x.normal), p: x.center, area: x.area_mm2 }]
+        : x.surface === "cylinder" && x.axis && x.axis_point ? [{ kind: "cylinder", d: unit(x.axis), p: x.axis_point, r: x.radius, area: x.area_mm2 }]
+          : []);
+  }
+  /** The same of a body in SolidWorks' export. */
+  function theirsToMatch(body) {
+    return body.faces.flatMap(x =>
+      x.surface === "plane" && x.plane ? [{ kind: "plane", d: unit(x.normal || x.plane.slice(0, 3)), p: mm(x.plane.slice(3, 6)), area: x.area * 1e6 }]
+        : x.surface === "cylinder" && x.cylinder ? [{ kind: "cylinder", d: unit(x.cylinder.slice(3, 6)), p: mm(x.cylinder.slice(0, 3)), r: x.cylinder[6] * MM, area: x.area * 1e6 }]
+          : []);
+  }
+
+  /**
+   * The rigid motion that puts the faces `ours` where `theirs` are, found from faces of the same kind and size:
+   * `{ m, t, matched, of }`, `m` the rotation's matrix (rows), `t` the translation, `matched` of `of` faces of
+   * ours that land on one of theirs. Null if none puts more than half there.
+   */
+  function register(ours, theirs) {
+    const same = (a, b) => a.kind === b.kind && Math.abs(a.area - b.area) <= 1e-4 * Math.max(1, a.area) + 1e-4
+      && (a.kind !== "cylinder" || Math.abs(a.r - b.r) < 1e-4);
+    const cands = ours.map(o => theirs.filter(t => same(o, t)));
+    const order = ours.map((_, i) => i).filter(i => cands[i].length).sort((i, j) => cands[i].length - cands[j].length);
+    if (!order.length) return null;
+    const frame = (u, w) => { const e1 = unit(u), e2 = unit(sub(w, mul(e1, dot(w, e1)))); return [e1, e2, cross(e1, e2)]; };
+    const perp = u => unit(cross(u, Math.abs(u[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]));
+    const turn = (E, F) => ({ E, F });
+    const rotate = (R, x) => add(add(mul(R.F[0], dot(R.E[0], x)), mul(R.F[1], dot(R.E[1], x))), mul(R.F[2], dot(R.E[2], x)));
+    // Turns that take two faces' directions to two of theirs at the same angle (a direction either way round)
+    const turns = [turn([[1, 0, 0], [0, 1, 0], [0, 0, 1]], [[1, 0, 0], [0, 1, 0], [0, 0, 1]])];
+    const i1 = order[0], u1 = ours[i1].d;
+    const i2 = order.find(i => len(cross(u1, ours[i].d)) > 0.1);
+    for (const t1 of cands[i1]) for (const s1 of [1, -1]) {
+      const w1 = mul(t1.d, s1);
+      if (i2 === undefined) { turns.push(turn(frame(u1, perp(u1)), frame(w1, perp(w1)))); continue; }
+      const u2 = ours[i2].d;
+      for (const t2 of cands[i2]) for (const s2 of [1, -1]) {
+        const w2 = mul(t2.d, s2);
+        if (Math.abs(dot(u1, u2) - dot(w1, w2)) > 1e-6) continue;
+        turns.push(turn(frame(u1, u2), frame(w1, w2)));
+      }
+    }
+    // Where a face of ours lands on one of theirs, given a turn and a shift
+    const lands = (o, t, R, shift) => {
+      const d = rotate(R, o.d);
+      if (Math.abs(Math.abs(dot(d, t.d)) - 1) > 1e-6) return false;
+      const p = add(rotate(R, o.p), shift);
+      return o.kind === "plane" ? Math.abs(dot(sub(p, t.p), t.d)) < 1e-3 : len(cross(sub(p, t.p), t.d)) < 1e-3;
+    };
+    let best = null;
+    for (const R of turns) {
+      // Each pair of faces that point the same way says where the shift is across them
+      const rows = [];
+      for (const [i, o] of ours.entries()) for (const t of cands[i]) {
+        const d = rotate(R, o.d);
+        if (Math.abs(Math.abs(dot(d, t.d)) - 1) > 1e-6) continue;
+        const gap = sub(t.p, rotate(R, o.p));
+        const across = t.kind === "plane" ? [t.d] : [perp(t.d), cross(t.d, perp(t.d))];
+        rows.push(across.map(n => [n, dot(n, gap)]));
+        if (rows.length > 14) break;
+      }
+      const shifts = [[0, 0, 0]];
+      for (let a = 0; a < rows.length; a++) for (let b = a; b < rows.length; b++) for (let c = b; c < rows.length; c++) {
+        const eqs = [...new Set([a, b, c])].flatMap(k => rows[k]);
+        const shift = solve3(eqs);
+        if (shift) shifts.push(shift);
+      }
+      for (const shift of shifts) {
+        const matched = ours.filter((o, i) => cands[i].some(t => lands(o, t, R, shift))).length;
+        if (!best || matched > best.matched) best = { R, shift, matched };
+      }
+    }
+    if (!best || best.matched * 2 <= ours.length) return null;
+    const m = [0, 1, 2].map(r => [0, 1, 2].map(c => rotate(best.R, AXES["xyz"[c]])[r]));
+    return { m, t: best.shift, matched: best.matched, of: ours.length };
+  }
+  /** The least-squares point of plane equations `[[normal, offset], …]`, if they fix it in all three directions. */
+  function solve3(eqs) {
+    const A = [[0, 0, 0], [0, 0, 0], [0, 0, 0]], b = [0, 0, 0];
+    for (const [n, d] of eqs) for (let r = 0; r < 3; r++) { b[r] += n[r] * d; for (let c = 0; c < 3; c++) A[r][c] += n[r] * n[c]; }
+    const det = M => M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1]) - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0]) + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
+    const D = det(A);
+    if (Math.abs(D) < 1e-9) return null;
+    return [0, 1, 2].map(k => det(A.map((row, r) => row.map((x, c) => (c === k ? b[r] : x)))) / D);
+  }
+  /** A rotation matrix as turns about X, then Y, then Z, in degrees (what move_body takes). */
+  function eulerXYZ(m) {
+    const y = Math.asin(Math.max(-1, Math.min(1, -m[2][0])));
+    const x = Math.atan2(m[2][1], m[2][2]), z = Math.atan2(m[1][0], m[0][0]);
+    return [x, y, z].map(a => tidy(a * 180 / Math.PI));
+  }
+
+  /**
+   * The axis a feature turns about, as a selector for an axis: an axis SolidWorks names that was imported, a
+   * standard axis, or the axis of a round face of the part along the line of a revolve it was made from (a
+   * temporary axis). Null if none is found.
+   */
+  function axisOf(f, ref) {
+    if (ref && ref.kind === "feature" && ref.name && made.has(ref.name)) return made.get(ref.name)[0];
+    const lines = [];
+    for (const name of [ref && ref.name, ...(f.parents || [])]) {
+      const r = name && byName.get(name);
+      if (!r || !/^(Revolution|RevCut)$/.test(r.type)) continue;
+      const a = values(r).Axis, sketch = sketchOf(r);
+      if (!a || !a.start || !a.end || !sketch || !sketch.sketch) continue;
+      const sf = frameOf(sketch.sketch.modelToSketch);
+      const p = fromSketch(sf, a.start);
+      lines.push({ p, d: unit(sub(fromSketch(sf, a.end), p)) });
+    }
+    for (const { p, d } of lines) {
+      const k = ["x", "y", "z"].find(k => Math.abs(Math.abs(dot(d, AXES[k])) - 1) < 1e-9);
+      if (k && len(cross(p, AXES[k])) < 1e-6) return k;
+      const round = (peet.ask({ op: "faces" }).faces || []).find(x => x.surface === "cylinder" && x.axis_point && Math.abs(Math.abs(dot(unit(x.axis), d)) - 1) < 1e-9 && len(cross(sub(x.axis_point, p), d)) < 1e-6);
+      if (round) {
+        const name = f.name + " axis";
+        if (peet.apply({ op: "axis", name, face: { body: round.body, index: round.index } }).ok) return name;
+      }
+    }
+    return null;
+  }
+
   /**
    * A feature as SolidWorks has it: one that is suppressed is built like any other and then suppressed, in
    * every configuration. It can't be compared with anything, since SolidWorks' body does not have it.
@@ -2454,6 +2597,197 @@ function importPart(doc, dir) {
         return finish(f, built);
       }
 
+      case "CirPattern": {
+        const seeds = [];
+        for (const p of v.PatternFeatureArray || []) {
+          if (unbuilt(p)) continue;
+          if (!p || !made.has(p.name)) return record(f, "failed", `what it copies (${p ? p.name : "nothing"}) was not imported`);
+          seeds.push(...made.get(p.name));
+        }
+        if (seeds.length === 0 || v.BodyPattern) return record(f, "not supported", "a pattern of faces or bodies");
+        if (v.Direction2 || v.Symmetric) return record(f, "not supported", "a circular pattern in two directions");
+        const count = v.TotalInstances;
+        if (!(count > 1)) return record(f, "imported", "nothing to do: one instance");
+        // Equal spacing: the angle is the whole span; otherwise the angle between copies
+        const span = (v.EqualSpacing ? v.Spacing : v.Spacing * (count - 1)) * 180 / Math.PI;
+        const axis = axisOf(f, v.Axis);
+        if (!axis) return record(f, "failed", "its axis was not found");
+        const extra = axis === f.name + " axis" ? [axis] : [];
+        const op = flip => ({ op: "circular_pattern", name: f.name, features: seeds, axis, count, angle: tidy(span), flip });
+        // All the way round, the way it goes makes no difference; otherwise the one nearest SolidWorks' is kept
+        const built = Math.abs(span - 360) < 1e-6 ? build(f, op(!!v.ReverseDirection)) : nearest(f, [op(!!v.ReverseDirection), op(!v.ReverseDirection)]);
+        if (built.ok) built.names = [...extra, ...built.names];
+        else if (extra.length) peet.apply({ op: "delete", features: extra });
+        return finish(f, built);
+      }
+
+      case "MoveCopyBody": {
+        // Where SolidWorks put the bodies (by mates, or by a distance and angles) is read off its body: the
+        // motion that takes the faces of the body here onto the faces of one of SolidWorks' bodies
+        const bodies = (v.Bodies || []).filter(b => b && b.kind === "body");
+        if (bodies.length !== 1) return record(f, "not supported", "a move of several bodies, or of none");
+        // Placed by mates, and with none, it leaves the body where it is
+        if (v.TransformType === 1 && !v.Copy && !(f.sub || []).some(x => /^Mate/.test(x.type))) {
+          const source = bodyFeatures(bodies[0].name);
+          if (!source) return record(f, "failed", `the body it moves (${bodies[0].name}) was not found`);
+          moves.set(f.name, source);
+          made.set(f.name, []);
+          return record(f, "imported", "nothing to do: it has no mates to move the body by");
+        }
+        const picked = bodyPick(bodies[0].name);
+        if (!picked) return record(f, "failed", `the body it moves (${bodies[0].name}) was not found`);
+        const ours = oursToMatch(picked.body);
+        let best = null;
+        for (const b of cur.bodies || []) {
+          const found = register(ours, theirsToMatch(b));
+          // A copy is not where the original is
+          const still = found && len(found.t) < 1e-6 && found.m.every((row, r) => row.every((x, c) => Math.abs(x - (r === c ? 1 : 0)) < 1e-9));
+          if (found && !(v.Copy && still) && (!best || found.matched > best.matched)) best = found;
+        }
+        if (!best) return record(f, "failed", "where SolidWorks put the body could not be found from its faces");
+        const [rx, ry, rz] = eulerXYZ(best.m), [dx, dy, dz] = best.t.map(tidy);
+        const nothing = [rx, ry, rz, dx, dy, dz].every(x => Math.abs(x) < 1e-6);
+        const source = bodyFeatures(bodies[0].name);
+        if (nothing && !v.Copy) {
+          moves.set(f.name, source);
+          made.set(f.name, []);
+          return record(f, "imported", "nothing to do: it leaves the body where it is");
+        }
+        const op = { op: "move_body", name: f.name, bodies: [picked.pick], dx, dy, dz, rx, ry, rz, ...(v.Copy ? { copy: true, copies: v.NumberOfCopies || 1 } : {}) };
+        const built = build(f, op);
+        if (built.ok) {
+          moves.set(f.name, v.Copy ? built.names : source);
+          if (best.matched < best.of) built.warning = `${best.matched} of the body's ${best.of} flat and round faces are where SolidWorks has them`;
+          if (v.TransformType === 1) built.warning = (built.warning ? built.warning + "; " : "") + "SolidWorks places it by mates, which PeetCAD's move doesn't have: it is moved where they put it";
+        }
+        return finish(f, built);
+      }
+
+      case "MirrorStock": case "Stock": {
+        // Another part's bodies, mirrored for a mirror part: that part is imported from its own export first,
+        // into a folder of this part's, and inserted from there
+        const from = v.PathName ? String(v.PathName).split(/[\\/]/).pop() : null;
+        const exported = from && doc.__file ? path.join(path.dirname(doc.__file), from + ".swx.json") : null;
+        if (!exported || !fs.existsSync(exported)) return record(f, "failed", `the export of the part it inserts (${from || "unknown"}) was not found`);
+        const folder = path.join(dir, doc.name + ".parts");
+        fs.mkdirSync(folder, { recursive: true });
+        const inner = JSON.parse(fs.readFileSync(exported, "utf8"));
+        inner.__file = exported;
+        const theirs = importPart(inner, folder);
+        report.notes.push(`${f.name} inserts ${inner.name}, imported on its own first (${theirs.verdict}).`);
+        let mirror = null;
+        if (f.type === "MirrorStock") {
+          // The transform is the reflection: its normal is the direction it turns round
+          const t = v.GetTransform && v.GetTransform.data;
+          if (!t) return record(f, "failed", "its mirror plane was not exported");
+          const m = [[t[0], t[1], t[2]], [t[3], t[4], t[5]], [t[6], t[7], t[8]]];
+          const n = [0, 1, 2].map(k => 1 - m[k][k]);
+          const normal = unit([Math.sqrt(Math.max(0, n[0] / 2)), Math.sqrt(Math.max(0, n[1] / 2)), Math.sqrt(Math.max(0, n[2] / 2))]);
+          const shift = mm([t[9], t[10], t[11]]);
+          const pf = { n: normal, o: mul(normal, dot(shift, normal) / 2) };
+          const k = ["x", "y", "z"].find(k => Math.abs(Math.abs(dot(normal, AXES[k])) - 1) < 1e-9);
+          if (!k) return record(f, "not supported", "a mirror part in a plane that is not square to an axis");
+          mirror = standardPlane(pf) || planeWhere(f.name + " plane", pf);
+          if (!mirror) return record(f, "failed", "its mirror plane could not be made");
+        }
+        const file = path.relative(dir, path.join(folder, inner.name + ".peet")).split(path.sep).join("/");
+        return finish(f, build(f, { op: "insert_part", name: f.name, file, ...(mirror ? { mirror } : {}) }));
+      }
+
+      case "WeldmentFeature":
+        made.set(f.name, []);
+        return record(f, "imported", "nothing to do: it marks the part as a weldment");
+
+      case "WeldMemberFeat": {
+        // A profile swept along sketch lines, a body for each line. The export has the lines (in model
+        // coordinates) and the profile's sketch; not which group each line is in, so groups are read off the
+        // lines as SolidWorks makes them: lines joined end to end at corners of two, or lines side by side
+        const lines = (v.PathSegments || []).filter(g => g && g.type === "line" && g.start && g.end).map(g => ({ a: mm([g.start.x, g.start.y, g.start.z]), b: mm([g.end.x, g.end.y, g.end.z]) }));
+        if (!lines.length || lines.length !== (v.PathSegments || []).length) return record(f, "not supported", "a structural member along something other than lines");
+        const profile = (f.sub || []).find(x => SKETCH.test(x.type) && x.sketch && !x.sketch.error);
+        const planeOf = (f.sub || []).find(x => x.type === "RefPlane" && x.planeTransform);
+        if (!profile || !planeOf) return record(f, "failed", "its profile was not exported");
+        const near = (p, q) => len(sub(p, q)) < 1e-6;
+        const dirOf = l => unit(sub(l.b, l.a));
+        const groups = [];
+        for (const l of lines) {
+          const g = groups[groups.length - 1];
+          const ends = g ? g.flatMap(x => [x.a, x.b]) : [];
+          const count = p => ends.filter(q => near(p, q)).length;
+          const joins = g && [l.a, l.b].some(p => count(p) === 1);
+          const beside = g && g.every(x => Math.abs(Math.abs(dot(dirOf(x), dirOf(l))) - 1) < 1e-9) && [l.a, l.b].every(p => count(p) === 0);
+          if (g && (joins || beside)) g.push(l); else groups.push([l]);
+        }
+        // The profile: drawn on the standard plane nearest square to the first line, about the point the lines
+        // go through, turned to where SolidWorks has it on that line
+        const pf = planeFrameOf(planeOf.planeTransform);
+        const d0 = dirOf(groups[0][0]);
+        const std = [["top", [1, 0, 0], [0, 1, 0], [0, 0, 1]], ["front", [1, 0, 0], [0, 0, 1], [0, -1, 0]], ["right", [0, 1, 0], [0, 0, 1], [1, 0, 0]]]
+          .sort((p, q) => Math.abs(dot(q[3], d0)) - Math.abs(dot(p[3], d0)))[0];
+        const [stdName, xs, ys, ns] = std;
+        // Where PeetCAD's turn takes the sketch's X: the smallest turn from its normal to the line
+        const turnX = (() => {
+          const c = dot(ns, d0);
+          if (c < -1 + 1e-12) return mul(xs, -1 + 2 * dot(xs, ys) ** 2); // half a turn about Y
+          const k = cross(ns, d0), s = len(k);
+          if (s < 1e-12) return xs;
+          const axis = mul(k, 1 / s), ang = Math.atan2(s, c);
+          // Rodrigues
+          return add(add(mul(xs, Math.cos(ang)), mul(cross(axis, xs), Math.sin(ang))), mul(axis, dot(axis, xs) * (1 - Math.cos(ang))));
+        })();
+        const swX = pf.x, swY = pf.y;
+        if (Math.abs(dot(cross(swX, swY), d0) - 1) > 1e-6) return record(f, "not supported", "a profile turned over (mirrored) on its line");
+        const rotate = tidy(Math.atan2(dot(cross(turnX, swX), d0), dot(turnX, swX)) * 180 / Math.PI);
+        const at = v.LocateProfilePoint && v.LocateProfilePoint.x !== undefined ? v.LocateProfilePoint : { x: 0, y: 0 };
+        const p2 = q => [tidy((q.x - at.x) * MM), tidy((q.y - at.y) * MM)];
+        const items = [];
+        for (const g of profile.sketch.segments) {
+          if (g.construction) continue;
+          if (g.type === "line" && g.start && g.end) items.push({ type: "line", from: p2(g.start), to: p2(g.end) });
+          else if (g.type === "arc" && g.circle) items.push({ type: "circle", center: p2(g.center), radius: tidy(g.radius * MM) });
+          else if (g.type === "arc") {
+            const [s, e] = g.direction === 1 ? [g.start, g.end] : [g.end, g.start];
+            items.push({ type: "arc", center: p2(g.center), start: p2(s), end: p2(e) });
+          } else return record(f, "not supported", `a profile with a ${g.type}`);
+        }
+        const names = [];
+        const undo = () => { if (names.length) peet.apply({ op: "delete", features: names.slice().reverse() }); };
+        const profileName = f.name + " profile";
+        if (!peet.apply({ op: "sketch", on: stdName, name: profileName, draw: items }).ok) return record(f, "failed", "its profile could not be drawn");
+        names.push(profileName);
+        // Each group's lines, in sketches on the planes they lie in
+        const corner = v.ApplyCornerTreatment && v.CornerTreatmentType === 1 ? "miter" : "plain";
+        let warning = null;
+        for (const [gi, group] of groups.entries()) {
+          const left = [...group], paths = [];
+          while (left.length) {
+            const l = left[0], d = dirOf(l);
+            // A plane through the line and another line of the group not along it, or any plane through it
+            const other = left.slice(1).flatMap(x => [x.a, x.b]).find(p => len(cross(sub(p, l.a), d)) > 1e-6);
+            let n = other ? unit(cross(d, sub(other, l.a))) : unit(cross(d, Math.abs(d[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0]));
+            const onPlane = x => [x.a, x.b].every(p => Math.abs(dot(sub(p, l.a), n)) < 1e-6);
+            const these = left.filter(onPlane);
+            for (const x of these) left.splice(left.indexOf(x), 1);
+            const sketchName = `${f.name} path${gi + 1}.${paths.length + 1}`;
+            const planeName = planeWhere(sketchName + " plane", { n, o: mul(n, dot(l.a, n)) });
+            if (!planeName) { undo(); return record(f, "not supported", "a structural member along lines on a plane that is not square to an axis"); }
+            if (planeName !== "top" && planeName !== "front" && planeName !== "right") names.push(planeName);
+            const pl = probe(planeName);
+            const to2 = p => [tidy(dot(sub(p, pl.o), pl.x)), tidy(dot(sub(p, pl.o), pl.y))];
+            if (!peet.apply({ op: "sketch", on: planeName, name: sketchName, draw: these.map(x => ({ type: "line", from: to2(x.a), to: to2(x.b) })) }).ok) { undo(); return record(f, "failed", "its path could not be drawn"); }
+            names.push(sketchName);
+            paths.push(sketchName);
+          }
+          const built = build(f, { op: "structural_member", name: groups.length === 1 ? f.name : `${f.name} group${gi + 1}`, profile: profileName, paths, corner, ...(rotate ? { rotate } : {}) });
+          if (!built.ok) { undo(); return record(f, "failed", built.message); }
+          names.push(...built.names);
+          warning = warning || built.warning;
+        }
+        // SolidWorks' bodies are named after the feature, numbered: "<name>[1]" and so on
+        made.set(f.name, names);
+        return record(f, warning ? "imported with a warning" : "imported", [warning, groups.length > 1 ? `its lines in ${groups.length} groups, one structural member each, as SolidWorks groups them` : null].filter(Boolean).join("; ") || null);
+      }
+
       case "LPattern": {
         const seeds = [];
         for (const p of v.PatternFeatureArray || []) {
@@ -2477,9 +2811,9 @@ function importPart(doc, dir) {
             const key = d.map(x => x.toFixed(4)).join(",");
             votes.set(key, { d, n: ((votes.get(key) || {}).n || 0) + 1 });
           }
-          // Copies both ways (a grid whose second direction is the first's opposite) tie: then the way the
-          // edge goes, as SolidWorks reads it, settles it
-          const best = [...votes.values()].sort((a, b) => b.n - a.n || (along ? dot(b.d, along) - dot(a.d, along) : 0))[0];
+          const [best, next] = [...votes.values()].sort((a, b) => b.n - a.n);
+          // As many copies one way as the other (seeds at both ends, each copied inwards): it doesn't say
+          if (best && next && next.n === best.n && dot(next.d, best.d) < -1 + 1e-6) return null;
           return best ? best.d : null;
         };
         const direction = (axis, reversed, spacing, alone) => {

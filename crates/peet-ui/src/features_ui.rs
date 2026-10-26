@@ -799,7 +799,10 @@ pub fn reference_panel(
             | FeatureKind::Import(_)
             | FeatureKind::Sweep(_)
             | FeatureKind::Loft(_)
-            | FeatureKind::ConvertToSheet(_) => {}
+            | FeatureKind::ConvertToSheet(_)
+            | FeatureKind::MoveBody(_)
+            | FeatureKind::InsertPart(_)
+            | FeatureKind::StructuralMember(_) => {}
         });
     out
 }

@@ -442,7 +442,7 @@ pub struct BaseFlangeFeature {
 }
 
 /// What patterns and mirrors copy, for messages.
-pub const COPIED: &str = "patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts, forms, edge and mitre flanges, tabs, break corners, and other patterns and mirrors.";
+pub const COPIED: &str = "patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts, forms, edge and mitre flanges, tabs, break corners, drafts of the faces of features they also copy, and other patterns and mirrors.";
 
 impl BaseFlangeFeature {
     pub fn new(sketch: FeatureId) -> Self {
@@ -907,6 +907,9 @@ pub enum FeatureKind {
     Loft(Box<LoftFeature>),
     ConvertToSheet(Box<ConvertToSheetFeature>),
     BreakCorner(Box<BreakCornerFeature>),
+    MoveBody(Box<crate::bodies::MoveBodyFeature>),
+    InsertPart(Box<crate::bodies::InsertPartFeature>),
+    StructuralMember(Box<crate::weldment::StructuralMemberFeature>),
 }
 
 impl FeatureKind {
@@ -953,6 +956,11 @@ impl FeatureKind {
             Self::Loft(l) if l.operation == crate::Operation::Cut => "Cut-loft",
             Self::Loft(_) => "Loft",
             Self::ConvertToSheet(_) => "Convert to sheet metal",
+            Self::MoveBody(m) if m.copy => "Copy body",
+            Self::MoveBody(_) => "Move body",
+            Self::InsertPart(p) if p.mirror.is_some() => "Mirrored part",
+            Self::InsertPart(_) => "Inserted part",
+            Self::StructuralMember(_) => "Structural member",
         }
     }
 
@@ -1000,6 +1008,9 @@ impl FeatureKind {
             Self::Loft(l) if l.operation == crate::Operation::Cut => "Cut-Loft",
             Self::Loft(_) => "Loft",
             Self::ConvertToSheet(_) => "Convert-To-Sheet",
+            Self::MoveBody(_) => "Body-Move",
+            Self::InsertPart(_) => "Part",
+            Self::StructuralMember(_) => "Structural-Member",
         }
     }
 
@@ -1029,6 +1040,9 @@ impl FeatureKind {
                 | Self::Sweep(_)
                 | Self::Loft(_)
                 | Self::ConvertToSheet(_)
+                | Self::MoveBody(_)
+                | Self::InsertPart(_)
+                | Self::StructuralMember(_)
         )
     }
 
@@ -1064,6 +1078,7 @@ impl FeatureKind {
             Self::Hole(h) => Some(h.sketch),
             Self::Sweep(s) => Some(s.profile),
             Self::Loft(l) => l.sections.first().copied(),
+            Self::StructuralMember(m) => Some(m.profile),
             _ => None,
         }
     }
@@ -1082,6 +1097,7 @@ impl FeatureKind {
                     | Self::EdgeFlange(_)
                     | Self::MiterFlange(_)
                     | Self::BreakCorner(_)
+                    | Self::Draft(_)
                     | Self::Pattern(_)
                     | Self::Mirror(_)
             ),
@@ -1222,6 +1238,21 @@ impl FeatureKind {
                     out.extend(f.name.features());
                 }
             }
+            Self::MoveBody(m) => {
+                for f in &m.bodies {
+                    out.extend(f.name.features());
+                }
+                point_deps(&m.center, &mut out);
+            }
+            Self::InsertPart(p) => {
+                if let Some(plane) = &p.mirror {
+                    plane_deps(plane, &mut out);
+                }
+            }
+            Self::StructuralMember(m) => {
+                out.push(m.profile);
+                out.extend(&m.paths);
+            }
         }
         out.sort_unstable();
         out.dedup();
@@ -1307,8 +1338,14 @@ impl FeatureKind {
                 &h.countersink_diameter,
                 &h.countersink_angle,
             ],
-            Self::Import(_) | Self::Sweep(_) | Self::Loft(_) => Vec::new(),
+            Self::Import(_) | Self::Sweep(_) | Self::Loft(_) | Self::InsertPart(_) => Vec::new(),
             Self::ConvertToSheet(c) => c.scalars(),
+            Self::MoveBody(m) => {
+                let mut v: Vec<&Scalar> = m.translate.iter().chain(&m.rotate).collect();
+                v.push(&m.copies);
+                v
+            }
+            Self::StructuralMember(m) => vec![&m.rotate],
         }
     }
 }
@@ -1458,6 +1495,21 @@ macro_rules! slots {
                     v
                 }
                 Self::SheetCut(c) => vec![("depth", Length, & $($m)? c.depth)],
+                Self::MoveBody(b) => {
+                    let b = & $($m)? **b;
+                    let [dx, dy, dz] = & $($m)? b.translate;
+                    let [rx, ry, rz] = & $($m)? b.rotate;
+                    vec![
+                        ("dx", Length, dx),
+                        ("dy", Length, dy),
+                        ("dz", Length, dz),
+                        ("rx", Angle, rx),
+                        ("ry", Angle, ry),
+                        ("rz", Angle, rz),
+                        ("copies", Number, & $($m)? b.copies),
+                    ]
+                }
+                Self::StructuralMember(m) => vec![("rotate", Angle, & $($m)? m.rotate)],
                 Self::Sketch(_)
                 | Self::Axis(_)
                 | Self::CoordSystem(_)
@@ -1465,6 +1517,7 @@ macro_rules! slots {
                 | Self::Point(PointDef::Vertex(_))
                 | Self::Mirror(_)
                 | Self::Import(_)
+                | Self::InsertPart(_)
                 | Self::Sweep(_)
                 | Self::Loft(_) => Vec::new(),
             }
@@ -1708,6 +1761,11 @@ impl From<FeatureKind> for FeatureKindV9 {
             FeatureKind::Loft(v) => Self::Loft(v),
             FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((&*v).into())),
             FeatureKind::BreakCorner(v) => Self::BreakCorner(v),
+            FeatureKind::MoveBody(_)
+            | FeatureKind::InsertPart(_)
+            | FeatureKind::StructuralMember(_) => {
+                panic!("schemas before 12 have bodies moved or parts inserted")
+            }
         }
     }
 }
@@ -1859,6 +1917,11 @@ impl From<FeatureKind> for FeatureKindV11 {
             FeatureKind::Loft(v) => Self::Loft(v),
             FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((&*v).into())),
             FeatureKind::BreakCorner(v) => Self::BreakCorner(v),
+            FeatureKind::MoveBody(_)
+            | FeatureKind::InsertPart(_)
+            | FeatureKind::StructuralMember(_) => {
+                panic!("schemas before 12 have bodies moved or parts inserted")
+            }
         }
     }
 }
@@ -2108,6 +2171,11 @@ impl From<&FeatureKind> for FeatureKindV8 {
             FeatureKind::Loft(v) => Self::Loft(v.clone()),
             FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((&**v).into())),
             FeatureKind::BreakCorner(v) => Self::BreakCorner(v.clone()),
+            FeatureKind::MoveBody(_)
+            | FeatureKind::InsertPart(_)
+            | FeatureKind::StructuralMember(_) => {
+                panic!("schemas before 12 have no {}", kind.type_name())
+            }
         }
     }
 }

@@ -23,6 +23,7 @@
 //! The crate has no UI or GPU dependency: everything here runs headless.
 
 mod assembly;
+mod bodies;
 pub mod config;
 mod convert;
 mod dressup;
@@ -46,11 +47,13 @@ pub mod samples;
 pub mod sheet;
 mod sweep;
 mod units;
+mod weldment;
 
 pub use assembly::{
     Assembly, CompId, Component, ComponentPattern, DefId, Definition, ExplodeId, ExplodeStep, Link,
     MAX_PATTERN, PatternId, PatternInstance, PatternKind, PatternLine, PatternStep, relative_to,
 };
+pub use bodies::{InsertPartFeature, MoveBodyFeature, PartSource, body_motion};
 pub use config::{ConfigId, Configuration, Scope, Slot, SlotValue};
 pub use convert::ConvertToSheetFeature;
 pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
@@ -82,6 +85,7 @@ pub use revolve::{
     RevolveAxisRef, RevolveFeature, RevolveInput, apply_revolve, default_axis, sketch_axis,
 };
 pub use sweep::{SweepFeature, SweepInput, apply_sweep};
+pub use weldment::{MemberCorner, StructuralMemberFeature};
 
 /// Why a feature failed to rebuild. The message is shown next to the feature.
 #[derive(Clone, Debug, PartialEq)]

@@ -415,6 +415,24 @@ with their defaults' types):
 - `fillet` and `chamfer` take `edges` and `size`; `shell` takes `open` (faces to remove)
   and `thickness`; `draft` takes `faces` (flat, round along
   the pull, or freeform), `neutral` (a plane) and `angle`.
+- A pattern or a mirror copies a `draft` of faces of features it copies too: list the
+  draft after them, and each copy drafts the same faces of their copies.
+- `move_body` (SolidWorks' move/copy body) takes `bodies` (a face of each body; none:
+  every body), turns them by `rx`, `ry`, `rz` degrees about the X, Y and Z axes through
+  `center` (default the origin), in that order, then moves them by `dx`, `dy`, `dz`. A
+  moved body keeps its faces' names. With `"copy": true` the bodies stay and `copies` moved
+  copies are made, each moved once more than the last. A sheet metal body moved this way
+  loses its flat pattern.
+- `structural_member` (SolidWorks' weldment structural member) sweeps `profile` (a
+  sketch, drawn with its origin on the line) along every line of the `paths` sketches, a
+  body per line, the profile turned square to each line by the smallest turn from its
+  sketch plane and then by `rotate` degrees about it. Lines of the feature meeting end to
+  end are mitred (`corner`: `miter` or `plain`); a line ending on a member of an earlier
+  structural member is trimmed to its outside (`trim`, default true).
+- `insert_part` (SolidWorks' insert part and mirror part) takes `file`, a `.peet` part,
+  and inserts its bodies as they are built in it, or their mirror image in `mirror` (a
+  plane). The bodies are read when `file` is set and kept: `update_links` reads the file
+  again. A relative path is looked for from the working folder, then from the part's own.
 
 | Operation | Fields |
 |---|---|
@@ -494,7 +512,7 @@ in all of them. Only the numeric fields of a feature can differ: an `edit` with
 | `parameters` | named values and units; a parameter that differs between configurations lists its expression in each |
 | `configurations` | the configurations, the active one, and what differs: the configurations each feature is suppressed in, each parameter's expression in every configuration, and under `values` each feature value and sketch dimension in every configuration |
 | `bodies` | bounds, volume, counts; flat size and thickness for sheet metal |
-| `faces`, `edges` (`body`) | what made each face, normals, centres; edge ends and the faces they join |
+| `faces`, `edges` (`body`) | what made each face, normals, centres, a round face's `radius`, `axis` and a point on it (`axis_point`); edge ends and the faces they join |
 | `bend_table` (`body`) | flat size, area, and each bend |
 | `checks` (`body`) | manufacturing checks, and the limits they were run with |
 | `materials` (`material`) | the material and gauge tables |
@@ -551,7 +569,7 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `new` with `"assembly": true` | starts an empty assembly |
 | `insert` | the part: `path` (a `.peet` file; an assembly becomes a sub-assembly), `sample`, `part` (an open document, by name or id) or `component` (another instance of its part). `name`, `at` (`[x, y, z]`: where the part's origin goes), `rotate` (`{"axis": "x"`, `"y"`, `"z"` or `[x, y, z]`, `"angle": degrees}`, from the part's own orientation), `fixed` (default: only the first component) |
 | `insert` with `"link": true` | with `path`: the component follows the part's file instead of the assembly keeping a copy. The link is relative to the assembly's folder unless `"absolute": true` |
-| `update_links` | reads every linked part from its file again. Replies `updated` (the parts that changed) and `warnings` (files that can't be found or read) |
+| `update_links` | reads every linked part from its file again, and in a part every inserted part (`insert_part`). Replies `updated` (the parts or features that changed) and `warnings` (files that can't be found or read) |
 | `link` | `part` (a part's name or id, as `components` lists the parts), `path`, `absolute` (default false): links the part to the file if there is one (the part becomes what is in it), else writes the part there first |
 | `unlink` | `part`: the assembly keeps the part as it is and no longer follows the file |
 | `place` | `component`, `at`, `rotate`: the ones given are set, the other is kept |

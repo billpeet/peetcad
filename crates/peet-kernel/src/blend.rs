@@ -29,6 +29,11 @@
 //! Faces that run along the edge at its end (the next face of a smooth chain) need
 //! nothing: the neighbouring edge's tool ends in the same section, and the two meet.
 //!
+//! **Narrow faces.** A round edge's fillet that would run past the far side of a narrow
+//! band next to it (a collar thinner than the radius) keeps that far edge, as SolidWorks
+//! does: the fillet is the round tangent to the other face that passes through the far
+//! edge, and the band is gone.
+//!
 //! **Corners.** Where edges blended with tools meet at a corner, their tools overlap and
 //! the blends meet in a mitre (fillets of one radius cross in ellipses). Where three
 //! fillets meet at a square, convex corner, the corner is rounded with a ball first,
@@ -287,6 +292,9 @@ struct Section {
     angle: f64,
     /// The material is between the two directions (else it is everything but).
     convex: bool,
+    /// How far each face reaches from the edge along `along_a` and `along_b`, where the
+    /// face is a band of one width all round a round edge.
+    widths: [Option<f64>; 2],
 }
 
 /// What ends a blend at one end of its edge.
@@ -382,6 +390,13 @@ impl Job {
                 return unsupported("a freeform edge can't be blended yet");
             }
         }
+        let widths = match &e.curve {
+            Curve3::Circle(c) => [
+                band_width(solid, fa, edge, c, corner, along_a),
+                band_width(solid, fb, edge, c, corner, along_b),
+            ],
+            _ => [None, None],
+        };
         let section = Section {
             corner,
             tangent,
@@ -389,6 +404,7 @@ impl Job {
             along_b,
             angle,
             convex: solid.face_normal_at(fb, corner).dot(along_a) < 0.0,
+            widths,
         };
         let reach = match blend {
             Blend::Fillet { radius } => radius / (angle / 2.0).tan(),
@@ -552,6 +568,56 @@ impl Job {
     }
 }
 
+/// How far `face` reaches from the round edge `edge` (a circle `c`, with `corner` on it)
+/// in the direction `along` across the edge: where every other edge of the face is a
+/// circle about the same axis, the same distance away (a band, like a collar's rim or an
+/// annular face). `None` for any other face.
+fn band_width(
+    solid: &Solid,
+    face: FaceId,
+    edge: EdgeId,
+    c: &crate::geom::Circle3,
+    corner: DVec3,
+    along: DVec3,
+) -> Option<f64> {
+    let axis = c.frame.z_axis();
+    let radial = (corner - c.frame.origin).normalize();
+    let mut width: Option<f64> = None;
+    for &l in &solid.face(face).loops {
+        for co in solid.loop_coedges(l) {
+            let id = solid.coedge(co).edge;
+            let other = solid.edge(id);
+            if id == edge {
+                continue;
+            }
+            // A seam of the face itself
+            if other.coedges.iter().all(|&k| solid.coedge_face(k) == face) {
+                continue;
+            }
+            let Curve3::Circle(o) = &other.curve else {
+                return None;
+            };
+            let w = o.frame.origin - c.frame.origin;
+            if !tolerance::directions_parallel(o.frame.z_axis(), axis)
+                || (w - axis * w.dot(axis)).length() > tolerance::LINEAR
+            {
+                return None;
+            }
+            // Where it crosses the section through `corner`
+            let at = o.frame.origin + radial * o.radius;
+            let d = (at - corner).dot(along);
+            if (at - corner - along * d).length() > tolerance::LINEAR {
+                return None;
+            }
+            match width {
+                Some(known) if (known - d).abs() > tolerance::LINEAR => return None,
+                _ => width = Some(d),
+            }
+        }
+    }
+    width.filter(|w| *w > tolerance::LINEAR)
+}
+
 /// The faces around a vertex.
 fn vertex_faces(solid: &Solid, vertex: VertexId) -> Vec<FaceId> {
     let mut out = Vec::new();
@@ -575,6 +641,12 @@ fn section_region(plane: &Plane, s: &Section, corner: DVec3, blend: Blend) -> Re
     let to_2d = |v: DVec3| plane.frame.vector_to_local(v).truncate();
     let p = plane.to_plane_coords(corner);
     let (a, b) = (to_2d(s.along_a).normalize(), to_2d(s.along_b).normalize());
+    if let Blend::Fillet { radius } = blend
+        && s.convex
+        && let Some(region) = kept_edge(p, a, b, s, radius)
+    {
+        return region;
+    }
     let (ta, tb, across) = match blend {
         Blend::Chamfer { distance } => {
             let (ta, tb) = (p + a * distance, p + b * distance);
@@ -623,6 +695,84 @@ fn section_region(plane: &Plane, s: &Section, corner: DVec3, blend: Blend) -> Re
         },
         holes: Vec::new(),
     }
+}
+
+/// The section of a fillet that would run past the far edge of a narrow band on one side
+/// (a face of width less than where the fillet would touch it): the round of `radius`
+/// tangent to the other face that passes through the band's far edge, which stays where
+/// it is. The loop runs from the corner along face A, across the fillet, and back along
+/// face B, numbered as [`section_region`]'s. `None` where neither face is too narrow, or
+/// both are.
+fn kept_edge(p: DVec2, a: DVec2, b: DVec2, s: &Section, radius: f64) -> Option<Region> {
+    let reach = radius / (s.angle / 2.0).tan();
+    let narrow = |w: Option<f64>| w.is_some_and(|w| w < reach - tolerance::LINEAR);
+    let (on_b, (along, across, width)) = match (narrow(s.widths[0]), narrow(s.widths[1])) {
+        (false, true) => (true, (a, b, s.widths[1]?)),
+        (true, false) => (false, (b, a, s.widths[0]?)),
+        _ => return None,
+    };
+    // The round's centre is `radius` off the wide face's line, on the corner's side, at
+    // `radius` from the far edge `e`.
+    let e = p + across * width;
+    let n = if along.perp_dot(across) > 0.0 {
+        along.perp()
+    } else {
+        -along.perp()
+    };
+    let q = e - p;
+    let disc = along.dot(q).powi(2) - q.length_squared() + 2.0 * radius * n.dot(q);
+    if disc < 0.0 {
+        return None;
+    }
+    let t = along.dot(q) + disc.sqrt();
+    let touch = p + along * t;
+    let center = touch + n * radius;
+    // The short way round from where it touches the wide face to the far edge.
+    let (from, to) = ((touch - center).to_angle(), (e - center).to_angle());
+    let ccw = (to - from).rem_euclid(TAU);
+    let (arc, reversed) = if ccw <= PI {
+        (
+            Curve::Arc {
+                center,
+                radius,
+                start_angle: from,
+                sweep: ccw,
+            },
+            false,
+        )
+    } else {
+        (
+            Curve::Arc {
+                center,
+                radius,
+                start_angle: to,
+                sweep: TAU - ccw,
+            },
+            true,
+        )
+    };
+    // From the corner along A, across, and back along B
+    let (ta, tb, across_edge) = if on_b {
+        (touch, e, (arc, reversed))
+    } else {
+        (e, touch, (arc, !reversed))
+    };
+    let edge = |entity: u32, curve: Curve, reversed: bool| LoopEdge {
+        entity: EntityId(entity),
+        curve,
+        reversed,
+    };
+    Some(Region {
+        outer: Loop {
+            edges: vec![
+                edge(0, Curve::Line { a: p, b: ta }, false),
+                edge(1, across_edge.0, across_edge.1),
+                edge(2, Curve::Line { a: tb, b: p }, false),
+            ],
+            signed_area: 0.5 * (ta - p).perp_dot(tb - p),
+        },
+        holes: Vec::new(),
+    })
 }
 
 /// A convex corner where three fillets meet squarely.

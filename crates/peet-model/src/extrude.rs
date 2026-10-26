@@ -458,7 +458,7 @@ fn extrude_joined(
 }
 
 /// The extruded tool solid with its face names.
-fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> {
+pub(crate) fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> {
     let regions = selected_regions(input.sketch, &input.params.regions, input.mirror)?;
     let (near, far) = range(input)?;
     let (from, to) = (near.min(far), near.max(far));

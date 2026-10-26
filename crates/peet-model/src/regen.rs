@@ -1421,6 +1421,119 @@ impl Engine {
                     crate::import::apply_import(id, bodies, i, key)
                 })
             }
+            FeatureKind::MoveBody(m) => {
+                let inputs = (|| {
+                    let mut by = [0.0; 3];
+                    for (k, (s, axis)) in m.translate.iter().zip(["X", "Y", "Z"]).enumerate() {
+                        by[k] =
+                            ctx.scalar(s, ScalarKind::Length, &format!("Distance along {axis}"))?;
+                    }
+                    let mut turn = [0.0; 3];
+                    for (k, (s, axis)) in m.rotate.iter().zip(["X", "Y", "Z"]).enumerate() {
+                        turn[k] =
+                            ctx.scalar(s, ScalarKind::Angle, &format!("Angle about {axis}"))?;
+                    }
+                    let center = ctx.point(&m.center).map_err(|e| format!("Centre: {e}"))?;
+                    let copies = if m.copy {
+                        let n = ctx.scalar(&m.copies, ScalarKind::Number, "Copies")?;
+                        if n.fract().abs() > 1e-9 || n < 1.0 || n > 1000.0 {
+                            return Err(format!(
+                                "Copies: {n} is not a whole number from 1 to 1000."
+                            ));
+                        }
+                        n.round() as usize
+                    } else {
+                        0
+                    };
+                    Ok((
+                        crate::bodies::body_motion(DVec3::from(by), turn, center),
+                        copies,
+                    ))
+                })();
+                match inputs {
+                    Err(e) => fail(e, Output::None),
+                    Ok((motion, copies)) => {
+                        let key = hash::of(&(
+                            23u8,
+                            id,
+                            &**m,
+                            run.body_key,
+                            format!("{motion:?}"),
+                            copies,
+                        ));
+                        self.solid_feature(id, key, run, |bodies| {
+                            let out = crate::bodies::apply_move_body(
+                                id, bodies, m, &motion, copies, key,
+                            )?;
+                            let warning = lost_sheet(model, bodies, &out.0, &feature.name);
+                            Ok((out.0, warning))
+                        })
+                    }
+                }
+            }
+            FeatureKind::InsertPart(p) => {
+                let mirror = p
+                    .mirror
+                    .as_ref()
+                    .map(|r| ctx.plane(r).map_err(|e| format!("Mirror plane: {e}")))
+                    .transpose();
+                match mirror {
+                    Err(e) => fail(e, Output::None),
+                    Ok(mirror) => {
+                        let key = hash::of(&(24u8, id, &**p, run.body_key, &mirror));
+                        self.solid_feature(id, key, run, |bodies| {
+                            crate::bodies::apply_insert_part(id, bodies, p, mirror.as_ref(), key)
+                        })
+                    }
+                }
+            }
+            FeatureKind::StructuralMember(m) => {
+                let inputs = (|| {
+                    let rotate = ctx.scalar(&m.rotate, ScalarKind::Angle, "Rotate")?;
+                    let own = ctx.member_layout(m, rotate)?;
+                    // The members of earlier structural members, which these are trimmed to
+                    let mut earlier = Vec::new();
+                    if m.trim {
+                        for f in model.features().take_while(|f| f.id != id) {
+                            let FeatureKind::StructuralMember(e) = &f.kind else {
+                                continue;
+                            };
+                            if !run.states.get(&f.id).is_some_and(|s| s.status.is_built()) {
+                                continue;
+                            }
+                            let r = ctx.scalar(&e.rotate, ScalarKind::Angle, "Rotate")?;
+                            earlier.push((f.id, ctx.member_layout(e, r)?));
+                        }
+                    }
+                    Ok::<_, String>((own, earlier))
+                })();
+                match inputs {
+                    Err(e) => fail(e, Output::None),
+                    Ok((own, earlier)) => {
+                        let sketches = |def: &crate::StructuralMemberFeature| -> Vec<u64> {
+                            std::iter::once(def.profile)
+                                .chain(def.paths.iter().copied())
+                                .map(|s| run.out_keys.get(&s).copied().unwrap_or(0))
+                                .collect()
+                        };
+                        let mut key = hash::of(&(25u8, id, &**m, run.body_key, sketches(m)));
+                        for (e, _) in &earlier {
+                            if let Some(FeatureKind::StructuralMember(d)) =
+                                model.feature(*e).map(|f| &f.kind)
+                            {
+                                key = hash::combine(key, hash::of(&(&**d, sketches(d))));
+                            }
+                        }
+                        let earlier: Vec<&crate::weldment::Layout> =
+                            earlier.iter().map(|(_, l)| l).collect();
+                        self.solid_feature(id, key, run, |bodies| {
+                            crate::weldment::apply_structural_member(
+                                id, bodies, &own, m.corner, &earlier, key,
+                            )
+                        })
+                    }
+                }
+            }
             // Reference geometry is a few vector operations: always recomputed.
             FeatureKind::Plane(def) => reference(ctx.plane_def(def).map(Output::Plane)),
             FeatureKind::Axis(def) => reference(ctx.axis_def(def).map(Output::Axis)),
@@ -1613,6 +1726,28 @@ impl<'m> Ctx<'m, '_> {
     }
 
     /// A built sketch's plane and geometry, for a feature that uses it.
+    /// A structural member's members, laid out.
+    fn member_layout(
+        &self,
+        def: &crate::StructuralMemberFeature,
+        rotate: f64,
+    ) -> Result<crate::weldment::Layout, String> {
+        let (plane, profile) = self
+            .sketch_input(def.profile)
+            .map_err(|m| m.replace("Its sketch", "Its profile"))?;
+        let mut paths = Vec::new();
+        for &p in &def.paths {
+            paths.push(
+                self.sketch_input(p)
+                    .map_err(|m| m.replace("Its sketch", "A path"))?,
+            );
+        }
+        if paths.is_empty() {
+            return Err("Pick the path sketches: the lines the members follow.".to_owned());
+        }
+        crate::weldment::layout((&plane, profile), &paths, rotate).map_err(|e| e.0)
+    }
+
     fn sketch_input(&self, id: FeatureId) -> Result<(Plane, &'m Sketch), String> {
         let state = self.state_of(id, "Its sketch")?;
         let Output::Sketch { plane, .. } = state.output else {
@@ -1875,6 +2010,36 @@ impl<'m> Ctx<'m, '_> {
     /// A copy of a pattern or a mirror is a copy of what it copies, where the pattern has it
     /// (the original and each copy), as SolidWorks copies one.
     fn seeds(&self, ids: &[FeatureId]) -> Result<Vec<pattern::SeedEntry<'m>>, String> {
+        let mut out = self.seeds_of(ids)?;
+        // A draft copies onto the copies of the features whose faces it drafts.
+        let copied: Vec<(FeatureId, bool)> =
+            out.iter().map(|(id, e)| (*id, e.3.is_empty())).collect();
+        for (id, (name, seed, ..)) in &mut out {
+            if let pattern::Seed::Draft { def, sources, .. } = seed {
+                for f in def.faces.iter().flat_map(|r| r.name.features()) {
+                    let at = copied.iter().position(|(c, plain)| *c == f && *plain);
+                    match at {
+                        Some(si) if !sources.iter().any(|(s, _)| *s == f) => sources.push((f, si)),
+                        Some(_) => {}
+                        None if f == *id => {}
+                        None => {
+                            return Err(format!(
+                                "{name} drafts faces of {}, which the pattern doesn't copy: add it to the features to copy, before {name}.",
+                                self.model.name_of(f)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out.into_iter().map(|(_, e)| e).collect())
+    }
+
+    /// [`Ctx::seeds`], each with the feature it copies.
+    fn seeds_of(
+        &self,
+        ids: &[FeatureId],
+    ) -> Result<Vec<(FeatureId, pattern::SeedEntry<'m>)>, String> {
         if ids.is_empty() {
             return Err("Pick the features to copy.".to_owned());
         }
@@ -1904,7 +2069,7 @@ impl<'m> Ctx<'m, '_> {
                 _ => None,
             };
             if let Some((motions, seeds)) = copies {
-                for (n, seed, index, inner) in self.seeds(seeds)? {
+                for (copied, (n, seed, index, inner)) in self.seeds_of(seeds)? {
                     let moved = if inner.is_empty() {
                         motions.clone()
                     } else {
@@ -1913,7 +2078,7 @@ impl<'m> Ctx<'m, '_> {
                             .flat_map(|m| inner.iter().map(move |i| m.after(i)))
                             .collect()
                     };
-                    out.push((n, seed, index, moved));
+                    out.push((copied, (n, seed, index, moved)));
                 }
                 continue;
             }
@@ -1994,6 +2159,19 @@ impl<'m> Ctx<'m, '_> {
                         sizes: self.hole_sizes(h)?,
                     }
                 }
+                FeatureKind::Draft(d) => {
+                    let Some(p) = &d.neutral else {
+                        return Err(format!("{name} has no neutral plane."));
+                    };
+                    pattern::Seed::Draft {
+                        def: d,
+                        neutral: self
+                            .plane(p)
+                            .map_err(|m| format!("{name}'s neutral plane: {m}"))?,
+                        angle: self.scalar(&d.angle, ScalarKind::Angle, "Angle")?,
+                        sources: Vec::new(),
+                    }
+                }
                 FeatureKind::Form(f) => {
                     let (plane, sketch) = self.sketch_input(f.sketch)?;
                     pattern::Seed::Form {
@@ -2013,10 +2191,13 @@ impl<'m> Ctx<'m, '_> {
                 }
             };
             out.push((
-                name,
-                seed,
-                self.model.index_of(id).unwrap_or(usize::MAX),
-                Vec::new(),
+                id,
+                (
+                    name,
+                    seed,
+                    self.model.index_of(id).unwrap_or(usize::MAX),
+                    Vec::new(),
+                ),
             ));
         }
         Ok(out)
