@@ -323,6 +323,35 @@ fn round_edges() {
     assert!(err.to_string().contains("too big"), "{err}");
 }
 
+#[test]
+fn a_fillet_wider_than_a_narrow_rim_keeps_its_far_edge() {
+    // A collar 0.5 thick, its top rim filleted with a radius of 3.125: the round can't be
+    // tangent to the rim's side, so, as SolidWorks makes it, it is tangent to the top and
+    // passes through the bottom edge, which stays where it is.
+    let mut sk = Sketch::new();
+    sk.add_circle(DVec2::ZERO, 15.0);
+    let s = extrude(&Plane::TOP, &region_at(&sk, v2(1.0, 1.0)), 0.0, 0.5).unwrap();
+    let rim = edges_where(&s, |p| near(p.z, 0.5) && near(p.truncate().length(), 15.0));
+    assert_eq!(rim.len(), 1);
+    let (r, h) = (3.125_f64, 0.5_f64);
+    let f = blended(&s, &rim, Blend::Fillet { radius: r });
+    let b = f.solid.bounds();
+    assert!(near(b.max.x, 15.0) && near(b.min.z, 0.0), "{b:?}");
+    // The torus touches the top where its tube's centre is, through the bottom edge.
+    let major = 15.0 - (r * r - (r - h) * (r - h)).sqrt();
+    assert!(f.solid.faces.iter().any(
+        |face| matches!(face.surface, Surface::Torus(t) if near(t.major, major) && near(t.minor, r))
+    ));
+    assert!(
+        !f.solid
+            .faces
+            .iter()
+            .any(|face| matches!(face.surface, Surface::Cylinder(_))),
+        "the rim's side is gone"
+    );
+    assert!(measure::volume(&f.solid) < measure::volume(&s));
+}
+
 /// A plate with rounded corners (an outline of lines and arcs).
 fn rounded_plate() -> Solid {
     let mut s = Sketch::new();
