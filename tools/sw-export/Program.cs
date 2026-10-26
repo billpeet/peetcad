@@ -473,7 +473,7 @@ internal static class Program
         }
         // What the running SolidWorks says the definition is, which can be newer than the interop assemblies
         // this is built against: their members are read by name (late bound) after the interop's own
-        var dispatch = DispatchTypeOf(definition);
+        var dispatch = DispatchTypeOf(definition) ?? KnownLateType(type);
         if (interfaces.Length == 0 && (dispatch == null || dispatch.Members.Count == 0))
             return null;
 
@@ -696,8 +696,86 @@ internal static class Program
         }
     }
 
-    private static object? InvokeLate(object target, string name, bool property, params object?[] arguments) =>
-        target.GetType().InvokeMember(name, property ? BindingFlags.GetProperty : BindingFlags.InvokeMethod, null, target, arguments);
+    // SolidWorks' objects give no type information through IDispatch, so what is newer than the interop can't be
+    // listed. It can still be read by name: these are the members SolidWorks 2026's API help lists that the 2018
+    // interop lacks, by feature type, less those that change the model or take arguments other than an index. A
+    // name the running SolidWorks doesn't have is logged once and listed as unreadable. SolidWorks-PC runs
+    // SolidWorks 2018 SP5 (revision 26.5), whose IDispatch knows none of these names (DISP_E_UNKNOWNNAME): the
+    // list matters only on a newer SolidWorks. What 2018 does give by name is the indexed reads (GetTransform).
+    private static readonly Dictionary<string, string[]> KnownLateMembers = new(StringComparer.Ordinal) {
+        ["LPattern"] = new[] {
+            "D1EndCondition", "D1EndReference", "D1EndRefOffset", "D1EndRefReverseOffset", "D1EndSeedReference",
+            "D1EndUseSeedReference", "D1EndUseSpacing", "D2EndCondition", "D2EndReference", "D2EndRefOffset",
+            "D2EndRefReverseOffset", "D2EndSeedReference", "D2EndUseSeedReference", "D2EndUseSpacing",
+            "AutoSelect", "FeatureScope", "InstancesToVary", "GetTransform",
+        },
+        ["LocalLPattern"] = new[] {
+            "AlignToSeed", "D1EndCondition", "D1EndReference", "D1EndReferenceType", "D1EndRefOffset",
+            "D1EndRefReverseOffset", "D1EndSeedReference", "D1EndSeedReferenceType", "D1EndUseSeedReference",
+            "D1EndUseSpacing", "D2EndCondition", "D2EndReference", "D2EndReferenceType", "D2EndRefOffset",
+            "D2EndRefReverseOffset", "D2EndSeedReference", "D2EndSeedReferenceType", "D2EndUseSeedReference",
+            "D2EndUseSpacing", "D2PatternSeedOnly", "RotateInstances", "RotationAngle",
+        },
+        ["CirPattern"] = new[] { "AutoSelect", "FeatureScope", "InstancesToVary", "GetTransform" },
+        ["SMBaseFlange"] = new[] {
+            "D1EndConditionDistance", "D1EndConditionReference", "D1EndConditionType", "D2EndConditionDistance",
+            "D2EndConditionReference", "D2EndConditionType", "OverrideDefaultSheetMetalParameters", "ReliefDepth",
+            "ReliefRatio", "ReliefType", "ReliefWidth", "SymmetricThickness", "UseDefaultBendAllowance",
+            "UseDefaultBendRelief", "UseMaterialSheetMetalParameters", "UseReliefRatio",
+        },
+        ["EdgeFlange"] = new[] { "AngleReference", "LockAngle", "NormalToFlangePlane", "PerpendicularToFace" },
+        ["RefPlane"] = new[] { "ReversedReferenceDirection" },
+        ["SheetMetal"] = new[] { "UseMaterialSheetMetalParameters" },
+        ["HoleWzd"] = new[] { "UnderHeadCounterSink", "UnderHeadCounterSinkAngle", "UnderHeadCounterSinkDiameter" },
+        ["CornerRelief"] = new[] { "CornerCount", "CornerType", "GetCornerAtIndex" },
+        ["Fillet"] = new[] { "EnablePartialEdgeParameters", "GetFaces" },
+        ["WeldMemberFeat"] = new[] { "Groups" },
+    };
+
+    /// <summary>The known newer members of a feature type, as if its IDispatch had listed them. Null if none.</summary>
+    private static DispatchType? KnownLateType(string featureType)
+    {
+        if (!KnownLateMembers.TryGetValue(featureType, out var names))
+            return null;
+        var key = "known:" + featureType;
+        if (DispatchTypes.TryGetValue(key, out var known))
+            return known;
+        var type = new DispatchType(key);
+        foreach (var name in names) {
+            type.All.Add(name);
+            var indexed = IndexedReads.IsMatch(name) || FixedIndexes.ContainsKey(name);
+            type.Members.Add(new LateMember(name, !Regex.IsMatch(name, "^(Get|Is)[A-Z]"), indexed ? VarEnum.VT_I4 : VarEnum.VT_EMPTY));
+        }
+        DispatchTypes[key] = type;
+        Log($"  {featureType}: {type.Members.Count} members by name, from the API help");
+        return type;
+    }
+
+    private static readonly HashSet<string> LateFailuresLogged = new(StringComparer.Ordinal);
+
+    /// <summary>
+    /// Reads a member by name through IDispatch. Whether SolidWorks' IDispatch takes a value as a property get or a
+    /// method call isn't always what the API help says, so the other ways are tried before giving up; the first
+    /// failure of each member is logged with SolidWorks' reason (unknown name or member not found).
+    /// </summary>
+    private static object? InvokeLate(object target, string name, bool property, params object?[] arguments)
+    {
+        var ways = property
+            ? new[] { BindingFlags.GetProperty, BindingFlags.GetProperty | BindingFlags.InvokeMethod, BindingFlags.InvokeMethod }
+            : new[] { BindingFlags.InvokeMethod, BindingFlags.GetProperty | BindingFlags.InvokeMethod, BindingFlags.GetProperty };
+        Exception? first = null;
+        foreach (var way in ways) {
+            try {
+                return target.GetType().InvokeMember(name, way, null, target, arguments);
+            }
+            catch (Exception ex) {
+                first ??= ex is TargetInvocationException { InnerException: { } inner } ? inner : ex;
+            }
+        }
+        if (LateFailuresLogged.Add(name))
+            Log($"  {name} could not be read by name: {first!.GetType().Name} {first.Message} (0x{first.HResult:X8})");
+        throw first!;
+    }
 
     /// <summary>
     /// Reads the members of <paramref name="dispatch"/> that <paramref name="values"/> doesn't have yet, under the
