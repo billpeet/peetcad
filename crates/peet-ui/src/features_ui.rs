@@ -1903,6 +1903,7 @@ pub fn pattern_panel(
                             spacing: first.spacing.clone(),
                             count: Scalar::new(2.0),
                             flip: false,
+                            up_to: None,
                         });
                     }
                     ui.end_row();

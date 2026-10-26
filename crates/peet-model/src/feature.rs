@@ -841,6 +841,54 @@ pub struct LinearDirection {
     #[serde(deserialize_with = "deserialize_pattern_count")]
     pub count: Scalar,
     pub flip: bool,
+    /// Up to a reference (SolidWorks' "up to reference"): the count, or the spacing,
+    /// follows from how far the reference is from the seed. `None`: both as given.
+    pub up_to: Option<Box<PatternUpTo>>,
+}
+
+/// Something a linear pattern runs up to, or measures its seed from: a plane (a
+/// standard or reference plane, or a flat face) or a point (a vertex or reference point).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PatternBound {
+    Plane(PlaneRef),
+    Point(PointRef),
+}
+
+/// Which of a linear pattern's spacing and count is given when it runs up to a
+/// reference: the other follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PatternKeeps {
+    /// The spacing is given: as many copies as fit before the reference.
+    Spacing,
+    /// The count is given: the copies are spread evenly up to the reference.
+    Count,
+}
+
+/// A linear pattern direction that runs up to a reference, as SolidWorks' "up to
+/// reference": the last copy is `offset` short of the reference (past it with
+/// `reverse_offset`), measured from the seed's centre along the direction or from a
+/// reference on the seed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PatternUpTo {
+    pub to: PatternBound,
+    pub offset: Scalar,
+    pub reverse_offset: bool,
+    /// Where on the seed the offset is measured from. `None`: its centre (the middle of
+    /// what it makes, along the direction: SolidWorks' centroid).
+    pub seed: Option<PatternBound>,
+    pub keeps: PatternKeeps,
+}
+
+impl PatternBound {
+    /// The features it refers to.
+    pub fn features(&self, out: &mut Vec<FeatureId>) {
+        match self {
+            Self::Plane(PlaneRef::Feature(id)) => out.push(*id),
+            Self::Plane(PlaneRef::Face(f)) => out.extend(f.name.features()),
+            Self::Plane(PlaneRef::Standard(_)) => {}
+            Self::Point(p) => point_deps(p, out),
+        }
+    }
 }
 
 /// How a pattern places its copies.
@@ -1190,9 +1238,14 @@ impl FeatureKind {
                 out.extend(&p.seeds);
                 match &p.def {
                     PatternDef::Linear { first, second } => {
-                        axis_deps(&first.direction, &mut out);
-                        if let Some(s) = second {
-                            axis_deps(&s.direction, &mut out);
+                        for d in std::iter::once(first).chain(second) {
+                            axis_deps(&d.direction, &mut out);
+                            if let Some(u) = &d.up_to {
+                                u.to.features(&mut out);
+                                if let Some(seed) = &u.seed {
+                                    seed.features(&mut out);
+                                }
+                            }
                         }
                     }
                     PatternDef::Circular { axis, .. } => axis_deps(axis, &mut out),
@@ -1328,8 +1381,14 @@ impl FeatureKind {
             Self::Pattern(p) => match &p.def {
                 PatternDef::Linear { first, second } => {
                     let mut v = vec![&first.spacing, &first.count];
+                    if let Some(u) = &first.up_to {
+                        v.push(&u.offset);
+                    }
                     if let Some(s) = second {
                         v.extend([&s.spacing, &s.count]);
+                        if let Some(u) = &s.up_to {
+                            v.push(&u.offset);
+                        }
                     }
                     v
                 }
@@ -1474,9 +1533,15 @@ macro_rules! slots {
                 Self::Pattern(p) => match & $($m)? p.def {
                     PatternDef::Linear { first, second } => {
                         let mut v = vec![("spacing", Length, & $($m)? first.spacing), ("count", Number, & $($m)? first.count)];
+                        if let Some(u) = & $($m)? first.up_to {
+                            v.push(("up_to_offset", Length, & $($m)? u.offset));
+                        }
                         if let Some(s) = second {
                             v.push(("spacing2", Length, & $($m)? s.spacing));
                             v.push(("count2", Number, & $($m)? s.count));
+                            if let Some(u) = & $($m)? s.up_to {
+                                v.push(("up_to_offset2", Length, & $($m)? u.offset));
+                            }
                         }
                         v
                     }
@@ -1614,6 +1679,7 @@ impl From<LinearDirectionV9> for LinearDirection {
             spacing: d.spacing,
             count: Scalar::new(f64::from(d.count)),
             flip: d.flip,
+            up_to: None,
         }
     }
 }
@@ -1836,6 +1902,115 @@ impl From<&EdgeFlangeFeature> for EdgeFlangeFeatureV11 {
     }
 }
 
+/// A linear pattern direction as model schemas 10 and 11 stored it: before it could run
+/// up to a reference.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct LinearDirectionV11 {
+    direction: AxisRef,
+    spacing: Scalar,
+    #[serde(deserialize_with = "deserialize_pattern_count")]
+    count: Scalar,
+    flip: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum PatternDefV11 {
+    Linear {
+        first: LinearDirectionV11,
+        second: Option<LinearDirectionV11>,
+    },
+    Circular {
+        axis: AxisRef,
+        #[serde(deserialize_with = "deserialize_pattern_count")]
+        count: Scalar,
+        angle: Scalar,
+        flip: bool,
+    },
+}
+
+/// A pattern as model schemas 10 and 11 stored it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PatternFeatureV11 {
+    seeds: Vec<FeatureId>,
+    def: PatternDefV11,
+}
+
+impl From<LinearDirectionV11> for LinearDirection {
+    fn from(d: LinearDirectionV11) -> Self {
+        Self {
+            direction: d.direction,
+            spacing: d.spacing,
+            count: d.count,
+            flip: d.flip,
+            up_to: None,
+        }
+    }
+}
+
+impl From<&LinearDirection> for LinearDirectionV11 {
+    /// The old layout, which has no room for a reference to run up to.
+    fn from(d: &LinearDirection) -> Self {
+        Self {
+            direction: d.direction.clone(),
+            spacing: d.spacing.clone(),
+            count: d.count.clone(),
+            flip: d.flip,
+        }
+    }
+}
+
+impl From<PatternFeatureV11> for PatternFeature {
+    fn from(p: PatternFeatureV11) -> Self {
+        let def = match p.def {
+            PatternDefV11::Linear { first, second } => PatternDef::Linear {
+                first: first.into(),
+                second: second.map(Into::into),
+            },
+            PatternDefV11::Circular {
+                axis,
+                count,
+                angle,
+                flip,
+            } => PatternDef::Circular {
+                axis,
+                count,
+                angle,
+                flip,
+            },
+        };
+        Self {
+            seeds: p.seeds,
+            def,
+        }
+    }
+}
+
+impl From<&PatternFeature> for PatternFeatureV11 {
+    fn from(p: &PatternFeature) -> Self {
+        let def = match &p.def {
+            PatternDef::Linear { first, second } => PatternDefV11::Linear {
+                first: first.into(),
+                second: second.as_ref().map(Into::into),
+            },
+            PatternDef::Circular {
+                axis,
+                count,
+                angle,
+                flip,
+            } => PatternDefV11::Circular {
+                axis: axis.clone(),
+                count: count.clone(),
+                angle: angle.clone(),
+                flip: *flip,
+            },
+        };
+        Self {
+            seeds: p.seeds.clone(),
+            def,
+        }
+    }
+}
+
 /// The feature kinds as model schemas 10 and 11 stored them. The variant order is frozen.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum FeatureKindV11 {
@@ -1854,7 +2029,7 @@ pub(crate) enum FeatureKindV11 {
     MiterFlange(Box<MiterFlangeFeature>),
     Corner(Box<CornerFeature>),
     Form(Box<FormFeature>),
-    Pattern(Box<PatternFeature>),
+    Pattern(Box<PatternFeatureV11>),
     Mirror(Box<MirrorFeature>),
     Revolve(Box<RevolveFeature>),
     Blend(Box<BlendFeature>),
@@ -1886,7 +2061,7 @@ impl From<FeatureKindV11> for FeatureKind {
             FeatureKindV11::MiterFlange(v) => Self::MiterFlange(v),
             FeatureKindV11::Corner(v) => Self::Corner(v),
             FeatureKindV11::Form(v) => Self::Form(v),
-            FeatureKindV11::Pattern(v) => Self::Pattern(v),
+            FeatureKindV11::Pattern(v) => Self::Pattern(Box::new((*v).into())),
             FeatureKindV11::Mirror(v) => Self::Mirror(v),
             FeatureKindV11::Revolve(v) => Self::Revolve(v),
             FeatureKindV11::Blend(v) => Self::Blend(v),
@@ -1920,7 +2095,7 @@ impl From<FeatureKind> for FeatureKindV11 {
             FeatureKind::MiterFlange(v) => Self::MiterFlange(v),
             FeatureKind::Corner(v) => Self::Corner(v),
             FeatureKind::Form(v) => Self::Form(v),
-            FeatureKind::Pattern(v) => Self::Pattern(v),
+            FeatureKind::Pattern(v) => Self::Pattern(Box::new((&*v).into())),
             FeatureKind::Mirror(v) => Self::Mirror(v),
             FeatureKind::Revolve(v) => Self::Revolve(v),
             FeatureKind::Blend(v) => Self::Blend(v),

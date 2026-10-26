@@ -270,12 +270,14 @@ pub fn chassis() -> (Model, Engine) {
             spacing: Scalar::new(x),
             count: Scalar::new(f64::from(nx)),
             flip: false,
+            up_to: None,
         },
         second: Some(LinearDirection {
             direction: AxisRef::Standard(StdAxis::Y),
             spacing: Scalar::new(y),
             count: Scalar::new(f64::from(ny)),
             flip: false,
+            up_to: None,
         }),
     };
     b.model

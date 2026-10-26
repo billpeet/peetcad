@@ -4214,6 +4214,7 @@ impl PeetApp {
                             spacing: Scalar::new(20.0),
                             count: Scalar::new(2.0),
                             flip: false,
+                            up_to: None,
                         },
                         second: None,
                     },

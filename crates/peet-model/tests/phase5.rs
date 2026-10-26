@@ -281,12 +281,14 @@ fn pattern_and_mirror_of_sheet_cuts() {
                 spacing: Scalar::new(20.0),
                 count: Scalar::new(4.0),
                 flip: false,
+                up_to: None,
             },
             second: Some(LinearDirection {
                 direction: AxisRef::Standard(StdAxis::Y),
                 spacing: Scalar::new(30.0),
                 count: Scalar::new(2.0),
                 flip: false,
+                up_to: None,
             }),
         },
     );
@@ -464,6 +466,7 @@ fn copies_of_unsupported_features_fail_clearly() {
                 spacing: Scalar::new(20.0),
                 count: Scalar::new(2.0),
                 flip: false,
+                up_to: None,
             },
             second: None,
         },

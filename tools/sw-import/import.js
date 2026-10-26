@@ -78,6 +78,10 @@ const spot = p => `${Math.round(p.x * 1e7)},${Math.round(p.y * 1e7)}`;
 const textPoint = (s, g) => s.points.find(p => p.id && p.id.join() === g.id.join()) || null;
 /** The fonts a text is fitted with, where the export does not say: SolidWorks' default and its styles. */
 const TEXT_FONTS = ["Century Gothic", "Century Gothic Bold", "Century Gothic Italic", "Century Gothic Bold Italic"];
+/** A sketch text's format as exports from the fifth on have it, or null. */
+const textFormat = g => g.format && !g.format.error && g.format.typeFace ? g.format : null;
+/** The PeetCAD font of a SolidWorks text format: its face, with " Bold" and " Italic" as SolidWorks has them. */
+const fontOf = t => t.typeFace + (t.bold ? " Bold" : "") + (t.italic ? " Italic" : "");
 /**
  * A sketch with the segments of its blocks among its own. A block is a group of segments drawn once and
  * placed by a transform; PeetCAD sketches have no blocks, so each instance's segments are drawn where it puts
@@ -257,6 +261,7 @@ function importPart(doc, dir) {
   const sketches = new Map();   // SolidWorks sketch name -> { name, toPeet, frame, partial }
   const made = new Map();       // SolidWorks feature name -> names of the PeetCAD features that stand for it
   const planeFrames = new Map(); // SolidWorks plane name -> where it is
+  const upToPatterns = new Set(); // SolidWorks linear patterns made to run up to their reference
   const flanges = new Map();     // SolidWorks edge flange name -> what it was made with, for mirroring it
   const rectangular = new Set(); // SolidWorks edge flanges whose outline could not be their own
   const miters = new Map();      // SolidWorks mitre flange name -> what it was made with, for mirroring it
@@ -388,14 +393,22 @@ function importPart(doc, dir) {
           ends.push([as + ".start", points[0]], [as + ".end", points[points.length - 1]]);
           own.push({ g, as, turned: false });
         } else if (g.type === "text" && sameHand) {
-          // Its point is the sketch point with the text's id. The export has no font, height or angle:
-          // they are fitted to SolidWorks' faces of the feature that uses the sketch, once it is drawn.
+          // Its point is the sketch point with the text's id. Its font, height, width and spacing are in
+          // exports from the fifth on; before, they are fitted to SolidWorks' faces of the feature that uses
+          // the sketch, once it is drawn.
           const at = textPoint(s, g) || { x: 0, y: 0 };
           const string = g.text.replace(/<[^>]*>/g, "");
           if (string !== g.text) report.notes.push(`${name}'s text ${JSON.stringify(g.text)} has formatting, left out: drawn as ${JSON.stringify(string)}.`);
-          // SolidWorks' x axis in the PeetCAD sketch: which way the text runs
-          const angle = Math.atan2(dot(sf.x, pf.y), dot(sf.x, pf.x)) * 180 / Math.PI;
-          items.push({ type: "text", at: toPeet(at), string, angle: tidy(angle), ...construction, as });
+          // SolidWorks' x axis in the PeetCAD sketch: which way the text runs, turned by the text's own angle
+          const format = textFormat(g);
+          const angle = Math.atan2(dot(sf.x, pf.y), dot(sf.x, pf.x)) * 180 / Math.PI + (format && format.escapement ? format.escapement * 180 / Math.PI : 0);
+          const style = !format ? {} : {
+            font: fontOf(format),
+            ...(format.charHeight > 0 ? { height: tidy(format.charHeight * MM) } : {}),
+            ...(format.widthFactor > 0 ? { width: tidy(format.widthFactor) } : {}),
+            ...(format.charSpacingFactor > 0 ? { spacing: tidy(format.charSpacingFactor) } : {})
+          };
+          items.push({ type: "text", at: toPeet(at), string, angle: tidy(angle), ...style, ...construction, as });
           own.push({ g, as, turned: false, text: true });
         } else left.add(g.type === "text" ? "text (mirrored, which PeetCAD's text can't be)" : g.type);
       });
@@ -458,6 +471,28 @@ function importPart(doc, dir) {
       const reply = peet.apply({ op: "set_text", sketch: sk.name, text: drawn.id, font, height: tidy(height) });
       return reply.ok && reply.text && reply.text.bounds ? reply.text : null;
     };
+    const offOf = t => Math.max(...[0, 1].flatMap(i => [Math.abs(t.bounds[0][i] - lo[i]), Math.abs(t.bounds[1][i] - hi[i])]));
+    // The export has the text's font: it is kept, and how far its outline is from SolidWorks' faces said
+    const format = textFormat(g);
+    if (format && format.charHeight > 0) {
+      const font = fontOf(format), height = tidy(format.charHeight * MM);
+      const t = set(font, height);
+      if (!t) return;
+      const off = offOf(t);
+      let note = `${sk.name}'s text ${JSON.stringify(g.text)}: ${font}${t.drawn_in ? ` (not installed: drawn in ${t.drawn_in})` : ""}, ${height} mm high, as the export has it; its outline's box is ${off.toFixed(4)} mm from SolidWorks' faces of ${f.children.join(", ")}`;
+      // Not the size SolidWorks' faces are: the height that makes it so, kept with the exported font, says by
+      // how much PeetCAD's height (a capital letter's) and SolidWorks' differ
+      if (off > 0.05) {
+        const [tl, th] = t.bounds;
+        const span = hi[1] - lo[1] >= hi[0] - lo[0] ? 1 : 0;
+        const fitted = height * (hi[span] - lo[span]) / (th[span] - tl[span]);
+        const u = fitted > 0 && isFinite(fitted) ? set(font, Math.round(fitted * 1e4) / 1e4) : null;
+        if (u && offOf(u) < off) note += `; made ${u.height} mm high to fit them (${(u.height / height).toFixed(4)} times SolidWorks' height), ${offOf(u).toFixed(4)} mm from them`;
+        else set(font, height);
+      }
+      report.notes.push(note + ".");
+      return;
+    }
     let best = null;
     for (const font of TEXT_FONTS) {
       const trial = set(font, 10);
@@ -468,7 +503,7 @@ function importPart(doc, dir) {
       const height = 10 * (hi[span] - lo[span]) / (th[span] - tl[span]);
       const t = height > 0 && isFinite(height) ? set(font, Math.round(height * 1e4) / 1e4) : null;
       if (!t) continue;
-      const off = Math.max(...[0, 1].flatMap(i => [Math.abs(t.bounds[0][i] - lo[i]), Math.abs(t.bounds[1][i] - hi[i])]));
+      const off = offOf(t);
       if (!best || off < best.off) best = { font, height: t.height, off, drawnIn: t.drawn_in };
     }
     if (!best) return;
@@ -1536,6 +1571,65 @@ function importPart(doc, dir) {
    * The face SolidWorks' extrusion goes up to (end condition 4), as a selector, if it is a flat face parallel
    * to the sketch: PeetCAD's extrusion can go up to it and follow it.
    */
+  /**
+   * A linear pattern direction (`n` is "D1" or "D2") that SolidWorks runs up to a reference (`D1EndCondition`
+   * 1, in exports from the fifth on), as `linear_pattern`'s `up_to` fields: { fields } to use, { why } if it
+   * can't be, null if the direction doesn't run up to a reference. `d` is the way the copies go. SolidWorks'
+   * count (or spacing) is checked first against the rule PeetCAD follows, worked out on SolidWorks' own faces.
+   */
+  function upToReference(v, n, d) {
+    if (v[n + "EndCondition"] !== 1) return null;
+    if (!d) return { why: "its direction is not known" };
+    // Something to run up to or measure from, with how far along `d` it is from a point
+    const bound = (e, what) => {
+      if (!e) return { why: `its ${what} was not exported` };
+      if (e.kind === "face" && e.surface === "plane" && e.normal && e.point) {
+        const normal = unit(e.normal), o = mm(e.point);
+        return { sel: { plane: { at: o.map(tidy), normal: e.normal.map(tidy) } }, from: p => dot(sub(o, p), normal) / dot(d, normal), across: Math.abs(dot(d, normal)), at: o };
+      }
+      if ((e.kind === "plane" || (e.kind === "feature" && e.type === "RefPlane")) && planes.has(e.name) && planeFrames.has(e.name)) {
+        const pf = planeFrames.get(e.name);
+        return { sel: { plane: planes.get(e.name) }, from: p => dot(sub(pf.o, p), pf.n) / dot(d, pf.n), across: Math.abs(dot(d, pf.n)), at: pf.o };
+      }
+      if (e.kind === "vertex" && e.point) {
+        const o = mm(e.point);
+        return { sel: { point: { at: o.map(tidy) } }, from: p => dot(sub(o, p), d), across: 1, at: o };
+      }
+      // A straight edge square to the direction is as far along it as either of its ends
+      if (e.kind === "edge" && e.curve === "line" && e.start && e.end && Math.abs(dot(unit(sub(e.end, e.start)), d)) < 1e-6) {
+        const o = mm(e.start);
+        return { sel: { point: { at: o.map(tidy) } }, from: p => dot(sub(o, p), d), across: 1, at: o };
+      }
+      return { why: `its ${what} is ${e.kind === "edge" ? "an edge not square to the direction" : "a " + (e.surface ? e.surface + " " : "") + e.kind}, which PeetCAD's pattern can't run up to` };
+    };
+    const to = bound(v[n + "EndReference"], "reference");
+    if (to.why) return to;
+    if (to.across < 1e-9) return { why: "its reference runs along the direction" };
+    const seed = v[n + "EndUseSeedReference"] ? bound(v[n + "EndSeedReference"], "seed reference") : null;
+    if (seed && seed.why) return seed;
+    // The seed's centre: the middle of the box round SolidWorks' faces of what is copied
+    const faces = (v.PatternFeatureArray || []).flatMap(p => p ? facesOf(p.name) : []).filter(x => x.box);
+    if (!faces.length) return { why: "the faces of what it copies are not in SolidWorks' body" };
+    const lo = [0, 1, 2].map(i => Math.min(...faces.map(x => x.box[i]))), hi = [3, 4, 5].map(i => Math.max(...faces.map(x => x.box[i])));
+    const centre = mm(lo.map((x, i) => (x + hi[i]) / 2));
+    const offset = (v[n + "EndRefOffset"] || 0) * MM, reverse = !!v[n + "EndRefReverseOffset"];
+    const span = to.from(centre) - (seed ? seed.from(centre) : 0) - (reverse ? -offset : offset);
+    const spacing = v[n + "Spacing"] * MM, count = v[n + "TotalInstances"];
+    const keepsSpacing = v[n + "EndUseSpacing"] !== false;
+    if (!(span > 1e-9)) return { why: `its reference, less the offset, is ${tidy(span)} mm along the direction from the seed` };
+    if (keepsSpacing && Math.floor(span / spacing + 1e-9) + 1 !== count)
+      return { why: `SolidWorks has ${count} copies ${tidy(spacing)} mm apart, where ${tidy(span)} mm from the seed to the reference, less the offset, makes room for ${Math.floor(span / spacing + 1e-9) + 1}` };
+    if (!keepsSpacing && (count < 2 || Math.abs(span / (count - 1) - spacing) > 1e-6))
+      return { why: `SolidWorks has ${count} copies ${tidy(spacing)} mm apart, where spreading them over the ${tidy(span)} mm from the seed to the reference, less the offset, puts them ${tidy(span / Math.max(1, count - 1))} mm apart` };
+    const fields = { up_to: to.sel };
+    if (offset) fields.up_to_offset = tidy(offset);
+    if (reverse) fields.up_to_reverse = true;
+    if (seed) fields.up_to_seed = seed.sel;
+    if (!keepsSpacing) fields.up_to_keeps = "count";
+    // Where the reference is, for finding a vertex as far along if PeetCAD's part hasn't the same one
+    return { fields, at: to.across > 1 - 1e-6 ? to.at : null };
+  }
+
   function upToFace(end, v, sf) {
     const face = end === 4 && v["GetFace(true)"];
     if (!face || face.kind !== "face" || face.surface !== "plane" || !face.normal || !face.point) return null;
@@ -2927,16 +3021,20 @@ function importPart(doc, dir) {
           } else if (alone) d = seen(spacing * MM, null);
           if (!d) return null;
           const k = ["x", "y", "z"].find(k => Math.abs(Math.abs(dot(d, AXES[k])) - 1) < 1e-9);
-          if (k) return { axis: k, flip: dot(d, AXES[k]) < 0 };
-          if (axis && axis.start && axis.end) return { axis: edgeSelector(axis), flip: dot(unit(sub(mm(axis.end), mm(axis.start))), d) < 0 };
+          if (k) return { axis: k, flip: dot(d, AXES[k]) < 0, d };
+          if (axis && axis.start && axis.end) return { axis: edgeSelector(axis), flip: dot(unit(sub(mm(axis.end), mm(axis.start))), d) < 0, d };
           // Any straight edge of the part that way
           const edge = (peet.ask({ op: "edges" }).edges || []).find(e => e.curve === "line" && len(sub(e.to, e.from)) > 1e-6 && Math.abs(Math.abs(dot(unit(sub(e.to, e.from)), d)) - 1) < 1e-9);
-          return edge ? { axis: { between: [edge.from, edge.to] }, flip: dot(unit(sub(edge.to, edge.from)), d) < 0 } : null;
+          return edge ? { axis: { between: [edge.from, edge.to] }, flip: dot(unit(sub(edge.to, edge.from)), d) < 0, d } : null;
         };
         const grid = (v.D2TotalInstances || 1) > 1;
         const first = direction(v.D1Axis, v.D1ReverseDirection, v.D1Spacing, !grid);
         if (!first) return record(f, "failed", "its direction was not exported");
         const op = { op: "linear_pattern", name: f.name, features: seeds, direction: first.axis, flip: first.flip, spacing: tidy(v.D1Spacing * MM), count: v.D1TotalInstances };
+        // SolidWorks' "up to reference" (exports from the fifth on): the count follows the part
+        const reach = upToReference(v, "D1", first.d);
+        if (reach && reach.fields) { Object.assign(op, reach.fields); upToPatterns.add(f.name); }
+        else if (reach) report.notes.push(`${f.name} runs up to a reference in SolidWorks; it is made with SolidWorks' count, which won't follow the part: ${reach.why}.`);
         if ((v.D2TotalInstances || 1) > 1) {
           const second = direction(v.D2Axis, v.D2ReverseDirection, v.D2Spacing, false);
           if (!second) return record(f, "failed", "its second direction was not exported");
@@ -2951,7 +3049,23 @@ function importPart(doc, dir) {
           }
           Object.assign(op, { direction2: along.direction, flip2: along.flip, spacing2: along.spacing, count2: along.count });
         }
-        return finish(f, build(f, op));
+        let built = build(f, op);
+        if (!built.ok && reach && reach.fields) {
+          // PeetCAD's part may not have the vertex or face SolidWorks runs up to where SolidWorks has it: a vertex
+          // as far along the direction does as well. Failing that, SolidWorks' count.
+          const level = reach.at && (peet.ask({ op: "edges" }).edges || []).flatMap(e => [e.from, e.to])
+            .filter(p => p && Math.abs(dot(sub(p, reach.at), first.d)) < 1e-6).sort((a, b) => len(sub(a, reach.at)) - len(sub(b, reach.at)))[0];
+          const tried = built.message;
+          if (level) built = build(f, { ...op, up_to: { point: { at: level.map(tidy) } } });
+          if (built.ok) report.notes.push(`${f.name} runs up to a vertex of PeetCAD's part as far along it as SolidWorks' reference (${tried}).`);
+          else {
+            for (const k of Object.keys(reach.fields)) delete op[k];
+            upToPatterns.delete(f.name);
+            built = build(f, op);
+            report.notes.push(`${f.name} runs up to a reference in SolidWorks that PeetCAD's part doesn't have (${tried}); it is made with SolidWorks' count, which won't follow the part.`);
+          }
+        }
+        return finish(f, built);
       }
 
       case "MirrorPattern": {
@@ -3343,6 +3457,7 @@ function importPart(doc, dir) {
       // reference the export does not have) gets its count from a parameter, set in each configuration to
       // SolidWorks' count there
       for (const [swName] of made) {
+        if (upToPatterns.has(swName)) continue;
         const counts = all.filter(c => c === config || entries.has(c)).map(c => {
           const x = maps.get(c).get(swName);
           const d = x && x.type === "LPattern" && (x.dimensions || []).find(d => d.valueType === 2 && d.fullName.split("@")[1] === swName);

@@ -84,7 +84,7 @@ pub use pattern::{
 pub use session::{DocSel, SessionCommand, apply_session, apply_session_json};
 pub use sketch::{Draw, DrawItem, Ent, Measure, ProjectionSel, Relation};
 pub use value::{
-    AxisSel, Bend, Configs, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel,
+    AxisSel, Bend, BoundSel, Configs, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel,
     HoleStandard, Input, PlaneSel, PointSel, Regions, RevolveAxis, Side, VertexQuery, VertexSel,
 };
 
