@@ -268,6 +268,17 @@ function importPart(doc, dir) {
   const sometimesOff = new Set();
   for (const c of doc.configurations) (function walk(list) { for (const x of list || []) { if (x.suppressed) sometimesOff.add(x.name); walk(x.sub); } })(c.features);
   const switched = { has: name => !!name && [...sometimesOff].some(n => name === n || name.startsWith(n + " ")) };
+  // Each configuration's suppressed features, with what is built on them (which SolidWorks suppresses with
+  // them), and so those suppressed somewhere a feature is live
+  const offIn = doc.configurations.filter(c => c.features).map(c => {
+    const off = new Set();
+    (function walk(list) { for (const x of list || []) { walk(x.sub); if (x.suppressed || (x.parents || []).some(p => off.has(p))) off.add(x.name); } })(c.features);
+    return off;
+  });
+  const switchedWhereLive = feature => {
+    const names = new Set(offIn.filter(off => !off.has(feature)).flatMap(off => [...off]));
+    return { has: name => !!name && [...names].some(n => name === n || name.startsWith(n + " ")) };
+  };
   /** A configuration's features by name, sub-features included. */
   const flatten = c => { const m = new Map(); (function walk(list) { for (const x of list || []) { if (!m.has(x.name)) m.set(x.name, x); walk(x.sub); } })(c.features); return m; };
   // The configuration being imported from: the active one first, then each other one for the features
@@ -548,7 +559,8 @@ function importPart(doc, dir) {
   function relate(f, sk, s, sf, own, drawn) {
     const pf = sk.frame, name = sk.name;
     const tally = { relations: s.relations.length, kept: 0, dropped: {} };
-    const drop = why => { tally.dropped[why] = (tally.dropped[why] || 0) + 1; };
+    let current = null;
+    const drop = why => { tally.dropped[why] = (tally.dropped[why] || 0) + 1; if (process.env.SW_DROPS && current) console.error("DROP", name, why, JSON.stringify(current)); };
     report.sketches = report.sketches || {};
     report.sketches[name] = tally;
 
@@ -610,7 +622,7 @@ function importPart(doc, dir) {
         const round = !!made && (made.type === "arc" || made.type === "circle");
         // A straight edge projects to a line from its start to its end
         const ends = made && made.type === "line" && item.edge && item.edge.between ? item.edge.between.map((p, i) => ({ id: [made.start, made.end][i], at: flat(p) })) : undefined;
-        projected.set(key, made ? { id: made.id !== undefined ? made.id : (made.curves || made.points || [])[0], point: item.vertex !== undefined, round, center: round ? made.center : undefined, ends } : null);
+        projected.set(key, made ? { id: made.id !== undefined ? made.id : (made.curves || made.points || [])[0], point: item.vertex !== undefined, round, circle: made.type === "circle", center: round ? made.center : undefined, ends } : null);
       }
       return projected.get(key) || undefined;
     };
@@ -624,11 +636,36 @@ function importPart(doc, dir) {
         if (whole && whole.id !== undefined) return whole;
         item = { type: "project", edge: { at: mid(mm(d.start), mm(d.end)).map(tidy) } };
       }
-      else if (d.kind === "edge" && d.curve === "circle" && d.start && d.end && d.circle) {
-        // An arc (a bend's end), found by the middle of it
-        const c = mm(d.circle.slice(0, 3)), r = d.circle[6] * MM;
-        const half = add(sub(mm(d.start), c), sub(mm(d.end), c)), n = Math.hypot(...half);
-        if (n > 1e-6 * r) item = { type: "project", edge: { at: add(c, mul(half, r / n)).map(tidy) } };
+      else if (d.kind === "edge" && d.curve === "circle" && d.circle) {
+        // An arc (a bend's end), found by the middle of it; a half circle by a point a quarter round from its
+        // start, either way; a whole circle (the export gives no ends) by any point of it
+        const c = mm(d.circle.slice(0, 3)), axis = unit(d.circle.slice(3, 6)), r = d.circle[6] * MM;
+        const tries = [];
+        if (d.start && d.end) {
+          const half = add(sub(mm(d.start), c), sub(mm(d.end), c)), n = len(half);
+          const q = cross(axis, sub(mm(d.start), c)), l = len(q);
+          if (n > 1e-6 * r) tries.push(add(c, mul(half, r / n)));
+          else if (l > 1e-9) tries.push(add(c, mul(q, r / l)), sub(c, mul(q, r / l)));
+        } else {
+          const q = cross(axis, Math.abs(axis[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]);
+          tries.push(add(c, mul(q, r / len(q))));
+        }
+        for (const at of tries) {
+          const p = projectItem({ type: "project", edge: { at: at.map(tidy) } });
+          if (p && p.id !== undefined) return p;
+        }
+        return undefined;
+      }
+      else if (d.kind === "face" && d.surface === "cylinder" && d.cylinder) {
+        // A point on a cylinder's axis (a circle's centre put on a hole's): the centre of a circular edge of it
+        const c = mm(d.cylinder.slice(0, 3)), axis = unit(d.cylinder.slice(3, 6)), r = d.cylinder[6] * MM;
+        const off = p => { const v = sub(p, c); return len(sub(v, mul(axis, dot(v, axis)))); };
+        for (const x of modelEdges()) {
+          if (x.curve !== "circle" || [x.from, x.middle].some(p => Math.abs(off(p) - r) > 1e-3) || Math.abs(dot(sub(x.from, x.middle), axis)) > 1e-6) continue;
+          const p = projectItem({ type: "project", edge: { at: x.middle } });
+          if (p && p.round && p.center !== undefined) return { id: p.center, point: true };
+        }
+        return undefined;
       }
       else if (d.kind === "vertex" && d.point) item = { type: "project", vertex: { at: mm(d.point).map(tidy) } };
       else if (d.kind === "feature" && d.type === "RefPlane" && planes.has(d.name)) item = { type: "project", plane: planes.get(d.name) };
@@ -642,12 +679,12 @@ function importPart(doc, dir) {
     // projected. Its copy is where the edge is seen from the sketch, so the edge may be off the sketch's plane.
     let edgesNow = null;
     const flat = p => { const d = sub(p, pf.o); return [dot(d, pf.x), dot(d, pf.y), dot(d, pf.n)]; };
-    // Not an edge of a feature that is suppressed in some configuration: the sketch would lose it there,
-    // where SolidWorks' copy stays where it was
+    // Not an edge of a feature that is suppressed in some configuration the sketch is live in: the sketch
+    // would lose it there, where SolidWorks' copy stays where it was
     const modelEdges = () => {
       if (edgesNow) return edgesNow;
-      const unsure = new Set();
-      for (const face of peet.ask({ op: "faces" }).faces || []) if ((face.made_by || []).some(m => switched.has(m.feature))) unsure.add(face.body + "|" + face.index);
+      const unsure = new Set(), off = switchedWhereLive(f.name);
+      for (const face of peet.ask({ op: "faces" }).faces || []) if ((face.made_by || []).some(m => off.has(m.feature))) unsure.add(face.body + "|" + face.index);
       edgesNow = (peet.ask({ op: "edges" }).edges || []).filter(e => !(e.faces || []).some(i => unsure.has(e.body + "|" + i)))
         .map(e => ({ ...e, a: flat(e.from), b: flat(e.to), m: flat(e.middle) }));
       return edgesNow;
@@ -731,10 +768,14 @@ function importPart(doc, dir) {
       copiesOf.get(seed.id).push(copy);
     }
     for (const r of s.relations) {
+      current = r;
       if (r.suppressed) { drop("suppressed"); continue; }
       const pts = [], segs = [], copies = [], unplaced = [], seen = [];
       for (const e of r.entities || []) {
         if (!e) continue;
+        // A point that is not the sketch's own, in a relation to the model, is the hidden copy of what the
+        // relation is defined by, wherever a point of the sketch's own lies (on it, as the relation has it)
+        if (e.kind === "sketchPoint" && (r.defined || []).length && e.x !== undefined && !byId.has(e.id.join("."))) { copies.push(e); continue; }
         if (e.kind === "sketchPoint") { const id = pointOf(e); if (id !== undefined) pts.push({ id, e: e.x !== undefined ? e : byId.get(e.id.join(".")) }); else if (e.x !== undefined) unplaced.push(e); }
         else if (e.kind === "sketchSegment") {
           const g = segmentOf(e);
@@ -767,7 +808,7 @@ function importPart(doc, dir) {
         if (p && p.id !== undefined) {
           outside.push(p);
           // A vertex where the sketch sees it, in the sketch's own coordinates (metres)
-          if (p.point && d.point) { const q = sub(mm(d.point), sf.o); seen.push({ id: p.id, e: { x: dot(q, sf.x) / MM, y: dot(q, sf.y) / MM } }); }
+          if (p.point && d.kind === "vertex" && d.point) { const q = sub(mm(d.point), sf.o); seen.push({ id: p.id, e: { x: dot(q, sf.x) / MM, y: dot(q, sf.y) / MM } }); }
         } else lost = true;
       }
       // The hidden copies stand for what the relation is defined by where the export has nothing for it, or
@@ -781,7 +822,7 @@ function importPart(doc, dir) {
         }
       }
       if (lost) { drop(`${r.type} to something outside the sketch that could not be projected`); continue; }
-      for (const o of outside) if (o.round) segs.push({ id: o.id, center: o.center, g: { type: "arc" }, projected: true });
+      for (const o of outside) if (o.round) segs.push({ id: o.id, center: o.center, g: { type: "arc", circle: o.circle }, projected: true });
       const lines = segs.filter(g => g.g.type === "line"), rounds = segs.filter(g => g.g.type === "arc");
       const outLines = outside.filter(o => !o.point && !o.round).map(o => o.id), outPoints = outside.filter(o => o.point).map(o => o.id);
       const anyLines = [...lines.map(l => l.id), ...outLines], anyPoints = [...pts.map(p => p.id), ...outPoints];
@@ -943,6 +984,7 @@ function importPart(doc, dir) {
       }
       items.push(item);
     }
+    current = null;
     if (items.length === 0) return;
 
     const shape = () => JSON.stringify((peet.ask({ op: "feature", feature: name }).entities || []).map(e => [e.id, e.from, e.to, e.center, e.radius, e.at].map(x => Array.isArray(x) ? x.map(v => +v.toFixed(4)) : typeof x === "number" ? +x.toFixed(4) : x)));
@@ -2035,7 +2077,8 @@ function importPart(doc, dir) {
       const tried = build(f, op);
       if (!tried.ok) { if (!best) best = { failed: tried }; continue; }
       const ours = (peet.ask({ op: "faces" }).faces || []).filter(x => (x.made_by || []).some(m => tried.names.includes(m.feature))).reduce((sum, x) => sum + x.area_mm2, 0);
-      const off = Math.abs(ours - theirs), planes = wallsMatched(f.name, tried.names);
+      // With nothing of it in SolidWorks' body (it is suppressed there), the way that makes something
+      const off = theirs > 0 ? Math.abs(ours - theirs) : -ours, planes = wallsMatched(f.name, tried.names);
       peet.apply({ op: "delete", features: tried.names });
       if (!best || best.failed || planes > best.planes + 1e-6 || (planes > best.planes - 1e-6 && off < best.off - 1e-6)) best = { op, off, planes };
     }
@@ -2397,7 +2440,21 @@ function importPart(doc, dir) {
     // of what it is on (Meter Bracket's Sketch69, on the left-hand return where the right-hand one is).
     if (cur === config && liveElsewhere(f.name)) return record(f, LATER);
     const before = report.features.length, had = made.has(f.name);
+    // What it is built on that was imported asleep (a flange its sketch is on, the slot a sketch converts the
+    // edges of) is woken while it is built, as it is there in SolidWorks wherever this is unsuppressed
+    const woken = [], seen = new Set();
+    (function wake(parents) {
+      for (const p of parents || []) {
+        if (seen.has(p)) continue;
+        seen.add(p);
+        if (asleep.has(p)) woken.push(...made.get(p));
+        wake((byName.get(p) || {}).parents);
+      }
+    })(f.parents);
+    const sleep = on => { for (const n of woken) peet.apply({ op: "suppress", feature: n, on, configurations: "all" }); };
+    sleep(false);
     handleLive({ ...f, suppressed: false });
+    sleep(true);
     const names = made.get(f.name);
     const built = !had && names && names.length > 0 && names.every(n => peet.apply({ op: "suppress", feature: n, on: true, configurations: "all" }).ok);
     if (built) asleep.add(f.name);
