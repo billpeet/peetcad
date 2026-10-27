@@ -396,9 +396,9 @@ with their defaults' types):
   flange with a face in their plane, and one that lands off the sheet is left out with a
   warning.
 - `unfold` lays bends of a sheet metal body flat, as SolidWorks' unfold: `fixed` (a
-  flange's top or bottom face) stays where it is, and `bends` (a face of each bend; left
-  out, every bend) open out flat, what lies beyond them turning into their parent's
-  plane. The features after it are made on the part as it lies, until a `fold` (`bends`;
+  flange's top or bottom face; left out, the largest flat face) stays where it is, and
+  `bends` (a face of each bend; left out, every bend) open out flat, what lies beyond
+  them turning into their parent's plane. The features after it are made on the part as it lies, until a `fold` (`bends`;
   left out, every bend laid flat) folds them back round, carrying what was cut while they
   were flat. A `sheet_cut` with an `end` between them cuts straight through the part as
   it lies; suppress the unfold and the fold and the same cut goes straight through the

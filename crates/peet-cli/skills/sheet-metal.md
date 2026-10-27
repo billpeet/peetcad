@@ -598,7 +598,7 @@ pair), or to mirror a SolidWorks part that has them. A plain cut across a bend n
 neither: `sheet_cut` draws over the blank already.
 
 - `fixed`: a flange's `top` or `bottom` face, which stays where it is. A bend's face or
-  an edge face is refused.
+  an edge face is refused. Left out: the largest flat face of the only sheet metal body.
 - `bends`: a face of each bend to lay flat (`{"feature": "Wall1", "side": "bend", ...}`;
   `peet faces` lists them). Leave it out to lay every bend flat. A face that is not a
   bend's is refused.

@@ -2026,34 +2026,59 @@ pub(crate) fn apply_unfold(
     def: &crate::feature::UnfoldFeature,
     seed: u64,
 ) -> Result<Applied, FeatureError> {
-    let fixed = def.fixed.as_ref().ok_or_else(|| {
-        FeatureError(
-            "Pick the fixed face: a flat face of a flange, which stays where it is.".to_owned(),
-        )
-    })?;
-    let found = find_face(bodies, fixed).ok_or_else(|| {
-        FeatureError(format!(
-            "The fixed face no longer exists ({}).",
-            model.describe_face(&fixed.name)
-        ))
-    })?;
-    let sheet = bodies[found.body]
-        .sheet
-        .as_ref()
-        .ok_or_else(|| FeatureError("The fixed face is not on a sheet metal body.".to_owned()))?;
-    let (piece, _, _) = sheet.flange_face(found.id).ok_or_else(|| {
-        FeatureError(
-            "The fixed face must be a flange's top or bottom face, not a bend or an edge."
-                .to_owned(),
-        )
-    })?;
-    let (_, bends) = bends_of(model, bodies, Some(found.body), &def.bends)?;
+    let (index, piece) = match &def.fixed {
+        Some(fixed) => {
+            let found = find_face(bodies, fixed).ok_or_else(|| {
+                FeatureError(format!(
+                    "The fixed face no longer exists ({}).",
+                    model.describe_face(&fixed.name)
+                ))
+            })?;
+            let sheet = bodies[found.body].sheet.as_ref().ok_or_else(|| {
+                FeatureError("The fixed face is not on a sheet metal body.".to_owned())
+            })?;
+            let (piece, _, _) = sheet.flange_face(found.id).ok_or_else(|| {
+                FeatureError(
+                    "The fixed face must be a flange's top or bottom face, not a bend or an edge."
+                        .to_owned(),
+                )
+            })?;
+            (found.body, piece)
+        }
+        // The largest flat face of the only sheet metal body
+        None => {
+            let mut sheets = bodies.iter().enumerate().filter(|(_, b)| b.sheet.is_some());
+            let (Some((index, body)), None) = (sheets.next(), sheets.next()) else {
+                return Err(FeatureError(
+                    "Pick the fixed face: a flat face of a flange, which stays where it is."
+                        .to_owned(),
+                ));
+            };
+            let sheet = body.sheet.as_ref().expect("a sheet metal body");
+            let piece = body
+                .solid
+                .face_ids()
+                .filter_map(|f| {
+                    let (piece, _, _) = sheet.flange_face(f)?;
+                    Some((
+                        piece,
+                        peet_kernel::validate::measure::face_area(&body.solid, f),
+                    ))
+                })
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(piece, _)| piece)
+                .ok_or_else(|| FeatureError("The body has no flat face to fix.".to_owned()))?;
+            (index, piece)
+        }
+    };
+    let sheet = bodies[index].sheet.as_ref().expect("a sheet metal body");
+    let (_, bends) = bends_of(model, bodies, Some(index), &def.bends)?;
     if sheet.layout.bends().next().is_none() {
         return Err(FeatureError("The body has no bends to unfold.".to_owned()));
     }
     let mut layout = sheet.layout.clone();
     layout.unfold(piece, &bends).map_err(FeatureError)?;
-    rebuild_sheet(model, bodies, found.body, layout, seed)
+    rebuild_sheet(model, bodies, index, layout, seed)
 }
 
 /// Folds bends an unfold laid flat back, the unfold's fixed face staying where it is.

@@ -805,7 +805,8 @@ impl From<&BreakCornerFeature> for BreakCornerFeatureV11 {
 /// the bends.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UnfoldFeature {
-    /// The flat face of a flange that stays where it is.
+    /// The flat face of a flange that stays where it is. `None`: the largest flat face of
+    /// the only sheet metal body.
     pub fixed: Option<FaceRef>,
     /// The bends to lay flat, each by one of its faces. Empty: every bend of the body.
     pub bends: Vec<FaceRef>,

@@ -1264,9 +1264,16 @@ fn what_the_sheet_metal_skill_says_about_unfold_and_fold_is_true() {
 {{"op": "edge_flange", "name": "Wall", "length": 15, "edge": {{"between": [[0, 0, 2], [60, 0, 2]]}}}}
 {{"op": "unfold", "fixed": {{"body": 0, "index": {bend}}}}}
 {{"op": "unfold", "fixed": {{"feature": "Base-Flange1", "side": "top"}}, "bends": [{{"body": 0, "index": {bend}}}]}}
+{{"op": "fold"}}
+{{"op": "unfold"}}
+{{"op": "bodies"}}
 "#
         ),
     );
+    // Left out, the fixed face is the largest: the plate stays, the wall lies flat beside it
+    assert_eq!(ran.replies[6]["created"][0]["status"], "ok");
+    assert!(ran.replies[7]["bodies"][0]["max"][2].as_f64().unwrap() <= 2.0 + 1e-9);
+    assert!(ran.replies[7]["bodies"][0]["min"][2].as_f64().unwrap() >= -1e-9);
     assert_eq!(
         ran.replies[3]["created"][0]["status"], "failed",
         "{}",

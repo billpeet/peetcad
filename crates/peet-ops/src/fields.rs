@@ -1433,7 +1433,8 @@ feature_args! {
     /// Bends of a sheet metal body laid flat, a face staying where it is (SolidWorks' unfold).
     Unfold: FeatureKind::Unfold(f) => &mut **f,
         UnfoldFeature { fixed, bends } => {
-    /// The flat face of a flange that stays where it is.
+    /// The flat face of a flange that stays where it is. Absent: the largest flat face of
+    /// the only sheet metal body.
     fixed: Option<FaceSel> as OptFace = fixed,
     /// A face of each bend to lay flat. None: every bend.
     bends: Vec<FaceSel> as Faces = bends,
