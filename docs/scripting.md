@@ -232,7 +232,9 @@ Sides: `start`, `end`, `side` for extrusions, revolves, sweeps and holes; `blend
 fillet's or chamfer's own faces; `inner` for the inside of a shell; `top`, `bottom`, `bend`, `wall` for sheet
 metal. A point on an edge is on two faces: add `normal` to say which. Indices are only
 valid until the part changes; every other selector is stored as a reference that follows
-the geometry through later edits.
+the geometry through later edits. A face picked with `at` keeps that point: where the face
+is in pieces later (a cut before it unsuppressed, or another configuration), it is the
+flat piece at that point, as SolidWorks keeps each piece picked.
 
 ## Operations
 

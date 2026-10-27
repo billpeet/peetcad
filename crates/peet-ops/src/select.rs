@@ -320,9 +320,15 @@ pub(crate) fn face(doc: &Document, sel: &FaceSel) -> Result<(usize, FaceId), Str
 pub(crate) fn face_ref(doc: &Document, sel: &FaceSel) -> Result<FaceRef, String> {
     match sel {
         FaceSel::Ref(r) => Ok(r.clone()),
-        FaceSel::Find(_) => {
+        FaceSel::Find(q) => {
             let (b, f) = face(doc, sel)?;
-            Ok(bodies(doc)[b].face_ref(f))
+            let mut r = bodies(doc)[b].face_ref(f);
+            // Picked at a point: the reference remembers it, to find the piece there if the
+            // face is cut in pieces later
+            if let Some(at) = q.at {
+                r.hint = mm3(at, &doc.model.parameters.units);
+            }
+            Ok(r)
         }
     }
 }

@@ -236,6 +236,42 @@ impl Body {
         if n > 0.0 { sum / n } else { DVec3::ZERO }
     }
 
+    /// Whether `p` is on flat face `face`: in its plane and inside its outline (curved
+    /// faces: never).
+    fn flat_face_holds(&self, face: FaceId, p: DVec3) -> bool {
+        let f = self.solid.face(face);
+        let peet_kernel::Surface::Plane(plane) = &f.surface else {
+            return false;
+        };
+        if f.surface.signed_distance(p).abs() > 1e-6 {
+            return false;
+        }
+        let at = plane.to_plane_coords(p);
+        // Even-odd crossings of a ray along +x with the outline's edges, curves as polylines
+        let mut inside = false;
+        for &l in &f.loops {
+            for c in self.solid.loop_coedges(l) {
+                let edge = self.solid.edge(self.solid.coedge(c).edge);
+                let n = if matches!(edge.curve, peet_kernel::Curve3::Line(_)) {
+                    1
+                } else {
+                    64
+                };
+                let mut a = plane.to_plane_coords(edge.point_at_fraction(0.0));
+                for i in 1..=n {
+                    let b = plane.to_plane_coords(edge.point_at_fraction(i as f64 / n as f64));
+                    if (a.y > at.y) != (b.y > at.y)
+                        && at.x < a.x + (at.y - a.y) / (b.y - a.y) * (b.x - a.x)
+                    {
+                        inside = !inside;
+                    }
+                    a = b;
+                }
+            }
+        }
+        inside
+    }
+
     fn neighbour_names(&self, face: FaceId) -> Vec<FaceName> {
         let mut names: Vec<FaceName> = self
             .solid
@@ -366,6 +402,17 @@ pub fn find_face(bodies: &[Arc<Body>], r: &FaceRef) -> Option<Found<FaceId>> {
             )
         })
         .collect();
+    // A face in pieces (cut in two since it was picked, or in this configuration and not
+    // the one it was picked in): the piece where it was picked, as SolidWorks keeps each
+    // piece picked apart. Faces whose neighbours are more alike come next.
+    if scored.len() > 1 {
+        let mut holding = scored
+            .iter()
+            .filter(|c| bodies[c.0.body].flat_face_holds(c.0.id, r.hint));
+        if let (Some(one), None) = (holding.next(), holding.next()) {
+            return Some(one.0);
+        }
+    }
     // With a single candidate the scores are not needed, but computing them is cheap.
     best(&scored)
 }
