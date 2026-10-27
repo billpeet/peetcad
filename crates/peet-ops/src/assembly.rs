@@ -18,6 +18,7 @@ use serde_json::{Map, Value, json};
 use crate::args::{Args, boolean, coordinates, integer, number, point3_out, round, text};
 use crate::op::{Op, Query, Sample, Source};
 use crate::session::DocSel;
+use crate::value::Configs;
 
 /// A component of the assembly, by name (`"Bracket-1"`) or id.
 #[derive(Clone, Debug, PartialEq)]
@@ -263,6 +264,9 @@ pub enum ComponentChange {
     Replace(InsertSource),
     /// A colour of its own, or (`None`) its part's again.
     Color(Option<[u8; 3]>),
+    /// Show its part in the configuration of the part called this (SolidWorks'
+    /// referenced configuration), or (`None`) in whichever the part has active.
+    Configuration(Option<String>),
     Delete,
 }
 
@@ -277,6 +281,7 @@ impl ComponentChange {
             Self::Place(_) | Self::PlaceInner(..) => "place",
             Self::Replace(_) => "replace",
             Self::Color(_) => "set_color",
+            Self::Configuration(_) => "component_configuration",
             Self::Delete => "delete",
         }
     }
@@ -286,12 +291,17 @@ impl ComponentChange {
 pub(crate) const ASSEMBLY_OPS: &[(&str, &str, &str)] = &[
     (
         "insert",
-        "path (a .peet file), sample, part (an open document) or component (another instance of its part); name, at ([x, y, z]), rotate ({axis: \"x\"|\"y\"|\"z\"|[x, y, z], angle}), fixed, link (with path: follow the file instead of copying the part), absolute (with link: keep the link as a full path, not relative to the assembly's folder)",
+        "path (a .peet file), sample, part (an open document) or component (another instance of its part); name, at ([x, y, z]), rotate ({axis: \"x\"|\"y\"|\"z\"|[x, y, z], angle}), fixed, configuration (the part's configuration it shows; default the part's active one, or for component that component's), link (with path: follow the file instead of copying the part), absolute (with link: keep the link as a full path, not relative to the assembly's folder)",
         "Add a component to the assembly: an instance of a part, which is copied into the assembly (or, with link, read from its file whenever the assembly is opened).",
     ),
     (
+        "component_configuration",
+        "component, configuration (a configuration of its part; null: whichever the part has active), configurations (of the assembly: \"this\" (default), \"all\", a name or a list of names)",
+        "Choose which configuration of its part a component shows (SolidWorks' referenced configuration). Two components of one part can show different configurations.",
+    ),
+    (
         "place",
-        "component (a name or id; or a path [sub-assembly, component, ...] to a component that moves in a flexible sub-assembly), at ([x, y, z]), rotate ({axis, angle})",
+        "component (a name or id; or a path [sub-assembly, component, ...] to a component that moves in a flexible sub-assembly), at ([x, y, z]), rotate ({axis, angle}), configurations (of the assembly: \"this\" (default), \"all\", a name or a list of names)",
         "Put a component somewhere: its part's origin at a point, turned about an axis from the part's own orientation.",
     ),
     (
@@ -301,7 +311,7 @@ pub(crate) const ASSEMBLY_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "fix",
-        "component, on (default true)",
+        "component, on (default true), configurations (of the assembly: \"this\" (default), \"all\", a name or a list of names)",
         "Hold a component where it is, or let it go.",
     ),
     (
@@ -317,7 +327,7 @@ pub(crate) const ASSEMBLY_OPS: &[(&str, &str, &str)] = &[
     ("rename", "component, name", "Rename a component."),
     (
         "suppress",
-        "component, on (default true)",
+        "component, on (default true), configurations (of the assembly: \"this\" (default), \"all\", a name or a list of names)",
         "Leave a component out of the assembly without deleting it, or put it back.",
     ),
     (
@@ -365,6 +375,7 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
         Ok(Op::Component {
             component: component(a)?,
             change: change?,
+            configurations: a.parsed("configurations", Configs::parse)?,
         })
     };
     Some(match op {
@@ -376,8 +387,20 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
                 fixed: a.parsed("fixed", boolean)?,
                 link: a.flag("link", false)?,
                 absolute: a.flag("absolute", false)?,
+                configuration: a.string("configuration")?,
             })
         })(),
+        "component_configuration" => {
+            let configuration = match a.take_nullable("configuration") {
+                None => Err(
+                    "'component_configuration' needs a 'configuration' field: the name of a configuration of the component's part (null for whichever it has active)."
+                        .to_owned(),
+                ),
+                Some(Value::Null) => Ok(None),
+                Some(v) => text(&v).map(|t| Some(t.to_owned())),
+            };
+            change(a, configuration.map(ComponentChange::Configuration))
+        }
         "components" => Ok(Op::Query(Query::Components)),
         "interference" => a
             .parsed("component", CompSel::parse)
@@ -417,6 +440,7 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
                 } else {
                     ComponentChange::PlaceInner(inner, placing)
                 },
+                configurations: a.parsed("configurations", Configs::parse)?,
             })
         })(),
         "drag" => (|| {
@@ -521,16 +545,10 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
         | Op::FlatPattern { .. }
         | Op::ApplyMaterial { .. }
         | Op::SetMaterial { .. }
-        | Op::SetColor { .. }
-        // An assembly has no configurations of its own: each part has its own.
-        | Op::AddConfiguration { .. }
-        | Op::EditConfiguration { .. }
-        | Op::DeleteConfiguration { .. }
-        | Op::Configuration { .. } => true,
+        | Op::SetColor { .. } => true,
         Op::Query(q) => matches!(
             q,
             Query::Features
-                | Query::Configurations
                 | Query::Feature(_)
                 | Query::Bodies
                 | Query::Faces { .. }
@@ -576,7 +594,7 @@ fn status_word(status: Option<&Status>) -> &'static str {
 
 /// A placement as scripts write it: where the origin is, and the turn as an axis and an
 /// angle in degrees (left out if it is not turned).
-fn placement_out(m: &mut Map<String, Value>, frame: &Frame, units: &Units) {
+pub(crate) fn placement_out(m: &mut Map<String, Value>, frame: &Frame, units: &Units) {
     m.insert("at".to_owned(), point3_out(frame.origin, units));
     let (axis, angle) = frame.rotation.to_axis_angle();
     // The shorter way round, and nothing for no turn at all.
@@ -611,6 +629,12 @@ pub(crate) fn component_out(doc: &Document, id: CompId) -> Value {
     m.insert("name".to_owned(), json!(c.name));
     if let Some(d) = assembly.definition(c.definition) {
         m.insert("part".to_owned(), json!(d.name()));
+        // The configuration of its part it shows, where the part has several.
+        if d.model.configurations().len() > 1
+            && let Some(name) = assembly.configuration_name(c)
+        {
+            m.insert("configuration".to_owned(), json!(name));
+        }
     }
     placement_out(&mut m, &c.placement, units);
     m.insert("fixed".to_owned(), json!(c.fixed));
@@ -694,6 +718,19 @@ pub(crate) fn components(doc: &Document) -> Result<Map<String, Value>, String> {
             if let Some(material) = &d.model.material {
                 m.insert("material".to_owned(), json!(material.name));
             }
+            if d.model.configurations().len() > 1 {
+                let names: Vec<&str> = d
+                    .model
+                    .configurations()
+                    .iter()
+                    .map(|c| c.name.as_str())
+                    .collect();
+                m.insert("configurations".to_owned(), json!(names));
+                m.insert(
+                    "active_configuration".to_owned(),
+                    json!(d.model.active_configuration().name),
+                );
+            }
             if let Some(link) = &d.link {
                 crate::links::link_out(&mut m, &d.model, link, doc);
             }
@@ -755,17 +792,21 @@ fn moving_out(doc: &Document, assembly: &Assembly, c: &peet_model::Component) ->
 /// The names of the components along a path, from a component of `assembly` down.
 fn path_names(assembly: &Assembly, path: &[CompId]) -> Vec<String> {
     let mut names = Vec::new();
-    let mut at = Some(assembly);
-    for id in path {
+    // Each sub-assembly in the configuration its component shows.
+    let mut inner: Option<Arc<Model>> = None;
+    for (i, id) in path.iter().enumerate() {
+        let at = if i == 0 {
+            Some(assembly)
+        } else {
+            inner.as_deref().and_then(Model::assembly)
+        };
         let Some(c) = at.and_then(|a| a.component(*id)) else {
             names.push(format!("#{}", id.0));
-            at = None;
+            inner = None;
             continue;
         };
         names.push(c.name.clone());
-        at = at
-            .and_then(|a| a.definition(c.definition))
-            .and_then(|d| d.model.assembly());
+        inner = at.and_then(|a| a.model_of(c));
     }
     names
 }
@@ -779,13 +820,17 @@ fn moving_path(assembly: &Assembly, top: CompId, inner: &[CompSel]) -> Result<Ve
         .ok_or_else(|| "The component no longer exists.".to_owned())?;
     let mut path = vec![top];
     let mut names = vec![c.name.clone()];
-    let mut here = c;
-    let mut within = assembly;
+    let mut here = c.clone();
+    let mut within: Option<Arc<Model>> = None;
     for sel in inner {
-        let definition = within
-            .definition(here.definition)
+        // In the configuration the component shows.
+        let shown = within
+            .as_deref()
+            .and_then(Model::assembly)
+            .unwrap_or(assembly)
+            .model_of(&here)
             .ok_or_else(|| "The component's part is missing.".to_owned())?;
-        let sub = definition.model.assembly().ok_or_else(|| {
+        let sub = shown.assembly().ok_or_else(|| {
             format!(
                 "{} is a part: the path can't go on inside it.",
                 names.join(" / ")
@@ -801,8 +846,8 @@ fn moving_path(assembly: &Assembly, top: CompId, inner: &[CompSel]) -> Result<Ve
         let id = sel
             .resolve_in(sub)
             .map_err(|e| format!("In {}: {e}", names.join(" / ")))?;
-        here = sub.component(id).expect("resolved in it");
-        within = sub;
+        here = sub.component(id).expect("resolved in it").clone();
+        within = Some(shown.clone());
         path.push(id);
         names.push(here.name.clone());
     }
@@ -823,6 +868,7 @@ fn check_not_itself(doc: &Document, model: &Model) -> Result<(), String> {
 }
 
 /// Adds a component. Returns it, with the undo label.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn insert(
     doc: &Document,
     model: &mut Model,
@@ -831,6 +877,7 @@ pub(crate) fn insert(
     placing: Option<&Placing>,
     fixed: Option<bool>,
     link: Option<bool>,
+    configuration: Option<&str>,
 ) -> Result<(CompId, String), String> {
     // `link`: whether to link, and if so whether the link is relative.
     let relative = link.unwrap_or(true);
@@ -868,6 +915,14 @@ pub(crate) fn insert(
             .map(|c| c.definition),
         _ => None,
     };
+    // The configuration it shows: the one asked for, or another instance's.
+    let shown = match (configuration, from) {
+        (Some(name), _) => Some(part_configuration(&part, name)?),
+        (None, InsertSource::Component(c)) => the_assembly(doc)?
+            .component(c.resolve(doc)?)
+            .and_then(|c| c.configuration),
+        _ => None,
+    };
     check_not_itself(doc, &part)?;
     let units = doc.model.parameters.units;
     let frame = match placing {
@@ -894,16 +949,37 @@ pub(crate) fn insert(
     if let (Some(fixed), Some(c)) = (fixed, assembly.component_mut(id)) {
         c.fixed = fixed;
     }
+    if let Some(c) = assembly.component_mut(id) {
+        c.configuration = shown;
+    }
     let label = format!("Insert {}", assembly.name_of(id));
     Ok((id, label))
 }
 
-/// Changes a component. Returns the undo label.
+/// The configuration of a part called `name`, or which ones it has.
+fn part_configuration(part: &Model, name: &str) -> Result<peet_model::ConfigId, String> {
+    part.configuration_named(name).map(|c| c.id).ok_or_else(|| {
+        let names: Vec<&str> = part
+            .configurations()
+            .iter()
+            .map(|c| c.name.as_str())
+            .collect();
+        format!(
+            "{} has no configuration called '{name}'. Its configurations are: {}.",
+            part.name,
+            names.join(", ")
+        )
+    })
+}
+
+/// Changes a component. What can differ between the assembly's configurations changes
+/// in those of `configurations` (the active one if `None`). Returns the undo label.
 pub(crate) fn change(
     doc: &Document,
     model: &mut Model,
     id: CompId,
     change: &ComponentChange,
+    configurations: Option<&Configs>,
 ) -> Result<String, String> {
     let units = doc.model.parameters.units;
     let was = the_assembly(doc)?.name_of(id).to_owned();
@@ -954,18 +1030,77 @@ pub(crate) fn change(
         }
         _ => None,
     };
+    // What differs between the assembly's configurations, in those asked for.
+    let scope = configurations.cloned().unwrap_or_default().resolve(doc)?;
+    match change {
+        ComponentChange::Suppress(on) => {
+            let on = *on;
+            model.set_component(id, &scope, |s| s.suppressed = on)?;
+            return Ok(format!(
+                "{} {was}",
+                if on { "Suppress" } else { "Unsuppress" }
+            ));
+        }
+        ComponentChange::Fix(on) => {
+            let on = *on;
+            model.set_component(id, &scope, |s| s.fixed = on)?;
+            return Ok(format!("{} {was}", if on { "Fix" } else { "Float" }));
+        }
+        ComponentChange::Place(placing) => {
+            // Checked once: each configuration's placement is changed from where it is.
+            placing.frame(Frame::WORLD, &units)?;
+            model.set_component(id, &scope, |s| {
+                if let Ok(frame) = placing.frame(s.placement, &units) {
+                    s.placement = frame;
+                }
+            })?;
+            return Ok(format!("Move {was}"));
+        }
+        ComponentChange::Configuration(name) => {
+            let part = the_assembly(doc)?
+                .definition_of(id)
+                .map(|d| d.model.clone())
+                .ok_or_else(|| "The component's part is missing.".to_owned())?;
+            let shown = name
+                .as_deref()
+                .map(|n| part_configuration(&part, n))
+                .transpose()?;
+            model.set_component(id, &scope, |s| s.configuration = shown)?;
+            return Ok(format!(
+                "Show {was} in {}",
+                name.as_deref().unwrap_or("its part's active configuration")
+            ));
+        }
+        _ => {}
+    }
+    if configurations.is_some()
+        && matches!(
+            change,
+            ComponentChange::Rename(_)
+                | ComponentChange::Show(_)
+                | ComponentChange::Color(_)
+                | ComponentChange::Flexible(_)
+                | ComponentChange::Replace(_)
+                | ComponentChange::Delete
+        )
+    {
+        return Err(format!(
+            "'{}' is the same in every configuration of the assembly: leave 'configurations' out.",
+            change.word()
+        ));
+    }
     let assembly = model
         .assembly_mut()
         .ok_or_else(|| "The document is not an assembly.".to_owned())?;
     let gone = || "The component no longer exists.".to_owned();
     Ok(match change {
+        ComponentChange::Suppress(_)
+        | ComponentChange::Fix(_)
+        | ComponentChange::Place(_)
+        | ComponentChange::Configuration(_) => unreachable!("changed above"),
         ComponentChange::Rename(name) => {
             rename(assembly, id, name)?;
             format!("Rename {was}")
-        }
-        ComponentChange::Suppress(on) => {
-            assembly.component_mut(id).ok_or_else(gone)?.suppressed = *on;
-            format!("{} {was}", if *on { "Suppress" } else { "Unsuppress" })
         }
         ComponentChange::Show(on) => {
             assembly.component_mut(id).ok_or_else(gone)?.visible = *on;
@@ -974,10 +1109,6 @@ pub(crate) fn change(
         ComponentChange::Color(color) => {
             assembly.component_mut(id).ok_or_else(gone)?.color = *color;
             format!("Colour {was}")
-        }
-        ComponentChange::Fix(on) => {
-            assembly.component_mut(id).ok_or_else(gone)?.fixed = *on;
-            format!("{} {was}", if *on { "Fix" } else { "Float" })
         }
         ComponentChange::Flexible(on) => {
             let c = assembly.component_mut(id).ok_or_else(gone)?;
@@ -997,11 +1128,6 @@ pub(crate) fn change(
                 None => c.poses.push(peet_model::Pose { path: inner, frame }),
             }
             format!("Move {name}")
-        }
-        ComponentChange::Place(placing) => {
-            let c = assembly.component_mut(id).ok_or_else(gone)?;
-            c.placement = placing.frame(c.placement, &units)?;
-            format!("Move {was}")
         }
         ComponentChange::Replace(_) => {
             let definition = assembly.define(replacement.ok_or_else(gone)?);
@@ -1174,7 +1300,9 @@ pub(crate) fn step_products(doc: &Document) -> (Vec<peet_io::step::StepProduct>,
             };
             let mut children = Vec::new();
             for c in assembly.components().filter(|c| !c.suppressed) {
-                let Some(definition) = assembly.definition(c.definition) else {
+                // In the configuration it shows: two configurations of a part are two
+                // products.
+                let Some(shown) = assembly.model_of(c) else {
                     continue;
                 };
                 let mut path = path.to_vec();
@@ -1192,7 +1320,7 @@ pub(crate) fn step_products(doc: &Document) -> (Vec<peet_io::step::StepProduct>,
                     c.placement
                 };
                 let posed = posed || c.flexible && !c.poses.is_empty();
-                if let Some(product) = self.product(&definition.model, &path, posed) {
+                if let Some(product) = self.product(&shown, &path, posed) {
                     children.push((product, c.name.clone(), placement));
                 }
             }

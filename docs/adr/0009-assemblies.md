@@ -450,6 +450,54 @@ different layouts. Main's numbers stand (5 and 6 for configurations, 7 for splin
 everything of this phase is model schema 8, and schema 6 and 7 files are read as
 `ModelV7` (a model with configurations, without material, colour or assembly) and
 converted. Files written by this branch before the merge are not read: no released
-version wrote them. An assembly has no configurations of its own (each of its parts has
-its own), so the configuration operations and the configuration list are refused or
-hidden in an assembly, as the other part operations are.
+version wrote them. An assembly had no configurations of its own (each of its parts has
+its own), so the configuration operations and the configuration list were refused or
+hidden in an assembly, as the other part operations are. *Superseded (October 2026): see
+"Configurations in assemblies".*
+
+## Configurations in assemblies
+
+*Supersedes the last paragraph of "Merging with configurations".* PeetCAD follows
+SolidWorks, where each component names the configuration of its part it shows (24 of the
+template library's 202 instances use one other than the part's default) and an assembly
+has configurations of its own (8 of its assemblies: left and right hinged, a long and a
+short duct), each with its own component suppression, referenced configurations, fixed
+components and positions, and its own mate suppression and values.
+
+- **A component chooses a configuration of its part.** `Component::configuration` (model
+  schema 12) is one of the definition's model's configurations; `None` is whichever that
+  model has active. A definition is still one model: the engine builds it once for each
+  configuration its components show (`Assembly::configuration_of`, the engine's parts keyed
+  by definition and configuration), from `Model::with_configuration`, and writes back only
+  the build of the model's own active configuration. Everything that reads a component's
+  part reads it in that configuration (`Assembly::model_of`): mates' ends and the solve,
+  flexible sub-assemblies, equations reading and setting a component's dimension, the
+  bill of materials (a part in two configurations is two lines), mass, interference
+  (through the instances) and STEP export (a product per part and configuration). The
+  alternative, a definition per configuration (a copy of the part with another
+  configuration active), was the importer's stand-in: it stores the part twice, and an
+  edit to the part reaches only one copy.
+- **An assembly's configurations are the model's.** The list, the active one and the
+  parameters that differ are a part's ([`config`](../../crates/peet-model/src/config.rs)).
+  What an assembly adds is kept as a part keeps what differs: the components and mates
+  hold the active configuration, and `Assembly`'s `Varying` holds, for each component or
+  mate that differs, its state in every other configuration
+  (`peet-model/src/asm_config.rs`). A component's state is its suppression, referenced
+  configuration, being fixed, placement and poses; a mate's its suppression and its kind
+  with its values. Activating a configuration swaps them, as a part's feature flags are
+  swapped, so the rebuild, the queries and the exports see an ordinary assembly.
+- **Where a component is belongs to the configuration**, as in SolidWorks: the rebuild's
+  write-back of solved placements and poses, and `place`, change the active configuration
+  only. Otherwise a mate live in one configuration would move components in the others,
+  and switching back and forth would solve each from the other's placements.
+- Operations: `component_configuration`; `insert` with `configuration`; `configurations`
+  on `suppress`, `fix`, `place`, `component_configuration` (default the active
+  configuration, SolidWorks' "This configuration"), on `suppress` with a mate, and on
+  mate values (`edit_mate`, `set D1@MATE`), which change as a part's values do. The part
+  configuration operations now work in an assembly; `configurations` lists what differs.
+- Not done: equations that differ per configuration (SolidWorks' "this configuration"
+  equations; the template library's differ only in disabled ones and one suppression
+  equation), derived configurations (none in the library), display states, a
+  configuration-specific colour, and the application's configuration list and a
+  component's configuration in its properties. `open_component` opens the part with its
+  own active configuration, not the one the component shows.

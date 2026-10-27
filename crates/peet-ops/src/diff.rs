@@ -117,9 +117,13 @@ pub fn diff_scoped(
                     });
                 }
             }
+            // In the assembly's active configuration where the component differs between
+            // them, in all of them where it doesn't.
             let component = |c: &peet_model::Component, change| Op::Component {
                 component: c.id.into(),
                 change,
+                configurations: (old.configurations().len() > 1)
+                    .then(|| as_set_directly(old.component_differs(c.id))),
             };
             // The patterns that are gone, first: their copies go with them.
             let edit_pattern =
@@ -157,6 +161,10 @@ pub fn diff_scoped(
                     fixed: Some(c.fixed),
                     link: false,
                     absolute: false,
+                    configuration: c
+                        .configuration
+                        .and_then(|id| part.model.configuration(id))
+                        .map(|x| x.name.clone()),
                 });
                 if c.suppressed {
                     ops.push(component(c, ComponentChange::Suppress(true)));
@@ -208,6 +216,24 @@ pub fn diff_scoped(
                 }
                 if o.color != c.color {
                     ops.push(component(c, ComponentChange::Color(c.color)));
+                }
+                if o.configuration != c.configuration {
+                    let name = match c.configuration {
+                        None => None,
+                        Some(id) => Some(
+                            after
+                                .definition(c.definition)
+                                .and_then(|d| d.model.configuration(id))
+                                .map(|x| x.name.clone())
+                                .ok_or_else(|| {
+                                    format!(
+                                        "{} shows a configuration its part doesn't have",
+                                        c.name
+                                    )
+                                })?,
+                        ),
+                    };
+                    ops.push(component(c, ComponentChange::Configuration(name)));
                 }
             }
             // The patterns: new ones (which make their copies), and changed ones.
@@ -287,11 +313,12 @@ pub fn diff_scoped(
         _ => {}
     }
     if let (Some(before), Some(after)) = (old.assembly(), new.assembly()) {
-        let references = |a: &peet_model::Assembly| -> Vec<(String, peet_model::MateEnd, peet_model::MateEnd)> {
-            a.references()
-                .map(|r| (r.name.clone(), r.a.clone(), r.b.clone()))
-                .collect()
-        };
+        let references =
+            |a: &peet_model::Assembly| -> Vec<(String, peet_model::MateEnd, peet_model::MateEnd)> {
+                a.references()
+                    .map(|r| (r.name.clone(), r.a.clone(), r.b.clone()))
+                    .collect()
+            };
         if before.equations() != after.equations() || references(before) != references(after) {
             return Err(
                 "the assembly's equations or reference dimensions were changed directly: 'set', 'set_suppression_expression' and 'reference_dimension' change them"
@@ -310,6 +337,7 @@ pub fn diff_scoped(
         let edit = |m: &peet_model::Mate, change| Op::EditMate {
             mate: m.id.into(),
             change,
+            configurations: None,
         };
         for m in before.mates() {
             // A deleted component's mates went with it.
@@ -426,7 +454,12 @@ pub fn diff_scoped(
                 ));
             }
             if o.suppressed != m.suppressed {
-                ops.push(edit(m, MateChange::Suppress(m.suppressed)));
+                ops.push(Op::EditMate {
+                    mate: m.id.into(),
+                    change: MateChange::Suppress(m.suppressed),
+                    configurations: (old.configurations().len() > 1)
+                        .then(|| as_set_directly(old.mate_differs(m.id))),
+                });
             }
         }
     }

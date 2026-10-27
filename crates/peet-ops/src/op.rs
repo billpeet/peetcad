@@ -529,6 +529,10 @@ pub enum Op {
         link: bool,
         /// Keep the link as a full path, not relative to the assembly's folder.
         absolute: bool,
+        /// The configuration of the part it shows (SolidWorks' referenced configuration):
+        /// the part's active one if absent (or, for another instance of a component, the
+        /// configuration that component shows).
+        configuration: Option<String>,
     },
     /// Read the linked parts of an assembly from their files again.
     UpdateLinks,
@@ -544,10 +548,13 @@ pub enum Op {
     Unlink {
         part: crate::links::PartSel,
     },
-    /// Change a component of an assembly.
+    /// Change a component of an assembly. What can differ between the assembly's
+    /// configurations (suppression, being fixed, where it is, the part's configuration it
+    /// shows) changes in `configurations`: the active one if absent.
     Component {
         component: CompSel,
         change: ComponentChange,
+        configurations: Option<Configs>,
     },
     /// Replace the model of one of an assembly's parts: how a part that was opened from
     /// an assembly and edited is stored back. A script saves that part instead.
@@ -580,10 +587,14 @@ pub enum Op {
         /// An automatic name (`Coincident1`) if absent.
         name: Option<String>,
     },
-    /// Change a mate of an assembly.
+    /// Change a mate of an assembly. Its suppression (the active configuration if
+    /// `configurations` is absent) and its values (if absent: the active configuration if
+    /// they already differ between the assembly's configurations, else all) can differ
+    /// between configurations.
     EditMate {
         mate: MateSel,
         change: MateChange,
+        configurations: Option<Configs>,
     },
     /// Copy components of an assembly in rows or round an axis.
     ComponentPattern {

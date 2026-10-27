@@ -24,6 +24,7 @@
 //!
 //! The crate has no UI or GPU dependency: everything here runs headless.
 
+mod asm_config;
 mod assembly;
 mod bodies;
 pub mod config;
@@ -54,6 +55,7 @@ mod sweep;
 mod units;
 mod weldment;
 
+pub use asm_config::{ComponentState, MateState};
 pub use assembly::{
     Assembly, CompId, Component, ComponentPattern, DefId, Definition, ExplodeId, ExplodeStep, Link,
     MAX_PATTERN, PatternId, PatternInstance, PatternKind, PatternLine, PatternStep, Pose,
@@ -62,19 +64,18 @@ pub use assembly::{
 pub use bodies::{InsertPartFeature, MoveBodyFeature, PartSource, body_motion};
 pub use config::{ConfigId, Configuration, Scope, Slot, SlotValue};
 pub use convert::ConvertToSheetFeature;
-pub use equations::{Equation, EquationTarget, ReferenceDimension};
 pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
+pub use equations::{Equation, EquationTarget, ReferenceDimension};
 pub use extrude::{
     EndCondition, Extrude, ExtrudeInput, Operation, RegionSelection, apply_extrude, default_regions,
 };
 pub use feature::{
     Axis, AxisDef, AxisRef, BaseFlangeFeature, BendModelDef, BreakCornerFeature, CoordSystemDef,
-    CornerFeature,
-    EdgeFlangeFeature, ExtrudeFeature, Feature, FeatureId, FeatureKind, FormFeature, HemFeature,
-    JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, PatternDef, PatternFeature,
-    PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind, SheetCutEnd, SheetCutFeature,
-    SheetSettingsDef,
-    SketchFeature, SketchedBendFeature, StdAxis, StdPlane, UnfoldFeature, FoldFeature,
+    CornerFeature, EdgeFlangeFeature, ExtrudeFeature, Feature, FeatureId, FeatureKind, FoldFeature,
+    FormFeature, HemFeature, JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature,
+    PatternDef, PatternFeature, PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind,
+    SheetCutEnd, SheetCutFeature, SheetSettingsDef, SketchFeature, SketchedBendFeature, StdAxis,
+    StdPlane, UnfoldFeature,
 };
 pub use history::History;
 pub use hole::{HoleEnd, HoleFeature, HoleFit, HoleKind, HoleSizes, METRIC, MetricSize};

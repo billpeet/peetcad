@@ -45,19 +45,20 @@ pub(crate) fn correction(poses: &[Pose], built: &Evaluation, path: &[CompId]) ->
 /// The units of a flexible sub-assembly: their paths below it (the first empty, the
 /// sub-assembly itself) and names; and the flexible levels in it (the sub-assembly and
 /// the flexible sub-assemblies in it that are taken apart), whose mates are solved.
-fn units<'a>(
-    model: &'a Model,
+fn units(
+    model: &std::sync::Arc<Model>,
     prefix: &mut Vec<CompId>,
     name: &str,
     out: &mut Vec<(Vec<CompId>, String)>,
-    levels: &mut Vec<(Vec<CompId>, &'a Model)>,
+    levels: &mut Vec<(Vec<CompId>, std::sync::Arc<Model>)>,
 ) {
     let Some(assembly) = model.assembly() else {
         return;
     };
-    levels.push((prefix.clone(), model));
+    levels.push((prefix.clone(), model.clone()));
     for c in assembly.components().filter(|c| !c.suppressed) {
-        let Some(definition) = assembly.definition(c.definition) else {
+        // In the configuration the component shows.
+        let Some(definition) = assembly.model_of(c) else {
             continue;
         };
         prefix.push(c.id);
@@ -65,8 +66,8 @@ fn units<'a>(
         if !(c.fixed || c.pattern.is_some()) {
             out.push((prefix.clone(), inner.clone()));
         }
-        if is_flexible(c, &definition.model) {
-            units(&definition.model, prefix, &inner, out, levels);
+        if is_flexible(c, &definition) {
+            units(&definition, prefix, &inner, out, levels);
         }
         prefix.pop();
     }

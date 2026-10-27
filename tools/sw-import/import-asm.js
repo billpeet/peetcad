@@ -51,6 +51,21 @@ class Peet {
     return JSON.parse(line);
   }
   apply(op) { const reply = this.run(op, true); if (reply.ok) this.script.push(op); return reply; }
+  /** Several operations, one after another, saved; those that fail are left out and the rest still done. */
+  applyAll(ops) {
+    if (!ops.length) return [];
+    const r = spawnSync(peetExe, ["run", "-", "-f", this.file, "-q", "--keep-going"],
+      { input: ops.map(o => JSON.stringify(o)).join("\n") + "\n", encoding: "utf8", maxBuffer: 1 << 28 });
+    const replies = (r.stdout || "").split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
+    // A run with an operation that failed is not saved: the others again, by themselves
+    const done = ops.filter((op, i) => replies[i] && replies[i].ok);
+    if (done.length < ops.length && done.length) {
+      spawnSync(peetExe, ["run", "-", "-f", this.file, "-q"],
+        { input: done.map(o => JSON.stringify(o)).join("\n") + "\n", encoding: "utf8", maxBuffer: 1 << 28 });
+    }
+    this.script.push(...done);
+    return replies;
+  }
   ask(op) { return this.run(op, false); }
   /** The replies to several operations run one after another, nothing saved. */
   askAll(ops) {
@@ -128,28 +143,39 @@ const partReport = file => {
   return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p)) : null;
 };
 
-// A part in another configuration than the one its file is in: PeetCAD's components can't choose a part's
-// configuration (parity A5), so a copy of the part with that configuration made active stands in for it.
-const variants = new Map();
-function partIn(file, configuration, report) {
-  const base = partFileOf(file);
-  if (!base) return { error: "the part was not imported" };
+/** The configurations a part's import has, its active one first (null if it has no report). */
+function partConfigurations(file) {
   const pr = partReport(file);
-  const active = pr && pr.configuration;
-  if (!configuration || configuration === active) return { path: base };
-  const key = base + "|" + configuration;
-  if (variants.has(key)) return variants.get(key);
-  const dir = path.join(outDir, "parts");
-  fs.mkdirSync(dir, { recursive: true });
-  const copy = path.join(dir, `${path.basename(base, ".peet")} @ ${configuration.replace(/[<>:"/\\|?*]/g, "_")}.peet`);
-  fs.copyFileSync(base, copy);
-  const r = spawnSync(peetExe, ["run", "-", "-f", copy, "-q"], { input: JSON.stringify({ op: "configuration", configuration }) + "\n", encoding: "utf8" });
-  const line = (r.stdout || "").split("\n").find(l => l.startsWith("{"));
-  const reply = line ? JSON.parse(line) : { ok: false, error: r.stderr };
-  const made = reply.ok ? { path: copy, standIn: `the part in its configuration "${configuration}" is a copy with that configuration active` }
-    : { error: `the part has no configuration "${configuration}" (${reply.error || "refused"})` };
-  variants.set(key, made);
-  return made;
+  if (!pr) return null;
+  return [pr.configuration, ...(pr.configurations || []).map(c => c.name)].filter(Boolean);
+}
+
+/**
+ * A component's part as PeetCAD has it: its file and the configuration of it the component shows (SolidWorks'
+ * referenced configuration; the component chooses it, so one file serves every configuration). `view` is what
+ * the faces and edges are looked up in: the file, in that configuration where it is not the file's active one.
+ */
+function partOf(comp) {
+  const base = partFileOf(comp.file);
+  if (!base) return { error: "the part was not imported" };
+  const configs = partConfigurations(comp.file) || [];
+  const wanted = comp.configuration;
+  if (!wanted) return { path: base, view: base, configuration: null };
+  if (!configs.includes(wanted)) return { error: `the part's import has no configuration "${wanted}" (it has ${configs.join(", ") || "none"})` };
+  return { path: base, view: wanted === configs[0] ? base : `${base}|${wanted}`, configuration: wanted };
+}
+
+/** A view (a part file, and a configuration after a "|") split into the two. */
+const splitView = v => { const i = v.indexOf("|"); return i < 0 ? [v, null] : [v.slice(0, i), v.slice(i + 1)]; };
+const viewName = v => { const [f, c] = splitView(v); return path.basename(f, ".peet") + (c ? ` (${c})` : ""); };
+/** The replies to operations on a part, in a configuration of it where the view names one; nothing saved. */
+function askView(view, ops) {
+  const [file, configuration] = splitView(view);
+  const all = configuration ? [{ op: "configuration", configuration }, ...ops] : ops;
+  const r = spawnSync(peetExe, ["run", "-", "-f", file, "-q", "--no-save"],
+    { input: all.map(o => JSON.stringify(o)).join("\n") + "\n", encoding: "utf8", maxBuffer: 1 << 28 });
+  const replies = (r.stdout || "").split("\n").filter(l => l.startsWith("{")).map(l => JSON.parse(l));
+  return configuration ? replies.slice(1) : replies;
 }
 
 // ---- Mates ----
@@ -173,12 +199,8 @@ const STANDARD_NORMALS = { top: [0, 0, 1], front: [0, -1, 0], right: [1, 0, 0] }
 const geometryCache = new Map();
 function geometryOf(file) {
   if (geometryCache.has(file)) return geometryCache.get(file);
-  const ask = op => {
-    const r = spawnSync(peetExe, ["op", JSON.stringify(op), "-f", file, "-q", "--no-save"], { encoding: "utf8", maxBuffer: 1 << 28 });
-    const line = (r.stdout || "").split("\n").find(l => l.startsWith("{"));
-    return line ? JSON.parse(line) : {};
-  };
-  const g = { faces: ask({ op: "faces" }).faces || [], edges: ask({ op: "edges" }).edges || [] };
+  const [faces, edges] = askView(file, [{ op: "faces" }, { op: "edges" }]);
+  const g = { faces: (faces || {}).faces || [], edges: (edges || {}).edges || [] };
   geometryCache.set(file, g);
   return g;
 }
@@ -308,9 +330,7 @@ const sketchCache = new Map();
 function findSketchEntity(file, e, transform) {
   const key = file + "|" + e.entity.sketch;
   if (!sketchCache.has(key)) {
-    const r = spawnSync(peetExe, ["op", JSON.stringify({ op: "feature", feature: e.entity.sketch }), "-f", file, "-q", "--no-save"], { encoding: "utf8", maxBuffer: 1 << 26 });
-    const line = (r.stdout || "").split("\n").find(l => l.startsWith("{"));
-    sketchCache.set(key, line ? JSON.parse(line) : null);
+    sketchCache.set(key, askView(file, [{ op: "feature", feature: e.entity.sketch }])[0] || null);
   }
   const s = sketchCache.get(key);
   if (!s || !s.plane || !s.entities) return null;
@@ -348,13 +368,9 @@ function findSketchEntity(file, e, transform) {
 const refPlaneCache = new Map();
 function referencePlanes(file) {
   if (refPlaneCache.has(file)) return refPlaneCache.get(file);
-  const ask = op => {
-    const r = spawnSync(peetExe, ["op", JSON.stringify(op), "-f", file, "-q", "--no-save"], { encoding: "utf8", maxBuffer: 1 << 26 });
-    const line = (r.stdout || "").split("\n").find(l => l.startsWith("{"));
-    return line ? JSON.parse(line) : {};
-  };
-  const planes = (ask({ op: "features" }).features || []).filter(f => /plane|coordinate/i.test(f.type))
-    .map(f => ({ name: f.name, plane: ask({ op: "feature", feature: f.id }).plane }))
+  const features = ((askView(file, [{ op: "features" }])[0] || {}).features || []).filter(f => /plane|coordinate/i.test(f.type));
+  const replies = features.length ? askView(file, features.map(f => ({ op: "feature", feature: f.id }))) : [];
+  const planes = features.map((f, i) => ({ name: f.name, plane: (replies[i] || {}).plane }))
     .filter(f => f.plane).map(f => ({ name: f.name, origin: f.plane.origin, normal: f.plane.normal }));
   refPlaneCache.set(file, planes);
   return planes;
@@ -366,9 +382,7 @@ function planeNormal(file, plane) {
   if (STANDARD_NORMALS[plane]) return STANDARD_NORMALS[plane];
   const key = file + "|" + plane;
   if (!planeNormals.has(key)) {
-    const r = spawnSync(peetExe, ["op", JSON.stringify({ op: "feature", feature: plane }), "-f", file, "-q", "--no-save"], { encoding: "utf8" });
-    const line = (r.stdout || "").split("\n").find(l => l.startsWith("{"));
-    const reply = line ? JSON.parse(line) : {};
+    const reply = askView(file, [{ op: "feature", feature: plane }])[0] || {};
     planeNormals.set(key, reply.plane ? reply.plane.normal : null);
   }
   return planeNormals.get(key);
@@ -447,7 +461,7 @@ function endOf(e, byPath, assembly, partFile, others = []) {
     if (!file) return { error: "its part was not imported" };
     if (!e.params) return { error: "a sketch end SolidWorks gives no numbers for" };
     const found = findSketchEntity(file, e, comp.transform);
-    if (!found) return { error: `no ${e.entity.type || "point"} of ${e.entity.sketch} in ${path.basename(file, ".peet")} is where SolidWorks' is`, unmatched: true };
+    if (!found) return { error: `no ${e.entity.type || "point"} of ${e.entity.sketch} in ${viewName(file)} is where SolidWorks' is`, unmatched: true };
     const { dir, element, ...where } = found;
     return { component, ...where, element, sign: signOf(dir) };
   }
@@ -458,7 +472,7 @@ function endOf(e, byPath, assembly, partFile, others = []) {
   let found = null;
   if (!e.entity && e.referenceType === 1 && shape.kind === "axis") found = findIn(file, { kind: "circle", c: shape.o, n: shape.d, r: shape.r });
   found = found || findIn(file, shape);
-  if (!found) return { error: `no ${shape.kind === "plane" ? "flat face" : shape.kind === "axis" ? "round face or edge on that axis" : shape.kind === "straight" ? "straight edge on that line" : shape.kind} of ${path.basename(file, ".peet")} is where SolidWorks' is`, unmatched: true };
+  if (!found) return { error: `no ${shape.kind === "plane" ? "flat face" : shape.kind === "axis" ? "round face or edge on that axis" : shape.kind === "straight" ? "straight edge on that line" : shape.kind} of ${viewName(file)} is where SolidWorks' is`, unmatched: true };
   const { dir, ...where } = found;
   const element = shape.kind === "plane" || shape.kind === "refplane" ? "plane" : shape.kind === "point" ? "point" : "axis";
   return { component, ...where, element, sign: signOf(dir), ...(e.entity ? {} : { guessed: true }) };
@@ -541,7 +555,7 @@ function referenceEnds(cfg, rd, target, byPath, name, partFile) {
  */
 function importEquations(peet, cfg, report, byPath, want, name) {
   report.equations = [];
-  const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partIn(comp.file, comp.configuration).path || null : null;
+  const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partOf(comp).view || null : null;
   const globals = new Map();
   const references = new Set();
   const annotations = ((cfg.features || []).find(f => f.type === "DetailCabinet") || {}).dimensions || [];
@@ -639,18 +653,239 @@ const imported = new Map();   // export file -> { peet, report }
 
 function walkFeatures(list, f) { for (const x of list || []) { f(x); walkFeatures(x.sub, f); } }
 
+/** The mates of a configuration of an assembly's export, by name, in the tree's order. */
+function matesOf(cfg) {
+  const out = new Map();
+  if (cfg) walkFeatures(cfg.features, f => { if (/^Mate/.test(f.type) && f.type !== "MateGroup" && f.mate) out.set(f.name, f); });
+  return out;
+}
+
+/** `place` for a component (a name, or a path into a flexible sub-assembly) at SolidWorks' placement `m`. */
+function placeOp(component, m) {
+  // Not turned is said too: `place` without `rotate` keeps the turn the component has
+  const rot = axisAngle(m) || { axis: [0, 0, 1], angle: 0 };
+  return { op: "place", component, at: m.t.map(v => tidy(v * MM)), rotate: rot };
+}
+
 /**
- * Imports an assembly. `listed` is the components to use when its file has no export: those its parent lists
- * under it, with their transforms in the parent's coordinates, and `frame` the sub-assembly's transform there.
+ * Where SolidWorks has a top-level component, as a placement in the assembly's coordinates. A sub-assembly goes
+ * where the components fixed in it are: SolidWorks' own transform for a sub-assembly it solves as flexible need
+ * not be (the template hinges' are hundreds of millimetres from their fixed leaf). Returns the placement and, if
+ * it is not SolidWorks' transform, why.
+ */
+function placementOf(c, all, placeOf, local) {
+  const anchor = /\.sldasm$/i.test(c.file || "") ? anchorOf(c, all) : null;
+  let m = placeOf(c);
+  let note = null;
+  if (anchor) {
+    const at = local ? then(anchor, local) : anchor;
+    const d = apart(at, m);
+    if (d > 1e-3) { note = `its fixed component ${anchor.by}, ${tidy(d)} mm from SolidWorks' transform for the sub-assembly`; m = at; }
+  }
+  return { m, note };
+}
+
+/** Where SolidWorks has the components inside a flexible sub-assembly component `c`, by path: [path, placement]. */
+function innerPlacements(c, all, placeOf, local) {
+  return all.filter(x => x.path.startsWith(c.path + "/")).map(x => {
+    // A sub-assembly in it, where its own fixed component is, as above
+    const anchorX = /\.sldasm$/i.test(x.file || "") ? anchorOf(x, all) : null;
+    return [x.path, anchorX ? (local ? then(anchorX, local) : anchorX) : placeOf(x)];
+  });
+}
+
+/** Whether a sub-assembly's export has a configuration of that name (true where there is no export to tell). */
+function subHas(file, configuration) {
+  const exp = exportOf(file);
+  if (!exp || !configuration) return true;
+  try { return (JSON.parse(fs.readFileSync(exp)).configurations || []).some(x => x.name === configuration); } catch { return true; }
+}
+
+/**
+ * The `mate` operation for SolidWorks' mate `f`, its ends found in the parts of the components of `byPath` (one
+ * configuration's), or null with `row.result` and `row.why` saying why not.
+ */
+function mateOp(f, byPath, name, want, row) {
+  const kind = MATE_KINDS[f.type];
+  if (!kind) { row.result = "not supported"; row.why = WHY_NOT[f.type] || `PeetCAD has no ${f.type.replace(/^Mate/, "")} mate (parity A4)`; return null; }
+  const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partOf(comp).view || null : null;
+  const named = (f.mate.entities || []).map(e => e.component).filter(c => c && c !== name);
+  const ends = (f.mate.entities || []).map(e => endOf(e, byPath, name, partFile, named));
+  const bad = ends.find(e => e.error);
+  if (bad) { row.result = bad.unmatched ? "failed" : "not supported"; row.why = bad.error; return null; }
+  // An end with no component is on the assembly's own plane or origin
+  const comps = ends.filter(e => e.component);
+  if (comps.some(e => !want.has(e.component[0]))) { row.result = "left out"; row.why = "a component it joins was left out"; return null; }
+  if (ends.some(e => e.guessed)) row.guessed = true;
+  const notes = ends.map(e => e.note).filter(Boolean);
+  if (notes.length) row.ends = notes;
+  const strip = e => { const { guessed, element, sign, note, ...rest } = e; return rest; };
+  // A component SolidWorks has suppressed: its mates wait for it, as SolidWorks' do
+  row.waits = comps.some(e => (byPath.get(e.component[0]) || {}).suppression === 0) ? "a component it joins is suppressed" : undefined;
+  const values = (f.definition && f.definition.values) || {};
+  let op;
+  if (kind === "width") {
+    // SolidWorks lists the width's pair, then the tab: two faces, or one round face or axis. Either pair may
+    // be on two components.
+    if (ends.length !== 4 && ends.length !== 3) { row.result = "not supported"; row.why = `a width mate of ${ends.length} ends`; return null; }
+    const width = ends.slice(0, 2), tab = ends.slice(2);
+    if (tab.length === 1 && tab[0].element !== "axis") { row.result = "not supported"; row.why = "a width mate whose one tab end is not round"; return null; }
+    op = { op: "mate", type: "width", name: f.name, a: width.map(strip), b: tab.length === 1 ? strip(tab[0]) : tab.map(strip) };
+    // swWidthMateConstraintType_e: 0 centred, 1 free, 2 dimension, 3 percent
+    const v = values;
+    if (v.ConstraintType === 1) op.mode = "free";
+    else if (v.ConstraintType === 2) { op.mode = "dimension"; op.distance = tidy(v.DistanceFromEnd * MM); }
+    else if (v.ConstraintType === 3) { op.mode = "percent"; op.percent = tidy(v.PercentDistanceFromEnd * 100); }
+    if (v.FlipDimension && op.mode && op.mode !== "free") op.a.reverse();
+  } else if (kind === "symmetric") {
+    // The two ends, then the plane of symmetry
+    if (ends.length !== 3) { row.result = "not supported"; row.why = `a symmetric mate of ${ends.length} ends`; return null; }
+    op = { op: "mate", type: "symmetric", name: f.name, a: strip(ends[0]), b: strip(ends[1]), plane: strip(ends[2]) };
+  } else {
+    if (ends.length !== 2) { row.result = "not supported"; row.why = `${ends.length} ends`; return null; }
+    const [ea, eb] = ends;
+    op = { op: "mate", type: kind, name: f.name, a: strip(ea), b: strip(eb) };
+    if (f.type === "MateCoordinate") row.note = "SolidWorks' coordinate mate of two origins: the points together (whether it also lines up their axes is not exported)";
+    const same = ea.element === eb.element && (ea.element === "plane" || ea.element === "axis");
+    const known = ea.sign && eb.sign;
+    if (kind === "slot") {
+      // No constraint type is exported for any of the library's slot mates: SolidWorks' default, free
+      // (swSlotMateConstraintType_e: 0 free, 1 centre, 2 distance along, 3 percent along)
+      if (values.ConstraintType === 1) op.mode = "centered";
+      else if (values.ConstraintType === 2) { op.mode = "dimension"; op.distance = tidy(values.DistanceFromEnd * MM); }
+      else if (values.ConstraintType === 3) { op.mode = "percent"; op.percent = tidy(values.PercentDistanceFromEnd * 100); }
+      if (values.FlipDimension && op.mode) op.flip_dimension = true;
+    } else if (kind === "limit_angle" || kind === "limit_distance") {
+      const angle = kind === "limit_angle";
+      const [lo, hi] = angle ? [values.MinimumAngle, values.MaximumAngle] : [values.MinimumDistance, values.MaximumDistance];
+      if (typeof lo !== "number" || typeof hi !== "number") { row.result = "failed"; row.why = "its limits were not exported"; return null; }
+      const scale = angle ? 180 / Math.PI : MM;
+      op.min = tidy(lo * scale);
+      op.max = tidy(hi * scale);
+      // Measured between the ends' directions as SolidWorks has them, or with the second turned round when it
+      // flips the dimension; PeetCAD's directions may point the other way (`sign`)
+      let flip = !!values.FlipDimension;
+      if (angle && known && ea.sign * eb.sign < 0) flip = !flip;
+      if (angle && !known) row.note = "the side the angle is measured on is SolidWorks', not checked against PeetCAD's directions";
+      if (flip) op.flip_dimension = true;
+    } else if (same && f.mate.alignment === 2) {
+      // swMateAlign_e: 0 aligned, 1 anti-aligned, 2 closest, of the ends' directions as SolidWorks has them;
+      // PeetCAD's may point the other way (a reference plane's, an axis's), which `sign` says.
+      if (ea.element === "plane") op.align = "closest";
+    } else if (same && known && (f.mate.alignment === 0 || f.mate.alignment === 1)) {
+      const aligned = (f.mate.alignment === 0 ? 1 : -1) * ea.sign * eb.sign > 0;
+      if (aligned) op.flip = true;
+      else if (ea.element === "axis") op.align = "anti_aligned";
+    } else if (same && ea.element === "plane" && f.mate.alignment === 0) {
+      op.flip = true;
+      row.note = "the alignment is SolidWorks', not checked against PeetCAD's directions";
+    }
+    if (kind === "distance") {
+      const d = (f.dimensions || [])[0];
+      if (!d) { row.result = "failed"; row.why = "its distance was not exported"; return null; }
+      op.distance = tidy(d.value * MM);
+      // SolidWorks' distance from a plane is along its outward normal unless the dimension is flipped;
+      // PeetCAD measures from the first end if it is a plane, else from the second
+      const from = ea.element === "plane" ? ea : eb.element === "plane" ? eb : null;
+      if (from && (f.mate.flipped ? 1 : -1) * (from.sign || 1) > 0) op.flip_dimension = true;
+      if (from && !from.sign) row.note = "which side the distance is on is SolidWorks', not checked against PeetCAD's directions";
+    }
+  }
+  if (f.suppressed) op.suppressed = true;
+  return op;
+}
+
+/** How far from SolidWorks' placements (`want`) the components a `components` reply lists are: the worst. */
+function offFrom(want, components) {
+  let worst = 0;
+  for (const c of withMoving(components)) { const m = want.get(c.name); if (m) worst = Math.max(worst, apart(matrixFromPeet(c), m)); }
+  return worst;
+}
+
+/**
+ * Adds SolidWorks' mate `f` with `op`; records in `row` whether it was, and how far it left the components from
+ * SolidWorks' placements. Returns whether it was added.
+ */
+function addMate(peet, f, op, row, want) {
+  const waits = !!row.waits;
+  const mark = peet.backup();
+  const reply = peet.apply(op);
+  const status = reply.mate && reply.mate.status;
+  const fine = status === "ok" || (status === "suppressed" && (f.suppressed || waits));
+  if (!reply.ok || (status && !fine)) {
+    peet.restore(mark);
+    row.result = "failed";
+    row.why = reply.error || (reply.mate && (reply.mate.message || reply.mate.status));
+    return false;
+  }
+  const now = peet.ask({ op: "components" });
+  const moved = tidy(offFrom(want, now.components));
+  row.result = "imported";
+  delete row.why;
+  if (moved) row.moved = moved;
+  if (f.suppressed && !waits) {
+    // What it would do if FabSys unsuppressed it: solved then, as SolidWorks does
+    const [un, placed] = peet.askAll([{ op: "suppress", mate: f.name, on: false }, { op: "components" }]);
+    const s = un && un.mate ? un.mate.status : (un && un.error) || "no reply";
+    row.unsuppressed = { status: s, ...(un && un.mate && un.mate.message ? { message: un.mate.message } : {}), off_mm: placed ? tidy(offFrom(want, placed.components)) : null };
+  }
+  return true;
+}
+
+/**
+ * Where the mates left each component, against SolidWorks' placements (`want`): fills each component's row
+ * (`rows`, by name) with how far off it is, and returns the worst and the assembly's freedom.
+ */
+function checkPlacements(peet, want, rows) {
+  const placed = peet.ask({ op: "components" });
+  let worst = 0;
+  for (const c of withMoving(placed.components)) {
+    const m = want.get(c.name);
+    if (!m) continue;
+    const d = apart(matrixFromPeet(c), m);
+    worst = Math.max(worst, d);
+    const row = rows.find(r => r.component === c.name);
+    if (row) { row.off_mm = tidy(d); row.status = c.status; row.freedom = c.freedom; }
+    else if (c.inside) {
+      // A component that moves in a flexible sub-assembly
+      const sub = rows.find(r => r.component === c.inside);
+      if (sub) (sub.moving = sub.moving || []).push({ component: c.name, off_mm: tidy(d), freedom: c.freedom });
+    }
+  }
+  return { worst, freedom: placed.freedom };
+}
+
+const verdictOf = (worst, missing, partsOff) => worst > 1e-3 ? "components placed differently"
+  : missing ? "placed as SolidWorks has them, with components or mates left out"
+  : partsOff ? "placed as SolidWorks has them; a part differs"
+  : "matches";
+
+/**
+ * Imports an assembly, every configuration of it. `listed` is the components to use when its file has no export:
+ * those its parent lists under it, with their transforms in the parent's coordinates, and `frame` the
+ * sub-assembly's transform there.
+ *
+ * The active configuration is imported first: its components (each in the configuration of its part SolidWorks
+ * has it reference), its equations and its mates. A mate SolidWorks has suppressed there but live in another
+ * configuration is left for that one, where the export describes its ends. Then each other configuration is added
+ * as a copy of it, and made what SolidWorks has: each component's suppression, referenced configuration, whether it
+ * is fixed, and where it is; every mate let go, then those live there put back one at a time (each moving nothing
+ * if it agrees with SolidWorks), with their values there; and the mates left for it added. Each configuration's
+ * placements are checked against SolidWorks' for it.
  */
 function importAssembly(name, exp, outFile, listed = null, frame = null) {
-  const report = { name, configuration: null, components: [], mates: [], left: [], standIns: [], notes: [] };
+  const report = { name, configuration: null, components: [], mates: [], left: [], standIns: [], notes: [], configurations: [] };
   const peet = new Peet(outFile);
   let cfg = null;
+  let others = [];
   if (exp) {
     cfg = exp.configurations.find(c => c.name === exp.activeConfiguration) || exp.configurations[0];
     report.configuration = cfg.name;
-    if (exp.configurations.length > 1) report.notes.push(`${exp.configurations.length} configurations: only "${cfg.name}" is imported (PeetCAD's assemblies have none, parity A5)`);
+    others = exp.configurations.filter(c => c !== cfg);
+    // A new assembly's one configuration is "Default": it is SolidWorks' active one
+    const comment = cfg.description && cfg.description !== cfg.name ? { comment: cfg.description } : {};
+    if (cfg.name !== "Default" || comment.comment) peet.apply({ op: "edit_configuration", configuration: "Default", ...(cfg.name !== "Default" ? { name: cfg.name } : {}), ...comment });
+    if (exp.configurations.some(c => c.derived)) report.notes.push("a derived configuration: imported as one of its own (PeetCAD's configurations are not derived from others)");
   }
   const all = listed || cfg.components || [];
   // In the sub-assembly's own coordinates
@@ -664,48 +899,45 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
     const row = { component: c.path, file: path.basename(c.file || ""), configuration: c.configuration, suppressed: c.suppression === 0, fixed: !!c.fixed };
     report.components.push(row);
     let source;
+    let configuration = null;
     if (/\.sldasm$/i.test(c.file || "")) {
       const sub = importSub(c, all);
       if (sub.error) { row.result = "left out"; row.why = sub.error; report.left.push(`${c.path}: ${sub.error}`); continue; }
       source = sub.path;
       if (sub.standIn) report.standIns.push(`${c.path}: ${sub.standIn}`);
+      // The sub-assembly's configuration it shows, as SolidWorks has it
+      if (c.configuration && sub.configurations && sub.configurations.includes(c.configuration)) configuration = c.configuration;
     } else {
-      const part = partIn(c.file, c.configuration, report);
+      const part = partOf(c);
       if (part.error) { row.result = "left out"; row.why = part.error; report.left.push(`${c.path}: ${part.error}`); continue; }
       source = part.path;
-      if (part.standIn) report.standIns.push(`${c.path}: ${part.standIn}`);
+      configuration = part.configuration;
       const pr = partReport(c.file);
       if (pr && pr.verdict !== "matches") row.partVerdict = pr.verdict;
     }
-    // A sub-assembly goes where the components fixed in it are: SolidWorks' own transform for a sub-assembly it
-    // solves as flexible need not be (the template hinges' are hundreds of millimetres from their fixed leaf)
-    const anchor = /\.sldasm$/i.test(c.file || "") ? anchorOf(c, all) : null;
-    let m = placeOf(c);
-    if (anchor) {
-      const at = local ? then(anchor, local) : anchor;
-      const d = apart(at, m);
-      if (d > 1e-3) { row.placedBy = `its fixed component ${anchor.by}, ${tidy(d)} mm from SolidWorks' transform for the sub-assembly`; m = at; }
-    }
+    const { m, note } = placementOf(c, all, placeOf, local);
+    if (note) row.placedBy = note;
     const rot = axisAngle(m);
-    const op = { op: "insert", path: source, name: c.path, at: m.t.map(v => tidy(v * MM)), ...(rot ? { rotate: rot } : {}), fixed: !!c.fixed };
+    const op = { op: "insert", path: source, name: c.path, at: m.t.map(v => tidy(v * MM)), ...(rot ? { rotate: rot } : {}), fixed: !!c.fixed, ...(configuration ? { configuration } : {}) };
     const reply = peet.apply(op);
     if (!reply.ok) { row.result = "failed"; row.why = reply.error; report.left.push(`${c.path}: ${reply.error}`); continue; }
     row.result = "inserted";
     want.set(c.path, m);
     // A sub-assembly SolidWorks solves as flexible: its own mates are solved here, and what moves in it starts
     // where SolidWorks has it
-    const flexible = /\.sldasm$/i.test(c.file || "") && flexibleOf(c, all);
+    // (Whether a sub-assembly is flexible is the same in every configuration: one opened otherwise than its file
+    // in any of them is)
+    const flexible = /\.sldasm$/i.test(c.file || "") && (flexibleOf(c, all) || others.map(o => {
+      const oc = (o.components || []).find(x => x.path === c.path);
+      return oc && flexibleOf(oc, o.components || []);
+    }).find(Boolean));
     if (flexible) {
       const made = peet.apply({ op: "flexible", component: c.path });
       if (made.ok) {
         row.flexible = flexible;
-        for (const x of all.filter(x => x.path.startsWith(c.path + "/"))) {
-          // A sub-assembly in it, where its own fixed component is, as above
-          const anchorX = /\.sldasm$/i.test(x.file || "") ? anchorOf(x, all) : null;
-          const p = anchorX ? (local ? then(anchorX, local) : anchorX) : placeOf(x), r = axisAngle(p);
-          const placed = peet.apply({ op: "place", component: x.path.split("/"), at: p.t.map(v => tidy(v * MM)), ...(r ? { rotate: r } : {}) });
+        for (const [inner, p] of innerPlacements(c, all, placeOf, local)) {
           // (Those fixed in their sub-assembly are refused: they move with it)
-          if (placed.ok) want.set(x.path, p);
+          if (peet.apply(placeOp(inner.split("/"), p)).ok) want.set(inner, p);
         }
       } else report.notes.push(`${c.path}: could not be made flexible: ${made.error}`);
     }
@@ -714,156 +946,181 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
 
   // Equations, before the mates: a part an equation sizes (Plinth Folded's pipes) is mated at its size
   if (cfg && (cfg.equations || []).length) importEquations(peet, cfg, report, byPath, want, name);
+  if (cfg && others.some(o => JSON.stringify((o.equations || []).filter(e => !e.disabled).map(e => e.expression)) !== JSON.stringify((cfg.equations || []).filter(e => !e.disabled).map(e => e.expression))))
+    report.notes.push("the live equations differ between configurations: those of the active one are imported, for every configuration");
 
-  // Mates
-  if (cfg) walkFeatures(cfg.features, f => {
-    if (!/^Mate/.test(f.type) || f.type === "MateGroup" || !f.mate) return;
+  // Mates. One SolidWorks has suppressed here and live in another configuration is added in that one, where the
+  // export describes its ends (in this one it gives only numbers, or nothing).
+  const liveIn = new Map();   // mate -> the first other configuration it is live in
+  for (const o of others) for (const [n, f] of matesOf(o)) if (!f.suppressed && !liveIn.has(n)) liveIn.set(n, o.name);
+  for (const [, f] of matesOf(cfg)) {
     const row = { mate: f.name, type: f.type, suppressed: !!f.suppressed };
     report.mates.push(row);
-    const kind = MATE_KINDS[f.type];
-    if (!kind) { row.result = "not supported"; row.why = WHY_NOT[f.type] || `PeetCAD has no ${f.type.replace(/^Mate/, "")} mate (parity A4)`; return; }
-    const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partIn(comp.file, comp.configuration).path || null : null;
-    const named = (f.mate.entities || []).map(e => e.component).filter(c => c && c !== name);
-    const ends = (f.mate.entities || []).map(e => endOf(e, byPath, name, partFile, named));
-    const bad = ends.find(e => e.error);
-    if (bad) { row.result = bad.unmatched ? "failed" : "not supported"; row.why = bad.error; return; }
-    // An end with no component is on the assembly's own plane or origin
-    const comps = ends.filter(e => e.component);
-    if (comps.some(e => !want.has(e.component[0]))) { row.result = "left out"; row.why = "a component it joins was left out"; return; }
-    if (ends.some(e => e.guessed)) row.guessed = true;
-    const notes = ends.map(e => e.note).filter(Boolean);
-    if (notes.length) row.ends = notes;
-    const strip = e => { const { guessed, element, sign, note, ...rest } = e; return rest; };
-    // A component SolidWorks has suppressed: its mates wait for it, as SolidWorks' do
-    const waits = comps.some(e => (byPath.get(e.component[0]) || {}).suppression === 0);
-    if (waits) row.waits = "a component it joins is suppressed";
-    const values = (f.definition && f.definition.values) || {};
-    let op;
-    if (kind === "width") {
-      // SolidWorks lists the width's pair, then the tab: two faces, or one round face or axis. Either pair may
-      // be on two components.
-      if (ends.length !== 4 && ends.length !== 3) { row.result = "not supported"; row.why = `a width mate of ${ends.length} ends`; return; }
-      const width = ends.slice(0, 2), tab = ends.slice(2);
-      if (tab.length === 1 && tab[0].element !== "axis") { row.result = "not supported"; row.why = "a width mate whose one tab end is not round"; return; }
-      op = { op: "mate", type: "width", name: f.name, a: width.map(strip), b: tab.length === 1 ? strip(tab[0]) : tab.map(strip) };
-      // swWidthMateConstraintType_e: 0 centred, 1 free, 2 dimension, 3 percent
-      const v = values;
-      if (v.ConstraintType === 1) op.mode = "free";
-      else if (v.ConstraintType === 2) { op.mode = "dimension"; op.distance = tidy(v.DistanceFromEnd * MM); }
-      else if (v.ConstraintType === 3) { op.mode = "percent"; op.percent = tidy(v.PercentDistanceFromEnd * 100); }
-      if (v.FlipDimension && op.mode && op.mode !== "free") op.a.reverse();
-    } else if (kind === "symmetric") {
-      // The two ends, then the plane of symmetry
-      if (ends.length !== 3) { row.result = "not supported"; row.why = `a symmetric mate of ${ends.length} ends`; return; }
-      op = { op: "mate", type: "symmetric", name: f.name, a: strip(ends[0]), b: strip(ends[1]), plane: strip(ends[2]) };
-    } else {
-      if (ends.length !== 2) { row.result = "not supported"; row.why = `${ends.length} ends`; return; }
-      const [ea, eb] = ends;
-      op = { op: "mate", type: kind, name: f.name, a: strip(ea), b: strip(eb) };
-      if (f.type === "MateCoordinate") row.note = "SolidWorks' coordinate mate of two origins: the points together (whether it also lines up their axes is not exported)";
-      const same = ea.element === eb.element && (ea.element === "plane" || ea.element === "axis");
-      const known = ea.sign && eb.sign;
-      if (kind === "slot") {
-        // No constraint type is exported for any of the library's slot mates: SolidWorks' default, free
-        // (swSlotMateConstraintType_e: 0 free, 1 centre, 2 distance along, 3 percent along)
-        if (values.ConstraintType === 1) op.mode = "centered";
-        else if (values.ConstraintType === 2) { op.mode = "dimension"; op.distance = tidy(values.DistanceFromEnd * MM); }
-        else if (values.ConstraintType === 3) { op.mode = "percent"; op.percent = tidy(values.PercentDistanceFromEnd * 100); }
-        if (values.FlipDimension && op.mode) op.flip_dimension = true;
-      } else if (kind === "limit_angle" || kind === "limit_distance") {
-        const angle = kind === "limit_angle";
-        const [lo, hi] = angle ? [values.MinimumAngle, values.MaximumAngle] : [values.MinimumDistance, values.MaximumDistance];
-        if (typeof lo !== "number" || typeof hi !== "number") { row.result = "failed"; row.why = "its limits were not exported"; return; }
-        const scale = angle ? 180 / Math.PI : MM;
-        op.min = tidy(lo * scale);
-        op.max = tidy(hi * scale);
-        // Measured between the ends' directions as SolidWorks has them, or with the second turned round when it
-        // flips the dimension; PeetCAD's directions may point the other way (`sign`)
-        let flip = !!values.FlipDimension;
-        if (angle && known && ea.sign * eb.sign < 0) flip = !flip;
-        if (angle && !known) row.note = "the side the angle is measured on is SolidWorks', not checked against PeetCAD's directions";
-        if (flip) op.flip_dimension = true;
-      } else if (same && f.mate.alignment === 2) {
-        // swMateAlign_e: 0 aligned, 1 anti-aligned, 2 closest, of the ends' directions as SolidWorks has them;
-        // PeetCAD's may point the other way (a reference plane's, an axis's), which `sign` says.
-        if (ea.element === "plane") op.align = "closest";
-      } else if (same && known && (f.mate.alignment === 0 || f.mate.alignment === 1)) {
-        const aligned = (f.mate.alignment === 0 ? 1 : -1) * ea.sign * eb.sign > 0;
-        if (aligned) op.flip = true;
-        else if (ea.element === "axis") op.align = "anti_aligned";
-      } else if (same && ea.element === "plane" && f.mate.alignment === 0) {
-        op.flip = true;
-        row.note = "the alignment is SolidWorks', not checked against PeetCAD's directions";
-      }
-      if (kind === "distance") {
-        const d = (f.dimensions || [])[0];
-        if (!d) { row.result = "failed"; row.why = "its distance was not exported"; return; }
-        op.distance = tidy(d.value * MM);
-        // SolidWorks' distance from a plane is along its outward normal unless the dimension is flipped;
-        // PeetCAD measures from the first end if it is a plane, else from the second
-        const from = ea.element === "plane" ? ea : eb.element === "plane" ? eb : null;
-        if (from && (f.mate.flipped ? 1 : -1) * (from.sign || 1) > 0) op.flip_dimension = true;
-        if (from && !from.sign) row.note = "which side the distance is on is SolidWorks', not checked against PeetCAD's directions";
-      }
-    }
-    if (f.suppressed) op.suppressed = true;
-    const mark = peet.backup();
-    const reply = peet.apply(op);
-    const status = reply.mate && reply.mate.status;
-    const fine = status === "ok" || (status === "suppressed" && (f.suppressed || waits));
-    if (!reply.ok || (status && !fine)) {
-      peet.restore(mark);
-      row.result = "failed";
-      row.why = reply.error || (reply.mate && (reply.mate.message || reply.mate.status));
-      return;
-    }
-    // How far from SolidWorks' placement the components are with this mate
-    const off = components => {
-      let worst = 0;
-      for (const c of withMoving(components)) { const m = want.get(c.name); if (m) worst = Math.max(worst, apart(matrixFromPeet(c), m)); }
-      return worst;
-    };
-    const now = peet.ask({ op: "components" });
-    const moved = tidy(off(now.components));
-    row.result = "imported";
-    if (moved) row.moved = moved;
-    if (f.suppressed && !waits) {
-      // What it would do if FabSys unsuppressed it: solved then, as SolidWorks does
-      const [un, placed] = peet.askAll([{ op: "suppress", mate: f.name, on: false }, { op: "components" }]);
-      const s = un && un.mate ? un.mate.status : (un && un.error) || "no reply";
-      row.unsuppressed = { status: s, ...(un && un.mate && un.mate.message ? { message: un.mate.message } : {}), off_mm: placed ? tidy(off(placed.components)) : null };
-    }
-  });
+    if (f.suppressed && liveIn.has(f.name)) { row.result = "left for another configuration"; row.deferredTo = liveIn.get(f.name); continue; }
+    const op = mateOp(f, byPath, name, want, row);
+    if (op) addMate(peet, f, op, row, want);
+  }
+  if (others.length) {
+    // The active configuration as imported, before the others are
+    const { worst } = checkPlacements(peet, want, report.components);
+    report.offBeforeOthers = tidy(worst);
+  }
+
+  // ---- The other configurations ----
+  for (const o of others) importConfiguration(peet, report, { name, cfg, o, all: exp.configurations, top, placeOf, local });
+  if (others.length) {
+    const back = peet.apply({ op: "configuration", configuration: cfg.name });
+    if (!back.ok) report.notes.push(`could not make ${cfg.name} active again: ${back.error}`);
+  }
 
   // Where the mates left each component, against SolidWorks
-  const placed = peet.ask({ op: "components" });
-  let worst = 0;
-  for (const c of withMoving(placed.components)) {
-    const m = want.get(c.name);
-    if (!m) continue;
-    const d = apart(matrixFromPeet(c), m);
-    worst = Math.max(worst, d);
-    const row = report.components.find(r => r.component === c.name);
-    if (row) { row.off_mm = tidy(d); row.status = c.status; row.freedom = c.freedom; }
-    else if (c.inside) {
-      // A component that moves in a flexible sub-assembly
-      const sub = report.components.find(r => r.component === c.inside);
-      if (sub) (sub.moving = sub.moving || []).push({ component: c.name, off_mm: tidy(d), freedom: c.freedom });
-    }
-  }
-  report.freedom = placed.freedom;
+  const { worst, freedom } = checkPlacements(peet, want, report.components);
+  report.freedom = freedom;
   report.off_mm = tidy(worst);
   const live = report.mates.filter(m => !m.suppressed);
   const missing = report.components.filter(c => c.result !== "inserted").length + live.filter(m => m.result !== "imported").length;
   const partsOff = report.components.some(c => c.partVerdict);
-  report.verdict = worst > 1e-3 ? "components placed differently"
-    : missing ? "placed as SolidWorks has them, with components or mates left out"
-    : partsOff ? "placed as SolidWorks has them; a part differs"
-    : "matches";
+  report.verdict = verdictOf(worst, missing, partsOff);
+  if (cfg) report.configurations.unshift({
+    name: cfg.name, active: true, verdict: report.verdict, off_mm: report.off_mm, freedom,
+    components: report.components.filter(c => c.result === "inserted" && !c.suppressed).length,
+    matesLive: live.length, matesImported: live.filter(m => m.result === "imported").length,
+  });
   fs.writeFileSync(outFile.replace(/\.peet$/, ".jsonl"), peet.script.map(o => typeof o === "string" ? o : JSON.stringify(o)).join("\n") + "\n");
   fs.writeFileSync(outFile.replace(/\.peet$/, ".report.json"), JSON.stringify(report, null, 1));
   try { fs.unlinkSync(outFile + ".before"); } catch {}
   return report;
+}
+
+/**
+ * Adds configuration `o` of an assembly whose active configuration `cfg` was imported, and makes it what SolidWorks
+ * has (see importAssembly). Adds a row to `report.configurations` with its verdict.
+ */
+function importConfiguration(peet, report, { name, cfg, o, all, top, placeOf, local }) {
+  const row = { name: o.name, changed: [], mates: [], notes: [] };
+  report.configurations.push(row);
+  const comment = o.description && o.description !== o.name ? { comment: o.description } : {};
+  const made = peet.apply({ op: "add_configuration", name: o.name, copy: cfg.name, ...comment });
+  if (!made.ok) { row.verdict = "not imported"; row.why = made.error; return; }
+  peet.note(`Configuration ${o.name}`);
+  const oall = o.components || [];
+  const obyPath = new Map(oall.map(c => [c.path, c]));
+  const owant = new Map();
+  const omates = matesOf(o);
+  const activeMates = matesOf(cfg);
+
+  // Every mate let go here, so the components can be put where SolidWorks has them in this configuration
+  const imported = report.mates.filter(r => r.result === "imported");
+  peet.applyAll(imported.map(r => ({ op: "suppress", mate: r.mate })));
+
+  // The components: suppressed or not, the configuration of their part they show, fixed or not, and where
+  for (const c of top) {
+    const crow = report.components.find(r => r.component === c.path);
+    const oc = obyPath.get(c.path);
+    if (!crow || crow.result !== "inserted") continue;
+    if (!oc) { row.notes.push(`${c.path} is not in this configuration's export`); continue; }
+    const ops = [];
+    const differs = [];
+    if ((oc.suppression === 0) !== (c.suppression === 0)) { ops.push({ op: "suppress", component: c.path, on: oc.suppression === 0 }); differs.push(oc.suppression === 0 ? "suppressed" : "unsuppressed"); }
+    if (oc.configuration !== c.configuration) {
+      const sub = /\.sldasm$/i.test(oc.file || "");
+      const ok = sub ? subHas(oc.file, oc.configuration) : !partOf(oc).error;
+      if (ok && oc.configuration) { ops.push({ op: "component_configuration", component: c.path, configuration: oc.configuration }); differs.push(`in ${oc.configuration}`); }
+      else row.notes.push(`${c.path}: its ${sub ? "sub-assembly" : "part"} has no configuration "${oc.configuration}" in PeetCAD`);
+    }
+    if (!!oc.fixed !== !!c.fixed) { ops.push({ op: "fix", component: c.path, on: !!oc.fixed }); differs.push(oc.fixed ? "fixed" : "floating"); }
+    const { m } = placementOf(oc, oall, placeOf, local);
+    ops.push(placeOp(c.path, m));
+    owant.set(c.path, m);
+    if (crow.flexible) for (const [inner, p] of innerPlacements(oc, oall, placeOf, local)) ops.push({ ...placeOp(inner.split("/"), p), inner, p });
+    const replies = peet.applyAll(ops.map(({ inner, p, ...op }) => op));
+    if (process.env.DEBUG_ASM) { const h = (peet.ask({ op: "components" }).components || []).find(x => x.name === process.env.DEBUG_ASM); console.error(c.path, JSON.stringify(replies.map(r => r.ok)), h && JSON.stringify([h.at, h.rotate])); }
+    ops.forEach((op, i) => {
+      const r = replies[i] || {};
+      // (Those fixed in their sub-assembly are refused: they move with it)
+      if (op.inner) { if (r.ok) owant.set(op.inner, op.p); return; }
+      if (!r.ok) row.notes.push(`${c.path}: ${op.op} failed: ${r.error || "no reply"}`);
+    });
+    if (differs.length) row.changed.push({ component: c.path, differs });
+  }
+
+  // Where the components are before any mate is put back: SolidWorks' placements, if the places took
+  {
+    const placed = peet.ask({ op: "components" });
+    row.offPlaced = [];
+    for (const c of withMoving(placed.components)) {
+      const m = owant.get(c.name);
+      const d = m ? apart(matrixFromPeet(c), m) : 0;
+      if (d > 1e-3) row.offPlaced.push({ component: c.name, off_mm: tidy(d) });
+    }
+  }
+
+  // The mates, in the tree's order: those live here put back one at a time, with their values here; those left
+  // for this configuration added
+  for (const [mname, f] of omates) {
+    const mrow = { mate: mname, type: f.type, suppressed: !!f.suppressed };
+    row.mates.push(mrow);
+    const first = report.mates.find(r => r.mate === mname);
+    if (!first) { mrow.result = "not in the active configuration"; continue; }
+    if (first.result === "left for another configuration" && first.deferredTo === o.name) {
+      // Added here, where SolidWorks describes its ends; suppressed where SolidWorks has it suppressed
+      const op = mateOp(f, obyPath, name, owant, mrow);
+      if (op && addMate(peet, f, op, mrow, owant)) {
+        const suppressedIn = all.filter(x => x !== o && (matesOf(x).get(mname) || {}).suppressed).map(x => x.name);
+        if (suppressedIn.length) peet.apply({ op: "suppress", mate: mname, configurations: suppressedIn });
+        Object.assign(first, { result: "imported", configuration: o.name, ...(mrow.guessed ? { guessed: true } : {}) });
+        delete first.why;
+      } else {
+        first.result = mrow.result;
+        first.why = `in ${o.name}: ${mrow.why}`;
+      }
+      continue;
+    }
+    if (first.result !== "imported") { mrow.result = first.result; mrow.why = first.why; continue; }
+    // A distance that differs here
+    const active = activeMates.get(mname);
+    const value = f.type === "MateDistanceDim" && (f.dimensions || [])[0] ? f.dimensions[0].value : null;
+    const was = active && (active.dimensions || [])[0] ? active.dimensions[0].value : null;
+    if (value !== null && was !== null && Math.abs(value - was) > 1e-9) {
+      const set = peet.apply({ op: "set", name: `D1@${mname}`, value: tidy(value * MM), configurations: "this" });
+      if (!set.ok) row.notes.push(`${mname}: its distance here could not be set: ${set.error}`);
+    }
+    if (f.suppressed) { mrow.result = "imported"; continue; }
+    const mark = peet.backup();
+    const reply = peet.apply({ op: "suppress", mate: mname, on: false });
+    const status = reply.mate && reply.mate.status;
+    const waits = (f.mate.entities || []).some(e => e.component && (obyPath.get(e.component.split("/")[0]) || {}).suppression === 0);
+    if (!reply.ok || (status !== "ok" && !(status === "suppressed" && waits))) {
+      peet.restore(mark);
+      mrow.result = "failed";
+      mrow.why = reply.error || (reply.mate && (reply.mate.message || reply.mate.status));
+      continue;
+    }
+    mrow.result = "imported";
+    const moved = tidy(offFrom(owant, peet.ask({ op: "components" }).components));
+    if (moved) mrow.moved = moved;
+  }
+
+  // Where the mates left each component, against SolidWorks' placements in this configuration
+  const placed = peet.ask({ op: "components" });
+  let worst = 0;
+  row.off = [];
+  for (const c of withMoving(placed.components)) {
+    const m = owant.get(c.name);
+    if (!m) continue;
+    const d = apart(matrixFromPeet(c), m);
+    worst = Math.max(worst, d);
+    if (d > 1e-3) row.off.push({ component: c.name, off_mm: tidy(d), freedom: c.freedom });
+  }
+  const freedom = placed.freedom;
+  row.off_mm = tidy(worst);
+  row.freedom = freedom;
+  const live = row.mates.filter(m => !m.suppressed);
+  const missing = report.components.filter(c => c.result !== "inserted").length + live.filter(m => m.result !== "imported").length;
+  row.verdict = verdictOf(worst, missing, report.components.some(c => c.partVerdict));
+  row.componentsLive = top.filter(c => (obyPath.get(c.path) || {}).suppression !== 0 && (report.components.find(r => r.component === c.path) || {}).result === "inserted").length;
+  row.matesLive = live.length;
+  row.matesImported = live.filter(m => m.result === "imported").length;
 }
 
 /** The components a `components` reply lists, and those that move in its flexible sub-assemblies, by path. */
@@ -884,12 +1141,7 @@ function withMoving(components) {
 function flexibleOf(c, all) {
   if (c.solving === "flexible") return "solving";
   if (c.solving === "rigid") return null;
-  // A sub-assembly used in another configuration than the one it is imported in (a stand-in, above) is placed
-  // otherwise for that reason, and has that configuration's mates: not taken for flexible
-  const exp = exportOf(c.file);
-  let active = null;
-  try { active = exp && JSON.parse(fs.readFileSync(exp)).activeConfiguration; } catch {}
-  if (c.configuration && active && c.configuration !== active) return null;
+  // (Set against the sub-assembly's own export in the configuration the component shows)
   const own = ownComponents(c);
   if (!own) return null;
   // Placed relative to the component fixed in it, as the parent lists them
@@ -916,27 +1168,38 @@ function ownComponents(c) {
 
 /**
  * Where a sub-assembly is, from the first component fixed in it: where its parent lists that component, less where
- * the sub-assembly's own file has it. Null if it has none (or no export to tell).
+ * the sub-assembly's own file has it. A sub-assembly with nothing fixed in it (in the configuration shown) is placed
+ * by its components where they all agree on one place for it (they are where its file has them, relative to each
+ * other). Null if neither (or there is no export to tell).
  */
 function anchorOf(c, all) {
   const own = ownComponents(c);
   if (!own) return null;
+  const places = [];
   for (const x of all.filter(x => x.path.startsWith(c.path + "/") && !x.path.slice(c.path.length + 1).includes("/"))) {
     const mine = own.get(x.path.slice(c.path.length + 1));
-    if (!mine || !mine.fixed || !mine.transform || !x.transform) continue;
-    return { ...then(inverse(matrixOf(mine.transform)), matrixOf(x.transform)), by: mine.path };
+    if (!mine || !mine.transform || !x.transform || mine.suppression === 0) continue;
+    const at = { ...then(inverse(matrixOf(mine.transform)), matrixOf(x.transform)), by: mine.path };
+    if (mine.fixed) return at;
+    // (SolidWorks' transform for a sub-assembly in it need not be where its parts are: its parts only)
+    if (!/\.sldasm$/i.test(x.file || "")) places.push(at);
   }
+  if (places.length && places.every(p => apart(p, places[0]) < 1e-3)) return { ...places[0], by: `${places[0].by} (nothing is fixed in it, and its components agree)` };
   return null;
 }
 
-/** A sub-assembly, imported once per file (and per configuration), as an assembly of its own. */
+/**
+ * A sub-assembly, imported once per file as an assembly of its own, with every configuration it has: a component
+ * of it shows the one SolidWorks has it reference. A sub-assembly that was not exported is built from what its
+ * parent lists under it.
+ */
 const subs = new Map();
 function importSub(c, all) {
-  const key = (c.file + "|" + (c.configuration || "")).toLowerCase();
-  if (subs.has(key)) return subs.get(key);
   const exp = exportOf(c.file);
+  const key = c.file.toLowerCase();
+  if (subs.has(key)) return subs.get(key);
   const name = path.basename(c.file).replace(/\.sldasm$/i, "");
-  const file = path.join(outDir, "sub-assemblies", `${name}${c.configuration && c.configuration !== "Default" ? " @ " + c.configuration : ""}.peet`);
+  const file = path.join(outDir, "sub-assemblies", `${name}.peet`);
   fs.mkdirSync(path.dirname(file), { recursive: true });
   let made;
   try {
@@ -944,8 +1207,7 @@ function importSub(c, all) {
       const j = JSON.parse(fs.readFileSync(exp));
       if (!j.configurations || !j.configurations.length) throw new Error("its export is empty: " + (j.error || ""));
       const r = importAssembly(name, j, file);
-      made = { path: file, report: r };
-      if (c.configuration && c.configuration !== j.activeConfiguration) made.standIn = `it is used in its configuration "${c.configuration}" and imported in "${j.activeConfiguration}"`;
+      made = { path: file, report: r, configurations: j.configurations.map(x => x.name) };
     } else {
       // Not exported (outside Templates): what its parent lists under it, placed relative to it
       const prefix = c.path + "/";
@@ -978,9 +1240,11 @@ for (const file of inputs.filter(f => !only || path.basename(f).toLowerCase().in
     components: (r.components || []).length, componentsLeft: (r.components || []).filter(c => c.result !== "inserted").length,
     mates: mates.length, matesImported: mates.filter(m => m.result === "imported").length,
     matesNotSupported: mates.filter(m => m.result === "not supported").length, standIns: (r.standIns || []).length,
+    configurations: (r.configurations || []).map(c => ({ name: c.name, verdict: c.verdict, off_mm: c.off_mm, matesLive: c.matesLive, matesImported: c.matesImported })),
     equations: (r.equations || []).filter(e => e.result !== "disabled").length, equationsImported: (r.equations || []).filter(e => e.result === "imported").length,
   };
   summary.push(row);
   console.log(`${r.verdict.padEnd(60)} ${name}  (components ${row.components - row.componentsLeft}/${row.components}, mates ${row.matesImported}/${row.mates}, off ${r.off_mm} mm)`);
+  for (const c of (r.configurations || []).filter(c => !c.active)) console.log(`${("  " + c.verdict).padEnd(60)}   configuration ${c.name}  (live mates ${c.matesImported}/${c.matesLive}, off ${c.off_mm} mm)`);
 }
 fs.writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1));
