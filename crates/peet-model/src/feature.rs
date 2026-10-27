@@ -1631,7 +1631,7 @@ macro_rules! slots {
                     let b = & $($m)? **b;
                     let [dx, dy, dz] = & $($m)? b.translate;
                     let [rx, ry, rz] = & $($m)? b.rotate;
-                    vec![
+                    let mut v = vec![
                         ("dx", Length, dx),
                         ("dy", Length, dy),
                         ("dz", Length, dz),
@@ -1639,7 +1639,17 @@ macro_rules! slots {
                         ("ry", Angle, ry),
                         ("rz", Angle, rz),
                         ("copies", Number, & $($m)? b.copies),
-                    ]
+                    ];
+                    // Each distance or angle mate's value, by the mate's place (see
+                    // `MATE_FIELDS`), after the move's own so that their names stay put.
+                    for (field, mate) in crate::bodies::MATE_FIELDS.iter().zip(& $($m)? b.mates) {
+                        match & $($m)? mate.kind {
+                            crate::MateKind::Distance(s) => v.push((*field, Length, s)),
+                            crate::MateKind::Angle(s) => v.push((*field, Angle, s)),
+                            _ => {}
+                        }
+                    }
+                    v
                 }
                 Self::StructuralMember(m) => vec![("rotate", Angle, & $($m)? m.rotate)],
                 Self::Sketch(_)

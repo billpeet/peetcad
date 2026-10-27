@@ -80,10 +80,22 @@ impl Feature {
                     .dimension_names
                     .get(field)
                     .cloned()
+                    .or_else(|| self.mate_value_name(field))
                     .unwrap_or_else(|| format!("d{}", i + 1));
                 (field, name)
             })
             .collect()
+    }
+
+    /// A moved body's mate value's own name: `D1@` the mate's name, as SolidWorks calls
+    /// a mate's dimension (`D1@Distance2`), if the mate has a name that can be one.
+    fn mate_value_name(&self, field: &str) -> Option<String> {
+        let FeatureKind::MoveBody(m) = &self.kind else {
+            return None;
+        };
+        let name = m.mate_of_field(field)?.name.trim();
+        let whole = format!("D1@{name}");
+        (!name.is_empty() && expr::check_dimension_name(&whole, true).is_ok()).then_some(whole)
     }
 }
 
@@ -147,10 +159,19 @@ impl Model {
 
     /// The dimension at an address: `NAME@FEATURE` (`Width@Sketch1`, `d1@Extrude1`), a
     /// whole name (`D2@Sketch10`), or a feature's field (`depth@Extrude1`).
+    ///
+    /// As in SolidWorks, the case of the letters doesn't matter where only one dimension
+    /// has the address in any case (`Width@Sketch1` finds `width@Sketch1`).
     pub fn find_dimension(&self, address: &str) -> Option<Dimension> {
         let address = address.trim();
         let all = self.dimensions();
         if let Some(d) = all.iter().find(|d| d.address == address) {
+            return Some(d.clone());
+        }
+        let mut alike = all
+            .iter()
+            .filter(|d| d.address.eq_ignore_ascii_case(address));
+        if let (Some(d), None) = (alike.next(), alike.next()) {
             return Some(d.clone());
         }
         let (field, feature) = address.split_once('@')?;
@@ -339,6 +360,9 @@ mod tests {
         let depth = m.find_dimension("depth@Extrude1").unwrap();
         assert_eq!((depth.feature, depth.name.as_str()), (e, "d1"));
         assert!(m.find_dimension("Height@Sketch1").is_none());
+        // As in SolidWorks, in any case where only one has the address
+        assert_eq!(m.find_dimension("width@sketch1").unwrap().feature, s);
+        assert_eq!(m.find_dimension("D2@SKETCH1").unwrap().name, "d2");
     }
 
     #[test]

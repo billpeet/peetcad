@@ -841,7 +841,7 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "set",
         "name (a dimension's address NAME@FEATURE, or a parameter), value, configurations (as for set_dimension and edit; a parameter: as for set_parameter)",
-        "Set a value by its name, as SolidWorks' equations and FabSys do: \"Width@Sketch1\", \"D1@LPattern2\", \"depth@Extrude1\", or a parameter.",
+        "Set a value by its name, as SolidWorks' equations and FabSys do: \"Width@Sketch1\", \"D1@LPattern2\", \"depth@Extrude1\", a moved body's mate \"D1@Distance2\", or a parameter (\"Base Height\"). As in SolidWorks, an address's case doesn't matter where only one dimension has it.",
     ),
     (
         "name_dimension",
@@ -896,7 +896,7 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "set_parameter",
         "name, value, configurations (\"this\" (default), \"all\", a name or a list of names)",
-        "Add or change a named value usable in every expression. A new one exists in every configuration.",
+        "Add or change a named value usable in every expression. A new one exists in every configuration. Its name is a word (\"width\") or, as SolidWorks' global variables, any text without '\"' or '@' (\"Base Height\"), which expressions quote: \"Base Height\" / 2.",
     ),
     (
         "add_configuration",

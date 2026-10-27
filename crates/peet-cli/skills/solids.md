@@ -336,6 +336,11 @@ solved at every rebuild, so the body follows when the part changes.
   the way its normal points; `"flip": true` puts the moved end behind it.
 - A mate that can't hold with those before it is left out, and the feature warns naming
   it: the body is where the others put it. Mates can't place copies.
+- A `distance` or `angle` mate's value is a dimension of the move called `D1@` the mate's
+  `name`, as SolidWorks calls it (`D1@Distance2`; a mate without a name is called after
+  its type and place, `Distance2` for the second). Change it with `set`, in some
+  configurations with `configurations`; `name_dimension` renames it by its field
+  (`mate2` for the second mate).
 
 ```jsonl
 {"op": "set_parameter", "name": "t", "value": "5mm"}
@@ -347,11 +352,13 @@ solved at every rebuild, so the body follows when the part changes.
 {"op": "extrude", "sketch": "Pin", "depth": 12, "operation": "new_body"}
 {"op": "move_body", "bodies": [{"feature": "Extrude2", "side": "end"}], "rx": -90, "mates": [{"type": "concentric", "moved": {"face": {"feature": "Extrude2", "side": "side"}}, "to": {"face": {"feature": "Cut-Extrude1", "side": "side"}}}, {"type": "distance", "distance": 2, "moved": {"face": {"feature": "Extrude2", "side": "start"}}, "to": {"face": {"feature": "Extrude1", "side": "end"}}}]}
 {"op": "set_parameter", "name": "t", "value": "8mm"}
+{"op": "add_configuration", "name": "Low"}
+{"op": "set", "name": "D1@Distance2", "value": 1, "configurations": "this"}
 {"op": "bodies"}
 ```
 
 The pin stands in the hole with its end 2 above the plate; making the plate 8 thick lifts
-it with the top face.
+it with the top face, and in the configuration `Low` it is 1 above.
 
 ## Another part's bodies
 

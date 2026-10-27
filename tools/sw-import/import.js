@@ -285,6 +285,7 @@ function importPart(doc, dir) {
   const miters = new Map();      // SolidWorks mitre flange name -> what it was made with, for mirroring it
   const promoted = new Map();    // "D1@Sketch1" -> the parameter that sketch dimension now follows
   const dimensionsNamed = new Set(); // SolidWorks features whose sizes have been given SolidWorks' names
+  const flangeEnds = new Map();  // "flange|outline sketch" -> the edge's ends and which is the PeetCAD flange's start
   let equationsLater = null;     // tries again the equations that set sizes of features imported later
   const formulas = new Set();    // the sketch dimensions (full names) whose value is a formula
   const asleep = new Set();      // SolidWorks features imported and then suppressed in every configuration
@@ -1002,6 +1003,32 @@ function importPart(doc, dir) {
    * edge's outline is that piece's, the others are the first's, and with `link` a piece whose length has no
    * name of its own follows the first's where they are the same.
    */
+  /**
+   * Which set-back of a flange piece (`offset_start` or `offset_end`) a length in its outline sketch `owner` is,
+   * from where the dimension is: SolidWorks measures a set-back from an end of the edge to the outline, so the
+   * two things it joins are both near that end. Null where that can't be told (the dimension's ends are not
+   * points and lines across the edge, it does not measure `want` along the edge, or which end is the PeetCAD
+   * flange's start is not known), or where the two are not near one end.
+   */
+  function setBackField(f, owner, d, want) {
+    const at = flangeEnds.get(`${f.name}|${owner}`), s = (f.sub || []).find(x => x.name === owner);
+    const rel = at && at.startAtFrom !== null && s && s.sketch && (s.sketch.relations || []).find(r => r.dimension === d.fullName);
+    if (!rel || !rel.entities || rel.entities.length !== 2) return null;
+    const dir = unit(sub(at.to, at.from)), whole = len(sub(at.to, at.from));
+    const along = q => dot(sub(fromSketch(at.sf, q), at.from), dir);
+    // A point's place along the edge, or a line's if it runs across the edge
+    const places = rel.entities.map(e => {
+      if (e.kind === "sketchPoint" && typeof e.x === "number") return along(e);
+      if (e.point && e.point.length === 3) return dot(sub(mm(e.point), at.from), dir);
+      if (e.start && e.end) { const a = along(e.start), b = along(e.end); return Math.abs(a - b) < 1e-6 ? a : null; }
+      return null;
+    });
+    if (places.some(x => x === null) || Math.abs(Math.abs(places[0] - places[1]) - want) > 1e-3) return null;
+    const middle = (places[0] + places[1]) / 2;
+    if (Math.abs(middle - whole / 2) < 1e-6) return null;
+    return (middle < whole / 2) === at.startAtFrom ? "offset_start" : "offset_end";
+  }
+
   function nameDimensions(link = true) {
     for (const [swName, names] of made) {
       if (dimensionsNamed.has(swName)) continue;
@@ -1030,9 +1057,11 @@ function importPart(doc, dir) {
         const numberOf = x => typeof x.value === "object" ? x.value.value : x.value;
         const want = d.valueType === 1 ? d.value * 180 / Math.PI : d.valueType === 2 ? d.value : d.value * MM;
         // A length in a flange's outline that is not its length is where the outline stops short of an end
-        // of the edge: the set-back the importer read off it, if it is just one of them
+        // of the edge: the set-back at the end of the edge the dimension measures from, or failing that the
+        // set-back the importer read off it, if it is just one of them
         if (!field.length && f.type === "EdgeFlange" && profiles.includes(owner) && d.valueType === 0) {
-          field = dimensionsOf(piece).filter(x => /^offset_(start|end)$/.test(x.field) && Math.abs(numberOf(x) - want) < 1e-6).map(x => x.field);
+          const atEnd = setBackField(f, owner, d, want);
+          field = atEnd ? [atEnd] : dimensionsOf(piece).filter(x => /^offset_(start|end)$/.test(x.field) && Math.abs(numberOf(x) - want) < 1e-6).map(x => x.field);
         }
         if (field.length !== 1 || done.has(piece + "|" + field[0])) continue;
         const mine = dimensionsOf(piece).find(x => x.field === field[0]);
@@ -2536,7 +2565,7 @@ function importPart(doc, dir) {
           : square ? rises[index] + thickness : rises[0] !== null ? length + rises[index] - rises[0] : length;
         const ops = found.map((edge, index) => {
           const s = edge.from, along = unit(sub(edge.to, edge.from)), whole = len(sub(edge.to, edge.from));
-          let offsets = {}, outline = null;
+          let offsets = {}, outline = null, used = null;
           // SolidWorks lists one outline per edge, in the edges' order. Failing that, each is tried.
           for (const p of profiles.length === found.length ? [profiles[index]] : profiles) {
             const sf = frameOf(p.sketch.modelToSketch);
@@ -2589,6 +2618,7 @@ function importPart(doc, dir) {
             // A foot that runs past an end of the edge is a flange wider than its edge: a negative offset.
             if (Math.abs(start) > 1e-3) offsets.offset_start = tidy(start);
             if (Math.abs(end) > 1e-3) offsets.offset_end = tidy(end);
+            used = p;
             break;
           }
           // An outline taller than the flange: the flange is made taller (by more than it can need, the cut
@@ -2614,6 +2644,8 @@ function importPart(doc, dir) {
               if (a !== undefined) offsets.offset_end = a;
             }
           }
+          // Which end of the edge is the flange's start, for naming its set-backs (see setBackField)
+          if (used) flangeEnds.set(`${f.name}|${used.name}`, { from: edge.from, to: edge.to, sf: frameOf(used.sketch.modelToSketch), startAtFrom: startsAtFrom(edge) });
           return { edge: { at: edge.middle.map(tidy) }, offsets, outline, found: edge, known };
         });
         // A relief of the flange's own, where SolidWorks does not use the body's. One given as a width and
@@ -3635,6 +3667,11 @@ function importPart(doc, dir) {
     // part is still the same afterwards.
     const equations = { inForce: 0, imported: 0, left: {} };
     const ident = t => t.replace(/[^A-Za-z0-9_]/g, "_").replace(/^(?=\d)/, "_");
+    // A global variable keeps SolidWorks' name ("Base Height"), which FabSys sets it by; expressions quote
+    // one that is not a plain word, as SolidWorks does. One PeetCAD can't take (with '@' or '"') is made a word.
+    const WORD = /^[A-Za-z_][A-Za-z0-9_]*$/;
+    const globalName = t => (t = t.trim()) && !/["@]/.test(t) ? t : ident(t);
+    const inExpression = name => WORD.test(name) ? name : `"${name}"`;
     const globals = new Map();
     const dimensionOf = ref => {
       const sk = sketches.get(ref.split("@")[1]);
@@ -3713,7 +3750,7 @@ function importPart(doc, dir) {
           if (!hasAddress(ref) && !sheetSize(ref) && !sketchOfOwn(ref)) { failed = "it reads a dimension that was not imported"; return "0"; }
           return `"${ref}"`;
         }
-        if (!globals.has(ref) && disabledGlobals.has(ref) && peet.apply({ op: "set_parameter", name: ident(ref), value: String(disabledGlobals.get(ref)) }).ok) globals.set(ref, ident(ref));
+        if (!globals.has(ref) && disabledGlobals.has(ref) && peet.apply({ op: "set_parameter", name: globalName(ref), value: String(disabledGlobals.get(ref)) }).ok) globals.set(ref, inExpression(globalName(ref)));
         if (!globals.has(ref)) { failed = "it reads a variable that is not defined"; return "0"; }
         return globals.get(ref);
       });
@@ -3724,9 +3761,13 @@ function importPart(doc, dir) {
     };
     const volumeNow = () => ((peet.ask({ op: "mass" }).total) || {}).volume_mm3;
     const steady = total.volume_mm3;
-    // "Thickness" is SolidWorks' own name for the sheet's thickness, which equations read. It becomes a
-    // parameter that the base flange follows.
-    if (thickness && (config.equations || []).some(e => !e.disabled && /"Thickness"/.test(e.expression))) {
+    // The sheet's thickness is "Thickness@Sheet-Metal" in SolidWorks, which FabSys sets on every sheet metal
+    // part it configures (its ConfigureSheetMetal): the base flange's thickness has that address. "Thickness",
+    // SolidWorks' own name for it in equations, reads it there. Without a base flange, "Thickness" is a
+    // parameter.
+    const sheetThickness = thickness && sheetSize("Thickness@Sheet-Metal");
+    if (sheetThickness) globals.set("Thickness", "\"Thickness@Sheet-Metal\"");
+    else if (thickness && (config.equations || []).some(e => !e.disabled && /"Thickness"/.test(e.expression))) {
       const base = [...made.entries()].find(([swName]) => (byName.get(swName) || {}).type === "SMBaseFlange");
       if (peet.apply({ op: "set_parameter", name: "Thickness", value: tidy(thickness) + "mm" }).ok) {
         globals.set("Thickness", "Thickness");
@@ -3748,8 +3789,8 @@ function importPart(doc, dir) {
       let ok = false, why = "refused";
       if (e.globalVariable) {
         // A variable with nothing after its `=` is 0 in SolidWorks
-        ok = peet.apply({ op: "set_parameter", name: ident(target), value: t.value || String(e.value || 0) }).ok;
-        if (ok) globals.set(target, ident(target));
+        ok = peet.apply({ op: "set_parameter", name: globalName(target), value: t.value || String(e.value || 0) }).ok;
+        if (ok) globals.set(target, inExpression(globalName(target)));
       } else if (/suppressed/i.test(m[2])) {
         const names = made.get(target);
         if (!names) why = "it suppresses something that was not imported";
@@ -3787,6 +3828,15 @@ function importPart(doc, dir) {
       if (why === NOT_IMPORTED) later.push(e);
     }
     if (fs.existsSync(peet.file + ".before")) fs.unlinkSync(peet.file + ".before");
+    // A disabled global variable is still there in SolidWorks, with the value it kept, and FabSys sets it by
+    // name (its SetGlobalVariable finds an equation by its name, in force or not, and fails if there is none):
+    // each is a parameter with that value
+    const parameters = new Set((peet.ask({ op: "parameters" }).parameters || []).map(x => x.name));
+    for (const [name, value] of disabledGlobals) {
+      const n = globalName(name);
+      if (globals.has(name) || parameters.has(n) || typeof value !== "number") continue;
+      if (peet.apply({ op: "set_parameter", name: n, value: String(value) }).ok) { globals.set(name, inExpression(n)); parameters.add(n); }
+    }
     if (equations.inForce) report.equations = equations;
     // One that sets a size of a feature imported later, for a configuration it is live in, is tried again
     // then: kept if no configuration changes
@@ -3915,14 +3965,23 @@ function importPart(doc, dir) {
         }
         entry.added = report.features.slice(before).filter(x => /^imported/.test(x.result) && !SKETCH.test(x.type)).length;
         for (const x of report.features.slice(before)) if (x.result === "failed" || x.result === "not supported") entry.missing.push(`${x.name}: ${x.result}`);
-        // Sizes of features themselves (a flange's length, a pattern's count) are not carried over yet
+        // Sizes of features themselves (a flange's length, a pattern's count, a moved body's mate distance):
+        // set in this configuration by SolidWorks' address where the part has it, else not carried over yet
         const here = maps.get(config);
+        let known = null;
         for (const [swName, feature] of maps.get(other)) {
           const base = here.get(swName);
           if (!base || feature.suppressed || base.suppressed || SKETCH.test(feature.type)) continue;
           for (const d of feature.dimensions || []) {
             const was = (base.dimensions || []).find(x => x.fullName === d.fullName);
-            if (was && Math.abs(was.value - d.value) > 1e-10 && d.fullName.split("@")[1] === swName) entry.missing.push(`${d.fullName.split("@").slice(0, 2).join("@")}, a feature's own size`);
+            const [short, owner] = d.fullName.split("@");
+            const own = owner === swName || (feature.sub || []).some(x => x.name === owner && !SKETCH.test(x.type));
+            if (!was || Math.abs(was.value - d.value) <= 1e-10 || !own || sketches.has(owner)) continue;
+            const address = `${short}@${owner}`;
+            if (!known) known = new Set((peet.ask({ op: "dimensions" }).dimensions || []).map(x => x.address));
+            const value = d.valueType === 1 ? tidy(d.value * 180 / Math.PI) : d.valueType === 2 ? d.value : tidy(d.value * MM);
+            if (known.has(address) && !formulas.has(d.fullName) && peet.apply({ op: "set", name: address, value: String(value), configurations: [other.name] }).ok) entry.dimensions++;
+            else if (owner === swName) entry.missing.push(`${address}, a feature's own size`);
           }
         }
       }

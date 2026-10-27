@@ -69,6 +69,26 @@ impl MoveBodyFeature {
     }
 }
 
+/// The fields of a move's mate values: `mate1` is the first mate's distance or angle,
+/// `mate2` the second's, and so on (a mate with no value has its field unused). They are
+/// the move's values like `dx`, so each configuration can have its own; as in SolidWorks,
+/// where a mate is a feature, a mate's value is called `D1@` the mate's name
+/// (`D1@Distance2`) unless it was given another name.
+pub const MATE_FIELDS: [&str; 32] = [
+    "mate1", "mate2", "mate3", "mate4", "mate5", "mate6", "mate7", "mate8", "mate9", "mate10",
+    "mate11", "mate12", "mate13", "mate14", "mate15", "mate16", "mate17", "mate18", "mate19",
+    "mate20", "mate21", "mate22", "mate23", "mate24", "mate25", "mate26", "mate27", "mate28",
+    "mate29", "mate30", "mate31", "mate32",
+];
+
+impl MoveBodyFeature {
+    /// The mate whose value is the field `field` (`mate2`), if there is one.
+    pub fn mate_of_field(&self, field: &str) -> Option<&BodyMate> {
+        let i = MATE_FIELDS.iter().position(|f| *f == field)?;
+        self.mates.get(i)
+    }
+}
+
 /// The motion that puts the bodies a move picks where its mates hold, nearest to
 /// `start`, with a warning naming the mates that can't. `planes` are the reference
 /// planes the mates name, where they are.
