@@ -123,13 +123,100 @@ pub fn configurations(doc: &Document) -> Value {
             .or_insert_with(|| Value::Object(Map::new()));
         of[name] = Value::Object(each);
     }
-    json!({
+    let mut out = json!({
         "active": model.active_configuration().name,
         "configurations": list,
         "suppressed_in": suppressed,
         "parameters": parameters,
         "values": values,
-    })
+    });
+    if model.is_assembly() {
+        let (components, mates) = assembly_differences(doc);
+        out["components"] = Value::Object(components);
+        out["mates"] = Value::Object(mates);
+    }
+    out
+}
+
+/// What differs between an assembly's configurations: for each component and mate that
+/// differs, the fields that differ, in every configuration.
+fn assembly_differences(doc: &Document) -> (Map<String, Value>, Map<String, Value>) {
+    let model = &doc.model;
+    let mut components = Map::new();
+    let mut mates = Map::new();
+    let Some(assembly) = model.assembly() else {
+        return (components, mates);
+    };
+    let configs = model.configurations();
+    for c in assembly
+        .components()
+        .filter(|c| model.component_differs(c.id))
+    {
+        let states: Vec<_> = configs
+            .iter()
+            .filter_map(|x| Some((x, model.component_in(c.id, x.id)?)))
+            .collect();
+        let differs = |f: &dyn Fn(&peet_model::ComponentState) -> Value| {
+            states.windows(2).any(|w| f(&w[0].1) != f(&w[1].1))
+        };
+        let part = assembly.definition(c.definition).map(|d| d.model.clone());
+        let shown = |s: &peet_model::ComponentState| -> Value {
+            let Some(part) = &part else {
+                return Value::Null;
+            };
+            let id = s.configuration.unwrap_or(part.active_configuration().id);
+            part.configuration(id)
+                .map_or(Value::Null, |x| json!(x.name))
+        };
+        let suppressed = |s: &peet_model::ComponentState| json!(s.suppressed);
+        let fixed = |s: &peet_model::ComponentState| json!(s.fixed);
+        let placed = |s: &peet_model::ComponentState| {
+            let mut m = Map::new();
+            crate::assembly::placement_out(&mut m, &s.placement, &model.parameters.units);
+            Value::Object(m)
+        };
+        type Field<'f> = &'f dyn Fn(&peet_model::ComponentState) -> Value;
+        let fields: Vec<(&str, Field)> = vec![
+            ("suppressed", &suppressed),
+            ("configuration", &shown),
+            ("fixed", &fixed),
+            ("placement", &placed),
+        ];
+        let mut each = Map::new();
+        for (x, state) in &states {
+            let mut m = Map::new();
+            for (name, f) in &fields {
+                if differs(*f) {
+                    m.insert((*name).to_owned(), f(state));
+                }
+            }
+            each.insert(x.name.clone(), Value::Object(m));
+        }
+        components.insert(c.name.clone(), Value::Object(each));
+    }
+    for m in assembly.mates().filter(|m| model.mate_differs(m.id)) {
+        let states: Vec<_> = configs
+            .iter()
+            .filter_map(|x| Some((x, model.mate_in(m.id, x.id)?)))
+            .collect();
+        let kinds_differ = states.windows(2).any(|w| w[0].1.kind != w[1].1.kind);
+        let suppression_differs = states
+            .windows(2)
+            .any(|w| w[0].1.suppressed != w[1].1.suppressed);
+        let mut each = Map::new();
+        for (x, state) in &states {
+            let mut o = Map::new();
+            if suppression_differs {
+                o.insert("suppressed".to_owned(), json!(state.suppressed));
+            }
+            if kinds_differ {
+                crate::mate::kind_values(&state.kind, doc, &mut o);
+            }
+            each.insert(x.name.clone(), Value::Object(o));
+        }
+        mates.insert(m.name.clone(), Value::Object(each));
+    }
+    (components, mates)
 }
 
 /// A parameter's expression in every configuration.

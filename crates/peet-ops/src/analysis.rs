@@ -52,6 +52,10 @@ fn row_out(doc: &Document, row: &BomRow) -> Value {
     let mut m = Map::new();
     m.insert("item".to_owned(), json!(row.item));
     m.insert("part".to_owned(), json!(row.part));
+    // A part with several configurations: the one these components show.
+    if let Some(configuration) = &row.configuration {
+        m.insert("configuration".to_owned(), json!(configuration));
+    }
     if row.is_assembly {
         m.insert("kind".to_owned(), json!("assembly"));
     }
@@ -102,11 +106,13 @@ pub(crate) fn bom(doc: &Document, top_level: bool) -> Map<String, Value> {
             out.insert("mass_kg".to_owned(), json!(round(mass)));
         }
         _ => {
-            let bare: Vec<&str> = rows
-                .iter()
-                .filter(|r| r.mass.is_none())
-                .map(|r| r.part.as_str())
-                .collect();
+            // (A part in two configurations is two rows, and named once.)
+            let mut bare: Vec<&str> = Vec::new();
+            for r in rows.iter().filter(|r| r.mass.is_none()) {
+                if !bare.contains(&r.part.as_str()) {
+                    bare.push(&r.part);
+                }
+            }
             if !bare.is_empty() {
                 out.insert("without_mass".to_owned(), json!(bare));
             }
@@ -148,7 +154,11 @@ pub(crate) fn bom_csv(doc: &Document, rows: &[BomRow]) -> String {
         );
         let fields = [
             row.item.to_string(),
-            field(&row.part),
+            // A part with several configurations: "Door (R Hinges)".
+            field(&match &row.configuration {
+                Some(c) => format!("{} ({c})", row.part),
+                None => row.part.clone(),
+            }),
             row.quantity.to_string(),
             field(row.material.as_deref().unwrap_or("")),
             row.mass.map_or_else(String::new, number),

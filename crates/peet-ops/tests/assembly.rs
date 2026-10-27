@@ -1215,7 +1215,8 @@ fn the_applications_changes_to_an_assembly_are_made_by_operations() {
         ops,
         [Op::Component {
             component: CompSel::Id(second),
-            change: ComponentChange::Delete
+            change: ComponentChange::Delete,
+            configurations: None,
         }]
     );
 
@@ -1229,6 +1230,7 @@ fn the_applications_changes_to_an_assembly_are_made_by_operations() {
             fixed: None,
             link: false,
             absolute: false,
+            configuration: None,
         },
         Undo::Step,
     );
@@ -1575,11 +1577,11 @@ fn components_are_mated_by_faces_of_their_parts() {
         json!({"op": "set", "name": "Width@Sketch1", "value": 2}),
     );
     assert!(why.contains("open_component"), "{why}");
-    let why = error(
+    // A mate's value in some of the assembly's configurations (it has one).
+    ok(
         &mut doc,
         json!({"op": "set", "name": "D1@Distance1", "value": 2, "configurations": "all"}),
     );
-    assert!(why.contains("no configurations"), "{why}");
     ok(
         &mut doc,
         json!({"op": "set_parameter", "name": "gap", "value": "6mm"}),
@@ -2933,17 +2935,10 @@ fn components_are_shown_hidden_and_coloured() {
     let mut part = Document::default();
     let e = error(&mut part, json!({"op": "show_all"}));
     assert!(e.contains("works on an assembly"), "{e}");
-    // Configurations are a part's: an assembly has none of its own to add or list.
-    for op in [
-        json!({"op": "add_configuration", "name": "Long"}),
-        json!({"op": "configurations"}),
-    ] {
-        let e = error(&mut doc, op);
-        assert!(
-            e.contains("is an assembly") && e.contains("open_component"),
-            "{e}"
-        );
-    }
+    // An assembly has configurations of its own (see tests/assembly_configurations.rs).
+    ok(&mut doc, json!({"op": "add_configuration", "name": "Long"}));
+    let listed = ok(&mut doc, json!({"op": "configurations"}));
+    assert_eq!(listed["active"], "Long");
 }
 
 #[test]

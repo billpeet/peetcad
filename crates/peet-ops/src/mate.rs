@@ -7,6 +7,8 @@
 //! against the part as it is now and stored as a persistent reference, so the mate
 //! follows its face through edits to the part.
 
+use std::sync::Arc;
+
 use peet_document::Document;
 use peet_math::Frame;
 use peet_model::{
@@ -199,23 +201,24 @@ impl MateEndSel {
                 ),
             };
         }
-        let mut assembly = the_assembly(doc)?;
         let mut path = Vec::new();
-        let mut names = Vec::new();
-        let mut definition = None;
-        for (index, sel) in component.iter().enumerate() {
+        let mut names: Vec<String> = Vec::new();
+        // Each component's part (or sub-assembly) in the configuration it shows.
+        let mut definition: Option<Arc<Model>> = None;
+        for sel in component {
+            let assembly = match &definition {
+                None => the_assembly(doc)?,
+                Some(model) => model.assembly().ok_or_else(|| format!("{} is a part, not a sub-assembly: the component path cannot continue inside it.", names.join(" / ")))?,
+            };
             let id = sel
                 .resolve_in(assembly)
                 .map_err(|e| format!("In component path {}: {e}", names.join(" / ")))?;
-            names.push(assembly.name_of(id));
+            names.push(assembly.name_of(id).to_owned());
             path.push(id);
-            let def = assembly
-                .definition_of(id)
+            let shown = assembly
+                .component_model(id)
                 .ok_or_else(|| "The component's part is missing.".to_owned())?;
-            definition = Some(def);
-            if index + 1 < component.len() {
-                assembly = def.model.assembly().ok_or_else(|| format!("{} is a part, not a sub-assembly: the component path cannot continue inside it.", names.join(" / ")))?;
-            }
+            definition = Some(shown);
         }
         let definition = definition.ok_or_else(|| "A component path can't be empty.".to_owned())?;
         if geom.is_some() && plane.is_some() {
@@ -231,10 +234,10 @@ impl MateEndSel {
             return Ok(MateEnd { path, geom: None });
         }
         let name = names.join(" / ");
-        let part = Document::from_model((*definition.model).clone(), None);
-        let on = |e: String| format!("In {name} (its part, {}): {e}", definition.name());
+        let part = Document::from_model((*definition).clone(), None);
+        let on = |e: String| format!("In {name} (its part, {}): {e}", definition.name);
         if let Some((sel, entity)) = sketch {
-            if definition.model.is_assembly() {
+            if definition.is_assembly() {
                 return Err(format!(
                     "{name} is a sub-assembly: extend the component path to a part inside it to select one of its sketches."
                 ));
@@ -282,7 +285,7 @@ impl MateEndSel {
                 })
                 .transpose()?,
             Some(sel) => {
-                if definition.model.is_assembly() {
+                if definition.is_assembly() {
                     return Err(format!(
                         "{name} is a sub-assembly: extend the component path to a part inside it to select its geometry, or select a standard plane."
                     ));
@@ -491,13 +494,13 @@ pub(crate) const MATE_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "edit_mate",
-        "mate, distance or angle, flip, align (aligned, anti_aligned, closest), flip_dimension; width and slot mates: mode (centered, free, dimension, percent), distance for dimension, percent for percent; limit mates: min, max",
+        "mate, distance or angle, flip, align (aligned, anti_aligned, closest), flip_dimension; width and slot mates: mode (centered, free, dimension, percent), distance for dimension, percent for percent; limit mates: min, max; configurations (of the assembly, for the value, mode and limits: \"this\", \"all\", a name or a list of names; left out: this one if they already differ between configurations, else all)",
         "Change a mate's value, which way round its ends go or which way its value is measured, a width or slot mate's mode and position, or a limit mate's range.",
     ),
     ("rename", "mate, name", "Rename a mate."),
     (
         "suppress",
-        "mate, on (default true)",
+        "mate, on (default true), configurations (of the assembly: \"this\" (default), \"all\", a name or a list of names)",
         "Leave a mate out of the solve without deleting it, or put it back.",
     ),
     ("delete", "mate", "Delete a mate."),
@@ -514,6 +517,7 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
         Ok(Op::EditMate {
             mate: a.required("mate", MateSel::parse)?,
             change: change?,
+            configurations: a.parsed("configurations", crate::value::Configs::parse)?,
         })
     };
     Some(match op {
@@ -626,25 +630,28 @@ fn status_word(status: Option<&Status>) -> &'static str {
 
 pub(crate) fn end_out(assembly: &Assembly, end: &MateEnd) -> Value {
     let mut m = Map::new();
-    let mut current = Some(assembly);
     let mut names = Vec::new();
-    let mut model = None;
-    for id in &end.path {
-        names.push(current.map_or("?", |a| a.name_of(*id)));
-        model = current
-            .and_then(|a| a.definition_of(*id))
-            .map(|d| &*d.model);
-        current = model.and_then(Model::assembly);
+    let mut model: Option<Arc<Model>> = None;
+    for (i, id) in end.path.iter().enumerate() {
+        let current = if i == 0 {
+            Some(assembly)
+        } else {
+            model.as_deref().and_then(Model::assembly)
+        };
+        names.push(current.map_or("?", |a| a.name_of(*id)).to_owned());
+        model = current.and_then(|a| a.component_model(*id));
     }
     if end.is_assembly() {
         m.insert("assembly".to_owned(), json!(true));
     } else {
-        m.insert("component".to_owned(), json!(names.first().copied()));
+        m.insert("component".to_owned(), json!(names.first()));
     }
     if let Some(MateGeom::Sketch(s)) = &end.geom {
         m.insert(
             "sketch".to_owned(),
-            model.map_or_else(|| json!(s.feature.0), |m| json!(m.name_of(s.feature))),
+            model
+                .as_ref()
+                .map_or_else(|| json!(s.feature.0), |m| json!(m.name_of(s.feature))),
         );
         m.insert("entity".to_owned(), json!(s.entity.0));
     }
@@ -680,35 +687,10 @@ pub(crate) fn end_out(assembly: &Assembly, end: &MateEnd) -> Value {
     Value::Object(m)
 }
 
-/// A mate in a few fields: what replies and `mates` give.
-pub(crate) fn mate_out(doc: &Document, id: MateId) -> Value {
-    let Some(assembly) = doc.model.assembly() else {
-        return Value::Null;
-    };
-    let Some(mate) = assembly.mate(id) else {
-        return json!({ "id": id.0, "status": "deleted" });
-    };
-    let status = doc.evaluation().mate_status(id);
-    let mut m = Map::new();
-    m.insert("id".to_owned(), json!(id.0));
-    m.insert("name".to_owned(), json!(mate.name));
-    m.insert("type".to_owned(), json!(mate.kind.word()));
-    let (a, b) = match &mate.kind {
-        MateKind::Width { a2, b2, .. } => (
-            json!([end_out(assembly, &mate.a), end_out(assembly, a2)]),
-            b2.as_ref().map_or_else(
-                || end_out(assembly, &mate.b),
-                |b2| json!([end_out(assembly, &mate.b), end_out(assembly, b2)]),
-            ),
-        ),
-        _ => (end_out(assembly, &mate.a), end_out(assembly, &mate.b)),
-    };
-    m.insert("a".to_owned(), a);
-    m.insert("b".to_owned(), b);
-    match &mate.kind {
-        MateKind::Symmetric { plane } => {
-            m.insert("plane".to_owned(), end_out(assembly, plane));
-        }
+/// A mate's values, as `mates` gives them: its distance or angle, a limit's range, a
+/// width or slot mate's mode.
+pub(crate) fn kind_values(kind: &MateKind, doc: &Document, m: &mut Map<String, Value>) {
+    match kind {
         MateKind::LimitAngle { min, max } => {
             m.insert("min".to_owned(), scalar_out(min, ScalarKind::Angle, doc));
             m.insert("max".to_owned(), scalar_out(max, ScalarKind::Angle, doc));
@@ -743,6 +725,37 @@ pub(crate) fn mate_out(doc: &Document, id: MateId) -> Value {
         }
         _ => {}
     }
+}
+
+/// A mate in a few fields: what replies and `mates` give.
+pub(crate) fn mate_out(doc: &Document, id: MateId) -> Value {
+    let Some(assembly) = doc.model.assembly() else {
+        return Value::Null;
+    };
+    let Some(mate) = assembly.mate(id) else {
+        return json!({ "id": id.0, "status": "deleted" });
+    };
+    let status = doc.evaluation().mate_status(id);
+    let mut m = Map::new();
+    m.insert("id".to_owned(), json!(id.0));
+    m.insert("name".to_owned(), json!(mate.name));
+    m.insert("type".to_owned(), json!(mate.kind.word()));
+    let (a, b) = match &mate.kind {
+        MateKind::Width { a2, b2, .. } => (
+            json!([end_out(assembly, &mate.a), end_out(assembly, a2)]),
+            b2.as_ref().map_or_else(
+                || end_out(assembly, &mate.b),
+                |b2| json!([end_out(assembly, &mate.b), end_out(assembly, b2)]),
+            ),
+        ),
+        _ => (end_out(assembly, &mate.a), end_out(assembly, &mate.b)),
+    };
+    m.insert("a".to_owned(), a);
+    m.insert("b".to_owned(), b);
+    if let MateKind::Symmetric { plane } = &mate.kind {
+        m.insert("plane".to_owned(), end_out(assembly, plane));
+    }
+    kind_values(&mate.kind, doc, &mut m);
     if mate.flip() {
         m.insert("flip".to_owned(), json!(true));
     }
@@ -1016,11 +1029,7 @@ pub(crate) fn value_address(
             doc.title()
         ));
     };
-    if configurations {
-        return Err(
-            "An assembly has no configurations of its own: leave 'configurations' out.".to_owned(),
-        );
-    }
+    let _ = configurations;
     let exact = assembly.mates().find(|m| m.name == name);
     let mut alike = assembly
         .mates()
@@ -1036,6 +1045,7 @@ pub(crate) fn change(
     model: &mut Model,
     id: MateId,
     change: &MateChange,
+    configurations: Option<&crate::value::Configs>,
 ) -> Result<String, String> {
     let kind = the_assembly(doc)?.mate(id).map(|m| &m.kind);
     let turns = matches!(
@@ -1116,9 +1126,50 @@ pub(crate) fn change(
         Ok((read(min)?, read(max)?))
     })
     .transpose()?;
-    let assembly = model
-        .assembly_mut()
-        .ok_or_else(|| "The document is not an assembly.".to_owned())?;
+    if matches!(change, MateChange::Width(_))
+        && !matches!(kind, Some(MateKind::Width { .. } | MateKind::Slot { .. }))
+    {
+        return Err("Only a width or slot mate takes mode or percent.".to_owned());
+    }
+    if configurations.is_some() && matches!(change, MateChange::Rename(_) | MateChange::Delete) {
+        return Err(format!(
+            "'{}' is the same in every configuration of the assembly: leave 'configurations' out.",
+            change.word()
+        ));
+    }
+    let scope =
+        |default: crate::value::Configs| configurations.cloned().unwrap_or(default).resolve(doc);
+    // What can differ between the assembly's configurations: the value, the mode and the
+    // limits, which are in the mate's kind.
+    let edit_kind = |kind: &mut MateKind| {
+        match &value {
+            Some((ScalarKind::Length, s)) => match &mut *kind {
+                MateKind::Width { mode, .. } | MateKind::Slot { mode } => {
+                    *mode = WidthMode::Dimension(s.clone());
+                }
+                other => *other = MateKind::Distance(s.clone()),
+            },
+            Some((_, s)) => *kind = MateKind::Angle(s.clone()),
+            None => {}
+        }
+        if let (Some(new), MateKind::Width { mode, .. } | MateKind::Slot { mode }) =
+            (&width_mode, &mut *kind)
+        {
+            *mode = new.clone();
+        }
+        if let (
+            Some((new_min, new_max)),
+            MateKind::LimitAngle { min, max } | MateKind::LimitDistance { min, max },
+        ) = (&limits, kind)
+        {
+            if let Some(s) = new_min {
+                *min = s.clone();
+            }
+            if let Some(s) = new_max {
+                *max = s.clone();
+            }
+        }
+    };
     let gone = || "The mate no longer exists.".to_owned();
     Ok(match change {
         MateChange::Edit {
@@ -1127,17 +1178,19 @@ pub(crate) fn change(
             flip_dimension,
             ..
         } => {
-            let mate = assembly.mate_mut(id).ok_or_else(gone)?;
-            match value {
-                Some((ScalarKind::Length, s)) => match &mut mate.kind {
-                    MateKind::Width { mode, .. } | MateKind::Slot { mode } => {
-                        *mode = WidthMode::Dimension(s);
-                    }
-                    kind => *kind = MateKind::Distance(s),
-                },
-                Some((_, s)) => mate.kind = MateKind::Angle(s),
-                None => {}
+            if value.is_some() {
+                let differs = model.mate_differs(id);
+                let scope = scope(if differs {
+                    crate::value::Configs::This
+                } else {
+                    crate::value::Configs::All
+                })?;
+                model.set_mate(id, &scope, |s| edit_kind(&mut s.kind))?;
             }
+            let assembly = model
+                .assembly_mut()
+                .ok_or_else(|| "The document is not an assembly.".to_owned())?;
+            let mate = assembly.mate_mut(id).ok_or_else(gone)?;
             if let Some(align) = align_of(*flip, *align) {
                 mate.align = align;
             }
@@ -1147,38 +1200,34 @@ pub(crate) fn change(
             format!("Edit {was}")
         }
         MateChange::Rename(name) => {
+            let assembly = model
+                .assembly_mut()
+                .ok_or_else(|| "The document is not an assembly.".to_owned())?;
             rename(assembly, id, name)?;
             format!("Rename {was}")
         }
         MateChange::Suppress(on) => {
-            assembly.mate_mut(id).ok_or_else(gone)?.suppressed = *on;
-            format!("{} {was}", if *on { "Suppress" } else { "Unsuppress" })
+            let on = *on;
+            model.set_mate(id, &scope(crate::value::Configs::This)?, |s| {
+                s.suppressed = on;
+            })?;
+            format!("{} {was}", if on { "Suppress" } else { "Unsuppress" })
         }
         MateChange::Delete => {
+            let assembly = model
+                .assembly_mut()
+                .ok_or_else(|| "The document is not an assembly.".to_owned())?;
             assembly.remove_mate(id).ok_or_else(gone)?;
             format!("Delete {was}")
         }
-        MateChange::Width(_) => {
-            let mate = assembly.mate_mut(id).ok_or_else(gone)?;
-            let (MateKind::Width { mode, .. } | MateKind::Slot { mode }) = &mut mate.kind else {
-                return Err("Only a width or slot mate takes mode or percent.".to_owned());
-            };
-            *mode = width_mode.expect("resolved above");
-            format!("Edit {was}")
-        }
-        MateChange::Limits { .. } => {
-            let mate = assembly.mate_mut(id).ok_or_else(gone)?;
-            let (new_min, new_max) = limits.expect("read above");
-            if let MateKind::LimitAngle { min, max } | MateKind::LimitDistance { min, max } =
-                &mut mate.kind
-            {
-                if let Some(s) = new_min {
-                    *min = s;
-                }
-                if let Some(s) = new_max {
-                    *max = s;
-                }
-            }
+        MateChange::Width(_) | MateChange::Limits { .. } => {
+            let differs = model.mate_differs(id);
+            let scope = scope(if differs {
+                crate::value::Configs::This
+            } else {
+                crate::value::Configs::All
+            })?;
+            model.set_mate(id, &scope, |s| edit_kind(&mut s.kind))?;
             format!("Edit {was}")
         }
     })

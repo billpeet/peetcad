@@ -288,9 +288,21 @@ struct Assembled {
     references: Vec<(String, Result<f64, String>)>,
 }
 
-/// A definition of an assembly as last rebuilt.
+/// A definition of an assembly, in one of its configurations: the definition, and the
+/// configuration if it is not the one its model has active.
+type PartKey = (DefId, Option<crate::ConfigId>);
+
+/// The part a component shows: its definition in the configuration it uses.
+fn part_key(assembly: &crate::Assembly, c: &crate::Component) -> PartKey {
+    (c.definition, assembly.configuration_of(c))
+}
+
+/// A definition of an assembly, in one configuration, as last rebuilt.
 struct Part {
-    /// The model that was rebuilt: nothing is done while the definition still has it.
+    /// The definition's model that was rebuilt: nothing is done while the definition
+    /// still has it.
+    source: Arc<Model>,
+    /// What was rebuilt: the definition's model, in the configuration.
     model: Arc<Model>,
     engine: Engine,
 }
@@ -299,8 +311,9 @@ struct Part {
 #[derive(Default)]
 pub struct Engine {
     cache: HashMap<FeatureId, Cached>,
-    /// For an assembly: an engine per definition.
-    parts: HashMap<DefId, Part>,
+    /// For an assembly: an engine per definition, and per configuration of it that its
+    /// components show.
+    parts: HashMap<PartKey, Part>,
     /// For an assembly: what is kept between solves of the same mates.
     mates: mate::Memo,
     /// A pull on a component, for the next rebuild only.
@@ -504,7 +517,7 @@ impl Engine {
                         Some(Status::Suppressed)
                     )
             }) {
-                let Some(part) = self.parts.get(&c.definition) else {
+                let Some(part) = self.parts.get(&part_key(assembly, c)) else {
                     continue;
                 };
                 let flexible = flexible::is_flexible(c, &part.model);
@@ -540,7 +553,7 @@ impl Engine {
                         Some(Status::Suppressed)
                     )
             }) {
-                let Some(part) = self.parts.get(&c.definition) else {
+                let Some(part) = self.parts.get(&part_key(assembly, c)) else {
                     continue;
                 };
                 let flexible = flexible::is_flexible(c, &part.model);
@@ -568,20 +581,43 @@ impl Engine {
             return Assembled::default();
         };
         // ---- The definitions ----
+        // Each in its active configuration, and in each other configuration a component
+        // shows (SolidWorks' referenced configuration): built once however many show it.
         let mut written = Vec::new();
-        for def in assembly.definitions() {
-            let part = self.parts.entry(def.id).or_insert_with(|| Part {
+        let mut keys: Vec<PartKey> = assembly
+            .definitions()
+            .map(|d| (d.id, None))
+            .chain(assembly.components().map(|c| part_key(assembly, c)))
+            .collect();
+        keys.sort();
+        keys.dedup();
+        for key in &keys {
+            let Some(def) = assembly.definition(key.0) else {
+                continue;
+            };
+            let part = self.parts.entry(*key).or_insert_with(|| Part {
                 // A model no definition has, so the first rebuild is not skipped.
+                source: Arc::new(Model::new()),
                 model: Arc::new(Model::new()),
                 engine: Self::new(),
             });
-            if Arc::ptr_eq(&part.model, &def.model) {
+            if Arc::ptr_eq(&part.source, &def.model) {
                 continue;
             }
-            let mut rebuilt = (*def.model).clone();
+            let mut rebuilt = match key.1 {
+                Some(config) => def.model.with_configuration(config),
+                None => (*def.model).clone(),
+            };
             let done = part.engine.regenerate(&mut rebuilt).stats;
             stats.rebuilt += done.rebuilt;
             stats.reused += done.reused;
+            if key.1.is_some() {
+                // Another configuration than the definition's own: what its rebuild
+                // writes back is kept here, not in the definition.
+                part.source = def.model.clone();
+                part.model = Arc::new(rebuilt);
+                continue;
+            }
             part.model = if rebuilt == *def.model {
                 def.model.clone()
             } else {
@@ -589,16 +625,16 @@ impl Engine {
                 written.push((def.id, rebuilt.clone()));
                 rebuilt
             };
+            part.source = part.model.clone();
         }
-        self.parts
-            .retain(|id, _| assembly.definition(*id).is_some());
+        self.parts.retain(|key, _| keys.contains(key));
 
         // ---- The mates ----
         // Solved from where the components are, with the bodies of their parts (and, for
         // a sub-assembly, of the parts in it) to find the mates' faces in.
         let parts = &self.parts;
         let place = |c: &crate::Component, frame: Frame| -> Option<mate::Placed> {
-            let part = parts.get(&c.definition)?;
+            let part = parts.get(&part_key(assembly, c))?;
             let built = part.engine.evaluation();
             let poses: &[crate::Pose] = if flexible::is_flexible(c, &part.model) {
                 &c.poses
@@ -632,7 +668,7 @@ impl Engine {
         let mut placed: Vec<mate::Placed> = Vec::new();
         let mut inner_mates: Vec<crate::Mate> = Vec::new();
         for c in assembly.components().filter(|c| !c.suppressed) {
-            let Some(part) = parts.get(&c.definition) else {
+            let Some(part) = parts.get(&part_key(assembly, c)) else {
                 continue;
             };
             if flexible::is_flexible(c, &part.model) {
@@ -666,12 +702,12 @@ impl Engine {
                     .map(|(m, r)| r.as_ref().unwrap_or(m)),
             )
             .collect();
-        let structure: Vec<(CompId, DefId, bool, bool, bool)> = assembly
+        let structure: Vec<(CompId, PartKey, bool, bool, bool)> = assembly
             .components()
             .map(|c| {
                 (
                     c.id,
-                    c.definition,
+                    part_key(assembly, c),
                     c.fixed || c.pattern.is_some(),
                     c.suppressed,
                     expanded.contains_key(&c.id),
@@ -857,9 +893,7 @@ impl Engine {
             .references()
             .map(|r| {
                 let at = |end: &crate::MateEnd| -> Result<mate::Located, String> {
-                    let gone = || {
-                        "A component it is measured to is gone or suppressed.".to_owned()
-                    };
+                    let gone = || "A component it is measured to is gone or suppressed.".to_owned();
                     let c = end
                         .component()
                         .and_then(|id| assembly.component(id))
@@ -869,8 +903,8 @@ impl Engine {
                     let on = place(c, frame).ok_or_else(gone)?;
                     mate::locate(end, &on)
                 };
-                let value = at(&r.a)
-                    .and_then(|a| at(&r.b).and_then(|b| crate::equations::measure(&a, &b)));
+                let value =
+                    at(&r.a).and_then(|a| at(&r.b).and_then(|b| crate::equations::measure(&a, &b)));
                 (r.name.clone(), value)
             })
             .collect();
@@ -891,7 +925,7 @@ impl Engine {
                 components.insert(c.id, Status::Suppressed);
                 continue;
             }
-            let Some(part) = self.parts.get(&c.definition) else {
+            let Some(part) = self.parts.get(&part_key(assembly, c)) else {
                 continue;
             };
             let placement = frames.get(&c.id).copied().unwrap_or(c.placement);
@@ -935,7 +969,16 @@ impl Engine {
             let failed = built.failures().count()
                 + built.component_problems().count()
                 + built.mate_failures().count();
-            let status = if failed > 0 {
+            let missing = c
+                .configuration
+                .filter(|id| part.model.configuration(*id).is_none());
+            let status = if missing.is_some() {
+                Status::Warning(format!(
+                    "{name} no longer has the configuration {} showed, so it shows {}: choose one of its configurations with 'component_configuration'.",
+                    c.name,
+                    part.model.active_configuration().name
+                ))
+            } else if failed > 0 {
                 Status::Warning(if part.model.is_assembly() {
                     format!(
                         "{failed} of the components of {name} need attention: open it to see which."
@@ -956,6 +999,19 @@ impl Engine {
             };
             components.insert(c.id, status);
         }
+        // Where a component is belongs to the active configuration: the others keep
+        // theirs (see `asm_config`).
+        let several = model.configurations().len() > 1;
+        let before: Vec<(CompId, crate::ComponentState)> = if several {
+            moved
+                .iter()
+                .map(|(id, _)| *id)
+                .chain(reposed.iter().map(|(id, _)| *id))
+                .filter_map(|id| Some((id, crate::ComponentState::of(assembly.component(id)?))))
+                .collect()
+        } else {
+            Vec::new()
+        };
         if (!written.is_empty() || !moved.is_empty() || !reposed.is_empty())
             && let Some(assembly) = model.assembly_mut()
         {
@@ -972,6 +1028,9 @@ impl Engine {
                     c.placement = frame;
                 }
             }
+        }
+        for (id, was) in before {
+            model.rescope_component(id, was, &crate::Scope::This);
         }
         Assembled {
             instances,
@@ -1045,10 +1104,9 @@ impl Engine {
                             }
                         },
                         Source::Edge(e) => match find_edge(ctx.bodies, e) {
-                            Some(found) => project_edge(
-                                ctx.bodies[found.body].solid.edge(found.id),
-                                plane,
-                            )?,
+                            Some(found) => {
+                                project_edge(ctx.bodies[found.body].solid.edge(found.id), plane)?
+                            }
                             None => {
                                 dangling += 1;
                                 continue;
@@ -1236,21 +1294,20 @@ impl Engine {
                             peet_sheetmetal::BendModel::Allowance(v) => (1u8, v),
                             peet_sheetmetal::BendModel::Deduction(v) => (2u8, v),
                         });
-                    let set_out =
-                        sheet::edge_flange_position_offset(e, &model.parameters).ok();
-                    let values =
-                        (spec.length, spec.angle, spec.offsets, spec.radius, ratio, bend, set_out);
+                    let set_out = sheet::edge_flange_position_offset(e, &model.parameters).ok();
+                    let values = (
+                        spec.length,
+                        spec.angle,
+                        spec.offsets,
+                        spec.radius,
+                        ratio,
+                        bend,
+                        set_out,
+                    );
                     let outline_key = e.outline.and_then(|s| run.out_keys.get(&s).copied());
                     let up_to_key = up_to.map(|p| p.to_array());
-                    let key = hash::of(&(
-                        4u8,
-                        id,
-                        &**e,
-                        run.body_key,
-                        values,
-                        outline_key,
-                        up_to_key,
-                    ));
+                    let key =
+                        hash::of(&(4u8, id, &**e, run.body_key, values, outline_key, up_to_key));
                     self.solid_feature(id, key, run, |bodies| {
                         sheet::apply_edge_flange(id, model, bodies, e, &spec, outline, up_to, key)
                     })
@@ -1403,17 +1460,15 @@ impl Engine {
                     })
                 }
             },
-            FeatureKind::BreakCorner(b) => {
-                match ctx.scalar(&b.size, ScalarKind::Length, "Size") {
-                    Err(m) => fail(m, Output::None),
-                    Ok(size) => {
-                        let key = hash::of(&(23u8, id, &**b, run.body_key, size));
-                        self.solid_feature(id, key, run, |bodies| {
-                            sheet::apply_break_corner(id, model, bodies, b, size, key)
-                        })
-                    }
+            FeatureKind::BreakCorner(b) => match ctx.scalar(&b.size, ScalarKind::Length, "Size") {
+                Err(m) => fail(m, Output::None),
+                Ok(size) => {
+                    let key = hash::of(&(23u8, id, &**b, run.body_key, size));
+                    self.solid_feature(id, key, run, |bodies| {
+                        sheet::apply_break_corner(id, model, bodies, b, size, key)
+                    })
                 }
-            }
+            },
             FeatureKind::Unfold(u) => {
                 let key = hash::of(&(26u8, id, &**u, run.body_key));
                 self.solid_feature(id, key, run, |bodies| {

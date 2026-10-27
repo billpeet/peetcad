@@ -85,8 +85,9 @@ pub use pattern::{
 pub use session::{DocSel, SessionCommand, apply_session, apply_session_json};
 pub use sketch::{Draw, DrawItem, Ent, Measure, ProjectionSel, Relation};
 pub use value::{
-    AxisSel, Bend, BoundSel, Configs, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel,
-    HoleStandard, Input, PlaneSel, PointSel, Regions, RevolveAxis, Side, VertexQuery, VertexSel,
+    AxisSel, Bend, BoundSel, Configs, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel,
+    GeomSel, HoleStandard, Input, PlaneSel, PointSel, Regions, RevolveAxis, Side, VertexQuery,
+    VertexSel,
 };
 
 use peet_document::Document;
@@ -563,6 +564,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             fixed,
             link,
             absolute,
+            configuration,
         } => {
             if *absolute && !*link {
                 return Err("'absolute' is about a link: give it with \"link\": true.".to_owned());
@@ -575,6 +577,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 placing.as_ref(),
                 *fixed,
                 link.then_some(!*absolute),
+                configuration.as_deref(),
             )?;
             done.component = Some(id);
             label
@@ -605,9 +608,13 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             let id = part.resolve(doc)?;
             assembly::unlink(doc, &mut model, id)?
         }
-        Op::Component { component, change } => {
+        Op::Component {
+            component,
+            change,
+            configurations,
+        } => {
             let id = component.resolve(doc)?;
-            let label = assembly::change(doc, &mut model, id, change)?;
+            let label = assembly::change(doc, &mut model, id, change, configurations.as_ref())?;
             if *change == ComponentChange::Delete {
                 done.data.insert(
                     "deleted".to_owned(),
@@ -639,9 +646,13 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.mate = Some(id);
             label
         }
-        Op::EditMate { mate, change } => {
+        Op::EditMate {
+            mate,
+            change,
+            configurations,
+        } => {
             let id = mate.resolve(doc)?;
-            let label = mate::change(doc, &mut model, id, change)?;
+            let label = mate::change(doc, &mut model, id, change, configurations.as_ref())?;
             if *change == MateChange::Delete {
                 done.data.insert(
                     "deleted".to_owned(),
@@ -733,7 +744,8 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
         Op::DeleteReference { name } => equations::delete_reference(doc, &mut model, name)?,
         Op::MakeIndependent { component, name } => {
             let id = component.resolve(doc)?;
-            let label = equations::make_independent(doc, &mut model, &mut done.data, component, name)?;
+            let label =
+                equations::make_independent(doc, &mut model, &mut done.data, component, name)?;
             done.component = Some(id);
             label
         }
@@ -1159,7 +1171,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             if doc.is_assembly() && !parameter() && equations::reaches_component(doc, target) {
                 if configurations.is_some() {
                     return Err(
-                        "An assembly has no configurations of its own: leave 'configurations' out."
+                        "A component's dimension is its part's, set in the configuration of the part the component shows: leave 'configurations' out."
                             .to_owned(),
                     );
                 }
@@ -1173,7 +1185,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                     align: None,
                     flip_dimension: None,
                 };
-                let label = mate::change(doc, &mut model, id, &change)?;
+                let label = mate::change(doc, &mut model, id, &change, configurations.as_ref())?;
                 done.mate = Some(id);
                 label
             } else {
@@ -1245,7 +1257,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             };
             if *configurations != Configs::default() {
                 return Err(
-                    "An assembly has no configurations of its own: leave 'configurations' out."
+                    "A feature of a component is its part's, suppressed in every instance: leave 'configurations' out."
                         .to_owned(),
                 );
             }

@@ -85,16 +85,22 @@ pub(crate) fn measure(a: &Located, b: &Located) -> Result<f64, String> {
     Ok(match (a, b) {
         (Located::Plane(p, n), Located::Plane(q, m)) => {
             if n.normalize_or_zero().cross(m.normalize_or_zero()).length() > PARALLEL {
-                return Err("The two planes are not parallel: there is no one distance between them.".to_owned());
+                return Err(
+                    "The two planes are not parallel: there is no one distance between them."
+                        .to_owned(),
+                );
             }
             (*q - *p).dot(n.normalize_or_zero()).abs()
         }
         (Located::Plane(p, n), Located::Point(q)) | (Located::Point(q), Located::Plane(p, n)) => {
             (*q - *p).dot(n.normalize_or_zero()).abs()
         }
-        (Located::Plane(p, n), Located::Line(q, d)) | (Located::Line(q, d), Located::Plane(p, n)) => {
+        (Located::Plane(p, n), Located::Line(q, d))
+        | (Located::Line(q, d), Located::Plane(p, n)) => {
             if n.normalize_or_zero().dot(d.normalize_or_zero()).abs() > PARALLEL {
-                return Err("The line crosses the plane: there is no one distance between them.".to_owned());
+                return Err(
+                    "The line crosses the plane: there is no one distance between them.".to_owned(),
+                );
             }
             (*q - *p).dot(n.normalize_or_zero()).abs()
         }
@@ -174,8 +180,7 @@ impl Model {
     pub fn kind_at(&self, address: &str) -> Option<ScalarKind> {
         if self.is_assembly() {
             let (c, rest) = self.component_address(address)?;
-            let def = self.assembly()?.definition_of(c)?;
-            return def.model.kind_at(&rest);
+            return self.assembly()?.component_model(c)?.kind_at(&rest);
         }
         let name = address.trim().trim_matches('"').trim();
         if let Some(p) = self.parameters.entries.iter().find(|p| p.name == name) {
@@ -204,10 +209,21 @@ impl Model {
                 .ok_or_else(|| "The component's part is gone.".to_owned())?;
             let id = def.id;
             let mut part = (*def.model).clone();
-            if !part
+            // In the configuration of its part the component shows, as SolidWorks sets it.
+            let shown = assembly
+                .component(c)
+                .and_then(|x| assembly.configuration_of(x));
+            let active = part.active_configuration().id;
+            if let Some(shown) = shown {
+                part.activate_configuration(shown);
+            }
+            let changed = part
                 .set_value_at(&rest, value)
-                .map_err(|e| format!("{} (in {}): {e}", rest, assembly.name_of(c)))?
-            {
+                .map_err(|e| format!("{} (in {}): {e}", rest, assembly.name_of(c)));
+            if shown.is_some() {
+                part.activate_configuration(active);
+            }
+            if !changed? {
                 return Ok(false);
             }
             self.assembly_mut()
@@ -223,12 +239,19 @@ impl Model {
             if p.expression.trim() == literal(value, kind) {
                 return Ok(false);
             }
-            self.set_parameter(name, &literal(value, kind), &crate::config::Scope::default())
-                .map_err(|e| format!("{name}: {e}"))?;
+            self.set_parameter(
+                name,
+                &literal(value, kind),
+                &crate::config::Scope::default(),
+            )
+            .map_err(|e| format!("{name}: {e}"))?;
             return Ok(true);
         }
         let d = self.find_dimension(name).ok_or_else(|| {
-            format!("The part {} has no dimension or parameter '{name}'.", self.name)
+            format!(
+                "The part {} has no dimension or parameter '{name}'.",
+                self.name
+            )
         })?;
         if !d.driving {
             return Err(format!(
@@ -265,14 +288,17 @@ impl Model {
         let Some(assembly) = self.assembly() else {
             return Vec::new();
         };
-        let mut tables: HashMap<crate::DefId, Vec<(String, Quantity)>> = HashMap::new();
+        type Table = Vec<(String, Quantity)>;
+        let mut tables: HashMap<(crate::DefId, Option<crate::ConfigId>), Table> = HashMap::new();
         let mut out = Vec::new();
         for c in assembly.components() {
-            let Some(def) = assembly.definition(c.definition) else {
+            // In the configuration the component shows.
+            let key = (c.definition, assembly.configuration_of(c));
+            let Some(model) = assembly.model_of(c) else {
                 continue;
             };
-            let table = tables.entry(def.id).or_insert_with(|| {
-                let mut part = (*def.model).clone();
+            let table = tables.entry(key).or_insert_with(|| {
+                let mut part = (*model).clone();
                 part.refresh_dimension_values();
                 let mut table: Vec<(String, Quantity)> = part
                     .parameters
@@ -289,11 +315,7 @@ impl Model {
                 );
                 table
             });
-            out.extend(
-                table
-                    .iter()
-                    .map(|(a, q)| (format!("{a}@{}", c.name), *q)),
-            );
+            out.extend(table.iter().map(|(a, q)| (format!("{a}@{}", c.name), *q)));
         }
         out
     }
@@ -312,7 +334,10 @@ impl Model {
                 _ => continue,
             };
             if let Ok(v) = value.evaluate(kind, &self.parameters) {
-                out.push((format!("D1@{}", m.name), Quantity::new(v, quantity_kind(kind))));
+                out.push((
+                    format!("D1@{}", m.name),
+                    Quantity::new(v, quantity_kind(kind)),
+                ));
             }
         }
         for r in assembly.references() {
@@ -341,7 +366,10 @@ impl Model {
         for _ in 0..ROUNDS {
             failures.clear();
             let mut changed = false;
-            let equations = self.assembly().map(|a| a.equations().to_vec()).unwrap_or_default();
+            let equations = self
+                .assembly()
+                .map(|a| a.equations().to_vec())
+                .unwrap_or_default();
             for (i, e) in equations.iter().enumerate() {
                 match self.apply_equation(e) {
                     Ok(c) => changed |= c,
@@ -429,7 +457,12 @@ mod tests {
                 let id = sk
                     .add_dimension(ConstraintKind::Distance(from, to), value)
                     .unwrap();
-                sk.constraint_mut(id).unwrap().dimension.as_mut().unwrap().name = name.to_owned();
+                sk.constraint_mut(id)
+                    .unwrap()
+                    .dimension
+                    .as_mut()
+                    .unwrap()
+                    .name = name.to_owned();
             }
         }
         m.add_extrude(s, Operation::NewBody);
@@ -462,7 +495,8 @@ mod tests {
         assert_eq!(read(&m, "\"Thickness@Cover-1.Part\""), Ok(3.0));
         assert!(read(&m, "\"Width@Sketch1@Plate-9\"").is_err());
         assert_eq!(
-            m.component_address("Width@Sketch1@Plate<2>.Part").map(|(_, a)| a),
+            m.component_address("Width@Sketch1@Plate<2>.Part")
+                .map(|(_, a)| a),
             Some("Width@Sketch1".to_owned())
         );
     }
@@ -523,10 +557,16 @@ mod tests {
         let z = DVec3::Z;
         let plane = |h: f64| Located::Plane(DVec3::new(1.0, 2.0, h), z);
         assert_eq!(measure(&plane(0.0), &plane(308.0)), Ok(308.0));
-        assert_eq!(measure(&plane(5.0), &Located::Point(DVec3::new(9.0, 9.0, -3.0))), Ok(8.0));
+        assert_eq!(
+            measure(&plane(5.0), &Located::Point(DVec3::new(9.0, 9.0, -3.0))),
+            Ok(8.0)
+        );
         assert!(measure(&plane(0.0), &Located::Plane(DVec3::ZERO, DVec3::X)).is_err());
         let line = Located::Line(DVec3::ZERO, DVec3::Z);
-        assert_eq!(measure(&line, &Located::Point(DVec3::new(3.0, 4.0, 7.0))), Ok(5.0));
+        assert_eq!(
+            measure(&line, &Located::Point(DVec3::new(3.0, 4.0, 7.0))),
+            Ok(5.0)
+        );
         assert_eq!(
             measure(&line, &Located::Line(DVec3::new(0.0, 6.0, 0.0), DVec3::Z)),
             Ok(6.0)

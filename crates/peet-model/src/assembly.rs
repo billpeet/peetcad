@@ -194,6 +194,10 @@ pub struct Component {
     /// sub-assembly's coordinates, in place of where its own file has it. Written by the
     /// solve; empty for a rigid one.
     pub poses: Vec<Pose>,
+    /// The configuration of its part it shows (SolidWorks' referenced configuration):
+    /// one of the definition's model's. `None`: the one that model has active. Two
+    /// components of one part can show different configurations. Model schema 12.
+    pub configuration: Option<crate::ConfigId>,
 }
 
 /// Where a component inside a flexible sub-assembly is: its path below the
@@ -248,6 +252,7 @@ impl From<ComponentV11> for Arc<Component> {
             pattern: c.pattern,
             flexible: false,
             poses: Vec::new(),
+            configuration: None,
         })
     }
 }
@@ -395,6 +400,11 @@ pub struct Assembly {
     /// (model schema 12).
     #[serde(default)]
     references: Vec<Arc<crate::equations::ReferenceDimension>>,
+    /// What differs between the assembly's configurations: the components' and the
+    /// mates' states in every configuration other than the active one (model schema 12;
+    /// see [`crate::asm_config`]).
+    #[serde(default)]
+    pub(crate) varying: crate::asm_config::Varying,
 }
 
 /// The assembly layout in schemas 8 through 10, with their feature layouts in definitions.
@@ -483,6 +493,7 @@ impl From<AssemblyV11> for Assembly {
             next_pattern: a.next_pattern,
             equations: Vec::new(),
             references: Vec::new(),
+            varying: Default::default(),
         }
     }
 }
@@ -543,6 +554,7 @@ impl<F: Into<crate::Feature>> From<AssemblyLegacy<F>> for Assembly {
             next_pattern: a.next_pattern,
             equations: Vec::new(),
             references: Vec::new(),
+            varying: Default::default(),
         }
     }
 }
@@ -718,6 +730,7 @@ impl Assembly {
             pattern: None,
             flexible: false,
             poses: Vec::new(),
+            configuration: None,
         }));
         Some(id)
     }
@@ -847,8 +860,9 @@ impl Assembly {
             self.remove_component(component);
         }
         for seed in &seeds {
-            let Some((definition, placement)) =
-                self.component(*seed).map(|c| (c.definition, c.placement))
+            let Some((definition, placement, configuration)) = self
+                .component(*seed)
+                .map(|c| (c.definition, c.placement, c.configuration))
             else {
                 continue;
             };
@@ -863,6 +877,8 @@ impl Assembly {
                     if let Some(c) = self.component_mut(component) {
                         c.pattern = Some(id);
                         c.fixed = false;
+                        // The copy shows its part as its original does.
+                        c.configuration = configuration;
                     }
                     instances.push(PatternInstance {
                         seed: *seed,
@@ -894,6 +910,7 @@ impl Assembly {
         let removed = self.components.remove(index);
         self.mates
             .retain(|m| !m.ends().any(|e| e.component() == Some(id)));
+        self.varying.forget(&self.components, &self.mates);
         self.equations.retain(|e| e.target.component() != id);
         self.references
             .retain(|r| r.a.component() != Some(id) && r.b.component() != Some(id));
@@ -911,7 +928,9 @@ impl Assembly {
     }
 
     /// The reference dimensions, in the order they were added.
-    pub fn references(&self) -> impl ExactSizeIterator<Item = &crate::equations::ReferenceDimension> {
+    pub fn references(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &crate::equations::ReferenceDimension> {
         self.references.iter().map(|r| &**r)
     }
 
@@ -919,7 +938,9 @@ impl Assembly {
     pub fn reference(&self, name: &str) -> Option<&crate::equations::ReferenceDimension> {
         let name = name.trim();
         self.references().find(|r| r.name == name).or_else(|| {
-            let mut alike = self.references().filter(|r| r.name.eq_ignore_ascii_case(name));
+            let mut alike = self
+                .references()
+                .filter(|r| r.name.eq_ignore_ascii_case(name));
             match (alike.next(), alike.next()) {
                 (Some(r), None) => Some(r),
                 _ => None,
@@ -929,7 +950,11 @@ impl Assembly {
 
     /// Adds a reference dimension, or replaces the one of the same name.
     pub fn set_reference(&mut self, reference: crate::equations::ReferenceDimension) {
-        match self.references.iter_mut().find(|r| r.name == reference.name) {
+        match self
+            .references
+            .iter_mut()
+            .find(|r| r.name == reference.name)
+        {
             Some(r) => *r = Arc::new(reference),
             None => self.references.push(Arc::new(reference)),
         }
@@ -1005,7 +1030,9 @@ impl Assembly {
 
     pub fn remove_mate(&mut self, id: MateId) -> Option<Mate> {
         let index = self.mates.iter().position(|m| m.id == id)?;
-        Some(Arc::unwrap_or_clone(self.mates.remove(index)))
+        let removed = Arc::unwrap_or_clone(self.mates.remove(index));
+        self.varying.forget(&self.components, &self.mates);
+        Some(removed)
     }
 
     /// Removes a component, with its mates, and its definition if nothing else uses it.
@@ -1046,8 +1073,10 @@ impl Assembly {
             return false;
         };
         c.definition = definition;
-        // Poses are of the components of the part it was.
+        // Poses and the configuration are of the part it was.
         c.poses.clear();
+        c.configuration = None;
+        self.varying.forget_part(id);
         self.prune();
         true
     }

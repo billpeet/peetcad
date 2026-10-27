@@ -330,6 +330,7 @@ pub fn apply_session(
             fixed,
             link,
             absolute,
+            configuration,
         } => from_document(from).map(|model| {
             model.map(|m| Op::Insert {
                 from: InsertSource::Model(m),
@@ -338,15 +339,18 @@ pub fn apply_session(
                 fixed: *fixed,
                 link: *link,
                 absolute: *absolute,
+                configuration: configuration.clone(),
             })
         }),
         Op::Component {
             component,
             change: ComponentChange::Replace(from),
+            configurations,
         } => from_document(from).map(|model| {
             model.map(|m| Op::Component {
                 component: component.clone(),
                 change: ComponentChange::Replace(InsertSource::Model(m)),
+                configurations: configurations.clone(),
             })
         }),
         _ => None,

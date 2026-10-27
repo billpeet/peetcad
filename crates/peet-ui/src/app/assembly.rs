@@ -831,6 +831,7 @@ impl PeetApp {
         let reply = self.perform(Op::EditMate {
             mate: id.into(),
             change,
+            configurations: None,
         });
         if reply.ok && deleted && self.selected_mate == Some(id) {
             self.selected_mate = None;
@@ -1283,6 +1284,7 @@ impl PeetApp {
             fixed: None,
             link: self.inserting_linked,
             absolute: false,
+            configuration: None,
         });
         if reply.ok {
             let id = reply.json["component"]["id"]
@@ -1322,6 +1324,7 @@ impl PeetApp {
         let reply = self.perform(Op::Component {
             component: CompSel::Id(id),
             change,
+            configurations: None,
         });
         if reply.ok && deleted && self.selected_component == Some(id) {
             self.selected_component = None;
@@ -2231,6 +2234,7 @@ mod tests {
             fixed: None,
             link: true,
             absolute: false,
+            configuration: None,
         });
         assert!(reply.ok, "{}", reply.json);
         app.selected_component = Some(CompId(1));
@@ -2290,6 +2294,7 @@ mod tests {
             fixed: None,
             link: true,
             absolute: false,
+            configuration: None,
         });
         assert!(reply.ok, "{}", reply.json);
         let asm = app.doc.current_id();

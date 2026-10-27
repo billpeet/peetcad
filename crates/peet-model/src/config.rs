@@ -229,7 +229,7 @@ impl Configurations {
 /// Drops the entries of `table` that say nothing: for things that no longer exist, and
 /// those whose value is the same in every configuration. Entries are completed first, so
 /// every one has a value for each of `others`.
-fn tidy<K: Ord + Clone, V: Clone>(
+pub(crate) fn tidy<K: Ord + Clone, V: Clone>(
     table: &mut BTreeMap<K, BTreeMap<ConfigId, V>>,
     others: &[ConfigId],
     current: impl Fn(&K) -> Option<V>,
@@ -483,6 +483,8 @@ impl Model {
             c.parameters.entry(n).or_default().insert(id, v);
         }
         c.next_id += 1;
+        self.copy_assembly(source, id);
+        let c = &mut self.configurations;
         c.list.push(Configuration {
             id,
             name: name.to_owned(),
@@ -576,6 +578,7 @@ impl Model {
             }
         }
         self.configurations.values = values;
+        self.swap_assembly(old, id);
         self.configurations.active = id;
         self.refresh_dimension_values();
         true
@@ -641,6 +644,16 @@ impl Model {
         }
         self.tidy_configurations();
         Ok(())
+    }
+
+    /// The configurations other than the active one.
+    pub(crate) fn other_configurations(&self) -> Vec<ConfigId> {
+        self.configurations.others()
+    }
+
+    /// The configurations a scope means, or `None` for all of them.
+    pub(crate) fn scope_targets(&self, scope: &Scope) -> Result<Option<Vec<ConfigId>>, String> {
+        self.targets(scope)
     }
 
     /// The configurations a scope means, or `None` for all of them.
@@ -831,6 +844,7 @@ impl Model {
             same_held,
         );
         self.configurations.values = values;
+        self.tidy_assembly(&others);
     }
 
     /// Restores the invariants of the configurations after loading a model from a file.

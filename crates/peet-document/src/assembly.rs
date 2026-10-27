@@ -12,37 +12,34 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use peet_io::step_import::StepNode;
-use peet_model::{Assembly, CompId, DefId, Definition, ImportedSolid, Model};
+use peet_model::{Assembly, CompId, DefId, ImportedSolid, Model};
 
 use crate::document::Document;
 use crate::solids::symmetric_eigenvalues;
 
 /// A component of an assembly, through the sub-assemblies it is in.
 #[derive(Clone, Debug)]
-pub struct Leaf<'a> {
+pub struct Leaf {
     /// The components from the assembly's own down to this one.
     pub path: Vec<CompId>,
     /// Their names, joined: `Gearbox-1/Shaft-2`.
     pub name: String,
-    pub definition: &'a Definition,
+    /// What it shows: its part (or sub-assembly) in the configuration the component
+    /// uses.
+    pub model: Arc<Model>,
 }
 
 /// The components of `model`. With `parts_only`, a sub-assembly is replaced by the
 /// components in it (and so on down): what is left are parts. Suppressed components are
-/// left out.
-pub fn leaves(model: &Model, parts_only: bool) -> Vec<Leaf<'_>> {
-    fn collect<'a>(
-        model: &'a Model,
-        parts_only: bool,
-        path: &[CompId],
-        name: &str,
-        out: &mut Vec<Leaf<'a>>,
-    ) {
+/// left out. Each is in the configuration its component shows, and a sub-assembly's
+/// components are as its configuration has them.
+pub fn leaves(model: &Model, parts_only: bool) -> Vec<Leaf> {
+    fn collect(model: &Model, parts_only: bool, path: &[CompId], name: &str, out: &mut Vec<Leaf>) {
         let Some(assembly) = model.assembly() else {
             return;
         };
         for c in assembly.components().filter(|c| !c.suppressed) {
-            let Some(definition) = assembly.definition(c.definition) else {
+            let Some(shown) = assembly.model_of(c) else {
                 continue;
             };
             let mut path = path.to_vec();
@@ -52,13 +49,13 @@ pub fn leaves(model: &Model, parts_only: bool) -> Vec<Leaf<'_>> {
             } else {
                 format!("{name}/{}", c.name)
             };
-            if parts_only && definition.model.is_assembly() {
-                collect(&definition.model, true, &path, &name, out);
+            if parts_only && shown.is_assembly() {
+                collect(&shown, true, &path, &name, out);
             } else {
                 out.push(Leaf {
                     path,
                     name,
-                    definition,
+                    model: shown,
                 });
             }
         }
@@ -125,15 +122,17 @@ const TOUCHING: f64 = 1e-6;
 impl Document {
     /// The name of the component a shown body belongs to, through sub-assemblies.
     fn body_owner(&self, index: usize) -> String {
-        let mut model = &self.model;
+        // Each sub-assembly in the configuration its component shows.
+        let mut inner: Option<Arc<Model>> = None;
         let mut names = Vec::new();
         for id in &self.placed[index].path {
+            let model = inner.as_deref().unwrap_or(&self.model);
             let Some(assembly) = model.assembly() else {
                 break;
             };
             names.push(assembly.name_of(*id).to_owned());
-            match assembly.definition_of(*id) {
-                Some(d) => model = &d.model,
+            match assembly.component_model(*id) {
+                Some(m) => inner = Some(m),
                 None => break,
             }
         }
@@ -246,6 +245,8 @@ pub struct BomRow {
     /// Counted from 1, in the order the parts first appear.
     pub item: usize,
     pub part: String,
+    /// The configuration of the part, if it has more than one.
+    pub configuration: Option<String>,
     /// A sub-assembly, listed as one thing (a bill of materials of the top level only).
     pub is_assembly: bool,
     pub quantity: usize,
@@ -278,7 +279,7 @@ impl Document {
             let material = parts
                 .iter()
                 .find(|l| l.path == placed.path)
-                .and_then(|l| l.definition.model.material.as_ref());
+                .and_then(|l| l.model.material.as_ref());
             mass = match (mass, material) {
                 (Some(sum), Some(material)) => Some(sum + material.mass_kg(m.volume)),
                 _ => None,
@@ -292,13 +293,14 @@ impl Document {
     /// sub-assembly is one line.
     pub fn bill_of_materials(&self, parts_only: bool) -> Vec<BomRow> {
         let mut rows: Vec<BomRow> = Vec::new();
-        let mut models: Vec<&Model> = Vec::new();
+        let mut models: Vec<Arc<Model>> = Vec::new();
         for leaf in leaves(&self.model, parts_only) {
-            let model = &*leaf.definition.model;
-            // The same part, wherever it is used (in sub-assemblies too).
+            let model = &leaf.model;
+            // The same part in the same configuration, wherever it is used (in
+            // sub-assemblies too). Two configurations of a part are two lines.
             let known = models
                 .iter()
-                .position(|m| std::ptr::eq(*m, model) || **m == *model);
+                .position(|m| Arc::ptr_eq(m, model) || **m == **model);
             if let Some(row) = known {
                 rows[row].quantity += 1;
                 rows[row].components.push(leaf.name);
@@ -319,10 +321,12 @@ impl Document {
                         bends: report.bends.len(),
                     }
                 });
-            models.push(model);
+            models.push(model.clone());
             rows.push(BomRow {
                 item: rows.len() + 1,
                 part: model.name.clone(),
+                configuration: (model.configurations().len() > 1)
+                    .then(|| model.active_configuration().name.clone()),
                 is_assembly: model.is_assembly(),
                 quantity: 1,
                 material: model.material.as_ref().map(|m| m.name.clone()),
@@ -388,7 +392,7 @@ impl Document {
                 continue;
             };
             let part = parts.iter().find(|l| l.path == placed.path);
-            let material = part.and_then(|l| l.definition.model.material.as_ref());
+            let material = part.and_then(|l| l.model.material.as_ref());
             match self.bodies[i].mass_properties() {
                 Ok(m) => bodies.push((
                     placed_mass(m, &placed.frame),
@@ -398,7 +402,7 @@ impl Document {
                 Err(e) => problems.push(format!("{}: {e}", self.body_owner(i))),
             }
             if let (None, Some(part)) = (material, part) {
-                let name = part.definition.name().to_owned();
+                let name = part.model.name.clone();
                 if !without_material.contains(&name) {
                     without_material.push(name);
                 }

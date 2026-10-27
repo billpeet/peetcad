@@ -1,6 +1,6 @@
 ---
 name: assemblies
-description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis), equations that size and suppress components from the assembly (SolidWorks addresses like Height@Sketch1@Door-1, reference dimensions, making a component independent), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
+description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis), configurations (a component showing one of its part's configurations, and an assembly's own configurations: left and right hinged, with components and mates suppressed, configured and placed per configuration), equations that size and suppress components from the assembly (SolidWorks addresses like Height@Sketch1@Door-1, reference dimensions, making a component independent), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
 ---
 
 # Assemblies
@@ -136,8 +136,9 @@ rough placement decides which of several possible positions is taken.
   (`set_parameter`): the components follow when the parameter changes.
 - `set` on an assembly takes a mate's value by SolidWorks' name for it, `D1@` the mate's
   name (`D1@Distance1`, in any case), as FabSys sets it, or an assembly parameter by its
-  name. An assembly has no configurations, so `set` there takes none. A dimension of a
-  component's part is set from the assembly too: see "Equations" below.
+  name; with `configurations`, in some of the assembly's configurations (see
+  "Configurations"). A dimension of a component's part is set from the assembly too: see
+  "Equations" below.
 
 ```jsonl
 {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
@@ -612,6 +613,75 @@ door is over 1500 high, so the last `set` suppresses it.
   of that component's part from the assembly. An equation that can't be worked out (a
   dimension that is gone, a component renamed) is listed under `failures` with why: fix
   the address with `set` again.
+
+## Configurations
+
+Two things, as in SolidWorks, and they go together:
+
+- **A component shows one configuration of its part** (SolidWorks' referenced
+  configuration). `insert` takes `configuration`; `component_configuration` changes it
+  (FabSys's `SetSubComponentConfig`). Two components of one part can show different
+  configurations: a door in "R Hinges" beside one in "Default". Without one, a component
+  shows whichever configuration its part has active.
+- **An assembly has configurations of its own**, made with the part operations
+  (`add_configuration`, `configuration`, `edit_configuration`, `delete_configuration`,
+  `configurations`). In each, a component can be suppressed or not, show another
+  configuration of its part, be fixed or not, and be somewhere else; a mate can be
+  suppressed or not and have another value. Use them for variants of one assembly: left
+  and right hinged, a long and a short duct.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 6}
+{"op": "add_configuration", "name": "Thick"}
+{"op": "edit", "feature": "Extrude1", "depth": 20, "configurations": "this"}
+{"op": "configuration", "configuration": "Default"}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Base"}
+{"op": "insert", "part": 1, "name": "Lid", "configuration": "Thick", "at": [0, 0, 40]}
+{"op": "mate", "type": "distance", "distance": 10, "a": {"component": "Base", "face": {"normal": [0, 0, 1]}}, "b": {"component": "Lid", "face": {"normal": [0, 0, -1]}}}
+{"op": "insert", "component": "Base", "name": "Spare", "at": [100, 0, 0]}
+{"op": "edit_configuration", "configuration": "Default", "name": "Closed"}
+{"op": "add_configuration", "name": "Open"}
+{"op": "set", "name": "D1@Distance1", "value": 50, "configurations": "this"}
+{"op": "component_configuration", "component": "Lid", "configuration": "Default"}
+{"op": "suppress", "component": "Spare", "configurations": ["Closed"]}
+{"op": "configurations"}
+{"op": "components"}
+{"op": "configuration", "configuration": "Closed"}
+{"op": "components"}
+{"op": "bom"}
+```
+
+In "Closed" the 20 thick lid is 10 above the base and the spare is suppressed; in "Open"
+the 6 thick lid is 50 above it and the spare is there.
+
+- **What changes where.** `suppress`, `fix`, `place` and `component_configuration` on a
+  component, and `suppress` on a mate, change the active configuration only, unless
+  `configurations` says which (`"all"`, a name, a list). A mate's value (`edit_mate`,
+  `set` `D1@MATE`) changes in all of them until it differs, then in the active one: give
+  `"configurations": "this"` to make it differ. Everything else (names, colours, ends,
+  `flexible`, equations, patterns) is the same in every configuration.
+- **Where a component is belongs to the configuration.** Mates solve each configuration
+  from its own placements, and a solve or a `place` moves a component in the active one
+  only. So place components where they go in each configuration before relying on the
+  mates to choose between two solutions there.
+- **A new configuration is a copy** of the active one (or of `copy`). A component or mate
+  added later is in every configuration: suppress it where it does not belong.
+- **Read it back.** `configurations` lists, for each component and mate that differs,
+  what it is in every configuration; `components` gives each component's `configuration`
+  (where its part has several), and each part its `configurations`. The `bom` gives a
+  part in two configurations as two rows.
+- **A configuration that is not there.** `insert` and `component_configuration` with a
+  name the part doesn't have fail and list its configurations; `configuration` with a
+  name the assembly doesn't have fails the same way. (FabSys's `SetConfiguration` in
+  SolidWorks silently ignores a missing name.) A part that loses the configuration a
+  component shows leaves the component showing its active one, with a warning in
+  `components`.
+- A sub-assembly is a component like a part: it shows one of its configurations, and its
+  own components and mates are as that configuration has them.
+- To change the part a component shows, `open_component` opens the part with its own
+  active configuration: switch to the one to change with `configuration` there.
 
 ## Changing a part of an assembly
 

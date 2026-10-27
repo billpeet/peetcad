@@ -169,6 +169,7 @@ fn cylindrical_names_work_in_mates_and_survive_nested_assemblies() {
             fixed: Some(true),
             link: false,
             absolute: false,
+            configuration: None,
         },
         Undo::Step,
     );
