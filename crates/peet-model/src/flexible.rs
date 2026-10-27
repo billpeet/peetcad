@@ -100,7 +100,7 @@ pub(crate) struct Expanded {
 /// from `next_id` and `next_mate`, counting down, so they meet none of the parent's.
 pub(crate) fn expand(
     c: &Component,
-    definition: &Model,
+    definition: &std::sync::Arc<Model>,
     engine: &Engine,
     fixed: bool,
     next_id: &mut u32,
@@ -156,6 +156,7 @@ pub(crate) fn expand(
                 fixed: path.is_empty() && fixed,
                 bodies: Vec::new(),
                 planes: Vec::new(),
+                models: Vec::new(),
             }
         })
         .collect();
@@ -180,6 +181,12 @@ pub(crate) fn expand(
         placed[k]
             .planes
             .push((rest, reference, peet_math::Plane { frame }));
+    }
+    // The part models, for mates on their sketches.
+    for (path, model, frame) in engine.mate_models(definition) {
+        let (k, rest) = index(&path);
+        let rel = as_built(&ids[k].0).inverse().compose(&frame);
+        placed[k].models.push((rest, model, rel));
     }
 
     // ---- The mates inside, between units ----
@@ -281,6 +288,7 @@ pub(crate) fn rewrite(m: &Mate, expanded: &HashMap<CompId, Expanded>) -> Option<
     let (a, b) = (end(&m.a), end(&m.b));
     let (a2, b2) = match &m.kind {
         MateKind::Width { a2, b2, .. } => (end(a2), b2.as_ref().and_then(end)),
+        MateKind::Symmetric { plane } => (end(plane), None),
         _ => (None, None),
     };
     if a.is_none() && b.is_none() && a2.is_none() && b2.is_none() {
@@ -299,6 +307,8 @@ pub(crate) fn rewrite(m: &Mate, expanded: &HashMap<CompId, Expanded>) -> Option<
         if let (Some(b2), Some(slot)) = (b2, wb2.as_mut()) {
             *slot = b2;
         }
+    } else if let (MateKind::Symmetric { plane }, Some(a2)) = (&mut out.kind, a2) {
+        *plane = a2;
     }
     Some(out)
 }

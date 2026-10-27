@@ -499,7 +499,7 @@ impl Engine {
 
     /// This definition's model and those of its active descendants, where each is in
     /// the definition's coordinates: for mates on their sketches.
-    fn mate_models(&self, model: &Arc<Model>) -> Vec<mate::ComponentModel> {
+    pub(crate) fn mate_models(&self, model: &Arc<Model>) -> Vec<mate::ComponentModel> {
         let mut models = vec![(Vec::new(), model.clone(), Frame::WORLD)];
         if let Some(assembly) = model.assembly() {
             for c in assembly.components().filter(|c| {
@@ -512,9 +512,16 @@ impl Engine {
                 let Some(part) = self.parts.get(&c.definition) else {
                     continue;
                 };
+                let flexible = flexible::is_flexible(c, &part.model);
                 for (mut path, inner, frame) in part.engine.mate_models(&part.model) {
+                    // Where a flexible component's pose puts it, as `mate_planes` has it.
+                    let posed = if flexible {
+                        flexible::correction(&c.poses, part.engine.evaluation(), &path)
+                    } else {
+                        Frame::WORLD
+                    };
                     path.insert(0, c.id);
-                    models.push((path, inner, c.placement.compose(&frame)));
+                    models.push((path, inner, c.placement.compose(&posed.compose(&frame))));
                 }
             }
         }
