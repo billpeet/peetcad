@@ -1,6 +1,6 @@
 ---
 name: assemblies
-description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis), configurations (a component showing one of its part's configurations, and an assembly's own configurations: left and right hinged, with components and mates suppressed, configured and placed per configuration), equations that size and suppress components from the assembly (SolidWorks addresses like Height@Sketch1@Door-1, reference dimensions, making a component independent), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
+description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten; a point kept on a path), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis), configurations (a component showing one of its part's configurations, and an assembly's own configurations: left and right hinged, with components and mates suppressed, configured and placed per configuration), equations that size and suppress components from the assembly (SolidWorks addresses like Height@Sketch1@Door-1, reference dimensions, making a component independent), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
 ---
 
 # Assemblies
@@ -414,6 +414,50 @@ sketch point (10, 5).
 The pin goes to X = 50, three quarters along the slot. The lid is centred on the
 assembly's right plane, hinged on the base's front top edge, and opened to between
 10° and 60°.
+
+### Path mates
+
+**`path`** keeps a point of one component on a path of another: a stay's pin in a curved
+track, a slider on a rail that bends. `a` is the point (a vertex, a sketch point, or
+`"origin": true`); `b` is the path, one end or a list of them joined end to end, all on one
+component: straight and round edges, or a sketch's lines, arcs and circles (sketch the
+track's centreline in the part and use that). The path starts at the first piece's end away
+from the others (a path of one piece runs the way it was drawn).
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "sketch", "on": "top", "name": "Track", "draw": [{"type": "line", "from": [10, 20], "to": [60, 20]}, {"type": "arc", "center": [60, 40], "start": [60, 20], "end": [80, 40]}]}
+{"op": "feature", "feature": "Track"}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-3, -2], "to": [12, 2]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 4}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Plate"}
+{"op": "insert", "part": 2, "name": "Shoe", "at": [30, 25, 0]}
+{"op": "mate", "type": "path", "a": {"component": "Shoe", "origin": true}, "b": [{"component": "Plate", "sketch": "Track", "entity": 1}, {"component": "Plate", "sketch": "Track", "entity": 4}]}
+{"op": "edit_mate", "mate": "PathMate1", "mode": "dimension", "distance": 20}
+{"op": "edit_mate", "mate": "PathMate1", "mode": "percent", "percent": 80}
+{"op": "components"}
+{"op": "mates"}
+```
+
+The shoe's origin goes onto the track at (30, 20), then 20 along it, then 80% of the way:
+round the bend. (The track's line is entity 1 and its arc 4: `feature` lists them.)
+
+- **Where along it:** `mode` `free` (the default: anywhere on the path, so `drag` slides it,
+  stopping at each joint between pieces), `dimension` with `distance` from the path's start
+  (`flip_dimension` measures from its end), `percent`, or `centered`. `edit_mate` changes
+  them.
+- **Which way it faces:** the point's component turns freely unless `follow` (`"x"`, `"y"`
+  or `"z"`: that axis of its own coordinates kept along the path, either way round:
+  SolidWorks' pitch and yaw "follow path") and `roll` (`{"axis": "z", "up": END}`: that axis
+  kept along a direction: a flat face's or plane's normal, a straight edge, an axis;
+  SolidWorks' "up vector") say. Both: the component is held but for its way along the path.
+- It fails if the path's pieces don't join end to end, aren't all on one component, or are
+  splines; or if `a` isn't a point. A distance longer than the path fails with its length.
+- `follow` and `roll` are given when the mate is added: to change them, delete the mate and
+  add it again.
 
 ## Posing what the mates leave free
 

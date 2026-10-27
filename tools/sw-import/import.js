@@ -787,6 +787,97 @@ function importPart(doc, dir) {
       return { type: "coincident", of: [line.start, same ? edge.start : edge.end], with: [{ type: "coincident", of: [line.end, same ? edge.end : edge.start] }] };
     };
     const dimensions = new Map((f.dimensions || []).map(d => [d.fullName, d]));
+    // A distance to a circle's or arc's near or far side (SolidWorks' arc conditions: Min and Max): its two ends
+    // (points, circles or arcs, or a line and a circle or arc), which side of each and which way, measured as
+    // PeetCAD's `sides` measure it. The export's arc end conditions (format 6) say which sides where it has them;
+    // failing those, the sides that give SolidWorks' value, the fewest away from the centre first. Null where the
+    // centres give the value (an ordinary distance) or nothing does.
+    // SolidWorks gives the two slots of a symmetric relation between slots as nulls (format 5; format 6 gives
+    // them by their centres): they are the two slot centres (points no curve ends or turns on) mirrored about
+    // the relation's line, if just one such pair is
+    const usedPoints = new Set(s.segments.flatMap(g => [g.start, g.end, g.center].filter(Boolean).map(p => p.id.join("."))));
+    const slotted = r => {
+      const es = r.entities || [];
+      if (r.type !== "symmetric" || es.length !== 3 || es.filter(e => !e).length !== 2) return es;
+      const axis = es.find(e => e && e.kind === "sketchSegment" && e.start && e.end);
+      if (!axis) return es;
+      const [o, t] = [axis.start, axis.end], u = [t.x - o.x, t.y - o.y], n2 = u[0] * u[0] + u[1] * u[1];
+      if (n2 < 1e-18) return es;
+      const mirror = p => { const q = ((p.x - o.x) * u[0] + (p.y - o.y) * u[1]) / n2; return [2 * (o.x + u[0] * q) - p.x, 2 * (o.y + u[1] * q) - p.y]; };
+      const free = s.points.filter(p => !usedPoints.has(p.id.join(".")));
+      const pairs = [];
+      for (let i = 0; i < free.length; i++) for (let j = i + 1; j < free.length; j++) {
+        const m = mirror(free[i]);
+        if (Math.hypot(m[0] - free[j].x, m[1] - free[j].y) < 1e-8 && Math.hypot(free[i].x - free[j].x, free[i].y - free[j].y) > 1e-8) pairs.push([free[i], free[j]]);
+      }
+      // Not a pair another symmetric relation ties already
+      const tied = new Set(s.relations.filter(x => x !== r && x.type === "symmetric").flatMap(x => (x.entities || []).filter(e => e && e.kind === "sketchPoint").map(e => e.id.join("."))));
+      const open = pairs.filter(([a, b]) => !tied.has(a.id.join(".")) || !tied.has(b.id.join(".")));
+      if (open.length !== 1) return es;
+      return [{ kind: "sketchPoint", ...open[0][0] }, { kind: "sketchPoint", ...open[0][1] }, axis];
+    };
+    const ARC_SIDE = { 0: "center", 1: "center", 2: "near", 3: "far" };
+    const sideDistance = ({ pts, seen, rounds, lines, outLines, dim, value }) => {
+      const ends = [...pts.map(p => ({ id: p.id, kind: "point" })), ...seen.map(p => ({ id: p.id, kind: "point" })),
+        ...rounds.map(g => ({ id: g.id, kind: "round" })), ...lines.map(l => ({ id: l.id, kind: "line" })), ...outLines.map(id => ({ id, kind: "line" }))];
+      if (ends.length !== 2 || !ends.some(e => e.kind === "round")) return null;
+      const now = new Map((peet.ask({ op: "feature", feature: name }).entities || []).map(e => [e.id, e]));
+      const geo = e => {
+        if (e.id === "origin") return { c: [0, 0], r: 0 };
+        const x = now.get(e.id);
+        if (!x) return null;
+        if (e.kind === "line") return x.from && x.to ? { a: x.from, b: x.to } : null;
+        if (e.kind === "point") return x.at ? { c: x.at, r: 0 } : null;
+        const r = typeof x.radius === "number" ? x.radius : x.from && x.at ? Math.hypot(x.from[0] - x.at[0], x.from[1] - x.at[1]) : null;
+        return x.at && r !== null ? { c: x.at, r } : null;
+      };
+      const g = ends.map(geo);
+      if (g.some(x => !x)) return null;
+      const toward = s => s === "near" ? 1 : s === "far" ? -1 : 0;
+      const measure = (sides, along) => {
+        const li = ends.findIndex(e => e.kind === "line");
+        const circular = ends.map(e => e.kind === "round");
+        let delta, radii;
+        if (li >= 0) {
+          if (along !== "straight") return null;
+          const l = g[li], o = g[1 - li], d = [l.b[0] - l.a[0], l.b[1] - l.a[1]], n = Math.hypot(...d);
+          if (n < 1e-9) return null;
+          delta = (d[0] * (o.c[1] - l.a[1]) - d[1] * (o.c[0] - l.a[0])) / n;
+          radii = li === 0 ? [0, o.r] : [o.r, 0];
+        } else {
+          const [a, b] = g;
+          delta = along === "straight" ? Math.hypot(b.c[0] - a.c[0], b.c[1] - a.c[1]) : along === "horizontal" ? b.c[0] - a.c[0] : b.c[1] - a.c[1];
+          radii = [a.r, b.r];
+        }
+        const nested = li < 0 && circular[0] && circular[1] && Math.hypot(g[1].c[0] - g[0].c[0], g[1].c[1] - g[0].c[1]) < Math.abs(radii[0] - radii[1]);
+        let total = Math.abs(delta);
+        for (const k of [0, 1]) total += (nested && radii[k] < radii[1 - k] ? 1 : -1) * toward(sides[k]) * radii[k];
+        return Math.abs(total);
+      };
+      // Which way: along the sketch's x or y where the dimension line says so (in PeetCAD's sketch, which may be
+      // turned), else straight
+      const line = dim.lineDirection && len(dim.lineDirection) > 1e-9 ? unit(dim.lineDirection.slice(0, 3)) : null;
+      const said = line ? (Math.abs(dot(line, sf.x)) > 0.9999 ? "horizontal" : Math.abs(dot(line, sf.y)) > 0.9999 ? "vertical" : null)
+        : dim.displayType === 11 ? "horizontal" : dim.displayType === 12 ? "vertical" : null;
+      const ways = said && level(said) ? [level(said), "straight"] : ["straight"];
+      const options = e => e.kind === "round" ? ["center", "near", "far"] : ["center"];
+      const conditions = Array.isArray(dim.arcEndConditions) && dim.arcEndConditions.some(c => c !== null && c !== undefined)
+        ? dim.arcEndConditions.map(c => ARC_SIDE[c] || "center").sort().join() : null;
+      const away = sides => sides.filter(s => s !== "center").length * 2 + sides.filter(s => s === "far").length;
+      const combos = [];
+      for (const a of options(ends[0])) for (const b of options(ends[1])) combos.push([a, b]);
+      combos.sort((x, y) => away(x) - away(y));
+      for (const sides of combos) {
+        if (conditions !== null && [...sides].sort().join() !== conditions) continue;
+        for (const along of ways) {
+          const m = measure(sides, along);
+          if (m === null || Math.abs(m - value) > 1e-4) continue;
+          if (sides.every(s => s === "center")) return null;
+          return { type: along === "straight" ? "distance" : `${along}_distance`, of: ends.map(e => e.id), sides, value };
+        }
+      }
+      return null;
+    };
     // An equation sets these, so they drive the sketch even where SolidWorks calls them driven; one whose equation
     // is disabled keeps the value it set and still drives it (VIC CT Metering Panel's D5, another value elsewhere)
     const byEquation = new Set((cur.equations || []).map(e => (/^\s*"([^"]+@[^"]+)"\s*=/.exec(e.expression) || [])[1]).filter(Boolean));
@@ -822,8 +913,12 @@ function importPart(doc, dir) {
       // pierces, which is on another sketch or the model, not this one.
       const hiddenPoint = e => e && e.kind === "sketchPoint" && ((r.defined || []).length || r.type === "atpierce") && e.x !== undefined && !byId.has(e.id.join("."))
         && (r.entities || []).some(o => o && o !== e && o.kind === "sketchPoint" && o.x !== undefined && byId.has(o.id.join(".")) && spot(o) === spot(e));
-      for (const e of r.entities || []) {
+      const ents = slotted(r), bySlots = (!!r.entities && ents !== r.entities) || ents.some(e => e && e.kind === "sketchSlot");
+      for (const e0 of ents) {
+        // A slot (format 6 gives it by its centre) is its centre point
+        const e = e0 && e0.kind === "sketchSlot" ? e0.centerPoint || (e0.center && { kind: "sketchPoint", id: [-1, -1], ...e0.center }) : e0;
         if (!e) continue;
+        if (e0 !== e && e.kind === undefined) e.kind = "sketchPoint";
         if (hiddenPoint(e)) { copies.push(e); continue; }
         if (e.kind === "sketchPoint") { const id = pointOf(e); if (id !== undefined) pts.push({ id, e: e.x !== undefined ? e : byId.get(e.id.join(".")) }); else if (e.x !== undefined) unplaced.push(e); }
         else if (e.kind === "sketchSegment") {
@@ -853,6 +948,7 @@ function importPart(doc, dir) {
       let outside = [];
       let lost = false;
       for (const d of r.defined || []) {
+        if (!d && bySlots) continue;
         const p = project(d);
         if (p && p.id !== undefined) {
           outside.push(p);
@@ -1052,6 +1148,12 @@ function importPart(doc, dir) {
         case "distance": {
           if (!dim) break;
           const value = tidy(dim.value * MM);
+          // To a circle's near or far side (SolidWorks' arc conditions, Min and Max), where SolidWorks' value is
+          // not between the centres
+          if (rounds.length) {
+            const sided = sideDistance({ pts, seen, rounds, lines, outLines, dim, value });
+            if (sided) { item = sided; break; }
+          }
           // The two points measured between: the sketch's own, vertices', and circles' centres
           const two = [...pts, ...seen, ...rounds.filter(g => g.center !== undefined && g.g.center).map(g => ({ id: g.center, e: g.g.center }))];
           if (two.length === 2 && anyPoints.length + rounds.length === 2 && anyLines.length === 0) {
@@ -1206,13 +1308,22 @@ function importPart(doc, dir) {
     const dir = unit(sub(at.to, at.from)), whole = len(sub(at.to, at.from));
     const along = q => dot(sub(fromSketch(at.sf, q), at.from), dir);
     // A point's place along the edge, or a line's if it runs across the edge
-    const places = rel.entities.map(e => {
-      if (e.kind === "sketchPoint" && typeof e.x === "number") return along(e);
-      if (e.point && e.point.length === 3) return dot(sub(mm(e.point), at.from), dir);
-      if (e.start && e.end) { const a = along(e.start), b = along(e.end); return Math.abs(a - b) < 1e-6 ? a : null; }
-      return null;
+    // Each entity's places along the edge: a point's, a line's if it runs across the edge; an arc's centre and
+    // its two sides along the edge (SolidWorks' arc conditions: Center, Min and Max), where the export's arc end
+    // conditions (format 6) don't say which
+    const conditions = Array.isArray(d.arcEndConditions) ? d.arcEndConditions : [];
+    const options = rel.entities.map((e, k) => {
+      if (e.kind === "sketchPoint" && typeof e.x === "number") return [along(e)];
+      if (e.point && e.point.length === 3) return [dot(sub(mm(e.point), at.from), dir)];
+      if (e.type === "arc" && e.center && typeof e.radius === "number") {
+        const c = along(e.center), r = e.radius * MM;
+        return conditions[k] === 2 || conditions[k] === 3 ? [c - r, c + r] : conditions[k] === 1 ? [c] : [c, c - r, c + r];
+      }
+      if (e.start && e.end) { const a = along(e.start), b = along(e.end); return Math.abs(a - b) < 1e-6 ? [a] : []; }
+      return [];
     });
-    if (places.some(x => x === null) || Math.abs(Math.abs(places[0] - places[1]) - want) > 1e-3) return null;
+    const places = options[0].flatMap(p => options[1].map(q => [p, q])).find(([p, q]) => Math.abs(Math.abs(p - q) - want) <= 1e-3);
+    if (!places) return null;
     const middle = (places[0] + places[1]) / 2;
     if (Math.abs(middle - whole / 2) < 1e-6) return null;
     return (middle < whole / 2) === at.startAtFrom ? "offset_start" : "offset_end";

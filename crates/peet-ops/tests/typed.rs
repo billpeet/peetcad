@@ -39,6 +39,7 @@ fn plate(doc: &mut Document) {
                     value: Some(80.into()),
                     name: Some("width".to_owned()),
                     driven: false,
+                    sides: None,
                 }
                 .into(),
             ],

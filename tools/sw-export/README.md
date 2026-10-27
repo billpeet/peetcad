@@ -61,6 +61,30 @@ For each configuration:
   sub-assembly its `solving` ("rigid" or "flexible", SolidWorks' "Solve as"; added
   without a new format version, so an older export has none).
 
+Added in format 6:
+
+- A dimension's `arcEndConditions`: where on a circle or arc each of its two ends is
+  measured (`IDimension.GetArcEndCondition`, swArcEndCondition_e: 0 none, 1 centre, 2 min,
+  3 max). A mate's `firstArcCondition` and `secondArcCondition` likewise for a distance mate.
+- A sketch's `slots` (centre, centre point, slot points, length, width), and each relation's
+  `entityTypes` (`GetEntitiesType`). SolidWorks gives the slots of a symmetric relation
+  between two slots as null entities: where two slots' centres are mirror images about the
+  relation's line, they are written in their place as `sketchSlot`s, with `resolved` saying so.
+- A path mate's `pathSelections`: what editing the mate selects (its point and the path's
+  edges or sketch segments, each with its component and selection mark). SolidWorks 2018
+  has no `IPathMateFeatureData` (it is from 2019) and gives the path as an empty mate entity,
+  so the mate is edited (Edit Feature), the selections read, and the edit cancelled. Skipped
+  with `--no-selections`.
+- A composite curve's `curve`: its edges (`IReferenceCurve.GetSegments`). Its definition is
+  no longer read in an assembly, where it faults SolidWorks 2018 (RPC_E_SERVERFAULT).
+- Assemblies, per configuration: `suppressedChildren`, the components of each suppressed
+  sub-assembly (which SolidWorks doesn't list, though mates can name them), read from the
+  sub-assembly's own document in the configuration the component shows, with `transform`
+  (in this assembly, by the component's transform) and `ownTransform`;
+  `massProperties` (volume, area, mass, centre of mass, SolidWorks' `box`, and `tightBox`
+  from the bodies' extreme points); and with `--step`, a STEP file of the configuration
+  (`<file>.<configuration>.step`), as for parts.
+
 A configuration SolidWorks made for the flat pattern (`…SM-FLAT-PATTERN`) has its bodies
 only: their box is the flat size.
 

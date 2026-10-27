@@ -184,12 +184,11 @@ const MATE_KINDS = {
   MateCoincident: "coincident", MateConcentric: "concentric", MateParallel: "parallel", MateDistanceDim: "distance", MateWidth: "width",
   MateSlot: "slot", MateLimitPlanarAngleDim: "limit_angle", MateLimitAngleDim: "limit_angle", MateLimitDistanceDim: "limit_distance",
   MateSymmetric: "symmetric",
+  MatePath: "path",
   // SolidWorks' coincident of two origins (or coordinate systems): the points together
   MateCoordinate: "coincident",
 };
-const WHY_NOT = {
-  MatePath: "PeetCAD has no path mate: it needs the path (a chain of edges or sketch curves), which the export doesn't give (the end is empty), and a position along it",
-};
+const WHY_NOT = {};
 // SolidWorks' Front Plane is XY, PeetCAD's top; its Top Plane is XZ, PeetCAD's front (whose normal is -Y where
 // SolidWorks' is +Y); Right is YZ in both.
 const STANDARD_PLANES = { "Front Plane": "top", "Top Plane": "front", "Right Plane": "right" };
@@ -362,6 +361,123 @@ function findSketchEntity(file, e, transform) {
     return found ? { sketch: s.name, entity: found.id, element: "axis", dir: norm3(sub3(at(found.to), at(found.from))) } : null;
   }
   return null;
+}
+
+/**
+ * The sketch curves of a part as PeetCAD has them, in the part's coordinates (mm): for each line, arc and circle
+ * of each sketch, {sketch, entity, kind, construction, a, b (a line's ends; an arc's), c, n, r (a circle's or
+ * arc's centre, normal and radius)}, and the sketch's `used` (SolidWorks' part export has features made of it).
+ */
+const curveCache = new Map();
+function sketchCurves(file) {
+  if (curveCache.has(file)) return curveCache.get(file);
+  const sketches = ((askView(file, [{ op: "features" }])[0] || {}).features || []).filter(f => /sketch/i.test(f.type || ""));
+  const replies = sketches.length ? askView(file, sketches.map(f => ({ op: "feature", feature: f.id }))) : [];
+  const sw = exportOf(path.basename(splitView(file)[0], ".peet") + ".sldprt");
+  const swSketches = new Map();
+  if (sw) {
+    let exp = null;
+    try { exp = JSON.parse(fs.readFileSync(sw)); } catch { }
+    const cfg = exp && (exp.configurations || [])[0];
+    walkFeatures(cfg && cfg.features, x => swSketches.set(x.name, x));
+  }
+  const out = [];
+  replies.forEach((s, i) => {
+    if (!s || !s.plane || !s.entities) return;
+    const { origin, x, y, normal } = s.plane;
+    const at = q => [0, 1, 2].map(k => origin[k] + q[0] * x[k] + q[1] * y[k]);
+    const own = swSketches.get(s.name || sketches[i].name);
+    const used = !!(own && (own.children || []).length);
+    for (const n of s.entities) {
+      const base = { sketch: s.name || sketches[i].name, entity: n.id, construction: !!n.construction, used };
+      if (n.type === "line") out.push({ ...base, kind: "line", a: at(n.from), b: at(n.to) });
+      else if (n.type === "circle") out.push({ ...base, kind: "circle", c: at(n.at), n: normal, r: n.radius });
+      else if (n.type === "arc") out.push({ ...base, kind: "arc", c: at(n.at), n: normal, r: len3(sub3(at(n.from), at(n.at))), a: at(n.from), b: at(n.to) });
+    }
+  });
+  curveCache.set(file, out);
+  return out;
+}
+
+/** How far a point is from a sketch curve of `sketchCurves` (mm). */
+function offCurve(p, g) {
+  if (g.kind === "line") {
+    const d = sub3(g.b, g.a), l = len3(d);
+    if (l < 1e-9) return len3(sub3(p, g.a));
+    const t = Math.max(0, Math.min(l, dot3(sub3(p, g.a), d) / l));
+    return len3(sub3(p, g.a.map((v, k) => v + d[k] * t / l)));
+  }
+  const v = sub3(p, g.c), h = dot3(v, g.n), q = sub3(v, g.n.map(x => x * h)), ql = len3(q);
+  const radial = Math.hypot(h, ql - g.r);
+  if (g.kind === "circle" || ql < 1e-9) return radial;
+  // On the arc's circle, between its ends (counter-clockwise about the normal from a to b)
+  const ang = w => { const u = sub3(w, g.c); return Math.atan2(dot3(cross3(sub3(g.a, g.c), u), g.n), dot3(sub3(g.a, g.c), u)); };
+  const wrap = t => (t + 2 * Math.PI) % (2 * Math.PI);
+  const end = wrap(ang(g.b)) || 2 * Math.PI, here = wrap(ang(p));
+  return here <= end + 1e-9 ? radial : Math.min(len3(sub3(p, g.a)), len3(sub3(p, g.b)));
+}
+const cross3 = (a, b) => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
+
+/**
+ * A path mate's path as PeetCAD ends on `comp`'s part `file`. Format 6 exports what editing the mate selects
+ * (`pathSelections`): the sketch segments (or edges) of the path. Format 5 has nothing for it: then the path is
+ * the sketch curve the point is on where SolidWorks has it (a sketch no feature is made of, and not a
+ * construction line, first), continued by the curves of its sketch joined to it end to end, one way on.
+ * Returns {ends, how} or {error}.
+ */
+function pathEnds(f, comp, file, pointAt) {
+  const curves = sketchCurves(file);
+  const component = comp.path.split("/");
+  const endFor = g => ({ component, sketch: g.sketch, entity: g.entity });
+  const sel = ((f.pathSelections || {}).selections || []).filter(s => s.entity && s.component && s.component.split("/")[0] === component[0]);
+  if (sel.length) {
+    const back = inverse(matrixOf(comp.transform));
+    const mm = p => p.map(v => v * MM);
+    const ends = [];
+    for (const s of sel) {
+      const e = s.entity;
+      if (e.kind === "sketchSegment") {
+        // In its sketch's own coordinates: found among the curves of the sketch of that name by its ends' or its
+        // centre's distances from the others, which no sketch frame changes
+        const pts = [e.start, e.end, e.center].filter(Boolean).map(q => [q.x * MM, q.y * MM]);
+        const span = (list) => list.length > 1 ? Math.hypot(list[0][0] - list[1][0], list[0][1] - list[1][1]) : null;
+        const want = e.type === "arc" ? { kind: "arc", r: e.radius * MM, chord: span(pts) } : { kind: "line", length: span(pts) };
+        const hits = curves.filter(g => g.sketch === e.sketch && (want.kind === "line" ? g.kind === "line" && Math.abs(len3(sub3(g.b, g.a)) - want.length) < TOL
+          : (g.kind === "arc" || g.kind === "circle") && Math.abs(g.r - want.r) < TOL));
+        if (hits.length !== 1) return { error: `the path's ${e.type} in ${e.sketch} is ${hits.length ? "one of several" : "not"} in ${viewName(file)}'s sketch` };
+        ends.push(endFor(hits[0]));
+      } else if (e.kind === "edge") {
+        // An edge picked in the assembly: its geometry may be the assembly's or the part's
+        const shapes = [shapeOf({ entity: e }, comp)];
+        const moved = { ...e, start: e.start && toWorld(back, e.start), end: e.end && toWorld(back, e.end),
+          circle: e.circle && [...toWorld(back, e.circle.slice(0, 3)), ...toWorld({ R: back.R, t: [0, 0, 0] }, e.circle.slice(3, 6)), e.circle[6]] };
+        shapes.push(shapeOf({ entity: moved }, comp));
+        const found = shapes.filter(Boolean).map(sh => findIn(file, sh)).find(x => x && x.edge);
+        if (!found) return { error: `an edge of the path is not in ${viewName(file)}` };
+        ends.push({ component, edge: found.edge });
+      } else return { error: `a path piece SolidWorks gives as ${e.kind}` };
+    }
+    return { ends, how: "from the mate's selections" };
+  }
+  if (!pointAt) return { error: "the export has no path (format 5) and no place for the point" };
+  const on = curves.filter(g => offCurve(pointAt, g) < TOL);
+  const rank = g => (g.used ? 2 : 0) + (g.construction ? 1 : 0);
+  const best = Math.min(...on.map(rank));
+  const first = on.filter(g => rank(g) === best);
+  if (first.length !== 1) return { error: first.length ? `the point is on ${first.length} sketch curves of ${viewName(file)} alike (${first.map(g => g.sketch).join(", ")}); the export (format 5) has no path` : `the point is on no sketch curve of ${viewName(file)}; the export (format 5) has no path` };
+  // Continued end to end through its sketch while just one curve goes on from an end
+  const chain = [first[0]];
+  const endsOf = g => g.kind === "circle" ? [] : [g.a, g.b];
+  let open = endsOf(first[0]);
+  for (let guard = 0; guard < 100 && open.length; guard++) {
+    const next = [];
+    for (const p of open) {
+      const touching = curves.filter(g => g.sketch === first[0].sketch && !chain.includes(g) && rank(g) === best && endsOf(g).some(q => len3(sub3(p, q)) < TOL));
+      if (touching.length === 1) { chain.push(touching[0]); next.push(...endsOf(touching[0]).filter(q => len3(sub3(p, q)) >= TOL)); }
+    }
+    open = next;
+  }
+  return { ends: chain.map(endFor), how: `the export (format 5) has no path: the ${first[0].kind} of ${first[0].sketch} the point is on where SolidWorks has it${chain.length > 1 ? `, and ${chain.length - 1} joined to it` : ""}` };
 }
 
 /** The reference planes of a part, with where each is: {name, origin, normal}. */
@@ -710,6 +826,7 @@ function mateOp(f, byPath, name, want, row) {
   if (!kind) { row.result = "not supported"; row.why = WHY_NOT[f.type] || `PeetCAD has no ${f.type.replace(/^Mate/, "")} mate (parity A4)`; return null; }
   const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partOf(comp).view || null : null;
   const named = (f.mate.entities || []).map(e => e.component).filter(c => c && c !== name);
+  if (kind === "path") return pathOp(f, byPath, name, want, row, partFile, named);
   const ends = (f.mate.entities || []).map(e => endOf(e, byPath, name, partFile, named));
   const bad = ends.find(e => e.error);
   if (bad) { row.result = bad.unmatched ? "failed" : "not supported"; row.why = bad.error; return null; }
@@ -795,6 +912,61 @@ function mateOp(f, byPath, name, want, row) {
   return op;
 }
 
+/**
+ * The `mate` operation for SolidWorks' path mate `f`: the point (its first end), the path (`pathEnds`), and where
+ * along it. Format 5 exports neither SolidWorks' path constraint (free, a distance or a percentage along the
+ * path) nor which end a distance is from, only the dimension D1, which a path mate has whichever it is: so the
+ * mate is tried as D1 from the path's start, from its end, and free (`row.alternatives`, tried by `addMate`),
+ * and the one that leaves the components where SolidWorks has them is kept.
+ */
+function pathOp(f, byPath, name, want, row, partFile, named) {
+  const [pe, ge] = f.mate.entities || [];
+  if (!pe || !ge) { row.result = "not supported"; row.why = "a path mate without two ends"; return null; }
+  let point = endOf(pe, byPath, name, partFile, named);
+  // A sketch point the part's import doesn't have (a sketch of a point alone, which no feature uses): a vertex
+  // there, or the centre of a round edge there, is the same point
+  const pointComp = pe.component && byPath.get(pe.component);
+  const pointFile = pointComp && partFile(pointComp);
+  if (point.error && pe.params && pointFile) {
+    const p = toWorld(inverse(matrixOf(pointComp.transform)), pe.params.slice(0, 3)).map(v => v * MM);
+    const { edges } = geometryOf(pointFile);
+    const vertex = edges.flatMap(g => [g.from, g.to]).find(q => q && len3(sub3(q, p)) < TOL);
+    const round = edges.find(g => g.curve === "circle" && g.center && len3(sub3(g.center, p)) < TOL);
+    const component = pe.component.split("/");
+    if (vertex) point = { component, vertex: { at: vertex.map(tidy) }, element: "point" };
+    else if (round) point = { component, edge: { body: round.body, index: round.index }, element: "point" };
+    if (!point.error) row.ends = [`its point (${pe.entity && pe.entity.sketch ? `in ${pe.entity.sketch}, which ${viewName(pointFile)} hasn't` : "not found"}) as the ${vertex ? "vertex" : "centre of the round edge"} where SolidWorks has it`];
+  }
+  if (point.error) { row.result = point.unmatched ? "failed" : "not supported"; row.why = point.error; return null; }
+  if (point.element !== "point") { row.result = "not supported"; row.why = "a path mate whose first end is not a point"; return null; }
+  const comp = byPath.get(ge.component);
+  if (!comp) { row.result = "not supported"; row.why = `its path's component ${ge.component} is not in the assembly`; return null; }
+  const file = partFile(comp);
+  if (!file) { row.result = "not supported"; row.why = "the path's part was not imported"; return null; }
+  for (const c of [point.component, ge.component.split("/")]) if (c && !want.has(c[0])) { row.result = "left out"; row.why = "a component it joins was left out"; return null; }
+  // Where SolidWorks has the point, in the path's part
+  const pointAt = pe.params ? toWorld(inverse(matrixOf(comp.transform)), pe.params.slice(0, 3)).map(v => v * MM) : null;
+  const pathAt = pathEnds(f, comp, file, pointAt);
+  if (pathAt.error) { row.result = "failed"; row.why = pathAt.error; return null; }
+  row.note = `its path ${pathAt.how}`;
+  const { guessed, element, sign, note, ...a } = point;
+  const op = { op: "mate", type: "path", name: f.name, a, b: pathAt.ends };
+  const d = (f.dimensions || [])[0];
+  if (d && typeof d.value === "number") {
+    // A length along the path (valueType 0); otherwise a fraction of it
+    if (d.valueType === 0) { op.mode = "dimension"; op.distance = tidy(d.value * MM); }
+    else { op.mode = "percent"; op.percent = tidy(d.value <= 1 ? d.value * 100 : d.value); }
+    const { mode, distance, percent, ...free } = op;
+    row.alternatives = [
+      { op: { ...op, flip_dimension: true }, note: `D1 (${op.distance !== undefined ? op.distance + " mm" : op.percent + "%"}) from the path's end` },
+      { op: free, note: "free along the path: D1 doesn't hold where SolidWorks has the components (the export doesn't say whether it is a free path mate)" },
+    ];
+  }
+  row.waits = [point.component, ge.component.split("/")].some(c => c && (byPath.get(c[0]) || {}).suppression === 0) ? "a component it joins is suppressed" : undefined;
+  if (f.suppressed) op.suppressed = true;
+  return op;
+}
+
 /** How far from SolidWorks' placements (`want`) the components a `components` reply lists are: the worst. */
 function offFrom(want, components) {
   let worst = 0;
@@ -818,8 +990,27 @@ function addMate(peet, f, op, row, want) {
     row.why = reply.error || (reply.mate && (reply.mate.message || reply.mate.status));
     return false;
   }
-  const now = peet.ask({ op: "components" });
-  const moved = tidy(offFrom(want, now.components));
+  let now = peet.ask({ op: "components" });
+  let moved = tidy(offFrom(want, now.components));
+  // What the export doesn't settle (a path mate's constraint): the others, if one leaves things nearer where
+  // SolidWorks has them
+  if (row.alternatives && moved > 1e-3 && !f.suppressed) {
+    let best = { moved, op, note: null };
+    for (const alt of row.alternatives) {
+      peet.restore(mark);
+      const other = peet.apply(alt.op);
+      const placed = other.ok && other.mate && other.mate.status === "ok" ? peet.ask({ op: "components" }) : null;
+      const off = placed ? tidy(offFrom(want, placed.components)) : Infinity;
+      if (off < best.moved) best = { moved: off, op: alt.op, note: alt.note };
+      if (off <= 1e-3) break;
+    }
+    peet.restore(mark);
+    peet.apply(best.op);
+    now = peet.ask({ op: "components" });
+    moved = tidy(offFrom(want, now.components));
+    if (best.note) row.note = `${row.note ? row.note + "; " : ""}${best.note}`;
+  }
+  delete row.alternatives;
   row.result = "imported";
   delete row.why;
   if (moved) row.moved = moved;
@@ -893,6 +1084,8 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
   const placeOf = c => local ? then(matrixOf(c.transform), local) : matrixOf(c.transform);
   const top = all.filter(c => !c.path.includes("/"));
   const byPath = new Map(all.map(c => [c.path, c]));
+  // With the components of suppressed sub-assemblies, which mates can name
+  const mateByPath = new Map(withHidden(all, listed ? null : cfg).map(c => [c.path, c]));
   const want = new Map();
 
   for (const c of top) {
@@ -957,7 +1150,7 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
     const row = { mate: f.name, type: f.type, suppressed: !!f.suppressed };
     report.mates.push(row);
     if (f.suppressed && liveIn.has(f.name)) { row.result = "left for another configuration"; row.deferredTo = liveIn.get(f.name); continue; }
-    const op = mateOp(f, byPath, name, want, row);
+    const op = mateOp(f, mateByPath, name, want, row);
     if (op) addMate(peet, f, op, row, want);
   }
   if (others.length) {
@@ -981,10 +1174,12 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
   const missing = report.components.filter(c => c.result !== "inserted").length + live.filter(m => m.result !== "imported").length;
   const partsOff = report.components.some(c => c.partVerdict);
   report.verdict = verdictOf(worst, missing, partsOff);
+  report.mass = compareMass(peet, cfg);
   if (cfg) report.configurations.unshift({
     name: cfg.name, active: true, verdict: report.verdict, off_mm: report.off_mm, freedom,
     components: report.components.filter(c => c.result === "inserted" && !c.suppressed).length,
     matesLive: live.length, matesImported: live.filter(m => m.result === "imported").length,
+    mass: report.mass,
   });
   fs.writeFileSync(outFile.replace(/\.peet$/, ".jsonl"), peet.script.map(o => typeof o === "string" ? o : JSON.stringify(o)).join("\n") + "\n");
   fs.writeFileSync(outFile.replace(/\.peet$/, ".report.json"), JSON.stringify(report, null, 1));
@@ -1064,7 +1259,7 @@ function importConfiguration(peet, report, { name, cfg, o, all, top, placeOf, lo
     if (!first) { mrow.result = "not in the active configuration"; continue; }
     if (first.result === "left for another configuration" && first.deferredTo === o.name) {
       // Added here, where SolidWorks describes its ends; suppressed where SolidWorks has it suppressed
-      const op = mateOp(f, obyPath, name, owant, mrow);
+      const op = mateOp(f, new Map(withHidden(oall, o).map(c => [c.path, c])), name, owant, mrow);
       if (op && addMate(peet, f, op, mrow, owant)) {
         const suppressedIn = all.filter(x => x !== o && (matesOf(x).get(mname) || {}).suppressed).map(x => x.name);
         if (suppressedIn.length) peet.apply({ op: "suppress", mate: mname, configurations: suppressedIn });
@@ -1121,6 +1316,34 @@ function importConfiguration(peet, report, { name, cfg, o, all, top, placeOf, lo
   row.componentsLive = top.filter(c => (obyPath.get(c.path) || {}).suppression !== 0 && (report.components.find(r => r.component === c.path) || {}).result === "inserted").length;
   row.matesLive = live.length;
   row.matesImported = live.filter(m => m.result === "imported").length;
+  row.mass = compareMass(peet, o);
+}
+
+/**
+ * The assembly's volume and box as PeetCAD measures them (`mass`), against SolidWorks' mass properties of the
+ * configuration (format 6: `massProperties`), so that the parts' geometry where they are is checked and not only
+ * their placements. SolidWorks' box is the bodies' extreme points where the export has them (`tightBox`), else its
+ * own (which can be loose); PeetCAD's is its components' boxes placed, which is loose round a turned part: so a box
+ * is only said to differ where PeetCAD's doesn't hold SolidWorks'. Null without SolidWorks' numbers.
+ */
+function compareMass(peet, swCfg) {
+  const sw = swCfg && swCfg.massProperties;
+  if (!sw || typeof sw.volume !== "number") return null;
+  const reply = peet.ask({ op: "mass" });
+  const total = reply && reply.total;
+  if (!total) return { error: (reply && reply.error) || "no mass" };
+  const volume = sw.volume * 1e9;
+  const out = { volume_mm3: tidy(total.volume_mm3), sw_volume_mm3: tidy(volume), volume_ratio: tidy(total.volume_mm3 / volume) };
+  const swBox = sw.tightBox || sw.box;
+  if (Array.isArray(swBox) && swBox.length >= 6 && total.min && total.max) {
+    const lo = swBox.slice(0, 3).map(v => v * MM), hi = swBox.slice(3, 6).map(v => v * MM);
+    // How far SolidWorks' box reaches outside PeetCAD's (0 if PeetCAD's holds it), and how much bigger PeetCAD's is
+    const outside = Math.max(0, ...[0, 1, 2].flatMap(k => [total.min[k] - lo[k], hi[k] - total.max[k]]));
+    const looser = Math.max(0, ...[0, 1, 2].flatMap(k => [lo[k] - total.min[k], total.max[k] - hi[k]]));
+    Object.assign(out, { min: total.min, max: total.max, sw_min: lo.map(tidy), sw_max: hi.map(tidy), sw_box: sw.tightBox ? "extreme points" : "SolidWorks' box", box_outside_mm: tidy(outside), box_looser_mm: tidy(looser) });
+  }
+  out.matches = Math.abs(out.volume_ratio - 1) < 1e-4 && !(out.box_outside_mm > 1e-2);
+  return out;
 }
 
 /** The components a `components` reply lists, and those that move in its flexible sub-assemblies, by path. */
@@ -1154,6 +1377,32 @@ function flexibleOf(c, all) {
     if (apart(then(matrixOf(x.transform), back), matrixOf(mine.transform)) > 1e-3) return "inferred";
   }
   return null;
+}
+
+/**
+ * A configuration's components with, under each suppressed sub-assembly, its components: SolidWorks lists none
+ * under one, but mates can name its parts (they wait for it). Format 6 exports them (`suppressedChildren`); else
+ * they are taken from the sub-assembly's own export, in the configuration it shows, placed by its transform. For
+ * finding mates' ends only: what is inserted is as before.
+ */
+function withHidden(list, cfg) {
+  const out = [...list];
+  const listed = new Set(list.map(c => c.path));
+  const exported = (cfg && cfg.suppressedChildren) || [];
+  for (const c of list) {
+    if (c.suppression !== 0 || !/\.sldasm$/i.test(c.file || "") || list.some(x => x.path.startsWith(c.path + "/"))) continue;
+    const mine = exported.filter(x => x.path.startsWith(c.path + "/"));
+    if (mine.length) { for (const x of mine) if (!listed.has(x.path)) out.push({ ...x, hidden: true }); continue; }
+    const own = ownComponents(c);
+    if (!own || !c.transform) continue;
+    const placed = matrixOf(c.transform);
+    for (const [p, x] of own) {
+      if (!x.transform || listed.has(c.path + "/" + p)) continue;
+      const m = then(matrixOf(x.transform), placed);
+      out.push({ ...x, path: c.path + "/" + p, transform: [...m.R.flat(), ...m.t, 1, 0, 0, 0], hidden: true });
+    }
+  }
+  return out;
 }
 
 /** A sub-assembly's components as its own export has them (in the configuration its parent uses), by path. */

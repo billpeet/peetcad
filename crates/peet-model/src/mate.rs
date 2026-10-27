@@ -169,6 +169,64 @@ pub enum MateKind {
     Symmetric {
         plane: MateEnd,
     },
+    /// A point of the first end's component kept on a path of the second's (SolidWorks'
+    /// path mate): `Mate::a` is a point (a vertex, a sketch point, an origin), `Mate::b`
+    /// the path's first piece and `more` the rest, all on one component, joined end to
+    /// end: straight or round edges, and sketch lines, arcs and circles. `along` says
+    /// where on the path: anywhere (`Free`), a length from its start (`Dimension`, from
+    /// its end with `flip_dimension`), a percentage of its length, or half way.
+    /// `follow` keeps an axis of the point's component along the path (SolidWorks'
+    /// pitch and yaw control, "follow path"); `roll` another of its axes along a
+    /// direction (its "up vector").
+    Path {
+        more: Vec<MateEnd>,
+        along: WidthMode,
+        follow: Option<PathAxis>,
+        roll: Option<PathRoll>,
+    },
+}
+
+/// An axis of a component's own coordinates.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PathAxis {
+    X,
+    Y,
+    Z,
+}
+
+impl PathAxis {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::X => "x",
+            Self::Y => "y",
+            Self::Z => "z",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "x" | "X" => Some(Self::X),
+            "y" | "Y" => Some(Self::Y),
+            "z" | "Z" => Some(Self::Z),
+            _ => None,
+        }
+    }
+
+    fn vector(self) -> DVec3 {
+        match self {
+            Self::X => DVec3::X,
+            Self::Y => DVec3::Y,
+            Self::Z => DVec3::Z,
+        }
+    }
+}
+
+/// A path mate's roll control: an axis of the point's component kept along a direction
+/// (a flat face's or a plane's normal, a straight edge or an axis), either way round.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PathRoll {
+    pub axis: PathAxis,
+    pub up: MateEnd,
 }
 
 /// Position a tab within the available clearance, measured from the first width end.
@@ -206,6 +264,7 @@ impl MateKind {
             Self::LimitAngle { .. } => "limit_angle",
             Self::LimitDistance { .. } => "limit_distance",
             Self::Symmetric { .. } => "symmetric",
+            Self::Path { .. } => "path",
         }
     }
 
@@ -223,6 +282,7 @@ impl MateKind {
             Self::LimitAngle { .. } => "LimitAngle",
             Self::LimitDistance { .. } => "LimitDistance",
             Self::Symmetric { .. } => "Symmetric",
+            Self::Path { .. } => "PathMate",
         }
     }
 }
@@ -332,7 +392,17 @@ impl Mate {
             MateKind::Symmetric { plane } => (Some(plane), None),
             _ => (None, None),
         };
-        [&self.a, &self.b].into_iter().chain(a2).chain(b2)
+        let path: Vec<&MateEnd> = match &self.kind {
+            MateKind::Path { more, roll, .. } => {
+                roll.iter().map(|r| &r.up).chain(more.iter()).collect()
+            }
+            _ => Vec::new(),
+        };
+        [&self.a, &self.b]
+            .into_iter()
+            .chain(a2)
+            .chain(b2)
+            .chain(path)
     }
 }
 
@@ -1157,7 +1227,10 @@ fn equations(
     }
     let (a, b) = (a.axis(), b.axis());
     match kind {
-        MateKind::Width { .. } | MateKind::Slot { .. } | MateKind::Symmetric { .. } => {
+        MateKind::Width { .. }
+        | MateKind::Slot { .. }
+        | MateKind::Symmetric { .. }
+        | MateKind::Path { .. } => {
             unreachable!("set up by their own functions")
         }
         MateKind::Fasten(relative) => {
@@ -1474,6 +1547,10 @@ fn mate_ends(mate: &Mate) -> Vec<&MateEnd> {
             ends.extend(b2);
         }
         MateKind::Symmetric { plane } => ends.push(plane),
+        MateKind::Path { more, roll, .. } => {
+            ends.extend(roll.iter().map(|r| &r.up));
+            ends.extend(more.iter());
+        }
         _ => {}
     }
     ends
@@ -1657,6 +1734,433 @@ fn slot_equations(
     )));
     Ok(out)
 }
+
+/// A piece of a path mate's path, in its component's coordinates, running from its start
+/// to its end.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Piece {
+    Line {
+        from: DVec3,
+        to: DVec3,
+    },
+    /// Round `axis` (a unit vector) from `from`, by `sweep` radians (right-handed about
+    /// the axis; negative the other way).
+    Arc {
+        center: DVec3,
+        axis: DVec3,
+        radius: f64,
+        from: DVec3,
+        sweep: f64,
+    },
+}
+
+impl Piece {
+    fn length(&self) -> f64 {
+        match *self {
+            Self::Line { from, to } => from.distance(to),
+            Self::Arc { radius, sweep, .. } => radius * sweep.abs(),
+        }
+    }
+
+    /// The point and the unit direction of travel a length `s` along it.
+    fn at(&self, s: f64) -> (DVec3, DVec3) {
+        match *self {
+            Self::Line { from, to } => {
+                let d = (to - from).normalize_or_zero();
+                (from + d * s, d)
+            }
+            Self::Arc {
+                center,
+                axis,
+                radius,
+                from,
+                sweep,
+            } => {
+                let angle = s / radius * sweep.signum();
+                let turn = DQuat::from_axis_angle(axis, angle);
+                let radial = turn * (from - center);
+                let tangent = axis.cross(radial).normalize_or_zero() * sweep.signum();
+                (center + radial, tangent)
+            }
+        }
+    }
+
+    fn start(&self) -> DVec3 {
+        self.at(0.0).0
+    }
+
+    fn end(&self) -> DVec3 {
+        self.at(self.length()).0
+    }
+
+    fn reversed(self) -> Self {
+        match self {
+            Self::Line { from, to } => Self::Line { from: to, to: from },
+            Self::Arc {
+                center,
+                axis,
+                radius,
+                sweep,
+                ..
+            } => Self::Arc {
+                center,
+                axis,
+                radius,
+                from: self.end(),
+                sweep: -sweep,
+            },
+        }
+    }
+
+    /// How far along it the point nearest `p` is.
+    fn nearest(&self, p: DVec3) -> f64 {
+        match *self {
+            Self::Line { from, to } => {
+                let d = to - from;
+                let l2 = d.length_squared();
+                if l2 < 1e-24 {
+                    0.0
+                } else {
+                    ((p - from).dot(d) / l2).clamp(0.0, 1.0) * l2.sqrt()
+                }
+            }
+            Self::Arc {
+                center,
+                axis,
+                radius,
+                from,
+                sweep,
+            } => {
+                let r0 = from - center;
+                let q = p - center;
+                let q = q - axis * q.dot(axis);
+                if q.length() < 1e-12 {
+                    return 0.0;
+                }
+                // The angle from the start, the way the arc runs, in [0, 2π)
+                let mut angle = r0.cross(q).dot(axis).atan2(r0.dot(q)) * sweep.signum();
+                if angle < 0.0 {
+                    angle += std::f64::consts::TAU;
+                }
+                let span = sweep.abs();
+                let along = if angle <= span {
+                    angle
+                } else if angle - span < std::f64::consts::TAU - angle {
+                    span
+                } else {
+                    0.0
+                };
+                along * radius
+            }
+        }
+    }
+}
+
+/// A piece of a path from an end of a path mate: a straight or round edge, or a sketch
+/// line, arc or circle; in the end's component's coordinates.
+fn path_piece(end: &MateEnd, component: &Placed) -> Result<Piece, String> {
+    let name = &component.name;
+    let gone = |what: &str| {
+        format!(
+            "The {what} of {name} the path was on is gone: the part was changed. Edit the mate to pick it again, or delete the mate."
+        )
+    };
+    let wrong = || {
+        format!(
+            "A path mate's path is made of straight and round edges, or sketch lines, arcs and circles, of {name}: select those."
+        )
+    };
+    let inner = end.path.get(1..).unwrap_or_default();
+    match &end.geom {
+        Some(MateGeom::Edge(r)) => {
+            let (bodies, frames): (Vec<Arc<Body>>, Vec<Frame>) = component
+                .bodies
+                .iter()
+                .filter(|(path, ..)| path == inner)
+                .map(|(_, body, rel)| (body.clone(), *rel))
+                .unzip();
+            let f = find_edge(&bodies, r).ok_or_else(|| gone("edge"))?;
+            let rel = frames[f.body];
+            let edge = bodies[f.body].solid.edge(f.id);
+            let piece = match &edge.curve {
+                Curve3::Line(_) => Piece::Line {
+                    from: edge.point_at_fraction(0.0),
+                    to: edge.point_at_fraction(1.0),
+                },
+                Curve3::Circle(c) => Piece::Arc {
+                    center: c.frame.origin,
+                    axis: c.frame.z_axis(),
+                    radius: c.radius,
+                    from: edge.point_at_fraction(0.0),
+                    sweep: edge.t1 - edge.t0,
+                },
+                _ => return Err(wrong()),
+            };
+            Ok(moved_piece(piece, &rel))
+        }
+        Some(MateGeom::Sketch(reference)) => {
+            let (_, model, rel) = component
+                .models
+                .iter()
+                .find(|(path, ..)| path == inner)
+                .ok_or_else(|| gone("part"))?;
+            let sketch = model
+                .feature(reference.feature)
+                .and_then(crate::Feature::sketch)
+                .ok_or_else(|| gone("sketch"))?;
+            let frame = sketch.placement.frame;
+            let at = |p: peet_math::DVec2| frame.to_world(DVec3::new(p.x, p.y, 0.0));
+            let curve = sketch
+                .sketch
+                .curve(reference.entity)
+                .ok_or_else(|| gone("sketch curve"))?;
+            let axis = frame.z_axis();
+            let piece = match curve {
+                peet_sketch::Curve::Line { a, b } => Piece::Line {
+                    from: at(a),
+                    to: at(b),
+                },
+                peet_sketch::Curve::Circle { center, radius } => Piece::Arc {
+                    center: at(center),
+                    axis,
+                    radius,
+                    from: at(center + peet_math::DVec2::X * radius),
+                    sweep: std::f64::consts::TAU,
+                },
+                peet_sketch::Curve::Arc {
+                    center,
+                    radius,
+                    start_angle,
+                    sweep,
+                } => Piece::Arc {
+                    center: at(center),
+                    axis,
+                    radius,
+                    from: at(center
+                        + peet_math::DVec2::new(start_angle.cos(), start_angle.sin()) * radius),
+                    sweep,
+                },
+                peet_sketch::Curve::Spline(_) => return Err(wrong()),
+            };
+            Ok(moved_piece(piece, rel))
+        }
+        _ => Err(wrong()),
+    }
+}
+
+fn moved_piece(piece: Piece, frame: &Frame) -> Piece {
+    match piece {
+        Piece::Line { from, to } => Piece::Line {
+            from: frame.to_world(from),
+            to: frame.to_world(to),
+        },
+        Piece::Arc {
+            center,
+            axis,
+            radius,
+            from,
+            sweep,
+        } => Piece::Arc {
+            center: frame.to_world(center),
+            axis: frame.vector_to_world(axis),
+            radius,
+            from: frame.to_world(from),
+            sweep,
+        },
+    }
+}
+
+/// The pieces joined end to end into one path, in the order they join, the others turned
+/// round as they must be. The path starts with the first piece, from its end away from
+/// the rest; a path of one piece runs the way it does.
+fn chain_pieces(pieces: Vec<Piece>) -> Result<Vec<Piece>, String> {
+    let size = pieces.iter().map(Piece::length).fold(0.0, f64::max);
+    let close = |p: DVec3, q: DVec3| p.distance(q) <= 1e-6 * size.max(1.0);
+    let mut rest = pieces;
+    let mut chain = vec![rest.remove(0)];
+    // Where the first piece is in the chain
+    let mut first = 0;
+    while !rest.is_empty() {
+        let (head, tail) = (chain[0].start(), chain[chain.len() - 1].end());
+        let found = rest.iter().enumerate().find_map(|(i, p)| {
+            if close(p.start(), tail) {
+                Some((i, *p, true))
+            } else if close(p.end(), tail) {
+                Some((i, p.reversed(), true))
+            } else if close(p.end(), head) {
+                Some((i, *p, false))
+            } else if close(p.start(), head) {
+                Some((i, p.reversed(), false))
+            } else {
+                None
+            }
+        });
+        let Some((i, piece, after)) = found else {
+            return Err("The pieces of the path mate's path don't join end to end: select edges or sketch curves that make one path.".to_owned());
+        };
+        rest.remove(i);
+        if after {
+            chain.push(piece);
+        } else {
+            chain.insert(0, piece);
+            first += 1;
+        }
+    }
+    // The path starts with the first piece selected, where that is at one of its ends
+    if first + 1 == chain.len() && chain.len() > 1 {
+        chain.reverse();
+        for piece in &mut chain {
+            *piece = piece.reversed();
+        }
+    }
+    Ok(chain)
+}
+
+/// The equations of a path mate: `point` (of the first end, in its component's
+/// coordinates) on `chain` (in the second end's), `now` being where the point is in the
+/// second's coordinates. `up` is the roll control's axis and its direction's element.
+#[allow(clippy::too_many_arguments)]
+fn path_equations(
+    chain: &[Piece],
+    point: DVec3,
+    now: DVec3,
+    along: &WidthMode,
+    follow: Option<PathAxis>,
+    up: Option<(PathAxis, Element)>,
+    flip: bool,
+    params: &Parameters,
+) -> Result<Vec<Proto>, String> {
+    let lengths: Vec<f64> = chain.iter().map(Piece::length).collect();
+    let total: f64 = lengths.iter().sum();
+    if total < 1e-9 {
+        return Err("The path mate's path has no length.".to_owned());
+    }
+    // Where along the whole path, from its start (from its end with flip_dimension)
+    let target = match along {
+        WidthMode::Free => None,
+        WidthMode::Centered => Some(total * 0.5),
+        WidthMode::Dimension(s) => {
+            let at = s.evaluate(ScalarKind::Length, params)?;
+            if !(-1e-9..=total + 1e-9).contains(&at) {
+                return Err(format!(
+                    "The path mate's distance must be between 0 and {total:.3} mm, the path's length."
+                ));
+            }
+            Some(at)
+        }
+        WidthMode::Percent(s) => {
+            let percent = s.evaluate(ScalarKind::Number, params)?;
+            if !(0.0..=100.0).contains(&percent) {
+                return Err("The path mate's percent must be between 0 and 100.".to_owned());
+            }
+            Some(total * percent / 100.0)
+        }
+    }
+    .map(|s| if flip { total - s } else { s });
+    // The piece the point is on (or goes to), and how far along it
+    let (k, s) = match target {
+        Some(mut s) => {
+            let mut k = 0;
+            while k + 1 < chain.len() && s > lengths[k] {
+                s -= lengths[k];
+                k += 1;
+            }
+            (k, s.clamp(0.0, lengths[k]))
+        }
+        None => chain
+            .iter()
+            .enumerate()
+            .map(|(k, p)| {
+                let s = p.nearest(now);
+                (k, s, p.at(s).0.distance(now))
+            })
+            .min_by(|x, y| x.2.total_cmp(&y.2))
+            .map(|(k, s, _)| (k, s))
+            .expect("a path has a piece"),
+    };
+    let piece = chain[k];
+    let (q, tangent) = piece.at(s);
+    let mut out = Vec::new();
+    // On the piece's line or circle (the first side is the path's, END_B)
+    match piece {
+        Piece::Line { from, .. } => {
+            on_line(&mut out, false, from, tangent, point);
+            if target.is_none() {
+                // Not past the piece's ends. The piece the point is on is chosen again at
+                // every solve (the nearest), so a point held at the end of one piece is
+                // on the next too; a drag stops at a joint.
+                out.push(Proto {
+                    range: Some((0.0, lengths[k])),
+                    ..proto(EqKind::Offset, false, tangent, from, DVec3::ZERO, point)
+                });
+            }
+        }
+        Piece::Arc {
+            center,
+            axis,
+            radius,
+            ..
+        } => {
+            on_plane(&mut out, false, center, axis, point, 0.0);
+            if target.is_some() {
+                // At the place on it: the radius out to it (only that place on the
+                // circle is that far out along it), then no way along the tangent
+                let out_to = (q - center).normalize_or_zero();
+                out.push(Proto {
+                    target: radius,
+                    ..proto(EqKind::Offset, false, out_to, center, DVec3::ZERO, point)
+                });
+            } else {
+                out.push(Proto {
+                    target: radius,
+                    ..proto(EqKind::LineDistance, false, axis, center, DVec3::ZERO, point)
+                });
+                // Not past the arc's ends: on its circle, the arc is what is at least
+                // r·cos(sweep / 2) out along the radius through its middle
+                let span = lengths[k] / radius;
+                if span < std::f64::consts::TAU - 1e-9 {
+                    let middle = (piece.at(lengths[k] * 0.5).0 - center).normalize_or_zero();
+                    out.push(Proto {
+                        range: Some((radius * (span * 0.5).cos(), f64::INFINITY)),
+                        ..proto(EqKind::Offset, false, middle, center, DVec3::ZERO, point)
+                    });
+                }
+            }
+        }
+    }
+    if target.is_some() {
+        // At the place along it: no way along the path's direction there
+        out.push(proto(EqKind::Offset, false, tangent, q, DVec3::ZERO, point));
+    }
+    if let Some(axis) = follow {
+        let d = axis.vector();
+        match piece {
+            Piece::Line { .. } => parallel(&mut out, false, tangent, d),
+            Piece::Arc {
+                center, axis: n, ..
+            } => {
+                // In the arc's plane, and square to the radius through the point
+                out.push(proto(EqKind::Dot, false, n, DVec3::ZERO, d, DVec3::ZERO));
+                out.push(proto(EqKind::Offset, true, d, point, DVec3::ZERO, center));
+            }
+        }
+    }
+    if let Some((axis, element)) = up {
+        let dir = match element.axis() {
+            Element::Plane(_, n) | Element::Line(_, n) => n,
+            _ => {
+                return Err("A path mate's up vector is a direction: select a flat face, a plane, a straight edge or an axis.".to_owned());
+            }
+        };
+        let mut rolled = Vec::new();
+        parallel(&mut rolled, false, dir, axis.vector());
+        out.extend(moved_to(rolled, END_B, END_UP));
+    }
+    Ok(out)
+}
+
+/// The index in [`mate_ends`] of a path mate's up vector.
+const END_UP: usize = 2;
 
 /// An element mirrored in the plane through `q` with unit normal `m` (all in one
 /// component's coordinates).
@@ -2305,6 +2809,46 @@ pub(crate) fn solve(
                         },
                     };
                     slot_equations(mode, slot, slot_is_a, pin, mate.flip_dimension, params)?
+                }
+                MateKind::Path {
+                    more,
+                    along,
+                    follow,
+                    roll,
+                } => {
+                    let first_piece = 2 + usize::from(roll.is_some());
+                    if on[first_piece..].iter().any(|i| *i != ib) {
+                        return Err("A path mate's path must be all on one component: select edges or sketch curves of one.".to_owned());
+                    }
+                    let mut pieces = vec![path_piece(&mate.b, &components[ib])?];
+                    for end in more {
+                        pieces.push(path_piece(end, &components[ib])?);
+                    }
+                    let chain = chain_pieces(pieces)?;
+                    let point = match a {
+                        Element::Point(p) | Element::Circle(p, _) => p,
+                        _ => {
+                            return Err("A path mate keeps a point on the path: select a vertex, a sketch point or an origin for its first end.".to_owned());
+                        }
+                    };
+                    // Where the point is now, in the path's component
+                    let now = components[ib]
+                        .frame
+                        .to_local(components[ia].frame.to_world(point));
+                    let up = match roll {
+                        Some(r) => Some((r.axis, element_of(2)?)),
+                        None => None,
+                    };
+                    path_equations(
+                        &chain,
+                        point,
+                        now,
+                        along,
+                        *follow,
+                        up,
+                        mate.flip_dimension,
+                        params,
+                    )?
                 }
                 MateKind::Symmetric { .. } => {
                     let is = on[END_PLANE];

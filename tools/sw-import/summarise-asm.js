@@ -20,6 +20,12 @@ for (const r of reports) {
   for (const c of r.components || []) if (c.off_mm > 1e-3) add(`component placed off (freedom ${c.freedom})`, r.name);
 }
 console.log(`${reports.length} assemblies`);
+// The assembled geometry against SolidWorks' mass properties (format 6 exports): volume and box, every configuration
+const massed = reports.flatMap(r => (r.configurations || []).filter(c => c.mass && !c.mass.error).map(c => ({ ...c.mass, at: `${r.name} (${c.name})` })));
+if (massed.length) {
+  const off = massed.filter(m => !m.matches);
+  console.log(`assembled geometry: ${massed.length - off.length} of ${massed.length} configurations match SolidWorks' volume and box${off.length ? `; not: ${off.map(m => `${m.at} volume x${m.volume_ratio}${m.box_outside_mm ? `, box ${m.box_outside_mm} mm out` : ""}`).join("; ")}` : ""}`);
+}
 for (const [v, n] of [...verdicts].sort((a, b) => b[1] - a[1])) console.log(String(n).padStart(4), v);
 // The configurations other than the active one, each checked against SolidWorks' placements for it
 const others = reports.flatMap(r => (r.configurations || []).filter(c => !c.active).map(c => ({ ...c, assembly: r.name })));
