@@ -1330,9 +1330,34 @@ fn components_are_mated_by_faces_of_their_parts() {
         json!({"op": "edit_mate", "mate": "Distance1", "distance": 2}),
     );
     assert!(near(at(&edited["moved"][0]), [0.0, -32.0, 5.0]), "{edited}");
+    // By SolidWorks' name for it, as FabSys sets it: D1@ the mate, in any case
+    let set = ok(
+        &mut doc,
+        json!({"op": "set", "name": "d1@distance1", "value": 4}),
+    );
+    assert!(near(at(&set["moved"][0]), [0.0, -34.0, 5.0]), "{set}");
     ok(
         &mut doc,
-        json!({"op": "set_parameter", "name": "gap", "value": "7mm"}),
+        json!({"op": "set", "name": "D1@Distance1", "value": 2}),
+    );
+    let why = error(
+        &mut doc,
+        json!({"op": "set", "name": "Width@Sketch1", "value": 2}),
+    );
+    assert!(why.contains("open_component"), "{why}");
+    let why = error(
+        &mut doc,
+        json!({"op": "set", "name": "D1@Distance1", "value": 2, "configurations": "all"}),
+    );
+    assert!(why.contains("no configurations"), "{why}");
+    ok(
+        &mut doc,
+        json!({"op": "set_parameter", "name": "gap", "value": "6mm"}),
+    );
+    // An assembly's own parameter (a global variable) by its name
+    ok(
+        &mut doc,
+        json!({"op": "set", "name": "gap", "value": "7mm"}),
     );
     let edited = ok(
         &mut doc,

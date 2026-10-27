@@ -187,7 +187,7 @@ rebuild measured).
 
 | Operation | Fields |
 |---|---|
-| `set` | `name` (an address, or a parameter), `value`, `configurations` (as for `edit`; a parameter: as for `set_parameter`). A reference dimension can't be set |
+| `set` | `name` (an address, or a parameter), `value`, `configurations` (as for `edit`; a parameter: as for `set_parameter`). A reference dimension can't be set. An address's case doesn't matter where only one dimension matches it, as in SolidWorks. On an assembly: a mate's value `D1@MATE`, or a parameter, without `configurations` |
 | `name_dimension` | `feature`, `dimension` (its name or field), `name`. A sketch dimension's name has no `"` or `@`; another feature's value may take a whole address |
 | `dimensions` | `feature`, `name`: every address, its feature, field, value, `driven` for a reference dimension, and each configuration's value where they differ |
 
@@ -479,7 +479,9 @@ with their defaults' types):
   end}`, with `distance` or `angle`, `aligned` (two flat faces the same way), `flip` (the
   distance or angle the other way) and `name`; an end is `{"face" | "edge" | "vertex":
   selector}` on a moved body as it was before the move, or on another body, or
-  `{"plane": plane}`. A mate that can't hold is left out with a warning.
+  `{"plane": plane}`. A mate that can't hold is left out with a warning. A distance or angle
+  mate's value is the move's dimension `D1@NAME` (`D1@Distance2`), field `mate1`, `mate2`, …
+  by the mate's place: `set` changes it, per configuration as any feature's value.
 - `structural_member` (SolidWorks' weldment structural member) sweeps `profile` (a
   sketch, drawn with its origin on the line) along every line of the `paths` sketches, a
   body per line, the profile turned square to each line by the smallest turn from its
@@ -507,7 +509,7 @@ with their defaults' types):
 
 | Operation | Fields |
 |---|---|
-| `set_parameter` | `name`, `value`, `configurations`. A new parameter exists in every configuration |
+| `set_parameter` | `name`, `value`, `configurations`. A new parameter exists in every configuration. A name is a word, or any text without `"` or `@` as SolidWorks names global variables (`Base Height`), quoted in expressions (`"Base Height" / 2`) |
 | `delete_parameter` | `name` |
 | `set_units` | `length` (`mm`, `cm`, `m`, `in`, `ft`) |
 | `set_material` | `material` (a name, or `null` for none), `density` in kg/m³ (left out: the material tables' density for that material). What the part is made of: saved with it, and what `mass` weighs it with |
@@ -652,6 +654,7 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `mate`, `type: "width"` | `a`: two planar ends, the width pair. `b`: two planar ends, the tab pair, or one cylindrical face / edge used as an axis. `mode`: `centered` by default, `free`, `dimension` with `distance`, or `percent` with `percent`. Values accept numbers or expressions. Each pair is parallel, distinct and within one top-level component; the width pair and tab are on different components. No `flip`. `name` |
 | `edit_mate` for width | `mate`, `mode`, and `distance` for Dimension or `percent` for Percent. `distance` alone edits a Dimension mate; `percent` alone selects/edits Percent. Rename, suppress and delete use the ordinary mate operations |
 | `edit_mate` | `mate`, and `distance` or `angle`, `flip` |
+| `set` | `name` `D1@MATE` (SolidWorks' name for a mate's value, `D1@Distance6`), `value`: a distance or angle mate's value; or an assembly parameter by name |
 | `rename`, `suppress`, `delete` | `mate` in place of `feature` |
 | `mates` | every mate (`id`, `name`, `type`, `a`, `b`, `distance` or `angle`, `flip`, `status`, `message`) and the `freedom` left |
 

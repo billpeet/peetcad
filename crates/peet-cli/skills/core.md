@@ -112,12 +112,20 @@ SolidWorks.
 {"op": "set", "name": "Width@Sketch1", "value": 120}
 {"op": "set", "name": "d1@Extrude1", "value": "\"Width@Sketch1\" / 20"}
 {"op": "name_dimension", "feature": "Extrude1", "dimension": "depth", "name": "Thick"}
+{"op": "set_parameter", "name": "Base Height", "value": "8mm"}
+{"op": "set", "name": "Thick@Extrude1", "value": "\"Base Height\" / 2"}
+{"op": "set", "name": "Base Height", "value": "12mm"}
+{"op": "set", "name": "width@sketch1", "value": 100}
 {"op": "dimensions", "feature": "Extrude1"}
 ```
 
 - `set` sets a dimension by address, or a parameter by name, to a number or an
   expression. It takes `configurations` as `edit` does. A reference (driven) dimension
-  can't be set.
+  can't be set. As in SolidWorks, an address's case doesn't matter when only one
+  dimension matches it (`Width@Sketch1` finds `width@Sketch1`).
+- A parameter's name is a word, or any text without `"` or `@`, as SolidWorks names its
+  global variables (`Base Height`, `50.00mm-`). Quote a name that isn't a word in an
+  expression: `"Base Height" / 2`. `set` takes it unquoted.
 - Any expression reads a dimension by address. Quote it when it isn't `word@word`:
   `"Dia.@Sketch1"`, `"Bend Radius@Sheet-Metal"`. A quote after a number is inches (`2"`).
 - `dimensions` lists every address with its value (and each configuration's where they

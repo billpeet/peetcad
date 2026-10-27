@@ -264,6 +264,12 @@ fn set_named(
     value: &Input,
     configurations: Option<&Configs>,
 ) -> Result<String, String> {
+    // A name as an expression quotes it ("Base Height") is the name.
+    let target = target.trim();
+    let target = target
+        .strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .map_or(target, str::trim);
     if doc
         .model
         .parameters
@@ -1084,7 +1090,29 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             configurations,
         } => {
             let target = name.trim();
-            set_named(&mut model, doc, &mut done, target, value, configurations.as_ref())?
+            let parameter = || {
+                let t = target.trim_matches('"').trim();
+                doc.model.parameters.entries.iter().any(|p| p.name == t)
+            };
+            if doc.is_assembly() && !parameter() {
+                let id = mate::value_address(doc, target, configurations.is_some())?;
+                let change = MateChange::Edit {
+                    value: Some(value.clone()),
+                    flip: None,
+                };
+                let label = mate::change(doc, &mut model, id, &change)?;
+                done.mate = Some(id);
+                label
+            } else {
+                set_named(
+                    &mut model,
+                    doc,
+                    &mut done,
+                    target,
+                    value,
+                    configurations.as_ref(),
+                )?
+            }
         }
         Op::NameDimension {
             feature,

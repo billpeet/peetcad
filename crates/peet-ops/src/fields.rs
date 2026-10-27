@@ -1757,7 +1757,7 @@ impl Field for BodyMates {
     type Arg = Vec<BodyMateSel>;
     type Target = Vec<BodyMate>;
     fn describe() -> String {
-        "list of mates, each {\"type\": coincident | concentric | parallel | perpendicular | distance | angle, \"moved\": end on a moved body, \"to\": end on the rest of the part, \"distance\" or \"angle\" (for those types), \"aligned\": bool, \"flip\": bool, \"name\"}; an end is {\"face\" | \"edge\" | \"vertex\": selector} or {\"plane\": plane}".to_owned()
+        "list of mates, each {\"type\": coincident | concentric | parallel | perpendicular | distance | angle, \"moved\": end on a moved body, \"to\": end on the rest of the part, \"distance\" or \"angle\" (for those types), \"aligned\": bool, \"flip\": bool, \"name\"}; an end is {\"face\" | \"edge\" | \"vertex\": selector} or {\"plane\": plane}; a mate's distance or angle is the dimension D1@NAME (\"D1@Distance2\"), which `set` changes, in some configurations if asked".to_owned()
     }
     fn parse(v: &Value) -> Result<Self::Arg, String> {
         each(list(v)?, BodyMateSel::parse)

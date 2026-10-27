@@ -110,3 +110,60 @@ fn a_mate_that_cannot_hold_warns() {
     // The first still holds
     assert!((pin(&mut doc).0[2] - 5.0).abs() < 1e-6);
 }
+
+#[test]
+fn a_mate_value_has_solidworks_address_and_differs_by_configuration() {
+    let mut doc = Document::default();
+    plate_and_pin(&mut doc);
+    ok(
+        &mut doc,
+        json!({"op": "move_body", "bodies": [{"feature": "Extrude2", "side": "end"}], "rx": -90,
+        "mates": [
+            {"type": "concentric", "moved": {"face": {"feature": "Extrude2", "side": "side"}},
+             "to": {"face": {"feature": "Cut-Extrude1", "side": "side"}}},
+            {"type": "distance", "distance": 2, "name": "Distance2",
+             "moved": {"face": {"feature": "Extrude2", "side": "start"}},
+             "to": {"face": {"feature": "Extrude1", "side": "end"}}},
+        ]}),
+    );
+    // SolidWorks' name for a mate's value: D1@ the mate
+    let dims = ok(
+        &mut doc,
+        json!({"op": "dimensions", "feature": "Body-Move1"}),
+    );
+    let mate = dims["dimensions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["address"] == "D1@Distance2")
+        .unwrap_or_else(|| panic!("no D1@Distance2 in {dims}"))
+        .clone();
+    assert_eq!(mate["field"], "mate2", "{mate}");
+    ok(
+        &mut doc,
+        json!({"op": "set", "name": "D1@Distance2", "value": 4}),
+    );
+    near(pin(&mut doc).0, [7.0, 7.0, 9.0]);
+    // Another configuration with a value of its own
+    ok(&mut doc, json!({"op": "add_configuration", "name": "Low"}));
+    ok(
+        &mut doc,
+        json!({"op": "set", "name": "D1@Distance2", "value": 1, "configurations": "this"}),
+    );
+    near(pin(&mut doc).0, [7.0, 7.0, 6.0]);
+    ok(
+        &mut doc,
+        json!({"op": "configuration", "configuration": "Default"}),
+    );
+    near(pin(&mut doc).0, [7.0, 7.0, 9.0]);
+    // And it can be named as another feature's value is
+    ok(
+        &mut doc,
+        json!({"op": "name_dimension", "feature": "Body-Move1", "dimension": "mate2", "name": "Lift"}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "set", "name": "Lift@Body-Move1", "value": 3}),
+    );
+    near(pin(&mut doc).0, [7.0, 7.0, 8.0]);
+}

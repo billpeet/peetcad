@@ -695,6 +695,40 @@ pub(crate) fn add(
 }
 
 /// Changes a mate. Returns the undo label.
+/// The mate whose distance or angle is at `address` in an assembly, as SolidWorks names a
+/// mate's value: `D1@Distance6` (the case of `D1` and of the name doesn't matter, where only
+/// one mate has the name in any case). For `set` on an assembly.
+pub(crate) fn value_address(
+    doc: &Document,
+    address: &str,
+    configurations: bool,
+) -> Result<MateId, String> {
+    let assembly = the_assembly(doc)?;
+    let Some(name) = address
+        .split_once('@')
+        .filter(|(d, rest)| d.eq_ignore_ascii_case("D1") && !rest.contains('@'))
+        .map(|(_, name)| name.trim())
+    else {
+        return Err(format!(
+            "{} is an assembly: 'set' takes a mate's distance or angle there, by SolidWorks' name D1@MATE (\"D1@Distance2\"). A dimension of a part ('{address}') is set in the part: open it with 'open_component'.",
+            doc.title()
+        ));
+    };
+    if configurations {
+        return Err(
+            "An assembly has no configurations of its own: leave 'configurations' out.".to_owned(),
+        );
+    }
+    let exact = assembly.mates().find(|m| m.name == name);
+    let mut alike = assembly
+        .mates()
+        .filter(|m| m.name.eq_ignore_ascii_case(name));
+    match (exact, alike.next(), alike.next()) {
+        (Some(m), ..) | (None, Some(m), None) => Ok(m.id),
+        _ => MateSel::Name(name.to_owned()).resolve(doc),
+    }
+}
+
 pub(crate) fn change(
     doc: &Document,
     model: &mut Model,

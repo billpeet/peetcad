@@ -118,6 +118,21 @@ rough placement decides which of several possible positions is taken.
   `delete` take `mate`. Deleting a component deletes its mates.
 - A mate's `distance` or `angle` can be an expression over the assembly's parameters
   (`set_parameter`): the components follow when the parameter changes.
+- `set` on an assembly takes a mate's value by SolidWorks' name for it, `D1@` the mate's
+  name (`D1@Distance1`, in any case), as FabSys sets it, or an assembly parameter by its
+  name. An assembly has no configurations, so `set` there takes none. A dimension of a
+  part (`Width@Sketch1`) is set in the part: `open_component` it.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 6}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Base"}
+{"op": "insert", "part": 1, "name": "Lid", "at": [0, 0, 30]}
+{"op": "mate", "type": "distance", "distance": 10, "a": {"component": "Base", "face": {"normal": [0, 0, 1]}}, "b": {"component": "Lid", "face": {"normal": [0, 0, -1]}}}
+{"op": "set", "name": "D1@Distance1", "value": 20}
+{"op": "components"}
+```
 
 ### Reference planes and parts inside sub-assemblies
 

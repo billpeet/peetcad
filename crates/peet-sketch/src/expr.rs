@@ -574,6 +574,37 @@ pub fn check_name(name: &str) -> Result<(), ExprError> {
     }
 }
 
+/// Whether `name` can name a parameter: a plain word (see [`check_name`]), or, as
+/// SolidWorks' global variables are named, any other text without a double quote, without
+/// `@` (which joins a dimension's address) and without spaces round it (`Base Height`,
+/// `flange edge offset`). A name that is not a plain word is quoted in an expression:
+/// `"Base Height" / 2`.
+pub fn check_parameter_name(name: &str) -> Result<(), ExprError> {
+    if is_word(name) {
+        return check_name(name);
+    }
+    if name.trim().is_empty() || name != name.trim() {
+        return Err(ExprError::new(
+            "a parameter's name can't be empty or start or end with a space",
+        ));
+    }
+    if name.contains('"') || name.contains('@') {
+        return Err(ExprError::new(format!(
+            "'{name}' can't name a parameter: it has a double quote or an '@' (which joins a dimension's name to its feature's)"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `name` is a plain word, which an expression can use without quotes.
+pub fn is_word(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 /// Whether `name` can name a dimension: any text without a double quote and without
 /// spaces round it, as in SolidWorks (`Width`, `Dia.`, `Hole Spacing`). One that is not a
 /// plain word is quoted in an expression (`"Dia.@Sketch1"`). With `whole`, the name may be
@@ -1789,8 +1820,20 @@ impl PartialEq for DimensionValues {
 }
 
 impl DimensionValues {
+    /// The value at an address. As in SolidWorks, the case of the letters doesn't matter
+    /// where only one address is the same in any case.
     pub fn get(&self, address: &str) -> Option<Quantity> {
-        self.0.get(address).copied()
+        if let Some(q) = self.0.get(address) {
+            return Some(*q);
+        }
+        let mut alike = self
+            .0
+            .iter()
+            .filter(|(a, _)| a.eq_ignore_ascii_case(address));
+        match (alike.next(), alike.next()) {
+            (Some((_, q)), None) => Some(*q),
+            _ => None,
+        }
     }
 
     /// Whether the two hold the same values (which `==` does not look at).
@@ -1839,7 +1882,7 @@ impl Parameters {
     /// units. The table is left unchanged if the new expression fails, or if it would
     /// break another parameter that evaluated fine before.
     pub fn set(&mut self, name: &str, expression: &str) -> Result<f64, ExprError> {
-        check_name(name)?;
+        check_parameter_name(name)?;
         Expr::parse(expression)?;
         let before = self.clone();
         let expression = expression.trim().to_owned();
@@ -2738,6 +2781,44 @@ mod tests {
     }
 
     #[test]
+    fn parameters_named_as_solidworks_global_variables() {
+        let mut p = Parameters::default();
+        // A name with spaces and other marks, quoted in expressions as SolidWorks quotes it
+        p.set("Base Height", "100mm").unwrap();
+        p.set("50.00mm-", "50").unwrap();
+        p.set("half", "\"Base Height\" / 2 + \"50.00mm-\"").unwrap();
+        assert_eq!(p.get("half"), Some(100.0));
+        // A plain word works either way
+        p.set("width", "20mm").unwrap();
+        p.set("both", "width + \"width\"").unwrap();
+        assert_eq!(p.get("both"), Some(40.0));
+        for bad in ["", " Base", "Base ", "a\"b", "Width@Sketch1", "sin"] {
+            assert!(p.set(bad, "1").is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn dimension_addresses_are_found_in_any_case() {
+        let mut p = Parameters::default();
+        p.dimensions
+            .0
+            .insert("width@Sketch1".to_owned(), Quantity::length(400.0));
+        assert_eq!(
+            p.evaluate_expression("\"Width@Sketch1\"").unwrap().value,
+            400.0
+        );
+        // Not where two differ only in case
+        p.dimensions
+            .0
+            .insert("WIDTH@Sketch1".to_owned(), Quantity::length(500.0));
+        assert!(p.evaluate_expression("\"Width@Sketch1\"").is_err());
+        assert_eq!(
+            p.evaluate_expression("\"WIDTH@Sketch1\"").unwrap().value,
+            500.0
+        );
+    }
+
+    #[test]
     fn solidworks_names() {
         // Quoted names hold any text; bare addresses are word@word.
         let e = Expr::parse("\"Dia.@Sketch1\" / 4 + \"Thickness\" + Width@Sketch2").unwrap();
@@ -2943,7 +3024,11 @@ mod tests {
         let mut p = Parameters::default();
         p.set("width", "20").unwrap();
         assert!(p.set("sin", "1").is_err());
-        assert!(p.set("2x", "1").is_err());
+        assert!(p.set("a@b", "1").is_err());
+        // Not a plain word, so quoted in expressions, as SolidWorks allows
+        p.set("2x", "1").unwrap();
+        assert_eq!(p.evaluate_expression("\"2x\" * 3").unwrap().value, 3.0);
+        p.remove("2x");
         let e = p.set("h", "widht / 2").unwrap_err();
         assert_eq!(
             e.message,
