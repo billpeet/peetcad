@@ -206,7 +206,9 @@ impl Layout {
             ));
         }
         let trim = match spec.position {
-            FlangePosition::MaterialInside => ossb + material_inside_extra(spec.angle.to_radians(), t),
+            FlangePosition::MaterialInside => {
+                ossb + material_inside_extra(spec.angle.to_radians(), t)
+            }
             FlangePosition::MaterialOutside => values.inside_setback(),
             FlangePosition::BendOutside => 0.0,
         } - own.set_out;
@@ -215,8 +217,16 @@ impl Layout {
             up: site.top != spec.flip,
             flat: straight,
         }];
-        self.add_profile(owner, site, spec.offsets, trim, &segments, part_base, relief)
-            .map(|_| ())
+        self.add_profile(
+            owner,
+            site,
+            spec.offsets,
+            trim,
+            &segments,
+            part_base,
+            relief,
+        )
+        .map(|_| ())
     }
 
     /// The length that takes an edge flange up to `point` (in model coordinates), as
@@ -300,9 +310,15 @@ impl Layout {
         // Where the flange's flat goes: a trial flange, built and thrown away
         let mut trial = self.clone();
         trial.add_edge_flange_part(owner, part_base, site, spec, own)?;
-        let at = trial.attachments.last().ok_or("The flange was not made.")?.clone();
+        let at = trial
+            .attachments
+            .last()
+            .ok_or("The flange was not made.")?
+            .clone();
         let Some(&flat) = at.pieces.get(1) else {
-            return Err("The flange is all bend: there is nothing to shape to the outline.".to_owned());
+            return Err(
+                "The flange is all bend: there is nothing to shape to the outline.".to_owned(),
+            );
         };
         let area = outline(&trial.pieces[flat].frame);
         if area.loops.is_empty() {
@@ -311,7 +327,10 @@ impl Layout {
         // The outline's extent along the edge (u) and away from it (v)
         let d = at.along();
         let out = DVec2::new(d.y, -d.x);
-        let (mut u, mut v) = ([f64::INFINITY, f64::NEG_INFINITY], [f64::INFINITY, f64::NEG_INFINITY]);
+        let (mut u, mut v) = (
+            [f64::INFINITY, f64::NEG_INFINITY],
+            [f64::INFINITY, f64::NEG_INFINITY],
+        );
         for e in area.edges() {
             for k in 0..=32 {
                 let p = e.curve.point_at(k as f64 / 32.0) - at.a;
@@ -330,6 +349,27 @@ impl Layout {
         // The offsets are from the ends of the edge as given, which the trial may have carried
         // on to a corner (`at`): an outline that ends between the two ends ends at the edge's
         // end, and the flange is carried on to the corner and fitted to the flange there.
+        // SolidWorks' rule: an outline's height from its foot is the flange's length to the
+        // inner virtual sharp (a thickness times tan(angle / 2) short of the outer one), at
+        // any angle and position. At 90° the foot SolidWorks draws (on the edge, or a
+        // thickness off it) is level with the inner virtual sharp, so the outline is where it
+        // is drawn. At another angle it is up to a thickness times the tangent of the
+        // difference off it, and the outline is moved onto it (a flange turned 92° comes out
+        // 0.1 mm short otherwise: Box Roof Top). The inner virtual sharp is the bend's inside
+        // setback back from where the flat starts. An outline further off than that is left
+        // where it is drawn (one on the wrong side of the edge then fails).
+        let slant = (spec.angle - 90.0).to_radians().tan().abs() * self.settings.thickness;
+        let shift = trial.pieces[at.pieces[0]].bend().map(|bend| {
+            let flat_start = (bend.origin - at.a).dot(out) + bend.values.allowance;
+            flat_start - bend.values.inside_setback() - v[0]
+        });
+        let area = match shift {
+            Some(shift) if shift.abs() > MIN_LENGTH && shift.abs() <= slant + MIN_LENGTH => {
+                v = [v[0] + shift, v[1] + shift];
+                area.mapped(&|p: DVec2| p + out * shift)
+            }
+            _ => area,
+        };
         let (start, end) = ((site.a - at.a).dot(d), (site.b - at.a).dot(d));
         let len = at.a.distance(at.b);
         // (how far in from the edge's end, whether the outline still reaches the corner)
@@ -347,7 +387,11 @@ impl Layout {
         ];
         shaped.length = spec.length + (v[1] - tip) + 0.01;
         self.add_edge_flange_part(owner, part_base, site, &shaped, own)?;
-        let made = self.attachments.last().ok_or("The flange was not made.")?.clone();
+        let made = self
+            .attachments
+            .last()
+            .ok_or("The flange was not made.")?
+            .clone();
         // Everything between the outline and a box round it, from its foot out
         let margin = 1.0;
         let corner = |pu: f64, pv: f64| at.a + d * pu + out * pv;
@@ -762,11 +806,7 @@ impl Layout {
 impl Layout {
     /// Whether piece `piece` has sheet at `p` (flat coordinates), after the cuts made so far.
     fn sheet_at(&self, piece: usize, p: DVec2) -> bool {
-        self.pieces[piece].covers(p)
-            && !self
-                .cuts
-                .iter()
-                .any(|c| c.removes(piece, p))
+        self.pieces[piece].covers(p) && !self.cuts.iter().any(|c| c.removes(piece, p))
     }
 
     /// The slanted ends of a flange's first bend, as SolidWorks makes them where the edge

@@ -311,6 +311,7 @@ function importPart(doc, dir) {
   let unfolded = null;           // between an Unfold and its Fold: the face that stays where it is
   let sheet = null;             // the sheet metal settings in force
   let thickness = null;
+  let asleepNow = false;         // while a feature suppressed in every configuration is built
 
   const record = (f, result, message) => report.features.push({ name: f.name, type: f.type, result, ...(message ? { message } : {}), ...(cur !== config ? { configuration: cur.name } : {}) });
   const sheetBody = () => (peet.ask({ op: "bodies" }).bodies || []).some(b => b.sheet_metal);
@@ -321,6 +322,12 @@ function importPart(doc, dir) {
     if (!reply.ok) return { ok: false, message: reply.error };
     const created = reply.created || [];
     const failed = created.filter(c => c.status === "failed");
+    // A feature suppressed everywhere in SolidWorks whose cut lies off the part at these sizes (Escutcheon's
+    // third hinge's holes, below the part until it is 1500 tall) is kept, suppressed, as SolidWorks keeps it
+    if (failed.length && asleepNow && failed.every(c => /doesn't remove any material: its shape is off/.test(c.message || ""))
+      && created.every(c => peet.apply({ op: "suppress", feature: c.name, on: true, configurations: "all" }).ok)) {
+      return { ok: true, names: created.map(c => c.name), warning: `it can't be built at these sizes (${failed[0].message}), as in SolidWorks, where it is suppressed` };
+    }
     if (failed.length) {
       peet.apply({ op: "delete", features: created.map(c => c.name) });
       return { ok: false, message: failed[0].message || "it can't be built" };
@@ -391,6 +398,25 @@ function importPart(doc, dir) {
     }
     // Nothing there (a sketch on a plane SolidWorks made for it, or on a face PeetCAD has elsewhere): a plane
     // where SolidWorks' sketch is, as SolidWorks' cuts and extrusions go from any plane
+    // A sketch suppressed here is in the export as SolidWorks last solved it, which can be for another part
+    // the file was made from (Esc Surround R Top's slots, still on Esc Surround Horizontal's flanges). In
+    // SolidWorks it is on a face of what it is built on, wherever that is now, and its normal is the face's:
+    // the nearest such face of a feature it is built on along its normal is where it goes.
+    if ((!on || away > NEAR) && !onFace && f.suppressed) {
+      const mine = new Set((f.parents || []).flatMap(p => made.get(p) || []));
+      let best = null;
+      for (const face of mine.size ? peet.ask({ op: "faces" }).faces || [] : []) {
+        if (face.surface !== "plane" || !face.normal || dot(face.normal, sf.n) < 0.9999) continue;
+        if (!(face.made_by || []).some(m => mine.has(m.feature))) continue;
+        const d = Math.abs(dot(sub(face.center, sf.o), sf.n));
+        if (!best || d < best.d) best = { d, sel: { at: face.center.map(tidy), normal: face.normal.map(tidy) } };
+      }
+      const plane = best && probe(best.sel);
+      if (plane && Math.abs(dot(plane.n, sf.n)) > 0.9999) {
+        on = best.sel; pf = plane; away = 0;
+        report.notes.push(`${name} is suppressed here and in the export away from its face (as SolidWorks last solved it): it is put on the face of ${f.parents.join(", ")} it faces the way of, ${best.d.toFixed(3)} mm along its normal from there.`);
+      }
+    }
     let planeMade = null;
     if ((!on || away > NEAR) && !onFace && !needFace) {
       planeMade = planeWhere(name + " plane", sf);
@@ -1084,8 +1110,10 @@ function importPart(doc, dir) {
         names.add(dimName);
         item.name = dimName;
         // SolidWorks calls a dimension driven both when it is for reference and when an equation sets it.
-        // One an equation sets still drives the sketch: its value is carried over, per configuration.
-        if (dim.drivenState === 1 && !byEquation.has(dim.fullName.split("@").slice(0, 2).join("@"))) item.driven = true;
+        // One an equation sets still drives the sketch: its value is carried over, per configuration. So
+        // does one an assembly's equation sets, which SolidWorks reports read-only and no equation of the
+        // part names (Weather Shield Door's Height@Sketch2, set by Door Assembly; its sketch fully defined).
+        if (dim.drivenState === 1 && !dim.readOnly && !byEquation.has(dim.fullName.split("@").slice(0, 2).join("@"))) item.driven = true;
         item.sw = dim.fullName;
       }
       // What the model or a dimension's value sets, which may have changed since SolidWorks last solved the sketch
@@ -2688,7 +2716,8 @@ function importPart(doc, dir) {
     })(f.parents);
     const sleep = on => { for (const n of woken) peet.apply({ op: "suppress", feature: n, on, configurations: "all" }); };
     sleep(false);
-    handleLive({ ...f, suppressed: false });
+    asleepNow = !liveElsewhere(f.name);
+    try { handleLive({ ...f, suppressed: false }); } finally { asleepNow = false; }
     sleep(true);
     const names = made.get(f.name);
     const built = !had && names && names.length > 0 && names.every(n => peet.apply({ op: "suppress", feature: n, on: true, configurations: "all" }).ok);
@@ -2809,6 +2838,10 @@ function importPart(doc, dir) {
           if (drawn.length !== 4 || drawn.some(g => g.type !== "line" || !g.start || !g.end)) return null;
           const sf = frameOf(profiles[i].sketch.modelToSketch), s = mm(e.start), along = unit(sub(mm(e.end), s));
           const away = drawn.flatMap(g => [g.start, g.end]).map(q => { const d = sub(fromSketch(sf, q), s); return len(sub(d, mul(along, dot(d, along)))); });
+          // An outline that is not at its edge (a suppressed flange's, as SolidWorks last solved it for
+          // another part: Esc Surround R Top's, still where Esc Surround Horizontal's edges are) says
+          // nothing of where the piece reaches: the flange's length stands
+          if (Math.min(...away) > (thickness || 0) + radius + 0.05) return null;
           return Math.max(...away) - Math.min(...away);
         }) : null;
         const square = Math.abs(angle - 90) < 1e-6 && thickness;
@@ -2844,7 +2877,14 @@ function importPart(doc, dir) {
             // A rectangle taller than the flange's length (one edge of a flange on several, its profile drawn
             // taller than the others) is as tall as it is drawn: it is the flange's outline
             const taller = Math.abs(angle - 90) < 1e-6 && rise > length - (thickness || 0) + 0.01;
-            if (taller || drawn.length !== 4 || drawn.some(g => g.type !== "line" || !g.start || !g.end || !square(g))) {
+            // A rectangle whose sketch has a length that is none of the flange's own sizes (its height from
+            // a foot a thickness off the corner, or at an angle: Box Roof Top's Depth@Sketch13, 700 where the
+            // flange is 703.1 to its outer corner) is the flange's outline too, as in SolidWorks, so that the
+            // dimension drives the flange and can be set. One flange on one edge only.
+            const sizes = [length, Math.abs(start), Math.abs(end)];
+            const unnamed = found.length === 1 && (p.dimensions || []).some(d => d.valueType === 0 && d.drivenState !== 1
+              && sizes.every(x => Math.abs(d.value * MM - x) > 1e-6));
+            if (taller || unnamed || drawn.length !== 4 || drawn.some(g => g.type !== "line" || !g.start || !g.end || !square(g))) {
               outline = { sketch: p, foot: foot.g, rise };
               // An outline that widens past an end of the edge its foot runs to: the flange is made that
               // wide (it overhangs the edge from the bend on) and cut back to the outline.
@@ -2946,6 +2986,9 @@ function importPart(doc, dir) {
           if (!o.outline || rectangular.has(f.name)) return;
           const piece = pieceName(i);
           const sf = frameOf(o.outline.sketch.sketch.modelToSketch);
+          // Under SolidWorks' name for it, so that its dimensions have SolidWorks' addresses
+          // (Depth@Sketch13), unless something has that name already
+          const skName = peet.ask({ op: "feature", feature: o.outline.sketch.name }).ok ? piece + " outline" : o.outline.sketch.name;
           // On a face of the part where SolidWorks' profile plane is (the end face along the edge, for a
           // flange with its material outside), as SolidWorks has it: its origin is the model's, so the
           // outline stays where it is drawn when another configuration moves the edge. A plane turned
@@ -2957,12 +3000,12 @@ function importPart(doc, dir) {
             return p && Math.abs(dot(p.n, sf.n)) > 0.9999 && Math.abs(dot(sub(p.o, sf.o), sf.n)) < 1e-4;
           });
           if (face) {
-            const sk = importSketch(o.outline.sketch, { name: piece + " outline", onFace: face });
+            const sk = importSketch(o.outline.sketch, { name: skName, onFace: face });
             if (!sk.error) { o.native = { plane: null, sketch: sk.name, sk }; outlined.push(sk.name); return; }
           }
           const plane = piece + " outline plane";
           if (!planeAbout(plane, { between: [o.found.from.map(tidy), o.found.to.map(tidy)] }, sf)) return;
-          const sk = importSketch(o.outline.sketch, { name: piece + " outline", onFace: plane });
+          const sk = importSketch(o.outline.sketch, { name: skName, onFace: plane });
           if (sk.error) { peet.apply({ op: "delete", features: [plane, plane + " turned"] }); return; }
           o.native = { plane, sketch: sk.name, sk };
           outlined.push(plane, plane + " turned", sk.name);
@@ -4159,7 +4202,7 @@ function importPart(doc, dir) {
             if (was === undefined || Math.abs(was - d.value) < 1e-10 || done.has(c.name + "|" + d.fullName)) continue;
             // A reference dimension (driven, and set by no equation) only measures what the rest makes
             const ref = d.fullName.split("@").slice(0, 2).join("@");
-            if (d.drivenState === 1 && !peetName && !(c.equations || []).some(e => !e.disabled && e.expression.replace(/\s/g, "").startsWith(`"${ref}"=`))) continue;
+            if (d.drivenState === 1 && !d.readOnly && !peetName && !(c.equations || []).some(e => !e.disabled && e.expression.replace(/\s/g, "").startsWith(`"${ref}"=`))) continue;
             done.add(c.name + "|" + d.fullName);
             let value = tidy(d.valueType === 1 ? d.value * 180 / Math.PI : d.value * MM);
             if (sk.supplementary && sk.supplementary.has(d.fullName)) value = tidy(180 - value);
