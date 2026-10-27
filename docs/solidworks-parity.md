@@ -407,7 +407,7 @@ PeetCAD:
 |---|---|---|---|
 | AI1 | **Which side a distance mate is measured to.** Done (`flip_dimension`). SolidWorks' "flip dimension"; `move_body`'s mates have it (`reversed` in `mate::solve`), assembly mates pass none. The main cause of components placed differently: Sliding Doorstay's Distance3 puts parts 344 mm off, Perforated Louver Filter's Distance1 222 mm | Most of the 9 assemblies placed differently | A11 |
 | AI2 | **A mate added suppressed.** Done (`suppressed`), without solving it: `mate` has no `suppressed`, so adding one of SolidWorks' suppressed mates moves components first | 114 suppressed mates; FabSys unsuppresses them | |
-| AI3 | **SolidWorks' alignment** (aligned, anti-aligned, closest) for coincident and concentric: Plinth Folded's pipes come out turned end for end (8 mm) | 1 assembly so far | A11 |
+| AI3 | **SolidWorks' alignment.** Done (`align`) (aligned, anti-aligned, closest) for coincident and concentric: Plinth Folded's pipes come out turned end for end (8 mm) | 1 assembly so far | A11 |
 | AI4 | **Mates to the assembly's own planes and origin** | 27 in 6 assemblies | A12 |
 | AI5 | **Mate kinds**: slot (6), limit angle (2), symmetric (2), coordinate (1), path (1); mate ends on sketch points and lines (4); width mates with a round tab or ends on more than two components (6) | | A4, A3 |
 | AI6 | **Assembly configurations**, each with its components' configurations and suppression, and its mates' suppression. Now only the active configuration is imported, and a part used in another configuration than its file's is a copy with that configuration active (a stand-in) | 8 assemblies with two configurations (left and right hinged); 24 instances in a non-default configuration | A5 |
