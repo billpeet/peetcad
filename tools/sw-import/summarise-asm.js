@@ -21,10 +21,25 @@ for (const r of reports) {
 }
 console.log(`${reports.length} assemblies`);
 for (const [v, n] of [...verdicts].sort((a, b) => b[1] - a[1])) console.log(String(n).padStart(4), v);
+// The configurations other than the active one, each checked against SolidWorks' placements for it
+const others = reports.flatMap(r => (r.configurations || []).filter(c => !c.active).map(c => ({ ...c, assembly: r.name })));
+if (others.length) {
+  const byVerdict = new Map();
+  for (const c of others) byVerdict.set(c.verdict, (byVerdict.get(c.verdict) || 0) + 1);
+  const live = others.reduce((n, c) => n + (c.matesLive || 0), 0), imported = others.reduce((n, c) => n + (c.matesImported || 0), 0);
+  console.log(`\n${others.length} other configurations (of ${new Set(others.map(c => c.assembly)).size} assemblies), ${imported} of ${live} live mates imported:`);
+  for (const [v, n] of [...byVerdict].sort((a, b) => b[1] - a[1])) console.log(String(n).padStart(4), v);
+}
 console.log("\nWhat was left out, failed or stood in for (count, assemblies):");
 for (const [k, t] of [...tally].sort((a, b) => b[1].n - a[1].n)) console.log(String(t.n).padStart(4), `${k}  [${t.who.size}: ${[...t.who].slice(0, 4).join(", ")}${t.who.size > 4 ? ", …" : ""}]`);
 if (flag === "--assemblies") for (const r of reports) {
   console.log(`\n${r.name}: ${r.verdict}, off ${r.off_mm} mm, freedom ${r.freedom}`);
   for (const c of r.components || []) if (c.result !== "inserted" || c.off_mm > 1e-3) console.log(`  component ${c.component}: ${c.result}${c.why ? " (" + c.why + ")" : ""}${c.off_mm > 1e-3 ? ` off ${c.off_mm} mm, freedom ${c.freedom}` : ""}`);
   for (const m of r.mates || []) if (m.result !== "imported") console.log(`  ${m.suppressed ? "(suppressed) " : ""}${m.mate} ${m.type}: ${m.result}: ${String(m.why).slice(0, 200)}`);
+  for (const c of (r.configurations || []).filter(c => !c.active)) {
+    console.log(`  configuration ${c.name}: ${c.verdict}, off ${c.off_mm} mm, live mates ${c.matesImported}/${c.matesLive}`);
+    for (const o of c.off || []) console.log(`    component ${o.component} off ${o.off_mm} mm, freedom ${o.freedom}`);
+    for (const m of c.mates || []) if (!m.suppressed && m.result !== "imported") console.log(`    ${m.mate} ${m.type}: ${m.result}: ${String(m.why).slice(0, 200)}`);
+    for (const n of c.notes || []) console.log(`    note: ${n}`);
+  }
 }
