@@ -3,7 +3,7 @@
 What PeetCAD can't yet do that the SolidWorks component library needs. The aim is for
 FabSys to drive PeetCAD in place of SolidWorks; parts come first, assemblies after.
 
-**Status, 28 October 2026 (assemblies: 14 of 26 match):** first written on 9 October from names and counts; since then
+**Status, 28 October 2026 (assemblies: 14 of 26 match, every configuration placed):** first written on 9 October from names and counts; since then
 the whole library has been exported and imported, and the entries below say what that
 found. Update an entry when it is confirmed, fixed or decided against.
 
@@ -410,7 +410,7 @@ PeetCAD:
 | AI3 | **SolidWorks' alignment.** Done (`align`) (aligned, anti-aligned, closest) for coincident and concentric: Plinth Folded's pipes come out turned end for end (8 mm) | 1 assembly so far | A11 |
 | AI4 | **Mates to the assembly's own planes and origin.** Done. | 27 in 6 assemblies | A12 |
 | AI5 | **Mate kinds.** Done but the path mate. slot (6), limit angle (2), symmetric (2), coordinate (1), path (1); mate ends on sketch points and lines (4); width mates with a round tab or ends on more than two components (6) | | A4, A3 |
-| AI6 | **Assembly configurations**, each with its components' configurations and suppression, and its mates' suppression. Now only the active configuration is imported, and a part used in another configuration than its file's is a copy with that configuration active (a stand-in) | 8 assemblies with two configurations (left and right hinged); 24 instances in a non-default configuration | A5 |
+| AI6 | **Assembly configurations.** Done., each with its components' configurations and suppression, and its mates' suppression. Now only the active configuration is imported, and a part used in another configuration than its file's is a copy with that configuration active (a stand-in) | 8 assemblies with two configurations (left and right hinged); 24 instances in a non-default configuration | A5 |
 | AI7 | **Flexible sub-assemblies.** Done. four Hinge Assembly instances (Meter Panel Movement, Laptop Shelf Assembly) are opened to another angle than the sub-assembly's own | 2 assemblies | A9 |
 | AI8 | **Assembly equations.** Done. reading and setting a component's dimension (`"Height@Sketch1@Door<1>.Part"`), suppressing a component by condition (`"Hinge Assembly-3.Assembly" = IIF(...)`, 5 assemblies), global variables (`SectionID`), reference dimensions in the assembly (`RD1@Annotations`) | 50 equations in 11 assemblies, most of those that set part sizes disabled | A6, A7 |
 | AI9 | **Assembly features**: a cut with its sketch (Escutcheon Assembly), layout sketches (3), a component pattern driven by equations (Gear Tray Assembly's LocalLPattern1, count and spacing from Gear tray's height), composite curves (33, Laptop Shelf); in-context features in parts (24 holders in 9 assemblies) | | A8, A10 |
@@ -479,10 +479,30 @@ PeetCAD:
   54, ConfigurePartSheetMetal 22 of 23, ResolveComponent 25 of 26, SuppressFeature in a component
   11 of 14, SuppressComponent and SetGlobalVariable all; SetSubComponentConfig needs AI6.
 
+**AI6, configurations, done** (28 October, `agents\C1\run3`). A component shows its own
+configuration of its part (`insert` takes `configuration`; `component_configuration` changes it,
+FabSys's SetSubComponentConfig), and two instances of one part can show different ones; mates,
+the bill of materials, mass, interference and STEP export follow it. An assembly has
+configurations: per configuration a component has its suppression, part configuration, fixed
+state and position, and a mate its suppression and values; `suppress`, `fix`, `place` and
+`component_configuration` take `configurations` and default to the active one, as in SolidWorks.
+The importer brings in every configuration and checks each against SolidWorks' placements for it.
+
+| | Before | Now |
+|---|---|---|
+| Active configurations matching | 14 of 26 | 14 of 26 (none placed differently) |
+| Suppressed mates imported | 71 of 114 | 100 of 114 |
+| Other configurations placed as SolidWorks has them | (not imported) | 8 of 8 (3 match, 5 with mates left out); 108 of 121 of their live mates |
+
+FabSys: SetSubComponentConfig 2 of 4 and SetConfiguration on assemblies 6 of 8; the others ask
+for configurations the templates don't have ("Wide1" where the part has "Wide", a Door Assembly
+"…90DegreeRestriction"), which SolidWorks ignores silently: a FabSys driver should ignore
+PeetCAD's error for a missing name. Not done: equations that differ between configurations (only
+disabled ones and one suppression equation do in the library), derived configurations (none in
+the library), display states, and the app's configuration list for assemblies.
+
 What is left:
 
-- **AI6, configurations**: the one item not done. 8 assemblies have two configurations; parts used
-  in another configuration than their file's are copies; SetSubComponentConfig.
 - **The templates and the export**: 11 live mates SolidWorks names the assembly for with no entity
   (Escutcheon Assembly's are on the Escutcheon Surround that doesn't exist; the Escutcheon Doors'
   point at a suppressed hinge, whose parts the export doesn't list), the path mate's empty path,
