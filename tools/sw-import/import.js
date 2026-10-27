@@ -969,30 +969,44 @@ function importPart(doc, dir) {
           if (first) item = { type: "patterned", of: first.g.id === copy.id ? [seed.id, copy.id] : [seed.id, copy.id, first.g.id] };
           break;
         }
-        // Offset Entities: the offset line parallel to the model edge it is offset from, the offset's distance
-        // away, one distance (SolidWorks' dimension) for every piece of the offset. The edge is the one that far
-        // from the line, nearest the sketch. (An offset arc's radius would follow the edge's, which PeetCAD's
-        // dimensions can't say.)
+        // Offset Entities: the offset curve kept offset from the model edge it is offset from (PeetCAD's
+        // `offset` dimension), one distance (SolidWorks' dimension) for every piece. The edge is the one that far
+        // from the curve (parallel to a line, round the same centre as an arc), nearest the sketch.
         case "offsetedge": {
           if (!offsetDim) break;
           // (The distance's own relation is kept with the first piece)
           if (!r.entities || !r.entities.length) continue;
-          if (lines.length !== 1 || !lines[0].g.start || !lines[0].g.end) break;
-          const [s0, s1] = [sk.toPeet(lines[0].g.start), sk.toPeet(lines[0].g.end)];
-          const d = [s1[0] - s0[0], s1[1] - s0[1]], l = Math.hypot(...d), gap = offsetDim.value * MM;
-          const off = q => (d[0] * (q[1] - s0[1]) - d[1] * (q[0] - s0[0])) / l;
+          const own = segs.length === 1 && !segs[0].projected ? segs[0] : null;
+          if (!own || !(own.g.type === "line" ? own.g.start && own.g.end : own.g.center && own.g.radius)) break;
+          const gap = offsetDim.value * MM, near = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
           let best = null;
-          for (const x of modelEdges()) {
-            if (x.curve !== "line" || Math.abs(x.a[2] - x.b[2]) > 1e-3) continue;
-            const [u, v] = [off(x.a), off(x.b)];
-            if (Math.abs(u - v) > 1e-6 || Math.abs(Math.abs(u) - gap) > 1e-4) continue;
-            if (!best || Math.abs(x.a[2]) < best.z) best = { x, z: Math.abs(x.a[2]) };
+          const consider = (x, it) => { if (!best || Math.abs(x.m[2]) < best.z) best = { it, z: Math.abs(x.m[2]) }; };
+          if (own.g.type === "line") {
+            const [s0, s1] = [sk.toPeet(own.g.start), sk.toPeet(own.g.end)];
+            const d = [s1[0] - s0[0], s1[1] - s0[1]], l = Math.hypot(...d);
+            const off = q => (d[0] * (q[1] - s0[1]) - d[1] * (q[0] - s0[0])) / l;
+            for (const x of modelEdges()) {
+              if (x.curve !== "line" || Math.abs(x.a[2] - x.b[2]) > 1e-3) continue;
+              const [u, v] = [off(x.a), off(x.b)];
+              if (Math.abs(u - v) > 1e-6 || Math.abs(Math.abs(u) - gap) > 1e-4) continue;
+              consider(x, { type: "project", edge: { between: [x.from, x.to] } });
+            }
+          } else {
+            const c = sk.toPeet(own.g.center), r0 = own.g.radius * MM;
+            for (const x of modelEdges()) {
+              if (x.curve !== "circle" || Math.abs(x.a[2] - x.m[2]) > 1e-3) continue;
+              const rr = near(x.m, c);
+              if (Math.abs(near(x.a, c) - rr) > 1e-4 || Math.abs(Math.abs(rr - r0) - gap) > 1e-4) continue;
+              consider(x, { type: "project", edge: { at: x.middle } });
+            }
           }
-          const source = best && projectItem({ type: "project", edge: { between: [best.x.from, best.x.to] } });
-          if (!source || source.id === undefined || source.point || source.round) break;
+          const source = best && projectItem(best.it);
+          if (!source || source.id === undefined || source.point || source.round !== (own.g.type === "arc")) break;
+          // An offset of nothing is the curve itself, converted: PeetCAD's dimensions are never 0
+          if (gap < 1e-9) { item = { type: own.g.type === "arc" ? "coradial" : "collinear", of: [own.id, source.id] }; break; }
           const first = !offsetUsed;
           offsetUsed = true;
-          item = { type: "distance", of: [lines[0].start, source.id], value: tidy(gap), with: [{ type: "parallel", of: [lines[0].id, source.id] }] };
+          item = { type: "offset_distance", of: [own.id, source.id], value: tidy(gap) };
           if (first) { offsetItem = item; item.extra = 1; item.sw = offsetDim.fullName; item.name = offsetDim.name.trim().replace(/["@]/g, "_") || "D"; while (names.has(item.name)) item.name += "_"; names.add(item.name); }
           else { item.value = offsetItem.name; item.name = offsetItem.name + "_"; while (names.has(item.name)) item.name += "_"; names.add(item.name); }
           items.push(item);
@@ -1069,7 +1083,7 @@ function importPart(doc, dir) {
       items.push(item);
     }
     current = null;
-    if (offsetRelation && !offsetUsed) drop("offsetedge: the offset's distance, with none of its pieces found");
+    if (offsetRelation && !offsetUsed) drop(offsetDim.value === 0 ? "offsetedge: an offset of 0, which PeetCAD's dimensions can't be (its pieces are on what they are offset from)" : "offsetedge: the offset's distance, with none of its pieces found");
     if (items.length === 0) return;
 
     const shape = () => JSON.stringify((peet.ask({ op: "feature", feature: name }).entities || []).map(e => [e.id, e.from, e.to, e.center, e.radius, e.at].map(x => Array.isArray(x) ? x.map(v => +v.toFixed(4)) : typeof x === "number" ? +x.toFixed(4) : x)));
