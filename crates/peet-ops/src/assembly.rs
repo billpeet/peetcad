@@ -242,7 +242,12 @@ pub enum ComponentChange {
     Show(bool),
     /// Hold it where it is, or let it go.
     Fix(bool),
+    /// Solve a sub-assembly as flexible (its own mates solved in this assembly) or rigid.
+    Flexible(bool),
     Place(Placing),
+    /// Put a component inside a flexible sub-assembly somewhere: by its path below the
+    /// sub-assembly's component.
+    PlaceInner(Vec<CompSel>, Placing),
     /// Make it an instance of another part, where it is.
     Replace(InsertSource),
     /// A colour of its own, or (`None`) its part's again.
@@ -257,7 +262,8 @@ impl ComponentChange {
             Self::Suppress(_) => "suppress",
             Self::Show(_) => "show",
             Self::Fix(_) => "fix",
-            Self::Place(_) => "place",
+            Self::Flexible(_) => "flexible",
+            Self::Place(_) | Self::PlaceInner(..) => "place",
             Self::Replace(_) => "replace",
             Self::Color(_) => "set_color",
             Self::Delete => "delete",
@@ -274,7 +280,7 @@ pub(crate) const ASSEMBLY_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "place",
-        "component, at ([x, y, z]), rotate ({axis, angle})",
+        "component (a name or id; or a path [sub-assembly, component, ...] to a component that moves in a flexible sub-assembly), at ([x, y, z]), rotate ({axis, angle})",
         "Put a component somewhere: its part's origin at a point, turned about an axis from the part's own orientation.",
     ),
     (
@@ -286,6 +292,11 @@ pub(crate) const ASSEMBLY_OPS: &[(&str, &str, &str)] = &[
         "fix",
         "component, on (default true)",
         "Hold a component where it is, or let it go.",
+    ),
+    (
+        "flexible",
+        "component (a sub-assembly), on (default true)",
+        "Solve a sub-assembly as flexible, as SolidWorks does: its own mates are solved in this assembly with this one's, so what is not fixed in it moves as they let it (a hinge opens to where this assembly's mates put it). Off: rigid, posed as its own file has it.",
     ),
     (
         "replace",
@@ -374,12 +385,29 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
                 })
             }),
         "open_component" => component(a).map(|component| Op::OpenComponent { component }),
-        "place" => {
-            let placing = Placing::parse(a).and_then(|p| {
-                p.ok_or_else(|| "'place' needs an 'at' or a 'rotate' field.".to_owned())
-            });
-            change(a, placing.map(ComponentChange::Place))
-        }
+        "place" => (|| {
+            let path = match a.require("component")? {
+                Value::Array(path) if !path.is_empty() => path
+                    .iter()
+                    .map(CompSel::parse)
+                    .collect::<Result<Vec<_>, _>>()?,
+                Value::Array(_) => return Err("A component path can't be empty.".to_owned()),
+                one => vec![CompSel::parse(&one)?],
+            };
+            let placing = Placing::parse(a)?
+                .ok_or_else(|| "'place' needs an 'at' or a 'rotate' field.".to_owned())?;
+            let mut path = path.into_iter();
+            let component = path.next().expect("a path is not empty");
+            let inner: Vec<CompSel> = path.collect();
+            Ok(Op::Component {
+                component,
+                change: if inner.is_empty() {
+                    ComponentChange::Place(placing)
+                } else {
+                    ComponentChange::PlaceInner(inner, placing)
+                },
+            })
+        })(),
         "drag" => (|| {
             Ok(Op::Drag {
                 component: component(a)?,
@@ -389,6 +417,10 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
         })(),
         "fix" => {
             let on = a.flag("on", true).map(ComponentChange::Fix);
+            change(a, on)
+        }
+        "flexible" => {
+            let on = a.flag("on", true).map(ComponentChange::Flexible);
             change(a, on)
         }
         "replace" => {
@@ -572,6 +604,13 @@ pub(crate) fn component_out(doc: &Document, id: CompId) -> Value {
     if let Some(freedom) = doc.evaluation().component_freedom(id) {
         m.insert("freedom".to_owned(), json!(freedom));
     }
+    if c.flexible {
+        m.insert("flexible".to_owned(), json!(true));
+        let moving = moving_out(doc, assembly, c);
+        if !moving.is_empty() {
+            m.insert("moving".to_owned(), Value::Array(moving));
+        }
+    }
     let mates: Vec<&str> = assembly.mates_of(id).map(|m| m.name.as_str()).collect();
     if !mates.is_empty() {
         m.insert("mates".to_owned(), json!(mates));
@@ -677,6 +716,91 @@ fn rename(assembly: &mut Assembly, id: CompId, name: &str) -> Result<(), String>
 }
 
 /// A model can't hold itself: the part being inserted must not be this assembly.
+/// The components that move in a flexible sub-assembly: each with its `path` of names
+/// below the sub-assembly, where it is in this assembly and how free it still is.
+fn moving_out(doc: &Document, assembly: &Assembly, c: &peet_model::Component) -> Vec<Value> {
+    let units = &doc.model.parameters.units;
+    let built = doc.evaluation();
+    c.poses
+        .iter()
+        .filter_map(|pose| {
+            let mut full = vec![c.id];
+            full.extend(&pose.path);
+            let frame = built.component_frame(&full)?;
+            let mut m = Map::new();
+            m.insert("path".to_owned(), json!(path_names(assembly, &full)[1..]));
+            placement_out(&mut m, &frame, units);
+            if let Some(freedom) = built.inner_freedom(&full) {
+                m.insert("freedom".to_owned(), json!(freedom));
+            }
+            Some(Value::Object(m))
+        })
+        .collect()
+}
+
+/// The names of the components along a path, from a component of `assembly` down.
+fn path_names(assembly: &Assembly, path: &[CompId]) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut at = Some(assembly);
+    for id in path {
+        let Some(c) = at.and_then(|a| a.component(*id)) else {
+            names.push(format!("#{}", id.0));
+            at = None;
+            continue;
+        };
+        names.push(c.name.clone());
+        at = at
+            .and_then(|a| a.definition(c.definition))
+            .and_then(|d| d.model.assembly());
+    }
+    names
+}
+
+/// The path of ids a path of names (or ids) below a flexible sub-assembly means, if it
+/// is a component that moves there: every sub-assembly on the way flexible, and the
+/// component not fixed in its own.
+fn moving_path(assembly: &Assembly, top: CompId, inner: &[CompSel]) -> Result<Vec<CompId>, String> {
+    let c = assembly
+        .component(top)
+        .ok_or_else(|| "The component no longer exists.".to_owned())?;
+    let mut path = vec![top];
+    let mut names = vec![c.name.clone()];
+    let mut here = c;
+    let mut within = assembly;
+    for sel in inner {
+        let definition = within
+            .definition(here.definition)
+            .ok_or_else(|| "The component's part is missing.".to_owned())?;
+        let sub = definition.model.assembly().ok_or_else(|| {
+            format!(
+                "{} is a part: the path can't go on inside it.",
+                names.join(" / ")
+            )
+        })?;
+        if !here.flexible {
+            return Err(format!(
+                "{} is a rigid sub-assembly: what is in it is posed as its own file has it. Make it flexible first: {{\"op\": \"flexible\", \"component\": \"{}\"}}.",
+                names.join(" / "),
+                names.join(" / ")
+            ));
+        }
+        let id = sel
+            .resolve_in(sub)
+            .map_err(|e| format!("In {}: {e}", names.join(" / ")))?;
+        here = sub.component(id).expect("resolved in it");
+        within = sub;
+        path.push(id);
+        names.push(here.name.clone());
+    }
+    if here.fixed || here.pattern.is_some() {
+        return Err(format!(
+            "{} is fixed in its sub-assembly, so it moves with it: place the sub-assembly, or another component in it.",
+            names.join(" / ")
+        ));
+    }
+    Ok(path)
+}
+
 fn check_not_itself(doc: &Document, model: &Model) -> Result<(), String> {
     if model.is_assembly() && *model == doc.model {
         return Err(format!("{} can't be a component of itself.", doc.title()));
@@ -771,8 +895,9 @@ pub(crate) fn change(
     let was = the_assembly(doc)?.name_of(id).to_owned();
     // A copy a pattern made is the pattern's to place and to remove.
     let refused = match change {
-        ComponentChange::Place(_) => Some("placed"),
+        ComponentChange::Place(_) | ComponentChange::PlaceInner(..) => Some("placed"),
         ComponentChange::Fix(_) => Some("fixed or let go"),
+        ComponentChange::Flexible(_) => Some("made flexible or rigid"),
         ComponentChange::Replace(_) => Some("replaced"),
         ComponentChange::Delete => Some("deleted"),
         _ => None,
@@ -786,6 +911,32 @@ pub(crate) fn change(
             let part = from.model(doc)?;
             check_not_itself(doc, &part)?;
             Some(part)
+        }
+        _ => None,
+    };
+    // A component inside a flexible sub-assembly: where it is now, and where it goes.
+    let inner = match change {
+        ComponentChange::PlaceInner(inner, placing) => {
+            let assembly = the_assembly(doc)?;
+            let path = moving_path(assembly, id, inner)?;
+            let now = doc.evaluation().component_frame(&path).ok_or_else(|| {
+                format!("{} is not built.", path_names(assembly, &path).join(" / "))
+            })?;
+            let to = placing.frame(now, &units)?;
+            let name = path_names(assembly, &path).join(" / ");
+            Some((path, to, name))
+        }
+        ComponentChange::Flexible(true) => {
+            let assembly = the_assembly(doc)?;
+            if !assembly
+                .definition_of(id)
+                .is_some_and(|d| d.model.is_assembly())
+            {
+                return Err(format!(
+                    "{was} is a part: only a sub-assembly can be flexible."
+                ));
+            }
+            None
         }
         _ => None,
     };
@@ -813,6 +964,25 @@ pub(crate) fn change(
         ComponentChange::Fix(on) => {
             assembly.component_mut(id).ok_or_else(gone)?.fixed = *on;
             format!("{} {was}", if *on { "Fix" } else { "Float" })
+        }
+        ComponentChange::Flexible(on) => {
+            let c = assembly.component_mut(id).ok_or_else(gone)?;
+            c.flexible = *on;
+            if !*on {
+                c.poses.clear();
+            }
+            format!("Make {was} {}", if *on { "Flexible" } else { "Rigid" })
+        }
+        ComponentChange::PlaceInner(..) => {
+            let (path, to, name) = inner.ok_or_else(gone)?;
+            let c = assembly.component_mut(id).ok_or_else(gone)?;
+            let frame = c.placement.inverse().compose(&to);
+            let inner = path[1..].to_vec();
+            match c.poses.iter_mut().find(|p| p.path == inner) {
+                Some(p) => p.frame = frame,
+                None => c.poses.push(peet_model::Pose { path: inner, frame }),
+            }
+            format!("Move {name}")
         }
         ComponentChange::Place(placing) => {
             let c = assembly.component_mut(id).ok_or_else(gone)?;
@@ -967,6 +1137,7 @@ pub(crate) fn step_products(doc: &Document) -> (Vec<peet_io::step::StepProduct>,
 
     struct Walk<'a> {
         instances: &'a [peet_model::Instance],
+        evaluation: &'a peet_model::Evaluation,
         products: Vec<StepProduct>,
         /// The product of each part and sub-assembly. None: nothing in it. Two parts
         /// that are the same in everything are one product, as in the bill of materials.
@@ -975,7 +1146,15 @@ pub(crate) fn step_products(doc: &Document) -> (Vec<peet_io::step::StepProduct>,
 
     impl Walk<'_> {
         /// The children of an assembly: its components that have something to show.
-        fn children(&mut self, model: &Model, path: &[CompId]) -> Vec<(usize, String, Frame)> {
+        /// `posed`: the assembly is in a flexible sub-assembly that this one's solve
+        /// posed, so its components are where the solve put them, not where its file has
+        /// them.
+        fn children(
+            &mut self,
+            model: &Model,
+            path: &[CompId],
+            posed: bool,
+        ) -> Vec<(usize, String, Frame)> {
             let Some(assembly) = model.assembly() else {
                 return Vec::new();
             };
@@ -986,24 +1165,39 @@ pub(crate) fn step_products(doc: &Document) -> (Vec<peet_io::step::StepProduct>,
                 };
                 let mut path = path.to_vec();
                 path.push(c.id);
-                if let Some(product) = self.product(&definition.model, &path) {
-                    children.push((product, c.name.clone(), c.placement));
+                let placement = if posed {
+                    let parent = if path.len() > 1 {
+                        self.evaluation.component_frame(&path[..path.len() - 1])
+                    } else {
+                        Some(Frame::WORLD)
+                    };
+                    parent
+                        .zip(self.evaluation.component_frame(&path))
+                        .map_or(c.placement, |(a, b)| a.inverse().compose(&b))
+                } else {
+                    c.placement
+                };
+                let posed = posed || c.flexible && !c.poses.is_empty();
+                if let Some(product) = self.product(&definition.model, &path, posed) {
+                    children.push((product, c.name.clone(), placement));
                 }
             }
             children
         }
 
-        /// The product of the part or sub-assembly at `path`.
-        fn product(&mut self, model: &Arc<Model>, path: &[CompId]) -> Option<usize> {
+        /// The product of the part or sub-assembly at `path`. A posed sub-assembly is a
+        /// product of its own: its instances can each be posed differently.
+        fn product(&mut self, model: &Arc<Model>, path: &[CompId], posed: bool) -> Option<usize> {
+            let shared = !(posed && model.is_assembly());
             let known = self
                 .of_model
                 .iter()
-                .find(|(m, _)| Arc::ptr_eq(m, model) || **m == **model);
+                .find(|(m, _)| shared && (Arc::ptr_eq(m, model) || **m == **model));
             if let Some((_, known)) = known {
                 return *known;
             }
             let (bodies, children) = if model.is_assembly() {
-                (Vec::new(), self.children(model, path))
+                (Vec::new(), self.children(model, path, posed))
             } else {
                 let solids: Vec<&peet_kernel::Solid> = self
                     .instances
@@ -1033,7 +1227,9 @@ pub(crate) fn step_products(doc: &Document) -> (Vec<peet_io::step::StepProduct>,
                 });
                 self.products.len() - 1
             });
-            self.of_model.push((model.clone(), index));
+            if shared {
+                self.of_model.push((model.clone(), index));
+            }
             index
         }
     }
@@ -1041,10 +1237,11 @@ pub(crate) fn step_products(doc: &Document) -> (Vec<peet_io::step::StepProduct>,
     let evaluation = doc.evaluation();
     let mut walk = Walk {
         instances: &evaluation.instances,
+        evaluation,
         products: Vec::new(),
         of_model: Vec::new(),
     };
-    let children = walk.children(&doc.model, &[]);
+    let children = walk.children(&doc.model, &[], false);
     walk.products.push(StepProduct {
         name: doc.model.name.clone(),
         bodies: Vec::new(),

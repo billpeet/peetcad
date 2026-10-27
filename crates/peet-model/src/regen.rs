@@ -45,7 +45,7 @@ use crate::feature::{
 };
 use crate::mate::{self, MateId};
 use crate::naming::{Body, find_edge, find_face, find_vertex};
-use crate::{Axis, Model, hash, pattern, sheet};
+use crate::{Axis, Model, flexible, hash, pattern, sheet};
 
 /// How well defined a sketch is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -171,6 +171,12 @@ pub struct Evaluation {
     /// is not fixed, less what the mates hold).
     pub freedom: usize,
     component_freedom: HashMap<CompId, usize>,
+    /// For an assembly: where each component is, at every depth (by its path from a
+    /// component of this assembly down), in this assembly's coordinates.
+    component_frames: HashMap<Vec<CompId>, Frame>,
+    /// For an assembly: how many ways each component that moves inside a flexible
+    /// sub-assembly can still move, by its path.
+    inner_freedom: HashMap<Vec<CompId>, usize>,
     pub stats: Stats,
 }
 
@@ -184,6 +190,20 @@ impl Evaluation {
     /// along with others it is mated to: 0 for one that is fixed or fully held.
     pub fn component_freedom(&self, id: CompId) -> Option<usize> {
         self.component_freedom.get(&id).copied()
+    }
+
+    /// Where a component of an assembly is, at any depth (by its path from a component
+    /// of this assembly down to it), in this assembly's coordinates. A component in a
+    /// flexible sub-assembly is where this assembly's solve put it.
+    pub fn component_frame(&self, path: &[CompId]) -> Option<Frame> {
+        self.component_frames.get(path).copied()
+    }
+
+    /// How many ways a component that moves inside a flexible sub-assembly (by its path:
+    /// the sub-assembly's component of this assembly first) can still move, on its own
+    /// or along with others.
+    pub fn inner_freedom(&self, path: &[CompId]) -> Option<usize> {
+        self.inner_freedom.get(path).copied()
     }
 
     /// How a mate of an assembly came out.
@@ -258,6 +278,8 @@ struct Assembled {
     patterns: HashMap<crate::PatternId, Status>,
     freedom: usize,
     component_freedom: HashMap<CompId, usize>,
+    component_frames: HashMap<Vec<CompId>, Frame>,
+    inner_freedom: HashMap<Vec<CompId>, usize>,
 }
 
 /// A definition of an assembly as last rebuilt.
@@ -415,6 +437,8 @@ impl Engine {
             patterns: assembled.patterns,
             freedom: assembled.freedom,
             component_freedom: assembled.component_freedom,
+            component_frames: assembled.component_frames,
+            inner_freedom: assembled.inner_freedom,
             stats: run.stats,
         };
         &self.evaluation
@@ -422,7 +446,7 @@ impl Engine {
 
     /// Reference planes of this definition and its active descendants, including
     /// definitions with no solid bodies. Inner placements are already solved.
-    fn mate_planes(&self, model: &Model) -> Vec<mate::ComponentPlane> {
+    pub(crate) fn mate_planes(&self, model: &Model) -> Vec<mate::ComponentPlane> {
         let mut planes: Vec<_> = crate::StdPlane::ALL
             .into_iter()
             .map(|p| (Vec::new(), PlaneRef::Standard(p), p.plane()))
@@ -452,13 +476,19 @@ impl Engine {
                 let Some(part) = self.parts.get(&c.definition) else {
                     continue;
                 };
+                let flexible = flexible::is_flexible(c, &part.model);
                 for (mut path, reference, plane) in part.engine.mate_planes(&part.model) {
+                    let posed = if flexible {
+                        flexible::correction(&c.poses, part.engine.evaluation(), &path)
+                    } else {
+                        Frame::WORLD
+                    };
                     path.insert(0, c.id);
                     planes.push((
                         path,
                         reference,
                         Plane {
-                            frame: c.placement.compose(&plane.frame),
+                            frame: c.placement.compose(&posed.compose(&plane.frame)),
                         },
                     ));
                 }
@@ -508,16 +538,19 @@ impl Engine {
         let place = |c: &crate::Component, frame: Frame| -> Option<mate::Placed> {
             let part = parts.get(&c.definition)?;
             let built = part.engine.evaluation();
+            let poses: &[crate::Pose] = if flexible::is_flexible(c, &part.model) {
+                &c.poses
+            } else {
+                &[]
+            };
             let bodies = built
                 .bodies
                 .iter()
                 .map(|b| (Vec::new(), b.clone(), Frame::WORLD))
-                .chain(
-                    built
-                        .instances
-                        .iter()
-                        .map(|i| (i.path.clone(), i.body.clone(), i.frame)),
-                )
+                .chain(built.instances.iter().map(|i| {
+                    let posed = flexible::correction(poses, built, &i.path);
+                    (i.path.clone(), i.body.clone(), posed.compose(&i.frame))
+                }))
                 .collect();
             Some(mate::Placed {
                 id: c.id,
@@ -529,13 +562,48 @@ impl Engine {
                 planes: part.engine.mate_planes(&part.model),
             })
         };
-        let placed: Vec<mate::Placed> = assembly
-            .components()
-            .filter(|c| !c.suppressed)
-            .filter_map(|c| place(c, c.placement))
+        // A flexible sub-assembly is taken apart: what moves in it is solved here, with
+        // its own mates (see `flexible`).
+        let mut expanded: HashMap<CompId, flexible::Expanded> = HashMap::new();
+        let (mut next_id, mut next_mate) = (u32::MAX, u32::MAX);
+        let mut placed: Vec<mate::Placed> = Vec::new();
+        let mut inner_mates: Vec<crate::Mate> = Vec::new();
+        for c in assembly.components().filter(|c| !c.suppressed) {
+            let Some(part) = parts.get(&c.definition) else {
+                continue;
+            };
+            if flexible::is_flexible(c, &part.model) {
+                let mut x = flexible::expand(
+                    c,
+                    &part.model,
+                    &part.engine,
+                    c.fixed,
+                    &mut next_id,
+                    &mut next_mate,
+                );
+                placed.append(&mut x.placed);
+                inner_mates.append(&mut x.mates);
+                expanded.insert(c.id, x);
+            } else if let Some(p) = place(c, c.placement) {
+                placed.push(p);
+            }
+        }
+        let own_mates: Vec<Option<crate::Mate>> = assembly
+            .mates()
+            .map(|m| flexible::rewrite(m, &expanded))
             .collect();
-        let mates: Vec<&crate::Mate> = assembly.mates().collect();
-        let structure: Vec<(CompId, DefId, bool, bool)> = assembly
+        // The sub-assemblies' own mates first: when they can't all hold, a hinge stays a
+        // hinge and the parent's mate that would break it fails.
+        let mates: Vec<&crate::Mate> = inner_mates
+            .iter()
+            .chain(
+                assembly
+                    .mates()
+                    .zip(&own_mates)
+                    .map(|(m, r)| r.as_ref().unwrap_or(m)),
+            )
+            .collect();
+        let structure: Vec<(CompId, DefId, bool, bool, bool)> = assembly
             .components()
             .map(|c| {
                 (
@@ -543,11 +611,13 @@ impl Engine {
                     c.definition,
                     c.fixed || c.pattern.is_some(),
                     c.suppressed,
+                    expanded.contains_key(&c.id),
                 )
             })
             .collect();
+        let units: Vec<(CompId, bool)> = placed.iter().map(|c| (c.id, c.fixed)).collect();
         let planes: Vec<_> = placed.iter().map(|c| (c.id, &c.planes)).collect();
-        let key = hash::of(&(&mates, structure, &model.parameters, planes));
+        let key = hash::of(&(&mates, structure, units, &model.parameters, planes));
         let drag = self.drag.take();
         let solved = mate::solve(
             &mates,
@@ -557,10 +627,44 @@ impl Engine {
             &mut self.mates,
             drag,
         );
+        let mut frames = solved.frames;
+        let mut statuses = solved.statuses;
+        for m in &inner_mates {
+            statuses.remove(&m.id);
+        }
+        let mut component_freedom = solved.component_freedom;
+        // Where what moves in each flexible sub-assembly is now, in its coordinates.
+        let mut inner_freedom = HashMap::new();
+        let mut posed: HashMap<CompId, Vec<crate::Pose>> = HashMap::new();
+        for (id, x) in &expanded {
+            let Some(frame) = frames.get(id).copied() else {
+                continue;
+            };
+            posed.insert(*id, flexible::poses(frame, x, &frames));
+            for (path, unit) in x.units.iter().filter(|(path, _)| !path.is_empty()) {
+                frames.remove(unit);
+                if let Some(f) = component_freedom.remove(unit) {
+                    let mut full = vec![*id];
+                    full.extend(path);
+                    inner_freedom.insert(full, f);
+                }
+            }
+        }
+        // Poses that only differ by rounding are kept, so the model doesn't change.
+        let mut reposed: Vec<(CompId, Vec<crate::Pose>)> = Vec::new();
+        for c in assembly.components() {
+            let new = posed.remove(&c.id).unwrap_or_default();
+            if flexible::same_poses(&c.poses, &new) {
+                posed.insert(c.id, c.poses.clone());
+            } else {
+                posed.insert(c.id, new.clone());
+                reposed.push((c.id, new));
+            }
+        }
+
         // ---- The patterns ----
         // After the mates: each copy goes where its original now is, moved by its place
         // in the pattern. A copy whose original is suppressed is left out with it.
-        let mut frames = solved.frames;
         let mut patterns = HashMap::new();
         let mut left_out: Vec<CompId> = Vec::new();
         for pattern in assembly.patterns() {
@@ -695,6 +799,7 @@ impl Engine {
         // ---- The components ----
         let mut instances = Vec::new();
         let mut components = HashMap::new();
+        let mut component_frames = HashMap::new();
         for c in assembly.components() {
             if c.suppressed || left_out.contains(&c.id) {
                 components.insert(c.id, Status::Suppressed);
@@ -705,6 +810,18 @@ impl Engine {
             };
             let placement = frames.get(&c.id).copied().unwrap_or(c.placement);
             let built = part.engine.evaluation();
+            let poses: &[crate::Pose] = match posed.get(&c.id) {
+                Some(p) if flexible::is_flexible(c, &part.model) => p,
+                _ => &[],
+            };
+            component_frames.insert(vec![c.id], placement);
+            for (path, frame) in &built.component_frames {
+                let mut full = Vec::with_capacity(path.len() + 1);
+                full.push(c.id);
+                full.extend(path);
+                let posed = flexible::correction(poses, built, path);
+                component_frames.insert(full, placement.compose(&posed.compose(frame)));
+            }
             let before = instances.len();
             for body in &built.bodies {
                 instances.push(Instance {
@@ -714,15 +831,17 @@ impl Engine {
                     color: c.color.or(part.model.color),
                 });
             }
-            // A sub-assembly's components, as one rigid thing.
+            // A sub-assembly's components: as one rigid thing, or for a flexible one
+            // where this assembly's solve put them.
             for inner in &built.instances {
                 let mut path = Vec::with_capacity(inner.path.len() + 1);
                 path.push(c.id);
                 path.extend(&inner.path);
+                let posed = flexible::correction(poses, built, &inner.path);
                 instances.push(Instance {
                     path,
                     body: inner.body.clone(),
-                    frame: placement.compose(&inner.frame),
+                    frame: placement.compose(&posed.compose(&inner.frame)),
                     color: c.color.or(inner.color),
                 });
             }
@@ -751,9 +870,14 @@ impl Engine {
             };
             components.insert(c.id, status);
         }
-        if (!written.is_empty() || !moved.is_empty())
+        if (!written.is_empty() || !moved.is_empty() || !reposed.is_empty())
             && let Some(assembly) = model.assembly_mut()
         {
+            for (id, poses) in reposed {
+                if let Some(c) = assembly.component_mut(id) {
+                    c.poses = poses;
+                }
+            }
             for (id, rebuilt) in written {
                 assembly.set_model(id, rebuilt);
             }
@@ -766,10 +890,12 @@ impl Engine {
         Assembled {
             instances,
             components,
-            mates: solved.statuses,
+            mates: statuses,
             patterns,
             freedom: solved.freedom,
-            component_freedom: solved.component_freedom,
+            component_freedom,
+            component_frames,
+            inner_freedom,
         }
     }
 
