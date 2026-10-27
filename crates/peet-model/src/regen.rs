@@ -177,6 +177,11 @@ pub struct Evaluation {
     /// For an assembly: how many ways each component that moves inside a flexible
     /// sub-assembly can still move, by its path.
     inner_freedom: HashMap<Vec<CompId>, usize>,
+    /// For an assembly: its equations that can't be worked out, by their place in its
+    /// list, with why.
+    pub equation_failures: Vec<(usize, String)>,
+    /// For an assembly: what each reference dimension measured, or why it can't be.
+    pub references: Vec<(String, Result<f64, String>)>,
     pub stats: Stats,
 }
 
@@ -280,6 +285,7 @@ struct Assembled {
     component_freedom: HashMap<CompId, usize>,
     component_frames: HashMap<Vec<CompId>, Frame>,
     inner_freedom: HashMap<Vec<CompId>, usize>,
+    references: Vec<(String, Result<f64, String>)>,
 }
 
 /// A definition of an assembly as last rebuilt.
@@ -353,6 +359,8 @@ impl Engine {
     pub fn regenerate(&mut self, model: &mut Model) -> &Evaluation {
         let start = Instant::now();
         model.refresh_dimension_values();
+        // An assembly's equations set its components' parts and suppression first.
+        let mut equation_failures = model.apply_equations();
         let params_key = hash::of(&model.parameters);
         // The values of dimensions read by address are not part of the table's own hash:
         // only the sketches whose expressions might read them depend on them (the other
@@ -426,7 +434,28 @@ impl Engine {
             }
         }
         self.cache.retain(|id, _| run.states.contains_key(id));
-        let assembled = self.assemble(model, &mut run.stats);
+        let mut assembled = self.assemble(model, &mut run.stats);
+        // What the reference dimensions measure, which equations may read: a part an
+        // equation changes is rebuilt and the mates solved again, until nothing changes.
+        for round in 0..4 {
+            let mut changed = false;
+            if let Some(assembly) = model.assembly_mut() {
+                for (name, value) in &assembled.references {
+                    changed |= assembly.set_reference_value(name, value.as_ref().ok().copied());
+                }
+            }
+            if !changed {
+                break;
+            }
+            // What expressions read now.
+            model.refresh_dimension_values();
+            let equations = model.assembly().is_some_and(|a| !a.equations().is_empty());
+            if !equations || round == 3 {
+                break;
+            }
+            equation_failures = model.apply_equations();
+            assembled = self.assemble(model, &mut run.stats);
+        }
         run.stats.ms = start.elapsed().as_secs_f64() * 1000.0;
         self.evaluation = Evaluation {
             bodies: run.bodies,
@@ -439,6 +468,8 @@ impl Engine {
             component_freedom: assembled.component_freedom,
             component_frames: assembled.component_frames,
             inner_freedom: assembled.inner_freedom,
+            equation_failures,
+            references: assembled.references,
             stats: run.stats,
         };
         &self.evaluation
@@ -788,6 +819,29 @@ impl Engine {
                 }
             }
         }
+        // ---- The reference dimensions ----
+        // Measured where the components are now.
+        let references = assembly
+            .references()
+            .map(|r| {
+                let at = |end: &crate::MateEnd| -> Result<mate::Located, String> {
+                    let gone = || {
+                        "A component it is measured to is gone or suppressed.".to_owned()
+                    };
+                    let c = end
+                        .component()
+                        .and_then(|id| assembly.component(id))
+                        .filter(|c| !c.suppressed)
+                        .ok_or_else(gone)?;
+                    let frame = frames.get(&c.id).copied().unwrap_or(c.placement);
+                    let on = place(c, frame).ok_or_else(gone)?;
+                    mate::locate(end, &on)
+                };
+                let value = at(&r.a)
+                    .and_then(|a| at(&r.b).and_then(|b| crate::equations::measure(&a, &b)));
+                (r.name.clone(), value)
+            })
+            .collect();
         let moved: Vec<(CompId, Frame)> = assembly
             .components()
             .filter_map(|c| {
@@ -896,6 +950,7 @@ impl Engine {
             component_freedom,
             component_frames,
             inner_freedom,
+            references,
         }
     }
 

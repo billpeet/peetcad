@@ -208,6 +208,9 @@ pub enum Query {
     Dimensions {
         feature: Option<FeatureSel>,
         name: Option<String>,
+        /// In an assembly: a component, whose part's dimensions are listed by their
+        /// address from the assembly.
+        component: Option<CompSel>,
     },
     /// The configurations, which one is active, and what differs between them.
     Configurations,
@@ -618,6 +621,27 @@ pub enum Op {
     Isolate {
         components: Vec<CompSel>,
     },
+    /// Set or clear the equation that suppresses a component of an assembly.
+    ComponentSuppression {
+        component: CompSel,
+        value: Option<String>,
+    },
+    /// Add a reference dimension to an assembly (or replace the one of that name).
+    ReferenceDimension {
+        a: crate::mate::MateEndSel,
+        b: crate::mate::MateEndSel,
+        /// `RD1`, `RD2`, … if absent.
+        name: Option<String>,
+    },
+    /// Delete a reference dimension of an assembly.
+    DeleteReference {
+        name: String,
+    },
+    /// Give a component a copy of its part of its own, called `name`.
+    MakeIndependent {
+        component: CompSel,
+        name: String,
+    },
     /// Open a component's part as a document of its own (see
     /// [`crate::apply_session`]): saving that document stores it back.
     OpenComponent {
@@ -714,6 +738,10 @@ impl Op {
             Self::Explode { .. } => "explode",
             Self::ShowAll => "show_all",
             Self::Isolate { .. } => "isolate",
+            Self::ComponentSuppression { .. } => "set_suppression_expression",
+            Self::ReferenceDimension { .. } => "reference_dimension",
+            Self::DeleteReference { .. } => "delete",
+            Self::MakeIndependent { .. } => "make_independent",
             Self::SetPart { .. } => "set_part",
             Self::OpenComponent { .. } => "open_component",
             Self::Undo => "undo",
@@ -1091,6 +1119,9 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
     if let Some(found) = crate::mate::parse(op, a) {
         return found;
     }
+    if let Some(found) = crate::equations::parse(op, a) {
+        return found;
+    }
     if let Some(found) = crate::assembly::parse(op, a) {
         return found;
     }
@@ -1293,6 +1324,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         "dimensions" => Op::Query(Query::Dimensions {
             feature: a.parsed("feature", FeatureSel::parse)?,
             name: a.string("name")?,
+            component: None,
         }),
         "set_text" => Op::SetText {
             sketch: feature(a, "sketch")?,
@@ -1437,6 +1469,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             all.extend(crate::links::LINK_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::explode::EXPLODE_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::pattern::PATTERN_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::equations::EQUATION_OPS.iter().map(|(_, n, ..)| *n));
             all.sort_unstable();
             all.dedup();
             return Err(format!(

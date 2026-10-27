@@ -387,6 +387,14 @@ pub struct Assembly {
     patterns: Vec<Arc<ComponentPattern>>,
     #[serde(default)]
     next_pattern: u32,
+    /// The assembly's equations that set something of its components: a dimension of a
+    /// component's part, or whether a component is suppressed (model schema 12).
+    #[serde(default)]
+    equations: Vec<crate::equations::Equation>,
+    /// Reference dimensions: distances measured in the assembly, which equations read
+    /// (model schema 12).
+    #[serde(default)]
+    references: Vec<Arc<crate::equations::ReferenceDimension>>,
 }
 
 /// The assembly layout in schemas 8 through 10, with their feature layouts in definitions.
@@ -473,6 +481,8 @@ impl From<AssemblyV11> for Assembly {
             next_explode: a.next_explode,
             patterns: a.patterns,
             next_pattern: a.next_pattern,
+            equations: Vec::new(),
+            references: Vec::new(),
         }
     }
 }
@@ -531,6 +541,8 @@ impl<F: Into<crate::Feature>> From<AssemblyLegacy<F>> for Assembly {
             next_explode: a.next_explode,
             patterns: a.patterns,
             next_pattern: a.next_pattern,
+            equations: Vec::new(),
+            references: Vec::new(),
         }
     }
 }
@@ -875,13 +887,70 @@ impl Assembly {
         self.prune();
     }
 
-    /// Takes a component out, with its mates. Nothing else is tidied.
+    /// Takes a component out, with its mates, the equations that set something of it and
+    /// the reference dimensions measured to it. Nothing else is tidied.
     fn remove_component(&mut self, id: CompId) -> Option<Component> {
         let index = self.components.iter().position(|c| c.id == id)?;
         let removed = self.components.remove(index);
         self.mates
             .retain(|m| !m.ends().any(|e| e.component() == Some(id)));
+        self.equations.retain(|e| e.target.component() != id);
+        self.references
+            .retain(|r| r.a.component() != Some(id) && r.b.component() != Some(id));
         Some(Arc::unwrap_or_clone(removed))
+    }
+
+    /// The assembly's equations, in the order they are worked out.
+    pub fn equations(&self) -> &[crate::equations::Equation] {
+        &self.equations
+    }
+
+    /// The assembly's equations, for changing them.
+    pub fn equations_mut(&mut self) -> &mut Vec<crate::equations::Equation> {
+        &mut self.equations
+    }
+
+    /// The reference dimensions, in the order they were added.
+    pub fn references(&self) -> impl ExactSizeIterator<Item = &crate::equations::ReferenceDimension> {
+        self.references.iter().map(|r| &**r)
+    }
+
+    /// The reference dimension called `name` (in any case, where only one is).
+    pub fn reference(&self, name: &str) -> Option<&crate::equations::ReferenceDimension> {
+        let name = name.trim();
+        self.references().find(|r| r.name == name).or_else(|| {
+            let mut alike = self.references().filter(|r| r.name.eq_ignore_ascii_case(name));
+            match (alike.next(), alike.next()) {
+                (Some(r), None) => Some(r),
+                _ => None,
+            }
+        })
+    }
+
+    /// Adds a reference dimension, or replaces the one of the same name.
+    pub fn set_reference(&mut self, reference: crate::equations::ReferenceDimension) {
+        match self.references.iter_mut().find(|r| r.name == reference.name) {
+            Some(r) => *r = Arc::new(reference),
+            None => self.references.push(Arc::new(reference)),
+        }
+    }
+
+    /// Removes the reference dimension called `name`.
+    pub fn remove_reference(&mut self, name: &str) -> bool {
+        let before = self.references.len();
+        self.references.retain(|r| r.name != name);
+        self.references.len() != before
+    }
+
+    /// Stores what a reference dimension measured. Returns whether it changed.
+    pub(crate) fn set_reference_value(&mut self, name: &str, value: Option<f64>) -> bool {
+        match self.references.iter_mut().find(|r| r.name == name) {
+            Some(r) if r.value.map(f64::to_bits) != value.map(f64::to_bits) => {
+                Arc::make_mut(r).value = value;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Adds a step to the exploded view, with an automatic name (`Explode1`). The
@@ -1112,6 +1181,22 @@ impl Assembly {
         self.next_pattern = self
             .next_pattern
             .max(max(&mut self.patterns.iter().map(|p| p.id.0)));
+        for e in &self.equations {
+            if self.component(e.target.component()).is_none() {
+                return Err(
+                    "The assembly is damaged: an equation sets something of a component that is not in the file."
+                        .to_owned(),
+                );
+            }
+        }
+        for r in &self.references {
+            if r.a.path.is_empty() || r.b.path.is_empty() {
+                return Err(format!(
+                    "The assembly is damaged: {} is not measured between two components.",
+                    r.name
+                ));
+            }
+        }
         for d in &mut self.definitions {
             let mut model = (*d.model).clone();
             model.validate()?;

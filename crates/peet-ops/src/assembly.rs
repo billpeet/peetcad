@@ -73,9 +73,20 @@ impl CompSel {
                 .component(*id)
                 .map(|c| c.id)
                 .ok_or_else(|| format!("There is no component with the id {}. {}", id.0, names())),
+            // As in SolidWorks, the case doesn't matter where only one component has
+            // the name in any case.
             Self::Name(name) => assembly
                 .components()
                 .find(|c| c.name == *name)
+                .or_else(|| {
+                    let mut alike = assembly
+                        .components()
+                        .filter(|c| c.name.eq_ignore_ascii_case(name));
+                    match (alike.next(), alike.next()) {
+                        (Some(c), None) => Some(c),
+                        _ => None,
+                    }
+                })
                 .map(|c| c.id)
                 .ok_or_else(|| format!("There is no component called '{name}'. {}", names())),
         }
@@ -478,6 +489,10 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
             | Op::Explode { .. }
             | Op::ShowAll
             | Op::Isolate { .. }
+            | Op::ComponentSuppression { .. }
+            | Op::ReferenceDimension { .. }
+            | Op::DeleteReference { .. }
+            | Op::MakeIndependent { .. }
             | Op::Query(
                 Query::Components
                     | Query::Mates
@@ -495,7 +510,6 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
         | Op::NameDimension { .. }
         | Op::SetText { .. }
         | Op::Rename { .. }
-        | Op::Suppress { .. }
         | Op::SetSuppressionExpression { .. }
         | Op::Show { .. }
         | Op::Delete { .. }

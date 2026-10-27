@@ -287,6 +287,19 @@ pub fn diff_scoped(
         _ => {}
     }
     if let (Some(before), Some(after)) = (old.assembly(), new.assembly()) {
+        let references = |a: &peet_model::Assembly| -> Vec<(String, peet_model::MateEnd, peet_model::MateEnd)> {
+            a.references()
+                .map(|r| (r.name.clone(), r.a.clone(), r.b.clone()))
+                .collect()
+        };
+        if before.equations() != after.equations() || references(before) != references(after) {
+            return Err(
+                "the assembly's equations or reference dimensions were changed directly: 'set', 'set_suppression_expression' and 'reference_dimension' change them"
+                    .to_owned(),
+            );
+        }
+    }
+    if let (Some(before), Some(after)) = (old.assembly(), new.assembly()) {
         use peet_model::MateKind;
         let width_mode = |mode: &peet_model::WidthMode| match mode {
             peet_model::WidthMode::Centered => WidthModeSel::Centered,

@@ -610,6 +610,39 @@ pub fn is_word(name: &str) -> bool {
 /// plain word is quoted in an expression (`"Dia.@Sketch1"`). With `whole`, the name may be
 /// a whole address (`D2@Sketch10`, one `@`), for a value whose SolidWorks name belongs to a
 /// feature that PeetCAD doesn't have on its own; otherwise it has no `@`.
+/// A component's name as SolidWorks writes it in an assembly's equations, as PeetCAD
+/// names the component: `Door<1>.Part` and `Door-1.Part` are `Door-1`, and
+/// `Hinge Assembly<3>.Assembly` is `Hinge Assembly-3`. Anything else is as it is.
+pub fn solidworks_component(name: &str) -> String {
+    let name = name.trim();
+    let lower = name.to_ascii_lowercase();
+    let name = [".part", ".assembly", ".sldprt", ".sldasm"]
+        .iter()
+        .find(|s| lower.ends_with(*s))
+        .map_or(name, |s| &name[..name.len() - s.len()]);
+    if let Some(open) = name.rfind('<')
+        && let Some(number) = name[open + 1..].strip_suffix('>')
+        && !number.is_empty()
+        && number.bytes().all(|b| b.is_ascii_digit())
+    {
+        return format!("{}-{number}", &name[..open]);
+    }
+    name.to_owned()
+}
+
+/// An address as PeetCAD writes it, from SolidWorks' form in an assembly's equations: the
+/// component it reaches into named as PeetCAD names it (`Height@Sketch1@Door<1>.Part` is
+/// `Height@Sketch1@Door-1`). See [`solidworks_component`].
+pub fn solidworks_address(address: &str) -> String {
+    match address.split_once('@') {
+        Some((name, rest)) => {
+            let rest: Vec<String> = rest.split('@').map(solidworks_component).collect();
+            format!("{name}@{}", rest.join("@"))
+        }
+        None => address.to_owned(),
+    }
+}
+
 pub fn check_dimension_name(name: &str, whole: bool) -> Result<(), ExprError> {
     if name.is_empty() || name != name.trim() {
         return Err(ExprError::new(
@@ -1823,17 +1856,23 @@ impl DimensionValues {
     /// The value at an address. As in SolidWorks, the case of the letters doesn't matter
     /// where only one address is the same in any case.
     pub fn get(&self, address: &str) -> Option<Quantity> {
-        if let Some(q) = self.0.get(address) {
-            return Some(*q);
-        }
-        let mut alike = self
-            .0
-            .iter()
-            .filter(|(a, _)| a.eq_ignore_ascii_case(address));
-        match (alike.next(), alike.next()) {
-            (Some((_, q)), None) => Some(*q),
-            _ => None,
-        }
+        let find = |address: &str| {
+            if let Some(q) = self.0.get(address) {
+                return Some(*q);
+            }
+            let mut alike = self
+                .0
+                .iter()
+                .filter(|(a, _)| a.eq_ignore_ascii_case(address));
+            match (alike.next(), alike.next()) {
+                (Some((_, q)), None) => Some(*q),
+                _ => None,
+            }
+        };
+        find(address).or_else(|| {
+            let ours = solidworks_address(address);
+            (ours != address).then(|| find(&ours)).flatten()
+        })
     }
 
     /// Whether the two hold the same values (which `==` does not look at).
@@ -2816,6 +2855,31 @@ mod tests {
             p.evaluate_expression("\"WIDTH@Sketch1\"").unwrap().value,
             500.0
         );
+    }
+
+    #[test]
+    fn solidworks_component_addresses() {
+        assert_eq!(solidworks_component("Door<1>.Part"), "Door-1");
+        assert_eq!(solidworks_component("Door-1.Part"), "Door-1");
+        assert_eq!(
+            solidworks_component("Hinge Assembly<3>.Assembly"),
+            "Hinge Assembly-3"
+        );
+        assert_eq!(solidworks_component("Door-1"), "Door-1");
+        assert_eq!(
+            solidworks_address("Height@Sketch1@Door<1>.Part"),
+            "Height@Sketch1@Door-1"
+        );
+        assert_eq!(solidworks_address("RD1@Annotations"), "RD1@Annotations");
+        let mut p = Parameters::default();
+        p.dimensions.0.insert(
+            "Height@Sketch1@Door-1".to_owned(),
+            Quantity::length(1600.0),
+        );
+        // SolidWorks' forms read what PeetCAD's does.
+        for name in ["\"Height@Sketch1@Door<1>.Part\"", "\"Height@Sketch1@Door-1.Part\""] {
+            assert_eq!(p.evaluate_expression(name).unwrap().value, 1600.0);
+        }
     }
 
     #[test]

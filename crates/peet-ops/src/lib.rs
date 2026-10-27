@@ -46,6 +46,7 @@ mod analysis;
 mod args;
 mod assembly;
 mod diff;
+mod equations;
 mod explode;
 mod export;
 mod fields;
@@ -144,6 +145,8 @@ struct Done {
     pattern: Option<peet_model::PatternId>,
     /// A pull on a component to solve the assembly with, and its undo label.
     drag: Option<(peet_model::Drag, String)>,
+    /// A reference dimension the operation was about, reported with what it measures.
+    reference: Option<String>,
     data: Map<String, Value>,
 }
 
@@ -422,6 +425,19 @@ fn help() -> Map<String, Value> {
             }
         }
     }
+    for (form, name, fields_text, what) in equations::EQUATION_OPS {
+        match ops.get_mut(*name) {
+            Some(entry) => {
+                entry[*form] = json!({ "does": what, "fields": fields_text });
+            }
+            None => {
+                ops.insert(
+                    (*name).to_owned(),
+                    json!({ "does": what, "fields": fields_text, "in": "an assembly" }),
+                );
+            }
+        }
+    }
     for (name, fields_text, what) in session::SESSION_OPS {
         ops.insert(
             (*name).to_owned(),
@@ -469,9 +485,29 @@ fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, V
         Query::Features => object(query::features(doc)),
         Query::Feature(f) => object(query::feature(doc, f.resolve(doc)?)),
         Query::Parameters => object(query::parameters(doc)),
-        Query::Dimensions { feature, name } => {
-            let feature = feature.as_ref().map(|f| f.resolve(doc)).transpose()?;
-            object(query::dimensions(doc, feature, name.as_deref())?)
+        Query::Dimensions {
+            feature,
+            name,
+            component,
+        } => {
+            if doc.is_assembly() {
+                if feature.is_some() {
+                    return Err(format!(
+                        "{} is an assembly: it has no features. 'dimensions' takes 'component' there.",
+                        doc.title()
+                    ));
+                }
+                equations::dimensions(doc, component.as_ref(), name.as_deref())?
+            } else {
+                if component.is_some() {
+                    return Err(format!(
+                        "{} is a part: 'component' is for an assembly's dimensions.",
+                        doc.title()
+                    ));
+                }
+                let feature = feature.as_ref().map(|f| f.resolve(doc)).transpose()?;
+                object(query::dimensions(doc, feature, name.as_deref())?)
+            }
         }
         Query::Configurations => object(query::configurations(doc)),
         Query::Bodies => object(query::bodies(doc)),
@@ -682,6 +718,23 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             if shown.is_empty() {
                 return Ok(done);
             }
+            label
+        }
+        Op::ComponentSuppression { component, value } => {
+            let label = equations::suppression(doc, &mut model, component, value.as_deref())?;
+            done.component = Some(component.resolve(doc)?);
+            label
+        }
+        Op::ReferenceDimension { a, b, name } => {
+            let (name, label) = equations::add_reference(doc, &mut model, a, b, name.as_deref())?;
+            done.reference = Some(name);
+            label
+        }
+        Op::DeleteReference { name } => equations::delete_reference(doc, &mut model, name)?,
+        Op::MakeIndependent { component, name } => {
+            let id = component.resolve(doc)?;
+            let label = equations::make_independent(doc, &mut model, &mut done.data, component, name)?;
+            done.component = Some(id);
             label
         }
         Op::Isolate { components } => {
@@ -1103,7 +1156,16 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 let t = target.trim_matches('"').trim();
                 doc.model.parameters.entries.iter().any(|p| p.name == t)
             };
-            if doc.is_assembly() && !parameter() {
+            if doc.is_assembly() && !parameter() && equations::reaches_component(doc, target) {
+                if configurations.is_some() {
+                    return Err(
+                        "An assembly has no configurations of its own: leave 'configurations' out."
+                            .to_owned(),
+                    );
+                }
+                let target = target.trim_matches('"').trim();
+                equations::set(doc, &mut model, &mut done.data, target, value)?
+            } else if doc.is_assembly() && !parameter() {
                 let id = mate::value_address(doc, target, configurations.is_some())?;
                 let change = MateChange::Edit {
                     value: Some(value.clone()),
@@ -1172,6 +1234,22 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             rename(&mut model, id, name)?;
             done.feature = Some(id);
             format!("Rename {}", doc.model.name_of(id))
+        }
+        Op::Suppress {
+            feature,
+            on,
+            configurations,
+        } if doc.is_assembly() => {
+            let FeatureSel::Name(name) = feature else {
+                return Err("In an assembly 'suppress' takes a component, or a feature of a component's part as FEATURE@COMPONENT.".to_owned());
+            };
+            if *configurations != Configs::default() {
+                return Err(
+                    "An assembly has no configurations of its own: leave 'configurations' out."
+                        .to_owned(),
+                );
+            }
+            equations::suppress_feature(doc, &mut model, &mut done.data, name, *on)?
         }
         Op::Suppress {
             feature,
@@ -1473,6 +1551,9 @@ pub(crate) fn apply_with(
     }
     if let Some(id) = done.explode_step {
         out.insert("explode_step".to_owned(), explode::step_out(doc, id));
+    }
+    if let Some(name) = &done.reference {
+        out.insert("reference".to_owned(), equations::reference_out(doc, name));
     }
     if done.changed && !done.replaced && doc.is_assembly() {
         // The components that are somewhere else now: what a mate, or a placement that
