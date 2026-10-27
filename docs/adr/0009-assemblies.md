@@ -495,9 +495,21 @@ components and positions, and its own mate suppression and values.
   configuration, SolidWorks' "This configuration"), on `suppress` with a mate, and on
   mate values (`edit_mate`, `set D1@MATE`), which change as a part's values do. The part
   configuration operations now work in an assembly; `configurations` lists what differs.
-- Not done: equations that differ per configuration (SolidWorks' "this configuration"
-  equations; the template library's differ only in disabled ones and one suppression
-  equation), derived configurations (none in the library), display states, a
-  configuration-specific colour, and the application's configuration list and a
-  component's configuration in its properties. `open_component` opens the part with its
-  own active configuration, not the one the component shows.
+- **Equations differ per configuration** (SolidWorks' "This configuration"): `Varying`
+  also holds, for each equation (by what it sets) that differs, its expression in every
+  other configuration, or that it has none there. `set` with a component's address and
+  `set_suppression_expression` with a component take `configurations` (left out: all while
+  the equation is the same everywhere, the active one once it differs, as a mate's value).
+  A suppression equation of some configurations suppresses in the active one only (the
+  component's suppression is per configuration); one of all of them as before.
+- **Derived configurations**, for parts and assemblies: a configuration has a `parent`
+  (model schema 12), and a change made to a configuration is made to those derived from it
+  that have its value there (per field of a component's or a mate's state). Deleting a
+  parent deletes what is derived from it. A schema 12 part written before this is still
+  read (`ModelV12Early`).
+- `open_component` opens the part in the configuration the component shows; `save` stores
+  it back with the part's own active configuration. The application lists an assembly's
+  configurations as a part's (with Add Derived Configuration), and a component's
+  configuration is chosen in its properties.
+- Not done: display states (the export has none to import: see the parity document), a
+  configuration-specific colour.

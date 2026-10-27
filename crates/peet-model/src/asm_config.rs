@@ -8,7 +8,10 @@
 //!   its part it shows (its *referenced configuration*), whether it is fixed, and where it
 //!   is (its placement, and the poses of a flexible sub-assembly);
 //! - per mate ([`MateState`]): whether it is suppressed, and its kind with its values (a
-//!   distance, an angle, limits).
+//!   distance, an angle, limits);
+//! - per equation (by what it sets, [`EquationTarget`]): its expression, or that it has
+//!   none there (SolidWorks' "This configuration" in the equation manager). The parameters
+//!   (global variables) differ as a part's do.
 //!
 //! As for a part, **the model holds the active configuration**: the components and mates
 //! are as it has them, so the rebuild, the queries and the exports see an ordinary
@@ -31,6 +34,7 @@ use serde::{Deserialize, Serialize};
 use crate::Model;
 use crate::assembly::{Assembly, CompId, Component, Pose};
 use crate::config::{ConfigId, Scope};
+use crate::equations::{Equation, EquationTarget};
 use crate::mate::{Mate, MateId, MateKind};
 
 /// What an assembly's configuration holds of a component.
@@ -54,6 +58,20 @@ impl ComponentState {
             placement: c.placement,
             poses: c.poses.clone(),
         }
+    }
+
+    /// Whether a derived configuration's state `self` follows its parent's, `parent`, in
+    /// a change that makes the parent's `after`: it has the parent's value of every field
+    /// the change changes.
+    fn follows(&self, parent: &Self, after: &Self) -> bool {
+        // A change that changes nothing in the parent has nothing to pass on.
+        parent != after
+            && (parent.suppressed == after.suppressed || self.suppressed == parent.suppressed)
+            && (parent.configuration == after.configuration
+                || self.configuration == parent.configuration)
+            && (parent.fixed == after.fixed || self.fixed == parent.fixed)
+            && (parent.placement == after.placement || self.placement == parent.placement)
+            && (parent.poses == after.poses || self.poses == parent.poses)
     }
 
     fn apply(&self, c: &mut Component) {
@@ -82,6 +100,13 @@ impl MateState {
         }
     }
 
+    /// As [`ComponentState::follows`].
+    fn follows(&self, parent: &Self, after: &Self) -> bool {
+        parent != after
+            && (parent.suppressed == after.suppressed || self.suppressed == parent.suppressed)
+            && (parent.kind == after.kind || self.kind == parent.kind)
+    }
+
     fn apply(&self, m: &mut Mate) {
         m.suppressed = self.suppressed;
         m.kind.clone_from(&self.kind);
@@ -94,14 +119,20 @@ impl MateState {
 pub(crate) struct Varying {
     components: BTreeMap<CompId, BTreeMap<ConfigId, ComponentState>>,
     mates: BTreeMap<MateId, BTreeMap<ConfigId, MateState>>,
+    /// The equations whose expression differs: the expression in every configuration
+    /// other than the active one (`None`: no equation sets that there).
+    equations: BTreeMap<EquationTarget, BTreeMap<ConfigId, Option<String>>>,
 }
 
 impl Varying {
-    /// Forgets the components and mates that are gone.
+    /// Forgets the components and mates that are gone, and the equations that set
+    /// something of a component that is gone.
     pub(crate) fn forget(&mut self, components: &[Arc<Component>], mates: &[Arc<Mate>]) {
         self.components
             .retain(|id, _| components.iter().any(|c| c.id == *id));
         self.mates.retain(|id, _| mates.iter().any(|m| m.id == *id));
+        self.equations
+            .retain(|t, _| components.iter().any(|c| c.id == t.component()));
     }
 
     /// A component made an instance of another part: the configurations it showed were
@@ -154,6 +185,37 @@ fn vary<K: Ord, V: Clone>(
                 here
             })
         }
+    }
+}
+
+/// The expression of the equation that sets `target` in `equations`, if one does.
+fn expression_of(equations: &[Equation], target: &EquationTarget) -> Option<String> {
+    equations
+        .iter()
+        .find(|e| e.target == *target)
+        .map(|e| e.expression.clone())
+}
+
+/// Makes `equations` have `expression` for `target` (`None`: no equation for it). One that
+/// is there keeps its place in the order.
+fn put_equation(
+    equations: &mut Vec<Equation>,
+    target: &EquationTarget,
+    expression: Option<String>,
+) {
+    match (
+        equations.iter().position(|e| e.target == *target),
+        expression,
+    ) {
+        (Some(i), Some(x)) => equations[i].expression = x,
+        (Some(i), None) => {
+            equations.remove(i);
+        }
+        (None, Some(x)) => equations.push(Equation {
+            target: target.clone(),
+            expression: x,
+        }),
+        (None, None) => {}
     }
 }
 
@@ -228,6 +290,82 @@ impl Model {
         )
     }
 
+    /// The expression of the equation that sets `target` in a configuration of this
+    /// assembly (`None`: there is none there).
+    pub fn equation_in(&self, target: &EquationTarget, config: ConfigId) -> Option<String> {
+        let assembly = self.assembly()?;
+        let now = expression_of(assembly.equations(), target);
+        if config == self.active_configuration().id {
+            return now;
+        }
+        match assembly.varying.equations.get(target) {
+            Some(v) => v.get(&config).cloned().unwrap_or(now),
+            None => now,
+        }
+    }
+
+    /// Whether the equation that sets `target` differs between the configurations (or is
+    /// in some of them only).
+    pub fn equation_differs(&self, target: &EquationTarget) -> bool {
+        self.assembly()
+            .is_some_and(|a| a.varying.equations.contains_key(target))
+    }
+
+    /// What the equations set in any configuration of this assembly: what those of the
+    /// active one set, in their order, then what only other configurations' set.
+    pub fn equation_targets(&self) -> Vec<EquationTarget> {
+        let Some(assembly) = self.assembly() else {
+            return Vec::new();
+        };
+        let mut out: Vec<EquationTarget> = assembly
+            .equations()
+            .iter()
+            .map(|e| e.target.clone())
+            .collect();
+        for t in assembly.varying.equations.keys() {
+            if !out.contains(t) {
+                out.push(t.clone());
+            }
+        }
+        out
+    }
+
+    /// Sets (or with `None` removes) the equation that sets `target`, in the
+    /// configurations of `scope`.
+    pub fn set_equation(
+        &mut self,
+        target: &EquationTarget,
+        expression: Option<String>,
+        scope: &Scope,
+    ) -> Result<(), String> {
+        let targets = self.scope_following(scope, |c, p| {
+            self.equation_in(target, c) == self.equation_in(target, p)
+        })?;
+        let active = self.active_configuration().id;
+        let others = self.other_configurations();
+        let assembly = self
+            .assembly_mut()
+            .ok_or_else(|| "The document is not an assembly.".to_owned())?;
+        if assembly.component(target.component()).is_none() {
+            return Err("The component no longer exists.".to_owned());
+        }
+        let now = expression_of(assembly.equations(), target);
+        let here = vary(
+            &mut assembly.varying.equations,
+            target.clone(),
+            &now,
+            &others,
+            active,
+            targets.as_deref(),
+            &|v: &mut Option<String>| v.clone_from(&expression),
+        );
+        if let Some(here) = here.filter(|h| *h != now) {
+            put_equation(assembly.equations_mut(), target, here);
+        }
+        self.tidy_configurations();
+        Ok(())
+    }
+
     /// Whether anything of a component differs between the configurations.
     pub fn component_differs(&self, id: CompId) -> bool {
         self.assembly()
@@ -247,7 +385,15 @@ impl Model {
         scope: &Scope,
         change: impl Fn(&mut ComponentState),
     ) -> Result<(), String> {
-        let targets = self.scope_targets(scope)?;
+        let state = |c| self.component_in(id, c);
+        let targets = self.scope_following(scope, |c, p| match (state(c), state(p)) {
+            (Some(c), Some(p)) => {
+                let mut after = p.clone();
+                change(&mut after);
+                c.follows(&p, &after)
+            }
+            _ => false,
+        })?;
         let active = self.active_configuration().id;
         let others = self.other_configurations();
         let assembly = self
@@ -283,7 +429,15 @@ impl Model {
         scope: &Scope,
         change: impl Fn(&mut MateState),
     ) -> Result<(), String> {
-        let targets = self.scope_targets(scope)?;
+        let state = |c| self.mate_in(id, c);
+        let targets = self.scope_following(scope, |c, p| match (state(c), state(p)) {
+            (Some(c), Some(p)) => {
+                let mut after = p.clone();
+                change(&mut after);
+                c.follows(&p, &after)
+            }
+            _ => false,
+        })?;
         let active = self.active_configuration().id;
         let others = self.other_configurations();
         let assembly = self
@@ -368,9 +522,20 @@ impl Model {
             states.insert(old, now);
         }
         assembly.varying.mates = mates;
+        let mut equations = std::mem::take(&mut assembly.varying.equations);
+        for (target, states) in &mut equations {
+            let now = expression_of(assembly.equations(), target);
+            let next = states.remove(&new).unwrap_or_else(|| now.clone());
+            if next != now {
+                put_equation(assembly.equations_mut(), target, next);
+            }
+            states.insert(old, now);
+        }
+        assembly.varying.equations = equations;
     }
 
-    /// A new configuration `id` starts as `source` has its components and mates.
+    /// A new configuration `id` starts as `source` has its components, mates and
+    /// equations.
     pub(crate) fn copy_assembly(&mut self, source: ConfigId, id: ConfigId) {
         let Some(assembly) = self.assembly() else {
             return;
@@ -387,9 +552,23 @@ impl Model {
             .keys()
             .filter_map(|m| Some((*m, self.mate_in(*m, source)?)))
             .collect();
+        let equations: Vec<(EquationTarget, Option<String>)> = assembly
+            .varying
+            .equations
+            .keys()
+            .map(|t| (t.clone(), self.equation_in(t, source)))
+            .collect();
         let Some(assembly) = self.assembly_mut() else {
             return;
         };
+        for (t, e) in equations {
+            assembly
+                .varying
+                .equations
+                .entry(t)
+                .or_default()
+                .insert(id, e);
+        }
         for (c, s) in components {
             assembly
                 .varying
@@ -423,6 +602,16 @@ impl Model {
             &mut varying.mates,
             others,
             |id| assembly.mate(*id).map(MateState::of),
+            |a, b| a == b,
+        );
+        crate::config::tidy(
+            &mut varying.equations,
+            others,
+            |t| {
+                assembly
+                    .component(t.component())
+                    .map(|_| expression_of(assembly.equations(), t))
+            },
             |a, b| a == b,
         );
         if varying != assembly.varying

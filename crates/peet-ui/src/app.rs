@@ -1609,11 +1609,19 @@ impl PeetApp {
                     name: configs_ui::new_name(&self.doc),
                     copy: None,
                     comment: None,
+                    parent: None,
                 },
                 ConfigAction::Copy(of) => Op::AddConfiguration {
                     name: configs_ui::new_name(&self.doc),
                     copy: Some(of),
                     comment: None,
+                    parent: None,
+                },
+                ConfigAction::Derive(parent) => Op::AddConfiguration {
+                    name: configs_ui::new_name(&self.doc),
+                    copy: None,
+                    comment: None,
+                    parent: Some(parent),
                 },
                 ConfigAction::Rename { from, to } => Op::EditConfiguration {
                     configuration: from,
@@ -2511,12 +2519,7 @@ impl PeetApp {
                 ui.weak("(modified)");
             }
         });
-        // (An assembly has no configurations of its own: its parts have theirs.)
-        let configs = if self.doc.is_assembly() {
-            Vec::new()
-        } else {
-            configs_ui::configs_ui(ui, &self.doc, &mut self.config_list)
-        };
+        let configs = configs_ui::configs_ui(ui, &self.doc, &mut self.config_list);
         if !configs.is_empty() {
             // Another configuration is another part: sketch editing ends first.
             if self.sketch.is_some() {

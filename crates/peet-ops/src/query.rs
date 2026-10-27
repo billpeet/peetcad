@@ -84,6 +84,9 @@ pub fn configurations(doc: &Document) -> Value {
             if !c.comment.is_empty() {
                 m.insert("comment".to_owned(), json!(c.comment));
             }
+            if let Some(parent) = c.parent.and_then(|p| model.configuration(p)) {
+                m.insert("parent".to_owned(), json!(parent.name));
+            }
             Value::Object(m)
         })
         .collect();
@@ -134,6 +137,7 @@ pub fn configurations(doc: &Document) -> Value {
         let (components, mates) = assembly_differences(doc);
         out["components"] = Value::Object(components);
         out["mates"] = Value::Object(mates);
+        out["equations"] = Value::Object(crate::equations::equations_that_differ(doc));
     }
     out
 }

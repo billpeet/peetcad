@@ -1,5 +1,6 @@
-//! The configurations list, above the feature tree: the part's configurations, with the
-//! active one marked.
+//! The configurations list, above the feature tree (or an assembly's component tree): the
+//! document's configurations, with the active one marked and derived ones under their
+//! parents.
 //!
 //! Double-clicking a configuration makes it the active one; right-clicking offers the
 //! rest. Like the tree, the list only reports what the user did ([`ConfigAction`]); the
@@ -20,6 +21,8 @@ pub enum ConfigAction {
     Add,
     /// A new configuration, a copy of this one.
     Copy(String),
+    /// A new configuration derived from this one.
+    Derive(String),
     Rename {
         from: String,
         to: String,
@@ -61,6 +64,9 @@ pub fn configs_ui(ui: &mut Ui, doc: &Document, list: &mut ConfigList) -> Vec<Con
         .show(ui, |ui| {
             for c in model.configurations() {
                 let is_active = c.id == active.id;
+                // A derived configuration is indented under its parent.
+                let depth = std::iter::successors(c.parent, |p| model.parent_configuration(*p))
+                    .count();
                 if let Some((id, text, focused)) = &mut list.renaming
                     && *id == c.id
                 {
@@ -82,10 +88,11 @@ pub fn configs_ui(ui: &mut Ui, doc: &Document, list: &mut ConfigList) -> Vec<Con
                     }
                     continue;
                 }
+                let indent = "    ".repeat(depth);
                 let text = if is_active {
-                    RichText::new(format!("● {}", c.name)).strong()
+                    RichText::new(format!("{indent}● {}", c.name)).strong()
                 } else {
-                    RichText::new(format!("○ {}", c.name))
+                    RichText::new(format!("{indent}○ {}", c.name))
                 };
                 let mut hint = if is_active {
                     "The active configuration: the one that is built, shown and exported."
@@ -93,6 +100,12 @@ pub fn configs_ui(ui: &mut Ui, doc: &Document, list: &mut ConfigList) -> Vec<Con
                 } else {
                     "Double-click to make it the active configuration.".to_owned()
                 };
+                if let Some(parent) = c.parent.and_then(|p| model.configuration(p)) {
+                    hint = format!(
+                        "Derived from {}: it follows it where it has no value of its own.\n{hint}",
+                        parent.name
+                    );
+                }
                 if !c.comment.is_empty() {
                     hint = format!("{}\n{hint}", c.comment);
                 }
@@ -122,10 +135,24 @@ pub fn configs_ui(ui: &mut Ui, doc: &Document, list: &mut ConfigList) -> Vec<Con
                         actions.push(ConfigAction::Copy(c.name.clone()));
                         ui.close();
                     }
-                    ui.separator();
                     if ui
-                        .add_enabled(count > 1, egui::Button::new("Delete"))
-                        .on_disabled_hover_text("A part has at least one configuration.")
+                        .button("Add Derived Configuration")
+                        .on_hover_text("A new configuration that follows this one, except where it is given values of its own.")
+                        .clicked()
+                    {
+                        actions.push(ConfigAction::Derive(c.name.clone()));
+                        ui.close();
+                    }
+                    ui.separator();
+                    let derived = model.derived_configurations(c.id).len();
+                    if ui
+                        .add_enabled(count > derived + 1, egui::Button::new("Delete"))
+                        .on_hover_text(if derived > 0 {
+                            "Deletes the configurations derived from it too."
+                        } else {
+                            "Delete the configuration."
+                        })
+                        .on_disabled_hover_text("A document has at least one configuration.")
                         .clicked()
                     {
                         actions.push(ConfigAction::Delete(c.name.clone()));
@@ -135,9 +162,11 @@ pub fn configs_ui(ui: &mut Ui, doc: &Document, list: &mut ConfigList) -> Vec<Con
             }
             if ui
                 .small_button("+ Add Configuration")
-                .on_hover_text(
-                    "A new configuration that starts as a copy of the active one. Features can then be suppressed, and parameters given other values, in it alone.",
-                )
+                .on_hover_text(if model.is_assembly() {
+                    "A new configuration that starts as a copy of the active one. Components can then be suppressed, shown in another configuration of their part or placed elsewhere, mates suppressed, and parameters and equations given other values, in it alone."
+                } else {
+                    "A new configuration that starts as a copy of the active one. Features can then be suppressed, and parameters given other values, in it alone."
+                })
                 .clicked()
             {
                 actions.push(ConfigAction::Add);

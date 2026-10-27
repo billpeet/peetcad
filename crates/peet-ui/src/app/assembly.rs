@@ -1774,6 +1774,22 @@ impl PeetApp {
             .and_then(|d| d.link.as_ref())
             .map(|l| l.path.clone());
         let mut unlink = false;
+        // The configuration of its part (or sub-assembly) it shows, and the others it could.
+        let configurations: Vec<String> = assembly
+            .definition(c.definition)
+            .map(|d| {
+                d.model
+                    .configurations()
+                    .iter()
+                    .map(|x| x.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let shown = assembly
+            .configuration_name(&c)
+            .unwrap_or_default()
+            .to_owned();
+        let mut show = shown.clone();
         let units = self.doc.model.parameters.units;
         let status = self.doc.evaluation().component_status(id).cloned();
         let freedom = freedom_text(c.fixed, self.doc.evaluation().component_freedom(id));
@@ -1831,6 +1847,19 @@ impl PeetApp {
                         .clicked();
                 });
                 ui.end_row();
+                if configurations.len() > 1 {
+                    ui.label("Configuration").on_hover_text(
+                        "The configuration of its part this component shows (SolidWorks' referenced configuration). Other components of the part can show others. It is set in the assembly's active configuration.",
+                    );
+                    egui::ComboBox::from_id_salt(("component_configuration", id.0))
+                        .selected_text(&show)
+                        .show_ui(ui, |ui| {
+                            for name in &configurations {
+                                ui.selectable_value(&mut show, name.clone(), name);
+                            }
+                        });
+                    ui.end_row();
+                }
                 if let Some(path) = &link {
                     ui.label("Linked to").on_hover_text(
                         "The part is read from this file whenever the assembly is opened.",
@@ -1943,6 +1972,9 @@ impl PeetApp {
                 * frame.rotation)
                 .normalize();
             self.change_component(id, ComponentChange::Place(Placing::Frame(frame)));
+        }
+        if show != shown {
+            self.change_component(id, ComponentChange::Configuration(Some(show)));
         }
         if fixed != c.fixed {
             self.change_component(id, ComponentChange::Fix(fixed));
@@ -2685,6 +2717,61 @@ mod tests {
         windows(&mut app);
         assert!(!app.windows.interference && !app.windows.bill_of_materials);
         assert!(app.windows.mass_properties);
+    }
+
+    #[test]
+    fn an_assemblys_configurations_and_a_components_configuration_in_the_application() {
+        use crate::configs_ui::ConfigAction;
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        // A part with two configurations, in an assembly.
+        for op in [
+            json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}),
+            json!({"op": "extrude", "sketch": "Sketch1", "depth": 6}),
+            json!({"op": "add_configuration", "name": "Thick"}),
+            json!({"op": "edit", "feature": "Extrude1", "depth": 20, "configurations": "this"}),
+            json!({"op": "configuration", "configuration": "Default"}),
+            json!({"op": "new", "assembly": true, "keep": true}),
+            json!({"op": "insert", "part": 1, "name": "Plate"}),
+        ] {
+            ok(&mut app, &ctx, op);
+        }
+        let plate = CompId(1);
+        app.selected_component = Some(plate);
+        draw(&mut app, &ctx);
+        // The configurations list is the assembly's: add, rename, derive, activate, delete.
+        app.apply_configs(vec![ConfigAction::Add]);
+        assert_eq!(app.doc.model.active_configuration().name, "Configuration2");
+        app.apply_configs(vec![ConfigAction::Rename {
+            from: "Configuration2".to_owned(),
+            to: "Tall".to_owned(),
+        }]);
+        // The component's configuration, from its properties, in the active one only.
+        app.change_component(
+            plate,
+            ComponentChange::Configuration(Some("Thick".to_owned())),
+        );
+        let shown = |app: &PeetApp| {
+            let a = app.doc.model.assembly().unwrap();
+            a.configuration_name(a.component(plate).unwrap())
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(shown(&app), "Thick");
+        app.apply_configs(vec![ConfigAction::Derive("Tall".to_owned())]);
+        let derived = app.doc.model.active_configuration().clone();
+        assert!(derived.parent.is_some());
+        assert_eq!(shown(&app), "Thick");
+        draw(&mut app, &ctx);
+        app.apply_configs(vec![ConfigAction::Activate("Default".to_owned())]);
+        assert_eq!(shown(&app), "Default");
+        app.apply_configs(vec![ConfigAction::Delete("Tall".to_owned())]);
+        assert_eq!(
+            app.doc.model.configurations().len(),
+            1,
+            "with what was derived from it"
+        );
+        assert!(app.untranslated().is_empty(), "{:?}", app.untranslated());
     }
 
     #[test]

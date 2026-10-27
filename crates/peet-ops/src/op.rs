@@ -316,7 +316,8 @@ pub enum Op {
     /// `configurations` as for [`Op::Edit`] (a parameter: as for [`Op::SetParameter`]).
     Set {
         name: String,
-        value: Input,
+        /// `None` (null): no equation of the assembly sets a component's value there.
+        value: Option<Input>,
         configurations: Option<Configs>,
     },
     /// Name a dimension of a feature (found by its name or field): `Width`, or for a value
@@ -399,11 +400,13 @@ pub enum Op {
         configurations: Configs,
     },
     /// Add a configuration: a copy of another (the active one if absent), which becomes
-    /// the active one.
+    /// the active one. With `parent`, one derived from that configuration (SolidWorks'
+    /// derived configuration): it follows the parent where it has no value of its own.
     AddConfiguration {
         name: String,
         copy: Option<String>,
         comment: Option<String>,
+        parent: Option<String>,
     },
     /// Rename a configuration, or change its comment.
     EditConfiguration {
@@ -636,6 +639,9 @@ pub enum Op {
     ComponentSuppression {
         component: CompSel,
         value: Option<String>,
+        /// Which of the assembly's configurations (left out: the active one if the
+        /// expression already differs between them, else all).
+        configurations: Option<Configs>,
     },
     /// Add a reference dimension to an assembly (or replace the one of that name).
     ReferenceDimension {
@@ -945,8 +951,8 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "add_configuration",
-        "name, copy (a configuration; default the active one), comment",
-        "Add a configuration, which starts as a copy and becomes the active one.",
+        "name, copy (a configuration; default the active one), comment, parent (a configuration to derive it from, in place of copy)",
+        "Add a configuration, which starts as a copy and becomes the active one. With parent, a derived configuration: it follows its parent where it has no value of its own.",
     ),
     (
         "edit_configuration",
@@ -956,7 +962,7 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "delete_configuration",
         "configuration",
-        "Delete a configuration. A part keeps at least one.",
+        "Delete a configuration, with the configurations derived from it. A part keeps at least one.",
     ),
     (
         "configuration",
@@ -1147,6 +1153,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             name: a.required("name", |v| text(v).map(str::to_owned))?,
             copy: a.string("copy")?,
             comment: a.string("comment")?,
+            parent: a.string("parent")?,
         },
         "edit_configuration" => Op::EditConfiguration {
             configuration: a.required("configuration", |v| text(v).map(str::to_owned))?,
@@ -1324,7 +1331,11 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         },
         "set" => Op::Set {
             name: a.required("name", |v| text(v).map(str::to_owned))?,
-            value: a.required("value", Input::parse)?,
+            value: match a.take_nullable("value") {
+                Some(Value::Null) => None,
+                Some(v) => Some(Input::parse(&v).map_err(|e| format!("value: {e}"))?),
+                None => return Err("'set' needs a 'value' field.".to_owned()),
+            },
             configurations: a.parsed("configurations", Configs::parse)?,
         },
         "name_dimension" => Op::NameDimension {

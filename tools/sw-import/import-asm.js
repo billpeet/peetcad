@@ -552,21 +552,39 @@ function referenceEnds(cfg, rd, target, byPath, name, partFile) {
  * an expression), a component suppressed by a condition a suppression expression, and the reference dimensions
  * they read reference dimensions. A disabled equation is not imported: SolidWorks doesn't apply it. Each is kept
  * only if PeetCAD works it out to SolidWorks' value.
+ *
+ * With `base` (the active configuration's export, already imported), `cfg` is another configuration, active now:
+ * what differs from `base` is imported for it alone (SolidWorks' "This configuration"): a disabled global variable
+ * with another value, a live equation with another expression (or live here only), and a live equation of `base`
+ * that is not live here is removed here.
  */
-function importEquations(peet, cfg, report, byPath, want, name) {
+function importEquations(peet, cfg, report, byPath, want, name, base = null) {
   report.equations = [];
+  const scope = base ? { configurations: "this" } : {};
+  const norm = t => t.replace(/\s+/g, " ").trim();
+  const baseLive = new Map();
+  const baseDisabled = new Map();
+  for (const e of (base && base.equations) || []) {
+    const m = /^\s*"([^"]+)"\s*=\s*([\s\S]*)$/.exec(e.expression);
+    if (!m) continue;
+    if (e.disabled) baseDisabled.set(m[1].trim(), e.value);
+    else baseLive.set(m[1].trim(), norm(m[2]));
+  }
   const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partOf(comp).view || null : null;
   const globals = new Map();
   const references = new Set();
   const annotations = ((cfg.features || []).find(f => f.type === "DetailCabinet") || {}).dimensions || [];
   const parse = e => /^\s*"([^"]+)"\s*=\s*([\s\S]*)$/.exec(e.expression);
-  // Disabled global variables keep their value
+  // Disabled global variables keep their value (in another configuration: where it differs, there)
   for (const e of cfg.equations) {
     const m = parse(e);
     if (!m || !e.disabled || !e.globalVariable || isComponentRef(m[1]) || m[1].includes("@")) continue;
     const n = globalName(m[1]);
-    if (peet.apply({ op: "set_parameter", name: n, value: String(e.value || 0) }).ok) globals.set(m[1].trim(), inExpression(n));
+    if (base && baseDisabled.get(m[1].trim()) === e.value) { globals.set(m[1].trim(), inExpression(n)); continue; }
+    if (peet.apply({ op: "set_parameter", name: n, value: String(e.value || 0), ...scope }).ok) globals.set(m[1].trim(), inExpression(n));
   }
+  // (Another configuration: the global variables the active one defined are there too)
+  if (base) for (const [t] of [...baseLive, ...baseDisabled]) if (!t.includes("@") && !isComponentRef(t) && !globals.has(t)) globals.set(t, inExpression(globalName(t)));
   const translate = (text, target) => {
     let failed = null;
     let out = text.replace(/"([^"]*)"/g, (whole, inner) => {
@@ -613,6 +631,8 @@ function importEquations(peet, cfg, report, byPath, want, name) {
       if (globals.has(target)) row.note = "a parameter with SolidWorks' value";
       continue;
     }
+    // Another configuration: an equation as the active one has it is there already
+    if (base && baseLive.get(target) === norm(m[2]) && (base.importedLive || new Set()).has(target)) { row.result = "imported"; row.note = "as in the active configuration"; continue; }
     const mark = peet.backup();
     const fail = why => { peet.restore(mark); row.result = "failed"; row.why = why; };
     const suppression = isComponentRef(target) && !target.includes("@");
@@ -622,28 +642,43 @@ function importEquations(peet, cfg, report, byPath, want, name) {
     const t = translate(m[2], component);
     if (t.failed) { fail(t.failed); continue; }
     if (suppression) {
-      const reply = peet.apply({ op: "set_suppression_expression", component, value: t.value });
+      const reply = peet.apply({ op: "set_suppression_expression", component, value: t.value, ...scope });
       if (!reply.ok) { fail(reply.error); continue; }
       const c = (peet.ask({ op: "components" }).components || []).find(x => x.name === component);
       const swSuppressed = (byPath.get(component) || {}).suppression === 0;
       if (!c || (c.status === "suppressed") !== swSuppressed) { fail(`PeetCAD has ${component} ${c && c.status === "suppressed" ? "suppressed" : "not suppressed"} by it, SolidWorks the other way`); continue; }
     } else if (e.globalVariable && !target.includes("@")) {
       const n = globalName(target);
-      const reply = peet.apply({ op: "set_parameter", name: n, value: t.value || String(e.value || 0) });
+      const reply = peet.apply({ op: "set_parameter", name: n, value: t.value || String(e.value || 0), ...scope });
       if (!reply.ok) { fail(reply.error); continue; }
       globals.set(target, inExpression(n));
     } else if (target.includes("@")) {
-      const reply = peet.apply({ op: "set", name: target, value: t.value });
+      const reply = peet.apply({ op: "set", name: target, value: t.value, ...scope });
       if (!reply.ok) { fail(reply.error); continue; }
       const now = peet.ask({ op: "dimensions", name: target });
       const v = now.ok && now.dimensions && now.dimensions[0] && now.dimensions[0].value;
       if (typeof v !== "number" || Math.abs(v - e.value) > 1e-4 * Math.max(1, Math.abs(e.value))) { fail(`PeetCAD works it out to ${v} where SolidWorks has ${tidy(e.value)}`); continue; }
     } else { fail("it sets something PeetCAD has no address for"); continue; }
     row.result = "imported";
+    if (base) row.configuration = cfg.name;
   }
-  const live = report.equations.filter(r => r.result !== "disabled");
+  // Another configuration: a live equation of the active one that is not live here is not here
+  if (base) {
+    const here = new Set(cfg.equations.filter(e => !e.disabled).map(e => (parse(e) || [])[1]).filter(Boolean).map(t => t.trim()));
+    for (const t of base.importedLive || []) {
+      if (here.has(t)) continue;
+      const suppression = isComponentRef(t) && !t.includes("@");
+      const reply = suppression
+        ? peet.apply({ op: "set_suppression_expression", component: componentName(t), value: null, configurations: "this" })
+        : t.includes("@") ? peet.apply({ op: "set", name: t, value: null, configurations: "this" }) : { ok: true };
+      report.equations.push({ equation: t, result: reply.ok ? "removed" : "failed", ...(reply.ok ? {} : { why: reply.error }) });
+    }
+  }
+  const live = report.equations.filter(r => r.result !== "disabled" && r.result !== "removed");
   const left = live.filter(r => r.result !== "imported").length;
   if (left) report.notes.push(`${left} of ${live.length} live equations not imported`);
+  // What later configurations compare with
+  if (!base) cfg.importedLive = new Set(report.equations.filter(r => r.result === "imported").map(r => (/^\s*"([^"]+)"/.exec(r.equation) || [])[1]).filter(Boolean).map(t => t.trim()));
 }
 
 // ---- Import ----
@@ -885,7 +920,7 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
     // A new assembly's one configuration is "Default": it is SolidWorks' active one
     const comment = cfg.description && cfg.description !== cfg.name ? { comment: cfg.description } : {};
     if (cfg.name !== "Default" || comment.comment) peet.apply({ op: "edit_configuration", configuration: "Default", ...(cfg.name !== "Default" ? { name: cfg.name } : {}), ...comment });
-    if (exp.configurations.some(c => c.derived)) report.notes.push("a derived configuration: imported as one of its own (PeetCAD's configurations are not derived from others)");
+    // (A derived configuration is added with its parent: see importConfiguration)
   }
   const all = listed || cfg.components || [];
   // In the sub-assembly's own coordinates
@@ -946,8 +981,6 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
 
   // Equations, before the mates: a part an equation sizes (Plinth Folded's pipes) is mated at its size
   if (cfg && (cfg.equations || []).length) importEquations(peet, cfg, report, byPath, want, name);
-  if (cfg && others.some(o => JSON.stringify((o.equations || []).filter(e => !e.disabled).map(e => e.expression)) !== JSON.stringify((cfg.equations || []).filter(e => !e.disabled).map(e => e.expression))))
-    report.notes.push("the live equations differ between configurations: those of the active one are imported, for every configuration");
 
   // Mates. One SolidWorks has suppressed here and live in another configuration is added in that one, where the
   // export describes its ends (in this one it gives only numbers, or nothing).
@@ -1000,7 +1033,10 @@ function importConfiguration(peet, report, { name, cfg, o, all, top, placeOf, lo
   const row = { name: o.name, changed: [], mates: [], notes: [] };
   report.configurations.push(row);
   const comment = o.description && o.description !== o.name ? { comment: o.description } : {};
-  const made = peet.apply({ op: "add_configuration", name: o.name, copy: cfg.name, ...comment });
+  // A derived configuration is derived from its parent (imported before it, or the active one), as in SolidWorks
+  const parent = o.derived && o.parent && (o.parent === cfg.name || report.configurations.some(r => r.name === o.parent && r !== row && r.verdict !== "not imported")) ? o.parent : null;
+  if (parent) row.parent = parent;
+  const made = peet.apply({ op: "add_configuration", name: o.name, ...(parent ? { parent } : { copy: cfg.name }), ...comment });
   if (!made.ok) { row.verdict = "not imported"; row.why = made.error; return; }
   peet.note(`Configuration ${o.name}`);
   const oall = o.components || [];
@@ -1042,6 +1078,13 @@ function importConfiguration(peet, report, { name, cfg, o, all, top, placeOf, lo
       if (!r.ok) row.notes.push(`${c.path}: ${op.op} failed: ${r.error || "no reply"}`);
     });
     if (differs.length) row.changed.push({ component: c.path, differs });
+  }
+
+  // Its equations where they differ from the active configuration's, before the mates, as there
+  if ((o.equations || []).length || (cfg.importedLive || new Set()).size) {
+    const eq = { equations: [], notes: row.notes };
+    importEquations(peet, o, eq, obyPath, owant, name, cfg);
+    row.equations = eq.equations.filter(e => e.note !== "as in the active configuration");
   }
 
   // Where the components are before any mate is put back: SolidWorks' placements, if the places took

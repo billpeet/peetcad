@@ -187,7 +187,7 @@ rebuild measured).
 
 | Operation | Fields |
 |---|---|
-| `set` | `name` (an address, or a parameter), `value`, `configurations` (as for `edit`; a parameter: as for `set_parameter`). A reference dimension can't be set. An address's case doesn't matter where only one dimension matches it, as in SolidWorks. On an assembly: a mate's value `D1@MATE` (with `configurations`, of the assembly), a parameter, or a component's dimension `NAME@FEATURE@COMPONENT` (see Assemblies), without `configurations` |
+| `set` | `name` (an address, or a parameter), `value`, `configurations` (as for `edit`; a parameter: as for `set_parameter`). A reference dimension can't be set. An address's case doesn't matter where only one dimension matches it, as in SolidWorks. On an assembly: a mate's value `D1@MATE` (with `configurations`, of the assembly), a parameter, or a component's dimension `NAME@FEATURE@COMPONENT` (see Assemblies; `configurations` of the assembly, for its equation) |
 | `name_dimension` | `feature`, `dimension` (its name or field), `name`. A sketch dimension's name has no `"` or `@`; another feature's value may take a whole address |
 | `dimensions` | `feature`, `name`: every address, its feature, field, value, `driven` for a reference dimension, and each configuration's value where they differ |
 
@@ -555,9 +555,9 @@ and exports. An assembly has configurations too, made with the same operations: 
 
 | Operation | Fields |
 |---|---|
-| `add_configuration` | `name`, `copy` (a configuration; default the active one), `comment`. It becomes the active one |
+| `add_configuration` | `name`, `copy` (a configuration; default the active one), `comment`, `parent` (a configuration to derive it from, in place of `copy`). It becomes the active one |
 | `edit_configuration` | `configuration`, `name`, `comment` |
-| `delete_configuration` | `configuration`. A part or an assembly keeps at least one |
+| `delete_configuration` | `configuration`, with the configurations derived from it. A part or an assembly keeps at least one |
 | `configuration` | `configuration`: make it the active one. Not an undo step |
 
 `suppress`, `set_parameter`, `edit`, `set_dimension` and `set` take `configurations`: `"this"`
@@ -566,6 +566,13 @@ and exports. An assembly has configurations too, made with the same operations: 
 that already differs between configurations in the active one, and a value that doesn't
 in all of them. Only the numeric fields of a feature can differ: an `edit` with
 `configurations` other than `"all"` that changes another field is refused.
+
+A **derived configuration** (`add_configuration` with `parent`, SolidWorks' derived
+configuration) starts as a copy of its parent and follows it: a change made to the parent
+is made to every configuration derived from it (at any depth) that has the parent's value
+there; a value of its own (one that differs from the parent's) stays. In an assembly this
+holds per field of a component, per mate and per equation. Deleting a parent deletes what
+is derived from it. `configurations` gives each derived one's `parent`.
 
 ```json
 {"op": "add_configuration", "name": "Thick"}
@@ -585,7 +592,7 @@ in all of them. Only the numeric fields of a feature can differ: an `edit` with
 | `feature` (`feature`) | its fields; a sketch's plane, definition, entities, relations and dimensions |
 | `parameters` | named values and units; a parameter that differs between configurations lists its expression in each |
 | `dimensions` (`feature`, `name`) | every dimension's address `NAME@FEATURE` and value: see [Dimensions by name](#dimensions-by-name) |
-| `configurations` | the configurations, the active one, and what differs: the configurations each feature is suppressed in, each parameter's expression in every configuration, and under `values` each feature value and sketch dimension in every configuration. In an assembly also `components` (for each component that differs, in every configuration, the fields that differ: `suppressed`, `configuration`, `fixed`, `placement`) and `mates` (for each mate that differs: `suppressed`, and its values) |
+| `configurations` | the configurations (a derived one with its `parent`), the active one, and what differs: the configurations each feature is suppressed in, each parameter's expression in every configuration, and under `values` each feature value and sketch dimension in every configuration. In an assembly also `components` (for each component that differs, in every configuration, the fields that differ: `suppressed`, `configuration`, `fixed`, `placement`), `mates` (for each mate that differs: `suppressed`, and its values) and `equations` (for each equation that differs, by what it sets, its expression in every configuration; null where there is none) |
 | `bodies` | bounds, volume, counts; flat size and thickness for sheet metal |
 | `faces`, `edges` (`body`) | what made each face, normals, centres, a round face's `radius`, `axis` and a point on it (`axis_point`); edge ends and the faces they join, a straight edge's `direction` (the one mates take) |
 | `bend_table` (`body`) | flat size, area, and each bend |
@@ -665,7 +672,7 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `rename`, `delete` | `explode_step` in place of `feature` |
 | `explode` | `on` (left out: the other way): shows the assembly exploded, or as it is. A view, not an undo step |
 | `explode_steps` | every step (`id`, `name`, `components`, `by`), whether the assembly is shown `exploded`, and under `moved` each component the steps move with its total `by` and where it is drawn exploded (`at`) |
-| `open_component` | `component`: opens its part as a document of its own and makes it current. `save` without a `path` on that document stores it back, as one undo step of the assembly, for every component of the part. Needs a session |
+| `open_component` | `component`: opens its part as a document of its own, in the configuration the component shows (the reply's `configuration`), and makes it current. `save` without a `path` on that document stores it back, as one undo step of the assembly, for every component of the part, with the part's own active configuration as it was. Needs a session |
 | `components` | every component (`id`, `name`, `part`, `configuration` (of its part, where the part has several), `at`, `rotate`, `fixed`, `freedom`, `mates`, `status`, `message`, `min`, `max`) and every part (`id`, `name`, `kind`, how many `components`, `material`, and where it has several `configurations` and its `active_configuration`); how many `mates`, and the `freedom` left |
 | `mate` | `type` (`coincident`, `concentric`, `parallel`, `distance`, `angle`, `fasten`, `width`, `slot`, `limit_angle`, `limit_distance`, `symmetric`), `a`, `b`, `distance` or `angle` for those types, `flip` (`true`: aligned), `align` (`aligned`, `anti_aligned` or `closest`: which way round the ends go, SolidWorks' alignment; not with `flip`), `flip_dimension` (the distance or angle measured the other way: SolidWorks' "flip dimension"), `suppressed` (added without being solved: nothing moves until it is unsuppressed), `name`. An end is `{"component": …, "face": selector}` (or `"edge"`, `"vertex"`, `"plane"`, `"origin": true`, or `"sketch"` (name or id) with `"entity"` (the id `feature` gives a point, line, circle or arc)), the selector in the part's own coordinates. `component` is a name, id or nonempty path array from the top-level component down through sub-assemblies. `plane` takes `"top"`, `"front"`, `"right"`, a reference plane or coordinate system by name or id, or a planar face selector. With no `component`, the end is the assembly's own: `{"plane": "top"}` (or `front`, `right`) or `{"origin": true}`, fixed where the assembly is. For `fasten` the component alone |
 | `mate`, `type: "slot"` | `a`, `b`: a face of a straight slot (one of its round ends or a flat side) and an axis (a round face or edge), either way round. The axis stays parallel to the slot's ends and on the line between their axes. `mode`: `free` by default (anywhere between the ends), `centered`, `dimension` with `distance` (from the first end's axis: the round end picked, else the end the part lists first), `percent` with `percent`; `flip_dimension` measures from the other end. No `flip` or `align` |
@@ -675,12 +682,12 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `edit_mate` for width | `mate`, `mode`, and `distance` for Dimension or `percent` for Percent. `distance` alone edits a Dimension mate; `percent` alone selects/edits Percent. Rename, suppress and delete use the ordinary mate operations |
 | `edit_mate` | `mate`, and `distance` or `angle`, `flip` or `align`, `flip_dimension`; a slot mate's `mode`, `distance`, `percent` as for width; a limit mate's `min` and `max`. `configurations` (of the assembly) for the value, mode and limits: left out, the active one if they already differ between configurations, else all |
 | `set` | `name` `D1@MATE` (SolidWorks' name for a mate's value, `D1@Distance6`), `value`, `configurations` (as for `edit_mate`): a distance or angle mate's value; or an assembly parameter by name |
-| `set` with a component | `name`: an address that reaches into a component, `NAME@FEATURE@COMPONENT` (`Height@Sketch1@Door-1`; SolidWorks' `Height@Sketch1@Door<1>.Part` and `Door-1.Part` too), a parameter of its part `NAME@COMPONENT`, through a sub-assembly `…@Door-1@Door Assembly-1`; `value`. A number sets the part, so every instance of it (a linked part's file is written: the reply's `written`); an expression is an equation of the assembly, worked out at every rebuild. A value replaces an equation on it |
-| `set_suppression_expression` with `component` | `value`: an expression of the assembly (nonzero suppresses, 0 unsuppresses: SolidWorks' `suppressed` and `unsuppressed`), or `null` to clear. It decides over `suppress` while it is set |
+| `set` with a component | `name`: an address that reaches into a component, `NAME@FEATURE@COMPONENT` (`Height@Sketch1@Door-1`; SolidWorks' `Height@Sketch1@Door<1>.Part` and `Door-1.Part` too), a parameter of its part `NAME@COMPONENT`, through a sub-assembly `…@Door-1@Door Assembly-1`; `value`. A number sets the part, so every instance of it (a linked part's file is written: the reply's `written`); an expression is an equation of the assembly, worked out at every rebuild. A value replaces an equation on it. `configurations` (of the assembly; left out, all of them while the equation is the same everywhere, else the active one): the equation is theirs, a number too; `value` `null` removes it there |
+| `set_suppression_expression` with `component` | `value`: an expression of the assembly (nonzero suppresses, 0 unsuppresses: SolidWorks' `suppressed` and `unsuppressed`), or `null` to clear. It decides over `suppress` while it is set. `configurations` as for `set` with a component |
 | `suppress` with a component's feature | `feature`: `FEATURE@COMPONENT` (`Vent@Door-1`), `on`: suppresses the feature in the component's part (every instance; a linked part's file is written) |
 | `reference_dimension` | `a`, `b` (ends as a mate's: flat faces, planes, edges, vertices), `name` (default `RD1`, `RD2`, …): the distance between them, measured after the mates are solved, which expressions read as `RD1@Annotations`. The reply's `reference` has its `value`. `delete` takes `reference_dimension` |
 | `make_independent` | `component`, `name`: the component gets a copy of its part, called `name`, and is renamed `name-1` (SolidWorks' Make Independent, FabSys's `ResolveComponent`). A linked part's copy is written beside its file as `name.peet` |
-| `dimensions` on an assembly | the assembly's own values (mates' `D1@MATE`, reference dimensions' `RD1@Annotations`), its `equations` (`target`, `expression`, `suppresses`, `status`, `message`) and `references`; with `component`, that component's part's dimensions and parameters by their address from the assembly (`equation`: set by one); with `name`, the value at any address |
+| `dimensions` on an assembly | the assembly's own values (mates' `D1@MATE`, reference dimensions' `RD1@Annotations`), its `equations` (`target`, `expression`, `suppresses`, `status`, `message`; those of the active configuration, then those only others have with `expression` null; `configurations` with each one's expression in every configuration where it differs) and `references`; with `component`, that component's part's dimensions and parameters by their address from the assembly (`equation`: set by one); with `name`, the value at any address |
 | `rename`, `suppress`, `delete` | `mate` in place of `feature`. `suppress` takes `configurations` (of the assembly; default the active one) |
 | `mates` | every mate (`id`, `name`, `type`, `a`, `b`, `distance` or `angle`, `flip`, `align` if one was given, `flip_dimension`, `status`, `message`) and the `freedom` left |
 
@@ -806,7 +813,14 @@ configuration unless `configurations` says otherwise; a mate's value (`edit_mate
 configuration: a solve that moves it, or `place`, moves it in the active one only, so each
 configuration keeps its own placements (left and right hinged). A new component or mate is
 in every configuration. A configuration made from another (`copy`) starts as it is.
-Equations and component patterns are the same in every configuration. The model schema
+An equation (`set` with a component's address, `set_suppression_expression` with a
+component) can differ too, as SolidWorks' "This configuration": both take `configurations`
+(left out: all of them while the equation is the same everywhere, the active one once it
+differs), a number for some configurations is an equation of theirs, and `"value": null`
+removes the equation there. A suppression equation of some configurations suppresses in the
+active one only. `open_component` opens the part in the configuration the component shows;
+`save` there stores it back with the part's own active configuration as it was. Reference
+dimensions and component patterns are the same in every configuration. The model schema
 is 12.
 
 ```json

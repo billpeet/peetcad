@@ -196,6 +196,14 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
         Some(11) => r
             .read::<peet_model::ModelV11>(SectionKind::MODEL)?
             .map(Model::from),
+        Some(12) => match r.read_whole::<Model>(SectionKind::MODEL) {
+            Some(m) => Some(m),
+            // A part saved while schema 12 was being made, before derived configurations.
+            None => match r.read_whole::<peet_model::ModelV12Early>(SectionKind::MODEL) {
+                Some(m) => Some(m.into()),
+                None => r.read(SectionKind::MODEL)?,
+            },
+        },
         _ => r.read(SectionKind::MODEL)?,
     };
     let mut model =
@@ -425,6 +433,29 @@ mod tests {
         w.section(SectionKind::MODEL, 11, &peet_model::ModelV11::of(&part))
             .unwrap();
         assert_eq!(open(&w.finish()).unwrap().model, part);
+    }
+
+    #[test]
+    fn early_schema_12_parts_and_derived_configurations_open() {
+        // A part as schema 12 was written before derived configurations, and one with a
+        // derived configuration as it is written now.
+        let (mut part, _) = peet_model::samples::chassis();
+        let base = part.add_configuration("Long", None).unwrap();
+        let mut w = Writer::new();
+        w.section(
+            SectionKind::MODEL,
+            12,
+            &peet_model::ModelV12Early::of(&part),
+        )
+        .unwrap();
+        assert_eq!(open(&w.finish()).unwrap().model, part);
+        part.add_derived_configuration("Long painted", base)
+            .unwrap();
+        let bytes = save(&part, &Metadata::default(), None).unwrap();
+        let opened = open(&bytes).unwrap().model;
+        assert_eq!(opened, part);
+        let derived = opened.configuration_named("Long painted").unwrap();
+        assert_eq!(derived.parent, Some(base));
     }
 
     #[test]
