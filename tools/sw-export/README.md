@@ -57,7 +57,9 @@ For each configuration:
 - `equations`, with their values.
 - `bodies` (parts): volume, area, centre of gravity, bounding box, and every face with its
   surface, the feature that made it and its name if it has one. Named edges too.
-- `components` (assemblies): each instance's file, configuration and transform.
+- `components` (assemblies): each instance's file, configuration and transform, and for a
+  sub-assembly its `solving` ("rigid" or "flexible", SolidWorks' "Solve as"; added
+  without a new format version, so an older export has none).
 
 A configuration SolidWorks made for the flat pattern (`…SM-FLAT-PATTERN`) has its bodies
 only: their box is the flat size.

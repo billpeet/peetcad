@@ -167,6 +167,9 @@ pub fn diff_scoped(
                 if c.color.is_some() {
                     ops.push(component(c, ComponentChange::Color(c.color)));
                 }
+                if c.flexible {
+                    ops.push(component(c, ComponentChange::Flexible(true)));
+                }
             }
             for c in after.components() {
                 let Some(o) = before.component(c.id) else {
@@ -193,6 +196,9 @@ pub fn diff_scoped(
                 }
                 if o.fixed != c.fixed && c.pattern.is_none() {
                     ops.push(component(c, ComponentChange::Fix(c.fixed)));
+                }
+                if o.flexible != c.flexible && c.pattern.is_none() {
+                    ops.push(component(c, ComponentChange::Flexible(c.flexible)));
                 }
                 if o.suppressed != c.suppressed {
                     ops.push(component(c, ComponentChange::Suppress(c.suppressed)));

@@ -316,6 +316,11 @@ internal static class Program
                     ["suppression"] = c.GetSuppression(),
                     ["fixed"] = c.IsFixed(),
                     ["virtual"] = c.IsVirtual,
+                    // A sub-assembly's "Solve as" (swComponentSolvingOption_e: 0 rigid, 1 flexible);
+                    // null where it can't be read, and left to the importer for a part
+                    ["solving"] = Try(() => c.GetPathName().EndsWith(".sldasm", StringComparison.OrdinalIgnoreCase)
+                        ? c.Solving switch { 0 => "rigid", 1 => "flexible", var other => (object)other }
+                        : null),
                     // 16 numbers: a 3x3 rotation by rows, the translation, the scale, and three unused
                     ["transform"] = Try(() => c.Transform2?.ArrayData)
                 }).ToList();

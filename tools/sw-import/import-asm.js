@@ -101,6 +101,11 @@ function matrixFromPeet(c) {
   const A = [[T * u * u + C, T * u * v - S * w, T * u * w + S * v], [T * u * v + S * w, T * v * v + C, T * v * w - S * u], [T * u * w - S * v, T * v * w + S * u, T * w * w + C]];
   return { R: [0, 1, 2].map(i => [0, 1, 2].map(j => A[j][i])), t: [x, y, z] };
 }
+/** `m` then `n`: the placement `m` gives, placed by `n`. */
+const then = (m, n) => ({
+  R: [0, 1, 2].map(i => [0, 1, 2].map(j => m.R[i][0] * n.R[0][j] + m.R[i][1] * n.R[1][j] + m.R[i][2] * n.R[2][j])),
+  t: toWorld(n, m.t),
+});
 /** How far apart two placements are: the largest distance between where they put points 100 mm round the origin. */
 function apart(a, b) {
   return Math.max(...[[0, 0, 0], [0.1, 0, 0], [0, 0.1, 0], [0, 0, 0.1]].map(p => {
@@ -483,12 +488,7 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
   const all = listed || cfg.components || [];
   // In the sub-assembly's own coordinates
   const local = frame ? inverse(matrixOf(frame)) : null;
-  const placeOf = c => {
-    if (!local) return matrixOf(c.transform);
-    const m = matrixOf(c.transform);
-    const R = [0, 1, 2].map(i => [0, 1, 2].map(j => m.R[i][0] * local.R[0][j] + m.R[i][1] * local.R[1][j] + m.R[i][2] * local.R[2][j]));
-    return { R, t: toWorld(local, m.t) };
-  };
+  const placeOf = c => local ? then(matrixOf(c.transform), local) : matrixOf(c.transform);
   const top = all.filter(c => !c.path.includes("/"));
   const byPath = new Map(all.map(c => [c.path, c]));
   const want = new Map();
@@ -510,13 +510,38 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
       const pr = partReport(c.file);
       if (pr && pr.verdict !== "matches") row.partVerdict = pr.verdict;
     }
-    const m = placeOf(c);
+    // A sub-assembly goes where the components fixed in it are: SolidWorks' own transform for a sub-assembly it
+    // solves as flexible need not be (the template hinges' are hundreds of millimetres from their fixed leaf)
+    const anchor = /\.sldasm$/i.test(c.file || "") ? anchorOf(c, all) : null;
+    let m = placeOf(c);
+    if (anchor) {
+      const at = local ? then(anchor, local) : anchor;
+      const d = apart(at, m);
+      if (d > 1e-3) { row.placedBy = `its fixed component ${anchor.by}, ${tidy(d)} mm from SolidWorks' transform for the sub-assembly`; m = at; }
+    }
     const rot = axisAngle(m);
     const op = { op: "insert", path: source, name: c.path, at: m.t.map(v => tidy(v * MM)), ...(rot ? { rotate: rot } : {}), fixed: !!c.fixed };
     const reply = peet.apply(op);
     if (!reply.ok) { row.result = "failed"; row.why = reply.error; report.left.push(`${c.path}: ${reply.error}`); continue; }
     row.result = "inserted";
     want.set(c.path, m);
+    // A sub-assembly SolidWorks solves as flexible: its own mates are solved here, and what moves in it starts
+    // where SolidWorks has it
+    const flexible = /\.sldasm$/i.test(c.file || "") && flexibleOf(c, all);
+    if (flexible) {
+      const made = peet.apply({ op: "flexible", component: c.path });
+      if (made.ok) {
+        row.flexible = flexible;
+        for (const x of all.filter(x => x.path.startsWith(c.path + "/"))) {
+          // A sub-assembly in it, where its own fixed component is, as above
+          const anchorX = /\.sldasm$/i.test(x.file || "") ? anchorOf(x, all) : null;
+          const p = anchorX ? (local ? then(anchorX, local) : anchorX) : placeOf(x), r = axisAngle(p);
+          const placed = peet.apply({ op: "place", component: x.path.split("/"), at: p.t.map(v => tidy(v * MM)), ...(r ? { rotate: r } : {}) });
+          // (Those fixed in their sub-assembly are refused: they move with it)
+          if (placed.ok) want.set(x.path, p);
+        }
+      } else report.notes.push(`${c.path}: could not be made flexible: ${made.error}`);
+    }
     if (c.suppression === 0) peet.apply({ op: "suppress", component: c.path });
   }
 
@@ -625,7 +650,7 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
     // How far from SolidWorks' placement the components are with this mate
     const off = components => {
       let worst = 0;
-      for (const c of components || []) { const m = want.get(c.name); if (m) worst = Math.max(worst, apart(matrixFromPeet(c), m)); }
+      for (const c of withMoving(components)) { const m = want.get(c.name); if (m) worst = Math.max(worst, apart(matrixFromPeet(c), m)); }
       return worst;
     };
     const now = peet.ask({ op: "components" });
@@ -643,13 +668,18 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
   // Where the mates left each component, against SolidWorks
   const placed = peet.ask({ op: "components" });
   let worst = 0;
-  for (const c of placed.components || []) {
+  for (const c of withMoving(placed.components)) {
     const m = want.get(c.name);
     if (!m) continue;
     const d = apart(matrixFromPeet(c), m);
     worst = Math.max(worst, d);
     const row = report.components.find(r => r.component === c.name);
     if (row) { row.off_mm = tidy(d); row.status = c.status; row.freedom = c.freedom; }
+    else if (c.inside) {
+      // A component that moves in a flexible sub-assembly
+      const sub = report.components.find(r => r.component === c.inside);
+      if (sub) (sub.moving = sub.moving || []).push({ component: c.name, off_mm: tidy(d), freedom: c.freedom });
+    }
   }
   report.freedom = placed.freedom;
   report.off_mm = tidy(worst);
@@ -664,6 +694,69 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
   fs.writeFileSync(outFile.replace(/\.peet$/, ".report.json"), JSON.stringify(report, null, 1));
   try { fs.unlinkSync(outFile + ".before"); } catch {}
   return report;
+}
+
+/** The components a `components` reply lists, and those that move in its flexible sub-assemblies, by path. */
+function withMoving(components) {
+  const out = [];
+  for (const c of components || []) {
+    out.push(c);
+    for (const x of c.moving || []) out.push({ ...x, name: [c.name, ...x.path].join("/"), inside: c.name });
+  }
+  return out;
+}
+
+/**
+ * Whether SolidWorks solves a sub-assembly component as flexible: its `solving` where the export has it, else
+ * whether its components are placed relative to each other otherwise than in the sub-assembly's own file (a hinge
+ * opened to another angle). Returns how it was told ("solving" or "inferred"), or null for rigid.
+ */
+function flexibleOf(c, all) {
+  if (c.solving === "flexible") return "solving";
+  if (c.solving === "rigid") return null;
+  // A sub-assembly used in another configuration than the one it is imported in (a stand-in, above) is placed
+  // otherwise for that reason, and has that configuration's mates: not taken for flexible
+  const exp = exportOf(c.file);
+  let active = null;
+  try { active = exp && JSON.parse(fs.readFileSync(exp)).activeConfiguration; } catch {}
+  if (c.configuration && active && c.configuration !== active) return null;
+  const own = ownComponents(c);
+  if (!own) return null;
+  // Placed relative to the component fixed in it, as the parent lists them
+  const anchor = anchorOf(c, all);
+  const back = inverse(anchor || matrixOf(c.transform));
+  // Its parts: SolidWorks' transforms for the sub-assemblies in it need not be where their parts are
+  for (const x of all.filter(x => x.path.startsWith(c.path + "/") && !/\.sldasm$/i.test(x.file || ""))) {
+    const mine = own.get(x.path.slice(c.path.length + 1));
+    if (!mine || !mine.transform || !x.transform) continue;
+    if (apart(then(matrixOf(x.transform), back), matrixOf(mine.transform)) > 1e-3) return "inferred";
+  }
+  return null;
+}
+
+/** A sub-assembly's components as its own export has them (in the configuration its parent uses), by path. */
+function ownComponents(c) {
+  const exp = exportOf(c.file);
+  if (!exp) return null;
+  let j;
+  try { j = JSON.parse(fs.readFileSync(exp)); } catch { return null; }
+  const cfg = (j.configurations || []).find(x => x.name === c.configuration) || (j.configurations || []).find(x => x.name === j.activeConfiguration) || (j.configurations || [])[0];
+  return cfg ? new Map((cfg.components || []).map(x => [x.path, x])) : null;
+}
+
+/**
+ * Where a sub-assembly is, from the first component fixed in it: where its parent lists that component, less where
+ * the sub-assembly's own file has it. Null if it has none (or no export to tell).
+ */
+function anchorOf(c, all) {
+  const own = ownComponents(c);
+  if (!own) return null;
+  for (const x of all.filter(x => x.path.startsWith(c.path + "/") && !x.path.slice(c.path.length + 1).includes("/"))) {
+    const mine = own.get(x.path.slice(c.path.length + 1));
+    if (!mine || !mine.fixed || !mine.transform || !x.transform) continue;
+    return { ...then(inverse(matrixOf(mine.transform)), matrixOf(x.transform)), by: mine.path };
+  }
+  return null;
 }
 
 /** A sub-assembly, imported once per file (and per configuration), as an assembly of its own. */

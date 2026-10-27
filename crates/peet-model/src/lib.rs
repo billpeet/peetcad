@@ -31,6 +31,7 @@ pub mod dimensions;
 mod dressup;
 mod extrude;
 pub mod feature;
+mod flexible;
 pub mod hash;
 mod history;
 pub mod hole;
@@ -53,7 +54,8 @@ mod weldment;
 
 pub use assembly::{
     Assembly, CompId, Component, ComponentPattern, DefId, Definition, ExplodeId, ExplodeStep, Link,
-    MAX_PATTERN, PatternId, PatternInstance, PatternKind, PatternLine, PatternStep, relative_to,
+    MAX_PATTERN, PatternId, PatternInstance, PatternKind, PatternLine, PatternStep, Pose,
+    relative_to,
 };
 pub use bodies::{InsertPartFeature, MoveBodyFeature, PartSource, body_motion};
 pub use config::{ConfigId, Configuration, Scope, Slot, SlotValue};

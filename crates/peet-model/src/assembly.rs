@@ -5,7 +5,7 @@
 //! list of *components* (each an instance of a definition, with a placement). Any number
 //! of components share one definition, so a part used ten times is stored, rebuilt and
 //! drawn once. A definition can itself be an assembly: a sub-assembly, placed as one
-//! rigid thing.
+//! rigid thing, or solved as flexible (see [`Component::flexible`]).
 //!
 //! *Mates* ([`crate::Mate`]) hold components together: they are solved when the assembly
 //! is rebuilt, and the placements they come to are stored in the components.
@@ -185,6 +185,71 @@ pub struct Component {
     /// the pattern puts it, and goes when the pattern does.
     #[serde(default)]
     pub pattern: Option<PatternId>,
+    /// A sub-assembly solved as flexible (SolidWorks' "Solve as: Flexible"): its own mates
+    /// are solved in this assembly together with this assembly's, so that the components
+    /// in it that are not fixed there move as those mates let them. Otherwise (rigid) it
+    /// is one body, posed as its own file has it. Model schema 12.
+    pub flexible: bool,
+    /// For a flexible sub-assembly: where each component that moves in it is, in the
+    /// sub-assembly's coordinates, in place of where its own file has it. Written by the
+    /// solve; empty for a rigid one.
+    pub poses: Vec<Pose>,
+}
+
+/// Where a component inside a flexible sub-assembly is: its path below the
+/// sub-assembly's component, and its placement in the sub-assembly's coordinates.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pose {
+    pub path: Vec<CompId>,
+    pub frame: Frame,
+}
+
+/// A component as model schemas 8 to 11 hold it: always rigid.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ComponentV11 {
+    id: CompId,
+    name: String,
+    definition: DefId,
+    placement: Frame,
+    fixed: bool,
+    visible: bool,
+    suppressed: bool,
+    color: Option<[u8; 3]>,
+    pattern: Option<PatternId>,
+}
+
+impl From<&Arc<Component>> for ComponentV11 {
+    fn from(c: &Arc<Component>) -> Self {
+        Self {
+            id: c.id,
+            name: c.name.clone(),
+            definition: c.definition,
+            placement: c.placement,
+            fixed: c.fixed,
+            visible: c.visible,
+            suppressed: c.suppressed,
+            color: c.color,
+            pattern: c.pattern,
+        }
+    }
+}
+
+impl From<ComponentV11> for Arc<Component> {
+    fn from(c: ComponentV11) -> Self {
+        Arc::new(Component {
+            id: c.id,
+            name: c.name,
+            definition: c.definition,
+            placement: c.placement,
+            fixed: c.fixed,
+            visible: c.visible,
+            suppressed: c.suppressed,
+            color: c.color,
+            pattern: c.pattern,
+            flexible: false,
+            poses: Vec::new(),
+        })
+    }
 }
 
 /// Identifies a component pattern within its assembly. Ids are not reused.
@@ -328,7 +393,7 @@ pub struct Assembly {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AssemblyLegacy<F> {
     definitions: Vec<DefinitionLegacy<F>>,
-    components: Vec<Arc<Component>>,
+    components: Vec<ComponentV11>,
     next_definition: u32,
     next_component: u32,
     mates: Vec<MateV11>,
@@ -343,7 +408,7 @@ pub(crate) struct AssemblyLegacy<F> {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AssemblyV11 {
     definitions: Vec<DefinitionV11>,
-    components: Vec<Arc<Component>>,
+    components: Vec<ComponentV11>,
     next_definition: u32,
     next_component: u32,
     mates: Vec<MateV11>,
@@ -372,7 +437,7 @@ impl AssemblyV11 {
                     link: d.link.clone(),
                 })
                 .collect(),
-            components: a.components.clone(),
+            components: a.components.iter().map(ComponentV11::from).collect(),
             next_definition: a.next_definition,
             next_component: a.next_component,
             mates: a.mates.iter().map(|m| MateV11::from(&**m)).collect(),
@@ -399,7 +464,7 @@ impl From<AssemblyV11> for Assembly {
                     })
                 })
                 .collect(),
-            components: a.components,
+            components: a.components.into_iter().map(Into::into).collect(),
             next_definition: a.next_definition,
             next_component: a.next_component,
             mates: a.mates.into_iter().map(|m| Arc::new(m.into())).collect(),
@@ -430,7 +495,7 @@ impl<F: From<crate::Feature>> AssemblyLegacy<F> {
                     link: d.link.clone(),
                 })
                 .collect(),
-            components: a.components.clone(),
+            components: a.components.iter().map(ComponentV11::from).collect(),
             next_definition: a.next_definition,
             next_component: a.next_component,
             mates: a.mates.iter().map(|m| MateV11::from(&**m)).collect(),
@@ -457,7 +522,7 @@ impl<F: Into<crate::Feature>> From<AssemblyLegacy<F>> for Assembly {
                     })
                 })
                 .collect(),
-            components: a.components,
+            components: a.components.into_iter().map(Into::into).collect(),
             next_definition: a.next_definition,
             next_component: a.next_component,
             mates: a.mates.into_iter().map(|m| Arc::new(m.into())).collect(),
@@ -639,6 +704,8 @@ impl Assembly {
             suppressed: false,
             color: None,
             pattern: None,
+            flexible: false,
+            poses: Vec::new(),
         }));
         Some(id)
     }
@@ -910,6 +977,8 @@ impl Assembly {
             return false;
         };
         c.definition = definition;
+        // Poses are of the components of the part it was.
+        c.poses.clear();
         self.prune();
         true
     }
