@@ -169,6 +169,38 @@ impl MateKind {
     }
 }
 
+/// Which way round the directions of a mate's two ends go (SolidWorks' alignment): a
+/// flat face's outward normal, an axis's direction (a round face's or a round edge's
+/// axis, a straight edge's direction).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum Align {
+    /// The same way: two flat faces flush side by side, two axes pointing alike.
+    Aligned,
+    /// Against each other: two flat faces face to face, two axes pointing apart.
+    AntiAligned,
+    /// Whichever is nearer where the components are.
+    Closest,
+}
+
+impl Align {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Aligned => "aligned",
+            Self::AntiAligned => "anti_aligned",
+            Self::Closest => "closest",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Option<Self> {
+        Some(match word {
+            "aligned" => Self::Aligned,
+            "anti_aligned" => Self::AntiAligned,
+            "closest" => Self::Closest,
+            _ => return None,
+        })
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Mate {
     pub id: MateId,
@@ -177,12 +209,63 @@ pub struct Mate {
     pub kind: MateKind,
     pub a: MateEnd,
     pub b: MateEnd,
-    /// For two planes: their normals the same way, instead of against each other.
-    pub flip: bool,
+    /// Which way round the ends go. `None` is the default for what they are: two planes
+    /// against each other, two axes whichever way is nearer.
+    pub align: Option<Align>,
+    /// The distance or angle measured the other way (SolidWorks' "flip dimension"): for a
+    /// distance from a plane, the other end is behind it instead of in front of it.
+    pub flip_dimension: bool,
     pub suppressed: bool,
 }
 
+/// A mate as model schemas 8 to 11 hold it: one `flip`, which put two planes the same
+/// way round.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct MateV11 {
+    id: MateId,
+    name: String,
+    kind: MateKind,
+    a: MateEnd,
+    b: MateEnd,
+    flip: bool,
+    suppressed: bool,
+}
+
+impl From<MateV11> for Mate {
+    fn from(m: MateV11) -> Self {
+        Self {
+            id: m.id,
+            name: m.name,
+            kind: m.kind,
+            a: m.a,
+            b: m.b,
+            align: m.flip.then_some(Align::Aligned),
+            flip_dimension: false,
+            suppressed: m.suppressed,
+        }
+    }
+}
+
+impl From<&Mate> for MateV11 {
+    fn from(m: &Mate) -> Self {
+        Self {
+            id: m.id,
+            name: m.name.clone(),
+            kind: m.kind.clone(),
+            a: m.a.clone(),
+            b: m.b.clone(),
+            flip: m.flip(),
+            suppressed: m.suppressed,
+        }
+    }
+}
+
 impl Mate {
+    /// Two planes (or axes) the same way round: what `flip` asks for.
+    pub fn flip(&self) -> bool {
+        self.align == Some(Align::Aligned)
+    }
+
     /// Every persistent end, including the additional ends of a width mate.
     pub fn ends(&self) -> impl Iterator<Item = &MateEnd> {
         let (a2, b2) = match &self.kind {
@@ -272,7 +355,6 @@ pub(crate) fn solve_body(
     ];
     let mut failed = Vec::new();
     let mut joined = Vec::new();
-    let mut reversed = Vec::new();
     for (i, m) in mates.iter().enumerate() {
         if matches!(m.kind, MateKind::Fasten(_) | MateKind::Width { .. }) {
             failed.push((
@@ -285,9 +367,6 @@ pub(crate) fn solve_body(
             continue;
         }
         let id = MateId(i as u32);
-        if m.flip {
-            reversed.push(id);
-        }
         joined.push(Mate {
             id,
             name: m.name.clone(),
@@ -300,20 +379,13 @@ pub(crate) fn solve_body(
                 path: vec![body],
                 geom: Some(m.moved.clone()),
             },
-            flip: m.aligned,
+            align: m.aligned.then_some(Align::Aligned),
+            flip_dimension: m.flip,
             suppressed: false,
         });
     }
     let refs: Vec<&Mate> = joined.iter().collect();
-    let solved = solve(
-        &refs,
-        components,
-        params,
-        0,
-        &mut Memo::default(),
-        None,
-        &reversed,
-    );
+    let solved = solve(&refs, components, params, 0, &mut Memo::default(), None);
     for m in &joined {
         if let Some(Status::Failed(why)) = solved.statuses.get(&m.id) {
             failed.push((m.name.clone(), why.replace("components", "bodies")));
@@ -857,7 +929,10 @@ fn width_equations(
     clearance: f64,
     params: &Parameters,
 ) -> Result<Vec<Proto>, String> {
-    if clearance < -1e-8 {
+    // Centred, the two midplanes coincide whichever is wider (as in SolidWorks, whose
+    // templates centre wide frames on narrower plates); the other modes place the tab
+    // within the gap, so it has to fit.
+    if clearance < -1e-8 && *mode != WidthMode::Centered {
         return Err(
             "The tab is wider than the width pair. Widen the gap or narrow the tab.".to_owned(),
         );
@@ -1364,9 +1439,7 @@ fn turned_over(frame: Frame, through: DVec3, axis: DVec3) -> Frame {
 /// Solves the mates. `components` are those that are not suppressed, where they are;
 /// `mates` are in the assembly's order. `key` identifies the mates and the components
 /// (not where they are): what `memo` remembers is used again while it stays the same.
-/// `drag` pulls a component as the mates are solved. The distances and angles of the
-/// mates in `reversed` are measured the other way (SolidWorks' "flip dimension").
-#[allow(clippy::too_many_arguments)]
+/// `drag` pulls a component as the mates are solved.
 pub(crate) fn solve(
     mates: &[&Mate],
     mut components: Vec<Placed>,
@@ -1374,7 +1447,6 @@ pub(crate) fn solve(
     key: u64,
     memo: &mut Memo,
     drag: Option<Drag>,
-    reversed: &[MateId],
 ) -> Solved {
     if memo.key != key {
         *memo = Memo {
@@ -1439,7 +1511,7 @@ pub(crate) fn solve(
                 width_equations(mode, a, b, width - tab_width, params)?
             } else {
                 let mut protos = equations(&mate.kind, a, b, params)?;
-                if reversed.contains(&mate.id) {
+                if mate.flip_dimension {
                     for p in &mut protos {
                         let measured = match mate.kind {
                             MateKind::Distance(_) => p.kind == EqKind::Offset,
@@ -1496,16 +1568,37 @@ pub(crate) fn solve(
                 }
             }
         }
-        // Two planes the wrong way round: turn one over first (see the module docs).
-        if let (Element::Plane(pa, na), Element::Plane(pb, nb)) = (a, b)
+        // Two planes or two axes the wrong way round: turn one over first (see the
+        // module docs). Planes go against each other unless asked otherwise; axes
+        // whichever way is nearer.
+        let wanted = match (a, b) {
+            (Element::Plane(..), Element::Plane(..)) => match mate.align {
+                None | Some(Align::AntiAligned) => Some(-1.0),
+                Some(Align::Aligned) => Some(1.0),
+                Some(Align::Closest) => None,
+            },
+            (Element::Line(..), Element::Line(..)) => match mate.align {
+                Some(Align::AntiAligned) => Some(-1.0),
+                Some(Align::Aligned) => Some(1.0),
+                None | Some(Align::Closest) => None,
+            },
+            _ => None,
+        };
+        if let (
+            Element::Plane(pa, na) | Element::Line(pa, na),
+            Element::Plane(pb, nb) | Element::Line(pb, nb),
+            Some(wanted),
+        ) = (a, b, wanted)
             && matches!(
                 mate.kind,
-                MateKind::Coincident | MateKind::Distance(_) | MateKind::Parallel
+                MateKind::Coincident
+                    | MateKind::Concentric
+                    | MateKind::Distance(_)
+                    | MateKind::Parallel
             )
         {
             let (fa, fb) = (components[ia].frame, components[ib].frame);
             let (wa, wb) = (fa.vector_to_world(na), fb.vector_to_world(nb));
-            let wanted = if mate.flip { 1.0 } else { -1.0 };
             if wa.dot(wb) * wanted < 0.0 {
                 let axis = wa
                     .cross(wb)

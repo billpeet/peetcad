@@ -568,6 +568,12 @@ pub enum Op {
         b: MateEndSel,
         /// Two flat faces the same way round, instead of against each other.
         flip: Option<bool>,
+        /// Which way round the ends go (SolidWorks' alignment); `flip` is `aligned`.
+        align: Option<peet_model::Align>,
+        /// The distance or angle measured the other way (SolidWorks' flip dimension).
+        flip_dimension: Option<bool>,
+        /// Added suppressed: nothing is solved, nothing moves, until it is unsuppressed.
+        suppressed: bool,
         /// An automatic name (`Coincident1`) if absent.
         name: Option<String>,
     },

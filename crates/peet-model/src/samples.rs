@@ -685,7 +685,7 @@ pub fn enclosure_assembly() -> (Model, Engine) {
     let mate = |a: &mut crate::Assembly, kind: MateKind, x: MateEnd, y: MateEnd, flip: bool| {
         let id = a.add_mate(kind, x, y);
         if let Some(m) = a.mate_mut(id) {
-            m.flip = flip;
+            m.align = flip.then_some(crate::Align::Aligned);
         }
     };
     let (x, y, z) = (DVec3::X, DVec3::Y, DVec3::Z);

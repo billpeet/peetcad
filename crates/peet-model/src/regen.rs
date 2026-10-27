@@ -556,7 +556,6 @@ impl Engine {
             key,
             &mut self.mates,
             drag,
-            &[],
         );
         // ---- The patterns ----
         // After the mates: each copy goes where its original now is, moved by its place

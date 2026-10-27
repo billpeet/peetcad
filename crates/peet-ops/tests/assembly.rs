@@ -539,6 +539,48 @@ fn invalid_width_selections_values_and_modes_are_explained_and_recover() {
 }
 
 #[test]
+fn a_centred_tab_may_be_wider_than_its_width_pair() {
+    // As in SolidWorks: centred, the midplanes coincide whichever is wider.
+    let mut doc = width_fixture();
+    let mut op = width_op();
+    let (a, b) = (op["a"].clone(), op["b"].clone());
+    op["a"] = b;
+    op["b"] = a;
+    let r = ok(&mut doc, op);
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    let width = doc
+        .model
+        .assembly()
+        .unwrap()
+        .components()
+        .find(|c| c.name == "Width")
+        .unwrap()
+        .placement;
+    let tab = doc
+        .model
+        .assembly()
+        .unwrap()
+        .components()
+        .find(|c| c.name == "Tab")
+        .unwrap()
+        .placement;
+    assert!(
+        ((width.origin.x + 20.0) - (tab.origin.x + 10.0)).abs() < 1e-6,
+        "{width:?} {tab:?}"
+    );
+    // Placed within the gap, it has to fit.
+    let r = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "percent", "percent": 50}),
+    );
+    assert_eq!(r["mate"]["status"], "failed", "{r}");
+    assert!(
+        r["mate"]["message"].as_str().unwrap().contains("wider"),
+        "{r}"
+    );
+}
+
+#[test]
 fn cylindrical_width_tabs_use_their_diameter_for_clearance() {
     let mut doc = width_fixture();
     let mut cylinder = Document::default();
@@ -1232,6 +1274,192 @@ fn near(a: [f64; 3], b: [f64; 3]) -> bool {
     a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6)
 }
 
+/// The placement of the component called `name`.
+fn placement(doc: &Document, name: &str) -> Frame {
+    doc.model
+        .assembly()
+        .unwrap()
+        .components()
+        .find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("no component {name}"))
+        .placement
+}
+
+#[test]
+fn a_distance_is_measured_either_way_and_ends_go_either_way_round() {
+    let dir = temp("align");
+    let (plate, pin) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Base"}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Lid", "at": [0, 0, 30]}),
+    );
+    let up = json!({"normal": [0, 0, 1]});
+    let down = json!({"normal": [0, 0, -1]});
+    let z = |doc: &Document| placement(doc, "Lid").origin.z;
+
+    // 10 in front of the base's top face; flipped, 10 behind it (SolidWorks' flip
+    // dimension), and back.
+    let made = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 10,
+               "a": {"component": "Base", "face": up},
+               "b": {"component": "Lid", "face": down}}),
+    );
+    assert!((z(&doc) - 15.0).abs() < 1e-6, "{made}");
+    let flipped = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Distance1", "flip_dimension": true}),
+    );
+    assert_eq!(flipped["mate"]["flip_dimension"], true);
+    assert!((z(&doc) + 5.0).abs() < 1e-6, "{flipped}");
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Distance1", "flip_dimension": false}),
+    );
+    assert!((z(&doc) - 15.0).abs() < 1e-6);
+    ok(&mut doc, json!({"op": "delete", "mate": "Distance1"}));
+
+    // Aligned and measured the other way, given when the mate is added: the lid's top
+    // 10 below the base's, the same way up.
+    let made = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 10, "align": "aligned",
+               "flip_dimension": true,
+               "a": {"component": "Base", "face": up},
+               "b": {"component": "Lid", "face": up}}),
+    );
+    assert_eq!(made["mate"]["flip"], true);
+    assert_eq!(made["mate"]["align"], "aligned");
+    assert!((z(&doc) + 10.0).abs() < 1e-6, "{made}");
+    let lid_up = |doc: &Document| placement(doc, "Lid").vector_to_world(DVec3::Z).z;
+    assert!((lid_up(&doc) - 1.0).abs() < 1e-9);
+    ok(&mut doc, json!({"op": "delete", "mate": "Distance1"}));
+
+    // Planes: closest keeps the lid the way up it is; the default turns it over.
+    let made = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident", "align": "closest",
+               "a": {"component": "Base", "face": up},
+               "b": {"component": "Lid", "face": up}}),
+    );
+    assert_eq!(made["mate"]["align"], "closest");
+    assert!((lid_up(&doc) - 1.0).abs() < 1e-9 && (z(&doc) - 0.0).abs() < 1e-6);
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Coincident1", "flip": false}),
+    );
+    assert!(
+        (lid_up(&doc) + 1.0).abs() < 1e-9,
+        "the faces go against each other"
+    );
+    ok(&mut doc, json!({"op": "delete", "mate": "Coincident1"}));
+
+    // Axes: whichever way is nearer, unless asked. The pin's axis and the hole's both
+    // point up in their parts.
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "name": "Pin", "at": [-30, 10, 40]}),
+    );
+    let hole = json!({"at": [24, 15, 2.5]});
+    let round = json!({"at": [4, 0, 10]});
+    let pin_up = |doc: &Document| placement(doc, "Pin").vector_to_world(DVec3::Z).z;
+    ok(
+        &mut doc,
+        json!({"op": "mate", "type": "concentric",
+               "a": {"component": "Base", "face": hole},
+               "b": {"component": "Pin", "face": round}}),
+    );
+    assert!((pin_up(&doc) - 1.0).abs() < 1e-9);
+    let turned = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Concentric1", "align": "anti_aligned"}),
+    );
+    assert_eq!(turned["mate"]["align"], "anti_aligned");
+    assert!((pin_up(&doc) + 1.0).abs() < 1e-9, "{turned}");
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Concentric1", "align": "closest"}),
+    );
+    assert!(
+        (pin_up(&doc) + 1.0).abs() < 1e-9,
+        "closest leaves it as it is"
+    );
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Concentric1", "align": "aligned"}),
+    );
+    assert!((pin_up(&doc) - 1.0).abs() < 1e-9);
+    let axis = placement(&doc, "Pin");
+    assert!(
+        (axis.origin.x - 20.0).abs() < 1e-6 && (axis.origin.y - 15.0).abs() < 1e-6,
+        "still in the hole: {axis:?}"
+    );
+
+    // Saved and opened again, the settings stay.
+    let file = dir.join("aligned.peet").to_string_lossy().into_owned();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let mut doc = Document::default();
+    ok(&mut doc, json!({"op": "open", "path": file}));
+    let mates = ok(&mut doc, json!({"op": "mates"}));
+    assert_eq!(mates["mates"][0]["align"], "aligned", "{mates}");
+
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Concentric1", "align": "sideways"}),
+    );
+    assert!(e.contains("aligned, anti_aligned or closest"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Concentric1", "flip": true, "align": "aligned"}),
+    );
+    assert!(e.contains("not both"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_mate_added_suppressed_moves_nothing_until_it_is_unsuppressed() {
+    let dir = temp("suppressed-mate");
+    let (plate, _) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Base"}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Lid", "at": [3, 4, 30],
+               "rotate": {"axis": [1, 0, 0], "angle": 180}}),
+    );
+    let before = placement(&doc, "Lid");
+    let made = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 10, "suppressed": true,
+               "a": {"component": "Base", "face": {"normal": [0, 0, 1]}},
+               "b": {"component": "Lid", "face": {"normal": [0, 0, -1]}}}),
+    );
+    assert_eq!(made["mate"]["status"], "suppressed", "{made}");
+    assert!(made.get("moved").is_none(), "nothing moves: {made}");
+    assert_eq!(placement(&doc, "Lid"), before);
+    // Unsuppressed, it is solved as any other mate.
+    let solved = ok(
+        &mut doc,
+        json!({"op": "suppress", "mate": "Distance1", "on": false}),
+    );
+    assert_eq!(solved["mate"]["status"], "ok", "{solved}");
+    let lid = placement(&doc, "Lid");
+    let bottom = lid
+        .to_world(DVec3::new(0.0, 0.0, 0.0))
+        .z
+        .min(lid.to_world(DVec3::new(0.0, 0.0, 5.0)).z);
+    assert!((bottom - 15.0).abs() < 1e-6, "{solved}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
 #[test]
 fn components_are_mated_by_faces_of_their_parts() {
     let dir = temp("mates");
@@ -1672,14 +1900,23 @@ fn the_applications_mates_are_made_by_operations() {
         let held = a.add_mate(MateKind::Fasten(relative), whole(1), whole(3));
         a.mate_mut(held).unwrap().suppressed = true;
     });
-    assert_eq!(ops.len(), 3, "{ops:?}");
+    // A mate added suppressed is one operation.
+    assert_eq!(ops.len(), 2, "{ops:?}");
     let ops = change("Change", &|m| {
         let mate = m.assembly_mut().unwrap().mate_mut(MateId(1)).unwrap();
         mate.kind = MateKind::Distance(Scalar::new(8.0));
-        mate.flip = true;
+        mate.align = Some(peet_model::Align::Aligned);
+        mate.flip_dimension = true;
         mate.name = "Gap".to_owned();
     });
     assert_eq!(ops.len(), 2, "{ops:?}");
+    for align in [Some(peet_model::Align::Closest), None] {
+        let ops = change("Align", &|m| {
+            let mate = m.assembly_mut().unwrap().mate_mut(MateId(1)).unwrap();
+            mate.align = align;
+        });
+        assert_eq!(ops.len(), 1, "{ops:?}");
+    }
     let ops = change("Delete", &|m| {
         let a = m.assembly_mut().unwrap();
         a.remove_mate(MateId(1));

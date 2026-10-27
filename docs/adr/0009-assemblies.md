@@ -227,7 +227,12 @@ assembly is opened again (there was no folder to watch).
   another.
 - **Which way round** two planes go (against each other, or the same way with `flip`)
   can't be told apart by equations that are well behaved at the solution, so a
-  component that is the wrong way round is turned over before the solve.
+  component that is the wrong way round is turned over before the solve. A mate's
+  `align` is SolidWorks' alignment: aligned, anti-aligned (two planes' default) or
+  closest (two axes' default: no turn, the solve keeps the nearer). Axes are turned
+  over the same way when an alignment is asked for. `flip_dimension` measures a
+  distance or angle the other way (SolidWorks' "flip dimension"). Both are model
+  schema 12; older files' `flip` reads as aligned.
 - **Conflicts.** If a group's mates can't all hold, they are added one at a time in
   their order; each that can't be satisfied with those before it is flagged and left
   out, and the rest hold. A mate that can't be set up (a face that is gone, two ends on

@@ -805,6 +805,9 @@ impl PeetApp {
             a: MateEndSel::Ref(a),
             b: MateEndSel::Ref(b),
             flip: None,
+            align: None,
+            flip_dimension: None,
+            suppressed: false,
             name: None,
         });
         if !reply.ok {
@@ -1465,7 +1468,9 @@ impl PeetApp {
                         "Flip",
                         MateChange::Edit {
                             value: None,
-                            flip: Some(!m.flip),
+                            flip: Some(!m.flip()),
+                            align: None,
+                            flip_dimension: None,
                         },
                     );
                 }
@@ -1644,7 +1649,9 @@ impl PeetApp {
         };
         let was_mode = width_mode.clone();
         let was = value.as_ref().map(|v| v.0);
-        let mut flip = mate.flip;
+        let mut flip = mate.flip();
+        let mut flip_dimension = mate.flip_dimension;
+        let measured = matches!(mate.kind, MateKind::Distance(_) | MateKind::Angle(_));
         ui.strong(&mate.name);
         egui::Grid::new("mate_props")
             .num_columns(2)
@@ -1700,6 +1707,13 @@ impl PeetApp {
                     ui.checkbox(&mut flip, "");
                     ui.end_row();
                 }
+                if measured {
+                    ui.label("Flip dimension").on_hover_text(
+                        "The distance or angle measured the other way: from a flat face, the other end goes behind it instead of in front of it.",
+                    );
+                    ui.checkbox(&mut flip_dimension, "");
+                    ui.end_row();
+                }
             });
         if let Some(message) = status.as_ref().and_then(Status::message) {
             ui.add_space(6.0);
@@ -1723,12 +1737,15 @@ impl PeetApp {
             }
             return;
         }
-        if new.is_some() || flip != mate.flip {
+        if new.is_some() || flip != mate.flip() || flip_dimension != mate.flip_dimension {
             self.change_mate(
                 id,
                 MateChange::Edit {
                     value: new.map(Input::Number),
-                    flip: (flip != mate.flip).then_some(flip),
+                    flip: (flip != mate.flip()).then_some(flip),
+                    align: None,
+                    flip_dimension: (flip_dimension != mate.flip_dimension)
+                        .then_some(flip_dimension),
                 },
             );
         }
@@ -2051,6 +2068,8 @@ mod tests {
             MateChange::Edit {
                 value: Some(Input::Number(25.0)),
                 flip: Some(true),
+                align: None,
+                flip_dimension: None,
             },
         );
         let second = app

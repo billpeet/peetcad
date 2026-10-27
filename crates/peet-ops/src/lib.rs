@@ -588,9 +588,18 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             a,
             b,
             flip,
+            align,
+            flip_dimension,
+            suppressed,
             name,
         } => {
-            let (id, label) = mate::add(doc, &mut model, kind, a, b, *flip, name.as_deref())?;
+            let settings = mate::MateSettings {
+                flip: *flip,
+                align: *align,
+                flip_dimension: *flip_dimension,
+                suppressed: *suppressed,
+            };
+            let (id, label) = mate::add(doc, &mut model, kind, a, b, settings, name.as_deref())?;
             done.mate = Some(id);
             label
         }
@@ -1099,6 +1108,8 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 let change = MateChange::Edit {
                     value: Some(value.clone()),
                     flip: None,
+                    align: None,
+                    flip_dimension: None,
                 };
                 let label = mate::change(doc, &mut model, id, &change)?;
                 done.mate = Some(id);
