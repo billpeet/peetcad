@@ -581,6 +581,16 @@ impl<'a> Reader<'a> {
         Ok(Some(data))
     }
 
+    /// As [`read`](Self::read), but only if the value is the whole section: for telling
+    /// two layouts of one schema apart. `None` if absent or another layout.
+    pub fn read_whole<T: DeserializeOwned>(&self, kind: SectionKind) -> Option<T> {
+        let bytes = self.raw(kind).ok()??;
+        match postcard::take_from_bytes(&bytes) {
+            Ok((value, [])) => Some(value),
+            _ => None,
+        }
+    }
+
     /// Decompresses and deserializes a section. `Ok(None)` if absent.
     ///
     /// Check [`schema_version`](Self::schema_version) first: the bytes of a different schema

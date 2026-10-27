@@ -33,8 +33,9 @@ use crate::config::Slot;
 use crate::feature::{FeatureKind, Scalar, ScalarKind};
 use crate::mate::{Located, MateEnd};
 
-/// What an assembly equation sets.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// What an assembly equation sets. An assembly has at most one equation per target in each
+/// configuration.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 pub enum EquationTarget {
     /// A dimension or a parameter of a component's part, by its address in the part
     /// (`Height@Sketch1`, `Thickness`), or in a sub-assembly by its address there.
@@ -399,6 +400,20 @@ impl Model {
                     ));
                 }
                 let on = q.value != 0.0;
+                // An equation of some configurations only suppresses in the active one, as
+                // SolidWorks keeps a component's suppression per configuration; one of all
+                // of them suppresses where the component's state is shared.
+                if self.equation_differs(&e.target) {
+                    let was = self
+                        .assembly()
+                        .and_then(|a| a.component(*c))
+                        .map(|x| x.suppressed);
+                    if was == Some(on) || was.is_none() {
+                        return Ok(false);
+                    }
+                    self.set_component(*c, &crate::config::Scope::This, |s| s.suppressed = on)?;
+                    return Ok(true);
+                }
                 let assembly = self.assembly_mut().expect("an assembly");
                 match assembly.component_mut(*c) {
                     Some(comp) if comp.suppressed != on => {
@@ -550,6 +565,66 @@ mod tests {
         let failures = m.apply_equations();
         assert_eq!(failures.len(), 1, "{failures:?}");
         assert_eq!(read(&m, "\"Width@Sketch1@Cover-1\""), Ok(150.0));
+    }
+
+    #[test]
+    fn equations_differ_between_configurations() {
+        use crate::config::Scope;
+        let mut m = assembly();
+        let plate = m.component_address("x@Plate-1").unwrap().0;
+        let cover = m.component_address("x@Cover-1").unwrap().0;
+        let width = EquationTarget::Dimension {
+            component: cover,
+            address: "Width@Sketch1".to_owned(),
+        };
+        let suppress = EquationTarget::Suppression(plate);
+        let first = m.active_configuration().id;
+        // Everywhere, then another value in a second configuration, and an equation there only.
+        m.set_equation(&width, Some("80".to_owned()), &Scope::All)
+            .unwrap();
+        let second = m.add_configuration("Wide", None).unwrap();
+        assert!(!m.equation_differs(&width));
+        m.set_equation(&width, Some("120".to_owned()), &Scope::Only(vec![second]))
+            .unwrap();
+        m.set_equation(&suppress, Some("1".to_owned()), &Scope::Only(vec![second]))
+            .unwrap();
+        assert!(m.equation_differs(&width) && m.equation_differs(&suppress));
+        assert_eq!(m.equation_in(&width, first).as_deref(), Some("80"));
+        assert_eq!(m.equation_in(&width, second).as_deref(), Some("120"));
+        assert_eq!(m.equation_in(&suppress, first), None);
+        assert_eq!(m.equation_targets(), vec![width.clone(), suppress.clone()]);
+        assert_eq!(m.assembly().unwrap().equations().len(), 1);
+        let read = |m: &Model, e: &str| m.parameters.evaluate_expression(e).map(|q| q.value);
+        let suppressed = |m: &Model| m.assembly().unwrap().component(plate).unwrap().suppressed;
+        let rebuild = |m: &mut Model| {
+            m.refresh_dimension_values();
+            assert!(m.apply_equations().is_empty());
+            m.refresh_dimension_values();
+        };
+        rebuild(&mut m);
+        assert_eq!(read(&m, "\"Width@Sketch1@Cover-1\""), Ok(80.0));
+        assert!(!suppressed(&m));
+        // Each configuration works out its own.
+        m.activate_configuration(second);
+        assert_eq!(m.assembly().unwrap().equations().len(), 2);
+        rebuild(&mut m);
+        assert_eq!(read(&m, "\"Width@Sketch1@Cover-1\""), Ok(120.0));
+        assert!(suppressed(&m));
+        m.activate_configuration(first);
+        rebuild(&mut m);
+        assert_eq!(read(&m, "\"Width@Sketch1@Cover-1\""), Ok(80.0));
+        // The same everywhere again: nothing differs.
+        m.set_equation(&width, Some("90".to_owned()), &Scope::All)
+            .unwrap();
+        m.set_equation(&suppress, None, &Scope::All).unwrap();
+        assert!(!m.equation_differs(&width) && !m.equation_differs(&suppress));
+        assert_eq!(m.equation_in(&width, second).as_deref(), Some("90"));
+        // Deleting the component forgets its equations in every configuration.
+        m.set_equation(&suppress, Some("0".to_owned()), &Scope::This)
+            .unwrap();
+        m.assembly_mut().unwrap().remove(plate);
+        m.tidy_configurations();
+        assert!(!m.equation_differs(&suppress));
     }
 
     #[test]

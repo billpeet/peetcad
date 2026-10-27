@@ -1,6 +1,6 @@
 ---
 name: assemblies
-description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis), configurations (a component showing one of its part's configurations, and an assembly's own configurations: left and right hinged, with components and mates suppressed, configured and placed per configuration), equations that size and suppress components from the assembly (SolidWorks addresses like Height@Sketch1@Door-1, reference dimensions, making a component independent), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
+description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis), configurations (a component showing one of its part's configurations, and an assembly's own configurations: left and right hinged, with components and mates suppressed, configured and placed per configuration, equations that differ per configuration, derived configurations), equations that size and suppress components from the assembly (SolidWorks addresses like Height@Sketch1@Door-1, reference dimensions, making a component independent), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
 ---
 
 # Assemblies
@@ -659,9 +659,12 @@ the 6 thick lid is 50 above it and the spare is there.
 - **What changes where.** `suppress`, `fix`, `place` and `component_configuration` on a
   component, and `suppress` on a mate, change the active configuration only, unless
   `configurations` says which (`"all"`, a name, a list). A mate's value (`edit_mate`,
-  `set` `D1@MATE`) changes in all of them until it differs, then in the active one: give
-  `"configurations": "this"` to make it differ. Everything else (names, colours, ends,
-  `flexible`, equations, patterns) is the same in every configuration.
+  `set` `D1@MATE`) and an equation (`set` with a component's address,
+  `set_suppression_expression` with a component) change in all of them until they
+  differ, then in the active one: give `"configurations": "this"` to make them differ (see
+  "Equations that differ between configurations"). Parameters differ with
+  `set_parameter`'s `configurations`, as in a part. Everything else (names, colours, ends,
+  `flexible`, reference dimensions, patterns) is the same in every configuration.
 - **Where a component is belongs to the configuration.** Mates solve each configuration
   from its own placements, and a solve or a `place` moves a component in the active one
   only. So place components where they go in each configuration before relying on the
@@ -681,8 +684,60 @@ the 6 thick lid is 50 above it and the spare is there.
   `components`.
 - A sub-assembly is a component like a part: it shows one of its configurations, and its
   own components and mates are as that configuration has them.
-- To change the part a component shows, `open_component` opens the part with its own
-  active configuration: switch to the one to change with `configuration` there.
+- **`open_component` opens the part in the configuration the component shows** (the
+  reply's `configuration`), as SolidWorks does: a change made there with
+  `"configurations": "this"` is that configuration's. `save` stores it back with the
+  part's own active configuration as it was, so components that name no configuration
+  still show the same one.
+- **Derived configurations** (`add_configuration` with `parent`) work in an assembly as in
+  a part (`peet skills configurations`): each field of a component, each mate and each
+  equation follows the parent unless the derived one has its own.
+
+### Equations that differ between configurations
+
+An equation of the assembly (`set` with a component's address, `set_suppression_expression`
+with a component) can have another expression, or none, in some configurations: SolidWorks'
+"This configuration" in the equation manager. A global variable is a parameter, and differs
+with `set_parameter`'s `configurations`.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 6}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Door"}
+{"op": "insert", "part": 1, "name": "Hinge", "at": [100, 0, 0]}
+{"op": "set_parameter", "name": "tall", "value": 0}
+{"op": "set", "name": "depth@Extrude1@Door", "value": "6 + 4 * tall"}
+{"op": "edit_configuration", "configuration": "Default", "name": "Short"}
+{"op": "add_configuration", "name": "Tall"}
+{"op": "set_parameter", "name": "tall", "value": 1, "configurations": "this"}
+{"op": "set", "name": "depth@Extrude1@Door", "value": "12mm", "configurations": "this"}
+{"op": "set_suppression_expression", "component": "Hinge", "value": "iif(tall > 0, 0, 1)", "configurations": "this"}
+{"op": "configurations"}
+{"op": "dimensions"}
+{"op": "configuration", "configuration": "Short"}
+{"op": "components"}
+```
+
+In "Tall" the door is 12 thick and the hinge is there; in "Short" the door is 6 thick and
+the hinge is as it was set there (not suppressed), as no equation sets it.
+
+- **Left out, `configurations` is "all"** for an equation that is the same everywhere,
+  and the active one for one that already differs, as for a mate's value.
+- `"value": null` (with `set`, or `set_suppression_expression`) removes the equation in
+  those configurations: what it set keeps its last value there.
+- **A number for some configurations is an equation of theirs** (`"12mm"`). A number for
+  all of them sets the part, as before.
+- **Suppression by an equation of some configurations** is that configuration's:
+  the component keeps its own suppression in the others.
+- **Read them back.** `configurations` lists under `equations` each one that differs, by
+  what it sets (`depth@Extrude1@Door`, or the component's name for suppression), with its
+  expression in every configuration (null: none). `dimensions` lists the active
+  configuration's equations, then those only others have (`expression` null), each that
+  differs with its `configurations`.
+- One equation per thing set, per configuration: setting it again replaces it there.
+  An equation reached through another instance of the same part (`Door-2`) replaces it
+  in every configuration.
 
 ## Changing a part of an assembly
 

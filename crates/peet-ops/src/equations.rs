@@ -13,16 +13,14 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use peet_document::Document;
-use peet_model::{
-    Assembly, CompId, DefId, Equation, EquationTarget, Model, ReferenceDimension, ScalarKind,
-};
+use peet_model::{Assembly, CompId, DefId, EquationTarget, Model, ReferenceDimension, ScalarKind};
 use serde_json::{Map, Value, json};
 
 use crate::args::{Args, length_out, text};
 use crate::assembly::CompSel;
 use crate::mate::MateEndSel;
 use crate::op::{Op, Query};
-use crate::value::Input;
+use crate::value::{Configs, Input};
 
 /// The second part of a reference dimension's address: `RD1@Annotations`.
 const ANNOTATIONS: &str = peet_model::equations::ANNOTATIONS;
@@ -32,14 +30,14 @@ pub(crate) const EQUATION_OPS: &[(&str, &str, &str, &str)] = &[
     (
         "assembly",
         "set",
-        "name (an address that reaches into a component: NAME@FEATURE@COMPONENT, \"Height@Sketch1@Door-1\", or SolidWorks' \"Height@Sketch1@Door<1>.Part\"; a parameter of its part: NAME@COMPONENT), value",
-        "Set a dimension or parameter of a component's part from the assembly: a number sets the part (every instance of it, and a linked part's file); an expression is an equation of the assembly, worked out at every rebuild.",
+        "name (an address that reaches into a component: NAME@FEATURE@COMPONENT, \"Height@Sketch1@Door-1\", or SolidWorks' \"Height@Sketch1@Door<1>.Part\"; a parameter of its part: NAME@COMPONENT), value (null: no equation), configurations (\"this\", \"all\", a name or a list of names; left out: this one if the equation already differs between configurations, else all)",
+        "Set a dimension or parameter of a component's part from the assembly: a number sets the part (every instance of it, and a linked part's file); an expression is an equation of the assembly, worked out at every rebuild. With configurations (or where the equation differs between them), the value is an equation of those configurations.",
     ),
     (
         "component",
         "set_suppression_expression",
-        "component, value (expression text, or null to clear)",
-        "Suppress a component by an expression of the assembly: nonzero suppresses, zero unsuppresses (SolidWorks' suppressed and unsuppressed). It decides at every rebuild, over 'suppress'.",
+        "component, value (expression text, or null to clear), configurations (as for set)",
+        "Suppress a component by an expression of the assembly: nonzero suppresses, zero unsuppresses (SolidWorks' suppressed and unsuppressed). It decides at every rebuild, over 'suppress'. It can differ between the assembly's configurations.",
     ),
     (
         "assembly",
@@ -79,6 +77,7 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
         "set_suppression_expression" if a.has("component") => (|| {
             Ok(Op::ComponentSuppression {
                 component: a.required("component", CompSel::parse)?,
+                configurations: a.parsed("configurations", Configs::parse)?,
                 value: match a.take_nullable("value") {
                     Some(Value::Null) => None,
                     Some(v) => Some(text(&v).map_err(|e| format!("value: {e}"))?.to_owned()),
@@ -179,13 +178,29 @@ fn write_link(doc: &Document, model: &Model, def: DefId) -> Result<Option<PathBu
     Ok(Some(path))
 }
 
-/// `set` with an address that reaches into a component. Returns the undo label.
+/// The configurations an equation that sets `target` is changed in: those given, else the
+/// active one if it already differs between configurations, else all of them.
+fn equation_scope(
+    doc: &Document,
+    target: &EquationTarget,
+    configurations: Option<&Configs>,
+) -> Result<peet_model::Scope, String> {
+    Ok(match configurations {
+        Some(c) => c.resolve(doc)?,
+        None if doc.model.equation_differs(target) => peet_model::Scope::This,
+        None => peet_model::Scope::All,
+    })
+}
+
+/// `set` with an address that reaches into a component. Returns the undo label. `value`
+/// `None` removes the equation that sets it.
 pub(crate) fn set(
     doc: &Document,
     model: &mut Model,
     data: &mut Map<String, Value>,
     target: &str,
-    value: &Input,
+    value: Option<&Input>,
+    configurations: Option<&Configs>,
 ) -> Result<String, String> {
     if is_reference(target) {
         return Err(format!(
@@ -205,31 +220,57 @@ pub(crate) fn set(
             part.name
         )
     })?;
-    let text = value.text();
-    let constant = peet_sketch::expr::Expr::parse(&text)
-        .map_err(|e| format!("{target}: {e}"))?
-        .names()
-        .is_empty();
-    // An equation of the assembly that sets the same value of the same part: replaced
-    // (by another equation) or dropped (by a value).
-    let same = |e: &Equation| match &e.target {
+    let own = EquationTarget::Dimension {
+        component: c,
+        address: rest.clone(),
+    };
+    // An equation of the assembly that sets the same value of the same part through another
+    // component, in any configuration: this one takes its place.
+    let same = |t: &EquationTarget| match t {
         EquationTarget::Dimension { component, address } => {
             assembly.component(*component).map(|o| o.definition) == Some(def)
                 && address.eq_ignore_ascii_case(&rest)
         }
         EquationTarget::Suppression(_) => false,
     };
+    let mut existing: Vec<EquationTarget> = doc
+        .model
+        .equation_targets()
+        .into_iter()
+        .filter(|t| same(t))
+        .collect();
+    // Its own address, as the equation that is there has it.
+    let own = existing
+        .iter()
+        .find(|t| t.component() == c)
+        .cloned()
+        .unwrap_or(own);
+    existing.retain(|t| *t != own);
+    let scope = equation_scope(doc, &own, configurations)?;
     let full = format!("{rest}@{name}");
-    if constant {
+    data.insert("dimension".to_owned(), json!(full));
+    for other in &existing {
+        model.set_equation(other, None, &peet_model::Scope::All)?;
+    }
+    let Some(value) = value else {
+        model.set_equation(&own, None, &scope)?;
+        return Ok(format!("Clear equation {full}"));
+    };
+    let text = value.text();
+    let constant = peet_sketch::expr::Expr::parse(&text)
+        .map_err(|e| format!("{target}: {e}"))?
+        .names()
+        .is_empty();
+    // A number for every configuration sets the part, where nothing differs; otherwise it
+    // is an equation of the configurations it is for.
+    let per_configuration =
+        configurations.is_some_and(|c| *c != Configs::All) || doc.model.equation_differs(&own);
+    if constant && !(per_configuration && doc.model.configurations().len() > 1) {
         let value = value
             .scalar(kind, doc)
             .map_err(|e| format!("{target}: {e}"))?
             .value;
-        model
-            .assembly_mut()
-            .expect("an assembly")
-            .equations_mut()
-            .retain(|e| !same(e));
+        model.set_equation(&own, None, &peet_model::Scope::All)?;
         model.set_value_at(&full, value)?;
         if let Some(file) = write_link(doc, model, def)? {
             data.insert("written".to_owned(), json!(file.display().to_string()));
@@ -242,21 +283,13 @@ pub(crate) fn set(
         }
         .evaluate(kind, &doc.model.parameters);
         if let Err(e) = check
-            && !(kind == ScalarKind::Number && doc.model.parameters.evaluate_expression(&text).is_ok())
+            && !(kind == ScalarKind::Number
+                && doc.model.parameters.evaluate_expression(&text).is_ok())
         {
             return Err(format!("{target}: {e}"));
         }
-        let equations = model.assembly_mut().expect("an assembly").equations_mut();
-        equations.retain(|e| !same(e));
-        equations.push(Equation {
-            target: EquationTarget::Dimension {
-                component: c,
-                address: rest.clone(),
-            },
-            expression: text,
-        });
+        model.set_equation(&own, Some(text), &scope)?;
     }
-    data.insert("dimension".to_owned(), json!(full));
     Ok(format!("Set {full}"))
 }
 
@@ -266,6 +299,7 @@ pub(crate) fn suppression(
     model: &mut Model,
     component: &CompSel,
     value: Option<&str>,
+    configurations: Option<&Configs>,
 ) -> Result<String, String> {
     let c = component.resolve(doc)?;
     let name = the_assembly(doc)?.name_of(c).to_owned();
@@ -282,14 +316,9 @@ pub(crate) fn suppression(
             );
         }
     }
-    let equations = model.assembly_mut().expect("an assembly").equations_mut();
-    equations.retain(|e| e.target != EquationTarget::Suppression(c));
-    if let Some(source) = value {
-        equations.push(Equation {
-            target: EquationTarget::Suppression(c),
-            expression: source.trim().to_owned(),
-        });
-    }
+    let target = EquationTarget::Suppression(c);
+    let scope = equation_scope(doc, &target, configurations)?;
+    model.set_equation(&target, value.map(|v| v.trim().to_owned()), &scope)?;
     Ok(format!("Set suppression expression {name}"))
 }
 
@@ -319,7 +348,9 @@ pub(crate) fn suppress_feature(
         .features()
         .find(|f| f.name == rest)
         .or_else(|| {
-            let mut alike = part.features().filter(|f| f.name.eq_ignore_ascii_case(&rest));
+            let mut alike = part
+                .features()
+                .filter(|f| f.name.eq_ignore_ascii_case(&rest));
             match (alike.next(), alike.next()) {
                 (Some(f), None) => Some(f),
                 _ => None,
@@ -394,7 +425,11 @@ pub(crate) fn add_reference(
 }
 
 /// Deletes a reference dimension. Returns the undo label.
-pub(crate) fn delete_reference(doc: &Document, model: &mut Model, name: &str) -> Result<String, String> {
+pub(crate) fn delete_reference(
+    doc: &Document,
+    model: &mut Model,
+    name: &str,
+) -> Result<String, String> {
     let assembly = the_assembly(doc)?;
     let found = assembly
         .reference(name.split('@').next().unwrap_or(name))
@@ -403,7 +438,11 @@ pub(crate) fn delete_reference(doc: &Document, model: &mut Model, name: &str) ->
             let names: Vec<&str> = assembly.references().map(|r| r.name.as_str()).collect();
             format!(
                 "There is no reference dimension called '{name}'. They are: {}.",
-                if names.is_empty() { "(none)".to_owned() } else { names.join(", ") }
+                if names.is_empty() {
+                    "(none)".to_owned()
+                } else {
+                    names.join(", ")
+                }
             )
         })?;
     model
@@ -515,6 +554,32 @@ fn target_text(assembly: &Assembly, target: &EquationTarget) -> String {
     }
 }
 
+/// An equation's expression in every configuration of the assembly (null where it has
+/// none).
+pub(crate) fn equation_configurations(doc: &Document, target: &EquationTarget) -> Value {
+    Value::Object(
+        doc.model
+            .configurations()
+            .iter()
+            .map(|c| (c.name.clone(), json!(doc.model.equation_in(target, c.id))))
+            .collect(),
+    )
+}
+
+/// What every equation that differs between the assembly's configurations sets, by its
+/// address, with its expression in each.
+pub(crate) fn equations_that_differ(doc: &Document) -> Map<String, Value> {
+    let Some(assembly) = doc.model.assembly() else {
+        return Map::new();
+    };
+    doc.model
+        .equation_targets()
+        .into_iter()
+        .filter(|t| doc.model.equation_differs(t))
+        .map(|t| (target_text(assembly, &t), equation_configurations(doc, &t)))
+        .collect()
+}
+
 /// The equations and reference dimensions that can't be worked out, for `failures`.
 pub(crate) fn failures(doc: &Document) -> Vec<Value> {
     let Some(assembly) = doc.model.assembly() else {
@@ -534,9 +599,13 @@ pub(crate) fn failures(doc: &Document) -> Vec<Value> {
             }))
         })
         .collect();
-    out.extend(built.references.iter().filter(|(_, r)| r.is_err()).map(|(name, _)| {
-        reference_out(doc, name)
-    }));
+    out.extend(
+        built
+            .references
+            .iter()
+            .filter(|(_, r)| r.is_err())
+            .map(|(name, _)| reference_out(doc, name)),
+    );
     out
 }
 
@@ -613,19 +682,28 @@ pub(crate) fn dimensions(
     out.insert("dimensions".to_owned(), json!(list));
     if component.is_none() {
         let built = doc.evaluation();
-        let equations: Vec<Value> = assembly
-            .equations()
-            .iter()
-            .enumerate()
-            .map(|(i, e)| {
-                let mut v = json!({
-                    "target": target_text(assembly, &e.target),
-                    "expression": e.expression,
-                });
-                if matches!(e.target, EquationTarget::Suppression(_)) {
+        // Those of the active configuration, then those only others have, with their
+        // expression in every configuration where it differs.
+        let equations: Vec<Value> = doc
+            .model
+            .equation_targets()
+            .into_iter()
+            .map(|t| {
+                let at = assembly.equations().iter().position(|e| e.target == t);
+                let mut v = json!({ "target": target_text(assembly, &t) });
+                match at {
+                    Some(i) => v["expression"] = json!(assembly.equations()[i].expression),
+                    None => v["expression"] = Value::Null,
+                }
+                if matches!(t, EquationTarget::Suppression(_)) {
                     v["suppresses"] = json!(true);
                 }
-                if let Some((_, why)) = built.equation_failures.iter().find(|(n, _)| *n == i) {
+                if doc.model.equation_differs(&t) {
+                    v["configurations"] = equation_configurations(doc, &t);
+                }
+                if let Some((_, why)) =
+                    at.and_then(|i| built.equation_failures.iter().find(|(n, _)| *n == i))
+                {
                     v["status"] = json!("failed");
                     v["message"] = json!(why);
                 }

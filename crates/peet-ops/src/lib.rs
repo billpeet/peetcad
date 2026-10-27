@@ -731,8 +731,18 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             }
             label
         }
-        Op::ComponentSuppression { component, value } => {
-            let label = equations::suppression(doc, &mut model, component, value.as_deref())?;
+        Op::ComponentSuppression {
+            component,
+            value,
+            configurations,
+        } => {
+            let label = equations::suppression(
+                doc,
+                &mut model,
+                component,
+                value.as_deref(),
+                configurations.as_ref(),
+            )?;
             done.component = Some(component.resolve(doc)?);
             label
         }
@@ -1169,18 +1179,23 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 doc.model.parameters.entries.iter().any(|p| p.name == t)
             };
             if doc.is_assembly() && !parameter() && equations::reaches_component(doc, target) {
-                if configurations.is_some() {
-                    return Err(
-                        "A component's dimension is its part's, set in the configuration of the part the component shows: leave 'configurations' out."
-                            .to_owned(),
-                    );
-                }
                 let target = target.trim_matches('"').trim();
-                equations::set(doc, &mut model, &mut done.data, target, value)?
+                equations::set(
+                    doc,
+                    &mut model,
+                    &mut done.data,
+                    target,
+                    value.as_ref(),
+                    configurations.as_ref(),
+                )?
+            } else if value.is_none() {
+                return Err(format!(
+                    "'value' null clears an equation of an assembly that sets a component's value: '{target}' is not one. Give a value."
+                ));
             } else if doc.is_assembly() && !parameter() {
                 let id = mate::value_address(doc, target, configurations.is_some())?;
                 let change = MateChange::Edit {
-                    value: Some(value.clone()),
+                    value: value.clone(),
                     flip: None,
                     align: None,
                     flip_dimension: None,
@@ -1194,7 +1209,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                     doc,
                     &mut done,
                     target,
-                    value,
+                    value.as_ref().expect("a value"),
                     configurations.as_ref(),
                 )?
             }
@@ -1392,12 +1407,25 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             name,
             copy,
             comment,
+            parent,
         } => {
             let copy = copy
                 .as_deref()
                 .map(|c| value::configuration(doc, c))
                 .transpose()?;
-            let id = model.add_configuration(name, copy)?;
+            let id = match parent {
+                Some(_) if copy.is_some() => {
+                    return Err(
+                        "A derived configuration starts as a copy of its parent: give 'parent' or 'copy', not both."
+                            .to_owned(),
+                    );
+                }
+                Some(parent) => {
+                    let parent = value::configuration(doc, parent)?;
+                    model.add_derived_configuration(name, parent)?
+                }
+                None => model.add_configuration(name, copy)?,
+            };
             if let Some(comment) = comment {
                 model.set_configuration_comment(id, comment);
             }

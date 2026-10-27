@@ -1,6 +1,6 @@
 ---
 name: configurations
-description: Configurations in peet - several versions of one part in one file (sizes, with and without features), giving a size, a sketch dimension or a parameter another value in some versions, switching between them, and exporting each.
+description: Configurations in peet - several versions of one part in one file (sizes, with and without features), giving a size, a sketch dimension or a parameter another value in some versions, derived configurations that follow a parent, switching between them, and exporting each.
 ---
 
 # Configurations
@@ -75,6 +75,36 @@ thickness that features and sketches use); set the value itself when it is one n
   name, as it would be typed (`"2 * t"` for an expression). An expression is evaluated
   with each configuration's own parameters.
 
+## Derived configurations
+
+A **derived configuration** (SolidWorks' "Add Derived Configuration") has a parent and
+follows it: a change made to the parent is made to it too, except where it has a value of
+its own. Use one for a variant of a variant (a painted version of the long size) so that
+changing the long size changes both.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [80, 50]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 8}
+{"op": "add_configuration", "name": "Long"}
+{"op": "add_configuration", "name": "Long thin", "parent": "Long"}
+{"op": "edit", "feature": "Extrude1", "depth": 4, "configurations": "this"}
+{"op": "edit", "feature": "Extrude1", "depth": 12, "configurations": "Long"}
+{"op": "set_parameter", "name": "finish", "value": 2, "configurations": "Long"}
+{"op": "configurations"}
+```
+
+"Long thin" keeps its depth of 4 (its own) and takes `finish` = 2 from "Long".
+
+- `add_configuration` with `parent` makes one: it starts as a copy of the parent (so
+  `copy` is refused with it) and becomes active.
+- **Its own value** is one that differs from its parent's. A change to the parent reaches
+  every configuration derived from it (at any depth) that has the parent's value there; a
+  change to a derived configuration stays in it. In an assembly the same holds for each
+  field of a component (suppressed, the configuration of its part, fixed, where it is),
+  each mate and each equation.
+- `configurations` gives a derived one's `parent`.
+- **Deleting a parent deletes the configurations derived from it**, as in SolidWorks.
+
 ## What is suppressed with a feature
 
 Everything built on a suppressed feature is suppressed with it (the sketch on its face,
@@ -148,3 +178,6 @@ Put an `export` where each `bodies` is to write a file per configuration.
   another value there.
 - **A part keeps at least one configuration.** Deleting the active one makes its
   neighbour active; the reply's `configuration` says which.
+- **SolidWorks' flat-pattern configurations** (`DefaultSM-FLAT-PATTERN`, derived ones it
+  makes for sheet metal) are not configurations in PeetCAD: the flat pattern is the
+  `flat_pattern` view and export of the configuration itself.
