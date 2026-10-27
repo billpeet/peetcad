@@ -405,8 +405,8 @@ PeetCAD:
 
 | | What | Evidence | Parity |
 |---|---|---|---|
-| AI1 | **Which side a distance mate is measured to.** SolidWorks' "flip dimension"; `move_body`'s mates have it (`reversed` in `mate::solve`), assembly mates pass none. The main cause of components placed differently: Sliding Doorstay's Distance3 puts parts 344 mm off, Perforated Louver Filter's Distance1 222 mm | Most of the 9 assemblies placed differently | A11 |
-| AI2 | **A mate added suppressed**, without solving it: `mate` has no `suppressed`, so adding one of SolidWorks' suppressed mates moves components first | 114 suppressed mates; FabSys unsuppresses them | |
+| AI1 | **Which side a distance mate is measured to.** Done (`flip_dimension`). SolidWorks' "flip dimension"; `move_body`'s mates have it (`reversed` in `mate::solve`), assembly mates pass none. The main cause of components placed differently: Sliding Doorstay's Distance3 puts parts 344 mm off, Perforated Louver Filter's Distance1 222 mm | Most of the 9 assemblies placed differently | A11 |
+| AI2 | **A mate added suppressed.** Done (`suppressed`), without solving it: `mate` has no `suppressed`, so adding one of SolidWorks' suppressed mates moves components first | 114 suppressed mates; FabSys unsuppresses them | |
 | AI3 | **SolidWorks' alignment** (aligned, anti-aligned, closest) for coincident and concentric: Plinth Folded's pipes come out turned end for end (8 mm) | 1 assembly so far | A11 |
 | AI4 | **Mates to the assembly's own planes and origin** | 27 in 6 assemblies | A12 |
 | AI5 | **Mate kinds**: slot (6), limit angle (2), symmetric (2), coordinate (1), path (1); mate ends on sketch points and lines (4); width mates with a round tab or ends on more than two components (6) | | A4, A3 |
@@ -415,6 +415,33 @@ PeetCAD:
 | AI8 | **Assembly equations**: reading and setting a component's dimension (`"Height@Sketch1@Door<1>.Part"`), suppressing a component by condition (`"Hinge Assembly-3.Assembly" = IIF(...)`, 5 assemblies), global variables (`SectionID`), reference dimensions in the assembly (`RD1@Annotations`) | 50 equations in 11 assemblies, most of those that set part sizes disabled | A6, A7 |
 | AI9 | **Assembly features**: a cut with its sketch (Escutcheon Assembly), layout sketches (3), a component pattern driven by equations (Gear Tray Assembly's LocalLPattern1, count and spacing from Gear tray's height), composite curves (33, Laptop Shelf); in-context features in parts (24 holders in 9 assemblies) | | A8, A10 |
 | AI10 | **FabSys reaching into components**: `SetDimension` and suppression in a component (`Height@Sketch1@<part>-1`), `SuppressComponent`, `ResolveComponent`, a component's configuration, a component's sheet metal | Most of what FabSys does that PeetCAD can't take | F |
+
+**After AI1–AI3** (27 October, `agents\M1\run`):
+
+| Result | First run | Now |
+|---|---|---|
+| Matches | 4 | 6 (Gland Plate Frame and Panel Mount Battery Bracket join) |
+| Placed as SolidWorks has them; a part differs | 1 | 1 |
+| Placed as SolidWorks has them, with components or mates left out | 12 | 13 |
+| Components placed differently | 9 | 6 |
+| Live mates imported | 204 of 303 | 231 of 303 |
+| Suppressed mates imported | 1 of 114 | 67 of 114 (56 of them solve when unsuppressed) |
+
+- **AI1, done.** In every live distance mate the second end is the distance along the first end's
+  outward normal, or against it when SolidWorks flips the dimension. PeetCAD's mates take
+  `flip_dimension` (and `move_body`'s use the same field).
+- **AI2, done.** `mate` takes `suppressed`: added without solving, solved when unsuppressed. A mate on
+  a suppressed component stays live and waits for it, as in SolidWorks.
+- **AI3, done.** Mates take `align`: `aligned`, `anti_aligned` or `closest` (`flip` still works).
+  SolidWorks' alignment agrees with its own ends in every live mate; "closest" is on 9, none of
+  which needs resolving. Plinth Folded's pipes are not an alignment matter: an assembly equation
+  makes them 308 mm long where the part has 300 (AI8).
+- Width mates: SolidWorks' centred width holds a tab wider than the gap; PeetCAD's now does too.
+- The six still placed differently all have a mate PeetCAD can't take yet: the assembly's own
+  planes (AI4) and hinges opened to another angle (AI7) in the Door and Escutcheon Door ones and
+  Laptop Shelf and Meter Panel Movement, a limit angle and sketch points (AI5), Plinth Folded's
+  equation (AI8). Also: a round edge coincident with a plane (the circle lies in the plane), which
+  PeetCAD takes as the edge's axis (Rod Doorstay).
 
 The importer: width mates (which pair is the gap and which the tab), mates on components that are
 suppressed (19, not failures), sub-assemblies in another configuration than their file's, and the
