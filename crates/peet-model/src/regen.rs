@@ -467,6 +467,30 @@ impl Engine {
         planes
     }
 
+    /// This definition's model and those of its active descendants, where each is in
+    /// the definition's coordinates: for mates on their sketches.
+    fn mate_models(&self, model: &Arc<Model>) -> Vec<mate::ComponentModel> {
+        let mut models = vec![(Vec::new(), model.clone(), Frame::WORLD)];
+        if let Some(assembly) = model.assembly() {
+            for c in assembly.components().filter(|c| {
+                !c.suppressed
+                    && !matches!(
+                        self.evaluation.component_status(c.id),
+                        Some(Status::Suppressed)
+                    )
+            }) {
+                let Some(part) = self.parts.get(&c.definition) else {
+                    continue;
+                };
+                for (mut path, inner, frame) in part.engine.mate_models(&part.model) {
+                    path.insert(0, c.id);
+                    models.push((path, inner, c.placement.compose(&frame)));
+                }
+            }
+        }
+        models
+    }
+
     /// Rebuilds definitions, solves mates and writes back solved placements.
     fn assemble(&mut self, model: &mut Model, stats: &mut Stats) -> Assembled {
         let Some(assembly) = model.assembly() else {
@@ -527,6 +551,7 @@ impl Engine {
                 fixed: c.fixed || c.pattern.is_some(),
                 bodies,
                 planes: part.engine.mate_planes(&part.model),
+                models: part.engine.mate_models(&part.model),
             })
         };
         let placed: Vec<mate::Placed> = assembly

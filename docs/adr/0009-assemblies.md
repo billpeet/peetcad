@@ -233,6 +233,18 @@ assembly is opened again (there was no folder to watch).
   over the same way when an alignment is asked for. `flip_dimension` measures a
   distance or angle the other way (SolidWorks' "flip dimension"). Both are model
   schema 12; older files' `flip` reads as aligned.
+- **SolidWorks' other mates and ends** (model schema 12). An end with an empty path is
+  the assembly's own standard plane or origin, solved as a fixed component of its own;
+  an end can be a part's origin or a sketch's point, line, circle or arc (resolved in the
+  part's model at each solve, so it follows the sketch). A round edge coincident with a
+  plane lies in it. `Slot` (a pin on the line between a straight slot's end axes),
+  `LimitAngle` and `LimitDistance` (a residual of nothing within the range, and of how
+  far outside otherwise; such rows don't count against the freedom), and `Symmetric`
+  (the mirror image as a coincident mate: the middle of two ends on one component in the
+  plane, an end mirrored in its own component's plane, or mirrored in a plane that
+  doesn't move). An equation reads up to four components (`peet-solve`'s `MAX_SLOTS` is
+  24), for width mates whose pairs are on two components: a sum of the faces' places
+  along the first width face's normal.
 - **Conflicts.** If a group's mates can't all hold, they are added one at a time in
   their order; each that can't be satisfied with those before it is flagged and left
   out, and the rest hold. A mate that can't be set up (a face that is gone, two ends on

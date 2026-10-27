@@ -1387,6 +1387,8 @@ impl FeatureKind {
                             crate::MateGeom::Edge(e) => out.extend(e.features()),
                             crate::MateGeom::Vertex(v) => out.extend(v.features()),
                             crate::MateGeom::Plane(p) => plane_deps(p, &mut out),
+                            crate::MateGeom::Sketch(s) => out.push(s.feature),
+                            crate::MateGeom::Origin => {}
                         }
                     }
                 }

@@ -966,7 +966,7 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "edges",
         "body",
-        "The edges of a body (or all): their ends and the faces they join.",
+        "The edges of a body (or all): their ends and the faces they join, a round edge's centre, axis and radius, a straight edge's direction.",
     ),
     (
         "bend_table",

@@ -20,7 +20,7 @@ use crate::assembly::CompSel;
 use crate::fields::scalar_out;
 use crate::op::Op;
 use crate::select;
-use crate::value::{GeomSel, Input, PlaneSel};
+use crate::value::{FeatureSel, GeomSel, Input, PlaneSel};
 
 /// A mate, by name (`"Coincident1"`) or id.
 #[derive(Clone, Debug, PartialEq)]
@@ -84,12 +84,16 @@ impl MateSel {
 /// One end of a mate.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MateEndSel {
-    /// As a script writes it: a component path, and geometry or a plane of its part
-    /// (none for a fasten mate, which holds the component as a whole).
+    /// As a script writes it: a component path, and geometry, a plane, the origin or a
+    /// sketch entity of its part (none for a fasten mate, which holds the component as
+    /// a whole). With no component, the assembly's own standard plane or origin.
     Find {
         component: Vec<CompSel>,
         geom: Option<GeomSel>,
         plane: Option<PlaneSel>,
+        origin: bool,
+        /// A sketch of the part, and the id of a point, line, circle or arc in it.
+        sketch: Option<(FeatureSel, u32)>,
     },
     /// Already resolved: what the application passes after a click.
     Ref(MateEnd),
@@ -99,7 +103,7 @@ impl MateEndSel {
     pub(crate) fn parse(v: &Value) -> Result<Self, String> {
         let wrong = || {
             format!(
-                "expected {{\"component\": name or [names or ids along a path], \"face\": selector}} (or \"edge\", \"vertex\", \"plane\"; or the component alone, for fasten), not {v}"
+                "expected {{\"component\": name or [names or ids along a path], \"face\": selector}} (or \"edge\", \"vertex\", \"plane\", \"origin\": true, or \"sketch\" with \"entity\"; or the component alone, for fasten; or, with no component, the assembly's own \"plane\" or \"origin\"), not {v}"
             )
         };
         let mut map = match v {
@@ -110,24 +114,44 @@ impl MateEndSel {
                     component: vec![CompSel::parse(v)?],
                     geom: None,
                     plane: None,
+                    origin: false,
+                    sketch: None,
                 });
             }
             _ => return Err(wrong()),
         };
-        let value = map.remove("component").ok_or_else(wrong)?;
-        let component = match &value {
-            Value::Array(path) if !path.is_empty() => path
+        let component = match map.remove("component") {
+            // The assembly itself.
+            None => Vec::new(),
+            Some(Value::Array(path)) if !path.is_empty() => path
                 .iter()
                 .map(CompSel::parse)
                 .collect::<Result<Vec<_>, _>>()?,
-            Value::Array(_) => return Err("A component path can't be empty.".to_owned()),
-            _ => vec![CompSel::parse(&value)?],
+            Some(Value::Array(_)) => return Err("A component path can't be empty.".to_owned()),
+            Some(value) => vec![CompSel::parse(&value)?],
         };
         let plane = map
             .remove("plane")
             .map(|v| PlaneSel::parse(&v))
             .transpose()?;
-        if plane.is_some() && !map.is_empty() {
+        let origin = map
+            .remove("origin")
+            .map(|v| boolean(&v))
+            .transpose()?
+            .unwrap_or(false);
+        let sketch = match (map.remove("sketch"), map.remove("entity")) {
+            (Some(s), Some(e)) => Some((FeatureSel::parse(&s)?, integer(&e)?)),
+            (None, None) => None,
+            _ => {
+                return Err(
+                    "A sketch end needs both 'sketch' (the sketch's name or id) and 'entity' (the id of a point, line, circle or arc in it, as 'feature' lists them)."
+                        .to_owned(),
+                );
+            }
+        };
+        let chosen =
+            usize::from(plane.is_some()) + usize::from(origin) + usize::from(sketch.is_some());
+        if chosen > 1 || (chosen == 1 && !map.is_empty()) {
             return Err(wrong());
         }
         let geom = match map.len() {
@@ -135,23 +159,46 @@ impl MateEndSel {
             1 => Some(GeomSel::parse(&Value::Object(map))?),
             _ => return Err(wrong()),
         };
+        if component.is_empty() && (geom.is_some() || sketch.is_some() || chosen == 0) {
+            return Err(format!(
+                "An end with no 'component' is on the assembly itself, which has only its standard planes and its origin: give \"plane\" (top, front or right) or \"origin\": true, or name a component. Not {v}"
+            ));
+        }
         Ok(Self::Find {
             component,
             geom,
             plane,
+            origin,
+            sketch,
         })
     }
 
     /// The end as a mate stores it, with the component it is on.
     pub(crate) fn resolve(&self, doc: &Document) -> Result<MateEnd, String> {
-        let (component, geom, plane) = match self {
+        let (component, geom, plane, origin, sketch) = match self {
             Self::Ref(end) => return Ok(end.clone()),
             Self::Find {
                 component,
                 geom,
                 plane,
-            } => (component, geom, plane),
+                origin,
+                sketch,
+            } => (component, geom, plane, *origin, sketch),
         };
+        if component.is_empty() {
+            // The assembly's own: fixed, where the assembly's origin is.
+            the_assembly(doc)?;
+            return match plane {
+                _ if origin => Ok(MateEnd::of_assembly(MateGeom::Origin)),
+                Some(PlaneSel::Standard(p)) => Ok(MateEnd::of_assembly(MateGeom::Plane(
+                    peet_model::PlaneRef::Standard(*p),
+                ))),
+                _ => Err(
+                    "The assembly itself has only its standard planes (top, front, right) and its origin: name a component for any other plane."
+                        .to_owned(),
+                ),
+            };
+        }
         let mut assembly = the_assembly(doc)?;
         let mut path = Vec::new();
         let mut names = Vec::new();
@@ -174,12 +221,57 @@ impl MateEndSel {
         if geom.is_some() && plane.is_some() {
             return Err("A mate end takes one geometry selector or one plane selector.".to_owned());
         }
-        if geom.is_none() && plane.is_none() {
+        if origin {
+            return Ok(MateEnd {
+                path,
+                geom: Some(MateGeom::Origin),
+            });
+        }
+        if geom.is_none() && plane.is_none() && sketch.is_none() {
             return Ok(MateEnd { path, geom: None });
         }
         let name = names.join(" / ");
         let part = Document::from_model((*definition.model).clone(), None);
         let on = |e: String| format!("In {name} (its part, {}): {e}", definition.name());
+        if let Some((sel, entity)) = sketch {
+            if definition.model.is_assembly() {
+                return Err(format!(
+                    "{name} is a sub-assembly: extend the component path to a part inside it to select one of its sketches."
+                ));
+            }
+            let feature = sel.resolve(&part).map_err(on)?;
+            let s = part
+                .model
+                .feature(feature)
+                .and_then(peet_model::Feature::sketch)
+                .ok_or_else(|| on("that feature is not a sketch.".to_owned()))?;
+            let id = peet_sketch::EntityId(*entity);
+            match s.sketch.entity(id).map(|e| &e.geometry) {
+                Some(
+                    peet_sketch::Geometry::Point { .. }
+                    | peet_sketch::Geometry::Line { .. }
+                    | peet_sketch::Geometry::Circle { .. }
+                    | peet_sketch::Geometry::Arc { .. },
+                ) => {}
+                Some(_) => {
+                    return Err(on(format!(
+                        "entity {entity} is a spline or text: a mate takes a sketch point, line, circle or arc."
+                    )));
+                }
+                None => {
+                    return Err(on(format!(
+                        "the sketch has no entity {entity}: 'feature' with the sketch lists its entities and their ids."
+                    )));
+                }
+            }
+            return Ok(MateEnd {
+                path,
+                geom: Some(MateGeom::Sketch(peet_model::SketchRef {
+                    feature,
+                    entity: id,
+                })),
+            });
+        }
         let geom = match geom {
             None => plane
                 .as_ref()
@@ -226,6 +318,19 @@ pub enum MateType {
         b2: Option<Box<MateEndSel>>,
         mode: WidthModeSel,
     },
+    /// A pin in a slot: where along it.
+    Slot(WidthModeSel),
+    /// An angle (degrees) or a distance kept between two values.
+    LimitAngle {
+        min: Input,
+        max: Input,
+    },
+    LimitDistance {
+        min: Input,
+        max: Input,
+    },
+    /// The two ends mirror images in this plane.
+    Symmetric(Box<MateEndSel>),
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -237,24 +342,37 @@ pub enum WidthModeSel {
 }
 
 impl WidthModeSel {
-    fn parse(a: &mut Args) -> Result<Self, String> {
+    /// A width mate's mode (centred unless said), or a slot mate's (`slot`: free unless
+    /// said).
+    fn parse_for(a: &mut Args, slot: bool) -> Result<Self, String> {
         let mode = a.string("mode")?.unwrap_or_else(|| {
             if a.has("percent") {
                 "percent"
             } else if a.has("distance") {
                 "dimension"
+            } else if slot {
+                "free"
             } else {
                 "centered"
             }
             .to_owned()
         });
+        let what = if slot { "Slot" } else { "Width" };
         Ok(match mode.as_str() {
-            "centered" => Self::Centered,
+            "centered" | "center" => Self::Centered,
             "free" => Self::Free,
-            "dimension" => Self::Dimension(a.required("distance", Input::parse)?),
+            "dimension" | "distance" => Self::Dimension(a.required("distance", Input::parse)?),
             "percent" => Self::Percent(a.required("percent", Input::parse)?),
-            _ => return Err("Width mode must be centered, free, dimension or percent.".to_owned()),
+            _ => {
+                return Err(format!(
+                    "{what} mode must be centered, free, dimension or percent."
+                ));
+            }
         })
+    }
+
+    fn parse(a: &mut Args) -> Result<Self, String> {
+        Self::parse_for(a, false)
     }
 
     fn resolve(&self, doc: &Document) -> Result<WidthMode, String> {
@@ -267,7 +385,7 @@ impl WidthModeSel {
     }
 }
 
-const TYPES: &str = "coincident, concentric, parallel, distance, angle, fasten, width";
+const TYPES: &str = "coincident, concentric, parallel, distance, angle, fasten, width, slot, limit_angle, limit_distance, symmetric";
 
 impl MateType {
     fn parse(a: &mut Args) -> Result<(Self, MateEndSel, MateEndSel), String> {
@@ -309,6 +427,16 @@ impl MateType {
             "distance" => Self::Distance(value(a, "distance")?),
             "angle" => Self::Angle(value(a, "angle")?),
             "fasten" => Self::Fasten(None),
+            "slot" => Self::Slot(WidthModeSel::parse_for(a, true)?),
+            "limit_angle" => Self::LimitAngle {
+                min: value(a, "min")?,
+                max: value(a, "max")?,
+            },
+            "limit_distance" => Self::LimitDistance {
+                min: value(a, "min")?,
+                max: value(a, "max")?,
+            },
+            "symmetric" => Self::Symmetric(Box::new(a.required("plane", MateEndSel::parse)?)),
             other => return Err(format!("type: '{other}' is not a mate: use {TYPES}.")),
         };
         Ok((
@@ -334,13 +462,19 @@ pub enum MateChange {
     /// Leave it out of the solve without deleting it, or put it back.
     Suppress(bool),
     Delete,
+    /// A width or slot mate's mode and value.
     Width(WidthModeSel),
+    /// A limit mate's least and greatest value: the ones given.
+    Limits {
+        min: Option<Input>,
+        max: Option<Input>,
+    },
 }
 
 impl MateChange {
     pub(crate) fn word(&self) -> &'static str {
         match self {
-            Self::Edit { .. } | Self::Width(_) => "edit_mate",
+            Self::Edit { .. } | Self::Width(_) | Self::Limits { .. } => "edit_mate",
             Self::Rename(_) => "rename",
             Self::Suppress(_) => "suppress",
             Self::Delete => "delete",
@@ -352,13 +486,13 @@ impl MateChange {
 pub(crate) const MATE_OPS: &[(&str, &str, &str)] = &[
     (
         "mate",
-        "type (coincident, concentric, parallel, distance, angle, fasten, width), a, b (each {component: name, id or nonempty path array, and face, edge, vertex or plane: a selector in the part's own coordinates}; plane: top, front, right or a reference plane's name or id; for fasten the component alone). Width: a is a pair of planar ends, b is a pair of planar ends or one axis end; each pair belongs to one top-level component; mode (centered, free, dimension, percent; default centered), distance for dimension, percent for percent (number or expression). Other mates: distance, angle, flip (true: aligned), align (aligned, anti_aligned, closest; default: planes anti_aligned, axes closest), flip_dimension (bool: the distance or angle measured the other way). All: name, suppressed (bool: added without being solved)",
+        "type (coincident, concentric, parallel, distance, angle, fasten, width, slot, limit_angle, limit_distance, symmetric), a, b (each {component: name, id or nonempty path array, and face, edge, vertex, plane, origin: true, or sketch: name or id with entity: id (a point, line, circle or arc); geometry in the part's own coordinates}; plane: top, front, right or a reference plane's name or id; with no component: the assembly's own plane (top, front, right) or origin: true; for fasten the component alone). Width: a is a pair of planar ends, b is a pair of planar ends or one axis end; mode (centered, free, dimension, percent; default centered), distance for dimension, percent for percent (number or expression). Slot: a and b are a face of a straight slot and an axis, either way round; mode (free, centered, dimension, percent; default free), distance, percent; flip_dimension measures from the slot's other end. limit_angle: min, max (degrees); limit_distance: min, max. Symmetric: plane (an end: the plane of symmetry). Other mates: distance, angle, flip (true: aligned), align (aligned, anti_aligned, closest; default: planes anti_aligned, axes closest), flip_dimension (bool: the distance or angle measured the other way). All: name, suppressed (bool: added without being solved)",
         "Hold two components together by geometry of their parts. The components move to where the mates hold, as little as they can.",
     ),
     (
         "edit_mate",
-        "mate, distance or angle, flip, align (aligned, anti_aligned, closest), flip_dimension; width mates: mode (centered, free, dimension, percent), distance for dimension, percent for percent",
-        "Change a mate's value, which way round its ends go or which way its value is measured, or a width mate's mode and position.",
+        "mate, distance or angle, flip, align (aligned, anti_aligned, closest), flip_dimension; width and slot mates: mode (centered, free, dimension, percent), distance for dimension, percent for percent; limit mates: min, max",
+        "Change a mate's value, which way round its ends go or which way its value is measured, a width or slot mate's mode and position, or a limit mate's range.",
     ),
     ("rename", "mate, name", "Rename a mate."),
     (
@@ -402,6 +536,15 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
             if a.has("mode") || a.has("percent") {
                 let mode = WidthModeSel::parse(a).map(MateChange::Width);
                 return Some(change(a, mode));
+            }
+            if a.has("min") || a.has("max") {
+                let limits = (|| {
+                    Ok(MateChange::Limits {
+                        min: a.parsed("min", Input::parse)?,
+                        max: a.parsed("max", Input::parse)?,
+                    })
+                })();
+                return Some(change(a, limits));
             }
             let edit = (|| {
                 let distance = a.parsed("distance", Input::parse)?;
@@ -493,7 +636,18 @@ pub(crate) fn end_out(assembly: &Assembly, end: &MateEnd) -> Value {
             .map(|d| &*d.model);
         current = model.and_then(Model::assembly);
     }
-    m.insert("component".to_owned(), json!(names.first().copied()));
+    if end.is_assembly() {
+        m.insert("assembly".to_owned(), json!(true));
+    } else {
+        m.insert("component".to_owned(), json!(names.first().copied()));
+    }
+    if let Some(MateGeom::Sketch(s)) = &end.geom {
+        m.insert(
+            "sketch".to_owned(),
+            model.map_or_else(|| json!(s.feature.0), |m| json!(m.name_of(s.feature))),
+        );
+        m.insert("entity".to_owned(), json!(s.entity.0));
+    }
     if end.path.len() > 1 {
         m.insert("inside".to_owned(), json!(end.path.len() - 1));
         m.insert("path".to_owned(), json!(names));
@@ -518,6 +672,8 @@ pub(crate) fn end_out(assembly: &Assembly, end: &MateEnd) -> Value {
             Some(MateGeom::Edge(_)) => "edge",
             Some(MateGeom::Vertex(_)) => "vertex",
             Some(MateGeom::Plane(_)) => "plane",
+            Some(MateGeom::Origin) => "origin",
+            Some(MateGeom::Sketch(_)) => "sketch",
             None => "component",
         }),
     );
@@ -550,7 +706,18 @@ pub(crate) fn mate_out(doc: &Document, id: MateId) -> Value {
     m.insert("a".to_owned(), a);
     m.insert("b".to_owned(), b);
     match &mate.kind {
-        MateKind::Width { mode, .. } => {
+        MateKind::Symmetric { plane } => {
+            m.insert("plane".to_owned(), end_out(assembly, plane));
+        }
+        MateKind::LimitAngle { min, max } => {
+            m.insert("min".to_owned(), scalar_out(min, ScalarKind::Angle, doc));
+            m.insert("max".to_owned(), scalar_out(max, ScalarKind::Angle, doc));
+        }
+        MateKind::LimitDistance { min, max } => {
+            m.insert("min".to_owned(), scalar_out(min, ScalarKind::Length, doc));
+            m.insert("max".to_owned(), scalar_out(max, ScalarKind::Length, doc));
+        }
+        MateKind::Width { mode, .. } | MateKind::Slot { mode } => {
             m.insert("mode".to_owned(), json!(mode.word()));
             match mode {
                 WidthMode::Dimension(s) => {
@@ -655,25 +822,55 @@ pub(crate) fn add(
     let align = align_of(settings.flip, settings.align).flatten();
     let (mut a, mut b) = (a.resolve(doc)?, b.resolve(doc)?);
     let assembly = the_assembly(doc)?;
-    let component = |end: &MateEnd| -> Result<CompId, String> {
+    // The component an end is on, or none for the assembly's own plane or origin.
+    let component = |end: &MateEnd| -> Result<Option<CompId>, String> {
+        if end.is_assembly() {
+            return Ok(None);
+        }
         end.component()
             .filter(|c| assembly.component(*c).is_some())
+            .map(Some)
             .ok_or_else(|| "A mate's component is not in the assembly.".to_owned())
     };
     let (ca, cb) = (component(&a)?, component(&b)?);
-    crate::pattern::placed_by_pattern(assembly, ca, "mated")?;
-    crate::pattern::placed_by_pattern(assembly, cb, "mated")?;
-    if ca == cb {
-        return Err(format!(
-            "Both ends are on {}: a mate joins two components.",
-            assembly.name_of(ca)
-        ));
+    for c in [ca, cb].into_iter().flatten() {
+        crate::pattern::placed_by_pattern(assembly, c, "mated")?;
     }
+    let symmetric = matches!(kind, MateType::Symmetric(_));
+    match (ca, cb) {
+        (None, None) => {
+            return Err(
+                "Both ends are on the assembly itself: a mate joins a component to something."
+                    .to_owned(),
+            );
+        }
+        (Some(ca), Some(cb)) if ca == cb && !symmetric => {
+            return Err(format!(
+                "Both ends are on {}: a mate joins two components.",
+                assembly.name_of(ca)
+            ));
+        }
+        _ => {}
+    }
+    let named = |end: &MateEnd| {
+        end.component()
+            .map_or("the assembly", |c| assembly.name_of(c))
+            .to_owned()
+    };
     let needs_geometry = |end: &MateEnd, which: &str| {
         if end.geom.is_none() {
             Err(format!(
                 "'{which}' names {} alone: this mate needs a face, an edge, a vertex or a plane of it (only fasten takes a component as a whole).",
-                assembly.name_of(end.component().unwrap_or(ca))
+                named(end)
+            ))
+        } else {
+            Ok(())
+        }
+    };
+    let no_turn = |what: &str| {
+        if align.is_some() {
+            Err(format!(
+                "A {what} mate keeps the nearest orientation and does not take flip or align."
             ))
         } else {
             Ok(())
@@ -681,22 +878,25 @@ pub(crate) fn add(
     };
     let kind = match kind {
         MateType::Width { a2, b2, mode } => {
-            if align.is_some() || settings.flip_dimension == Some(true) {
+            no_turn("width")?;
+            if settings.flip_dimension == Some(true) {
                 return Err(
-                    "A width mate keeps the nearest orientation and does not take flip, align or flip_dimension."
+                    "A width mate keeps the nearest orientation and does not take flip, align or flip_dimension: reverse the width pair to measure from its other face."
                         .to_owned(),
                 );
             }
             let a2 = a2.resolve(doc)?;
             let b2 = b2.as_ref().map(|b| b.resolve(doc)).transpose()?;
-            for (first, second) in [(&a, Some(&a2)), (&b, b2.as_ref())] {
-                needs_geometry(first, "width/tab")?;
-                if let Some(second) = second {
-                    needs_geometry(second, "width/tab")?;
-                    if first.component() != second.component() {
-                        return Err("Each width mate pair must belong to one top-level component. The width pair and tab must belong to different components.".to_owned());
-                    }
-                }
+            for end in [&a, &a2, &b].into_iter().chain(b2.as_ref()) {
+                needs_geometry(end, "width/tab")?;
+            }
+            let on: Vec<Option<CompId>> = [&a, &a2, &b]
+                .into_iter()
+                .chain(b2.as_ref())
+                .map(MateEnd::component)
+                .collect();
+            if on.iter().all(|c| *c == on[0]) {
+                return Err("The width pair and the tab are all on one component: a mate joins two components.".to_owned());
             }
             MateKind::Width {
                 a2,
@@ -705,6 +905,11 @@ pub(crate) fn add(
             }
         }
         MateType::Fasten(relative) => {
+            let (Some(ca), Some(cb)) = (ca, cb) else {
+                return Err(
+                    "A fasten mate holds two components: name a component at each end.".to_owned(),
+                );
+            };
             // The components as wholes, where they are now.
             a.geom = None;
             b.geom = None;
@@ -718,22 +923,56 @@ pub(crate) fn add(
             };
             MateKind::Fasten(relative)
         }
+        MateType::Slot(mode) => {
+            no_turn("slot")?;
+            needs_geometry(&a, "a")?;
+            needs_geometry(&b, "b")?;
+            MateKind::Slot {
+                mode: mode.resolve(doc)?,
+            }
+        }
+        MateType::Symmetric(plane) => {
+            needs_geometry(&a, "a")?;
+            needs_geometry(&b, "b")?;
+            let plane = plane.resolve(doc)?;
+            needs_geometry(&plane, "plane")?;
+            if let Some(c) = component(&plane)? {
+                crate::pattern::placed_by_pattern(assembly, c, "mated")?;
+            }
+            if ca == cb && cb == plane.component() {
+                return Err(format!(
+                    "Both ends and the plane are on {}: a mate joins two components.",
+                    named(&a)
+                ));
+            }
+            MateKind::Symmetric { plane }
+        }
         other => {
             needs_geometry(&a, "a")?;
             needs_geometry(&b, "b")?;
+            let scalar = |v: &Input, kind, what: &str| {
+                v.scalar(kind, doc).map_err(|e| format!("{what}: {e}"))
+            };
             match other {
                 MateType::Coincident => MateKind::Coincident,
                 MateType::Concentric => MateKind::Concentric,
                 MateType::Parallel => MateKind::Parallel,
-                MateType::Distance(v) => MateKind::Distance(
-                    v.scalar(ScalarKind::Length, doc)
-                        .map_err(|e| format!("distance: {e}"))?,
-                ),
-                MateType::Angle(v) => MateKind::Angle(
-                    v.scalar(ScalarKind::Angle, doc)
-                        .map_err(|e| format!("angle: {e}"))?,
-                ),
-                MateType::Fasten(_) | MateType::Width { .. } => unreachable!("handled above"),
+                MateType::Distance(v) => {
+                    MateKind::Distance(scalar(v, ScalarKind::Length, "distance")?)
+                }
+                MateType::Angle(v) => MateKind::Angle(scalar(v, ScalarKind::Angle, "angle")?),
+                MateType::LimitAngle { min, max } => MateKind::LimitAngle {
+                    min: scalar(min, ScalarKind::Angle, "min")?,
+                    max: scalar(max, ScalarKind::Angle, "max")?,
+                },
+                MateType::LimitDistance { min, max } => MateKind::LimitDistance {
+                    min: scalar(min, ScalarKind::Length, "min")?,
+                    max: scalar(max, ScalarKind::Length, "max")?,
+                },
+                MateType::Fasten(_)
+                | MateType::Width { .. }
+                | MateType::Slot(_)
+                | MateType::Symmetric(_) => unreachable!("handled above"),
             }
         }
     };
@@ -798,21 +1037,27 @@ pub(crate) fn change(
     id: MateId,
     change: &MateChange,
 ) -> Result<String, String> {
-    if matches!(
-        the_assembly(doc)?.mate(id).map(|m| &m.kind),
-        Some(MateKind::Width { .. })
-    ) && matches!(
+    let kind = the_assembly(doc)?.mate(id).map(|m| &m.kind);
+    let turns = matches!(
         change,
-        MateChange::Edit { flip: Some(_), .. }
-            | MateChange::Edit { align: Some(_), .. }
-            | MateChange::Edit {
-                flip_dimension: Some(_),
-                ..
-            }
-    ) {
+        MateChange::Edit { flip: Some(_), .. } | MateChange::Edit { align: Some(_), .. }
+    );
+    let measures = matches!(
+        change,
+        MateChange::Edit {
+            flip_dimension: Some(_),
+            ..
+        }
+    );
+    if matches!(kind, Some(MateKind::Width { .. })) && (turns || measures) {
         return Err(
             "A width mate keeps the nearest orientation and does not take flip, align or flip_dimension."
                 .to_owned(),
+        );
+    }
+    if matches!(kind, Some(MateKind::Slot { .. })) && turns {
+        return Err(
+            "A slot mate keeps the nearest orientation and does not take flip or align.".to_owned(),
         );
     }
     let was = the_assembly(doc)?
@@ -824,13 +1069,18 @@ pub(crate) fn change(
         MateChange::Edit {
             value: Some(input), ..
         } => {
-            let kind = match the_assembly(doc)?.mate(id).map(|m| &m.kind) {
+            let kind = match kind {
                 Some(MateKind::Distance(_)) => ScalarKind::Length,
                 Some(MateKind::Angle(_)) => ScalarKind::Angle,
-                Some(MateKind::Width {
-                    mode: WidthMode::Dimension(_),
-                    ..
-                }) => ScalarKind::Length,
+                Some(
+                    MateKind::Width {
+                        mode: WidthMode::Dimension(_),
+                        ..
+                    }
+                    | MateKind::Slot {
+                        mode: WidthMode::Dimension(_),
+                    },
+                ) => ScalarKind::Length,
                 Some(other) => {
                     return Err(format!(
                         "{was} is a {} mate: it has no distance or angle to set.",
@@ -847,6 +1097,25 @@ pub(crate) fn change(
         MateChange::Width(mode) => Some(mode.resolve(doc)?),
         _ => None,
     };
+    let limits = match (change, kind) {
+        (MateChange::Limits { min, max }, Some(MateKind::LimitAngle { .. })) => {
+            Some((ScalarKind::Angle, min, max))
+        }
+        (MateChange::Limits { min, max }, Some(MateKind::LimitDistance { .. })) => {
+            Some((ScalarKind::Length, min, max))
+        }
+        (MateChange::Limits { .. }, _) => {
+            return Err(format!(
+                "{was} is not a limit mate: only limit_angle and limit_distance take min and max."
+            ));
+        }
+        _ => None,
+    }
+    .map(|(kind, min, max)| -> Result<_, String> {
+        let read = |v: &Option<Input>| v.as_ref().map(|v| v.scalar(kind, doc)).transpose();
+        Ok((read(min)?, read(max)?))
+    })
+    .transpose()?;
     let assembly = model
         .assembly_mut()
         .ok_or_else(|| "The document is not an assembly.".to_owned())?;
@@ -860,13 +1129,12 @@ pub(crate) fn change(
         } => {
             let mate = assembly.mate_mut(id).ok_or_else(gone)?;
             match value {
-                Some((ScalarKind::Length, s)) => {
-                    if let MateKind::Width { mode, .. } = &mut mate.kind {
+                Some((ScalarKind::Length, s)) => match &mut mate.kind {
+                    MateKind::Width { mode, .. } | MateKind::Slot { mode } => {
                         *mode = WidthMode::Dimension(s);
-                    } else {
-                        mate.kind = MateKind::Distance(s);
                     }
-                }
+                    kind => *kind = MateKind::Distance(s),
+                },
                 Some((_, s)) => mate.kind = MateKind::Angle(s),
                 None => {}
             }
@@ -892,10 +1160,25 @@ pub(crate) fn change(
         }
         MateChange::Width(_) => {
             let mate = assembly.mate_mut(id).ok_or_else(gone)?;
-            let MateKind::Width { mode, .. } = &mut mate.kind else {
-                return Err("Only a width mate takes mode or percent.".to_owned());
+            let (MateKind::Width { mode, .. } | MateKind::Slot { mode }) = &mut mate.kind else {
+                return Err("Only a width or slot mate takes mode or percent.".to_owned());
             };
             *mode = width_mode.expect("resolved above");
+            format!("Edit {was}")
+        }
+        MateChange::Limits { .. } => {
+            let mate = assembly.mate_mut(id).ok_or_else(gone)?;
+            let (new_min, new_max) = limits.expect("read above");
+            if let MateKind::LimitAngle { min, max } | MateKind::LimitDistance { min, max } =
+                &mut mate.kind
+            {
+                if let Some(s) = new_min {
+                    *min = s;
+                }
+                if let Some(s) = new_max {
+                    *max = s;
+                }
+            }
             format!("Edit {was}")
         }
     })
