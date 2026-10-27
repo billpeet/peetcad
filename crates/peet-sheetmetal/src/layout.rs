@@ -455,6 +455,11 @@ pub struct Layout {
     pub corners: Vec<Corner>,
     /// Dimples, embosses and louvers pressed into flanges.
     pub forms: Vec<Form>,
+    /// The bends an unfold has laid flat ([`Layout::unfold`]): each is built as a flat
+    /// strip, and what is beyond it lies in its parent's plane. Empty in a folded part.
+    pub flat_bends: Vec<usize>,
+    /// The flange that stays where it is while bends are laid flat and folded again.
+    pub fixed: usize,
 }
 
 /// A rectangle in a 2D frame `(o, u, v)`: `o + x·u + y·v` for `x` in `x0..x1`, `y` in
@@ -508,6 +513,8 @@ impl Layout {
             attachments: Vec::new(),
             corners: Vec::new(),
             forms: Vec::new(),
+            flat_bends: Vec::new(),
+            fixed: 0,
         })
     }
 
@@ -683,6 +690,8 @@ impl Layout {
             attachments: Vec::new(),
             corners: Vec::new(),
             forms: Vec::new(),
+            flat_bends: Vec::new(),
+            fixed: 0,
         })
     }
 
@@ -720,6 +729,99 @@ impl Layout {
     /// The bend model, for reports.
     pub fn model(&self) -> BendModel {
         self.settings.model
+    }
+
+    /// Lays bends flat, as SolidWorks' unfold does: each of `bends` (bend pieces; empty
+    /// for every bend) opens out to a flat strip, and what lies beyond it turns into its
+    /// parent's plane. Flange `fixed` stays where it is. What is added to the part while
+    /// they are flat (a cut) is in flat coordinates, so [`Layout::fold`] carries it back
+    /// round the bends.
+    pub fn unfold(&mut self, fixed: usize, bends: &[usize]) -> Result<(), String> {
+        if !self.pieces.get(fixed).is_some_and(Piece::is_flange) {
+            return Err("The fixed face must be a flat face of a flange.".to_owned());
+        }
+        let all: Vec<usize> = self.bends().map(|(i, _)| i).collect();
+        let bends = if bends.is_empty() { &all[..] } else { bends };
+        if let Some(b) = bends.iter().find(|b| !all.contains(b)) {
+            return Err(format!("Piece {b} is not a bend."));
+        }
+        for &b in bends {
+            if !self.flat_bends.contains(&b) {
+                self.flat_bends.push(b);
+            }
+        }
+        self.fixed = fixed;
+        self.place(fixed);
+        Ok(())
+    }
+
+    /// Folds bends laid flat by [`Layout::unfold`] back (`bends`; empty for all of them),
+    /// keeping the unfold's fixed flange where it is.
+    pub fn fold(&mut self, bends: &[usize]) {
+        if bends.is_empty() {
+            self.flat_bends.clear();
+        } else {
+            self.flat_bends.retain(|b| !bends.contains(b));
+        }
+        self.place(self.fixed);
+    }
+
+    /// The layout with every bend folded, the fixed flange where it is.
+    pub fn folded(&self) -> Layout {
+        let mut out = self.clone();
+        if !out.flat_bends.is_empty() {
+            out.fold(&[]);
+        }
+        out
+    }
+
+    /// Places every piece again from flange `fixed`, which stays: across a folded bend
+    /// by the bend's fold, across a flat one in its parent's plane. A piece no bend
+    /// reaches keeps its placement.
+    fn place(&mut self, fixed: usize) {
+        let mut placed: Vec<Option<Frame>> = vec![None; self.pieces.len()];
+        placed[fixed] = Some(self.pieces[fixed].frame);
+        let links: Vec<(usize, usize, Option<usize>, Frame)> = self
+            .bends()
+            .map(|(i, b)| {
+                let fold = if self.flat_bends.contains(&i) {
+                    Frame::WORLD
+                } else {
+                    b.fold_frame()
+                };
+                (i, b.parent, b.child, fold)
+            })
+            .collect();
+        loop {
+            let mut more = false;
+            for &(bend, parent, child, fold) in &links {
+                if placed[parent].is_none()
+                    && let Some(c) = child.and_then(|c| placed[c])
+                {
+                    placed[parent] = Some(c.compose(&fold.inverse()));
+                    more = true;
+                }
+                let Some(p) = placed[parent] else { continue };
+                if placed[bend].is_none() {
+                    placed[bend] = Some(p);
+                    more = true;
+                }
+                if let Some(c) = child
+                    && placed[c].is_none()
+                {
+                    placed[c] = Some(p.compose(&fold));
+                    more = true;
+                }
+            }
+            if !more {
+                break;
+            }
+        }
+        for (piece, frame) in self.pieces.iter_mut().zip(placed) {
+            if let Some(f) = frame {
+                piece.frame = f;
+            }
+        }
     }
 }
 

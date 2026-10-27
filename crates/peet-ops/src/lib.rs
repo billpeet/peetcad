@@ -68,8 +68,8 @@ pub use export::export_bytes;
 pub use fields::{
     AngledPlane, BaseFlange, Blend, BreakCorner, CircularPattern, ConvertToSheet, CoordinateSystem,
     CoordinatesPoint, Corner, CylinderAxis, Draft, EdgeAxis, EdgeFlange, Extrude, FeatureArgs,
-    Form, Hem, Hole, Jog, LinearPattern, Loft, MidPlane, Mirror, MiterFlange, OffsetPlane,
-    PlanesAxis, Revolve, SheetCut, Shell, SketchPlane, SketchedBend, Sweep, VertexPoint,
+    Fold, Form, Hem, Hole, Jog, LinearPattern, Loft, MidPlane, Mirror, MiterFlange, OffsetPlane,
+    PlanesAxis, Revolve, SheetCut, Shell, SketchPlane, SketchedBend, Sweep, Unfold, VertexPoint,
 };
 pub use host::{AppCommand, Headless, Host, SketchTool, Toggle, View, Window};
 pub use library::{CheckRule, Gauge, GaugeBend};

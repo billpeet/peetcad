@@ -344,7 +344,7 @@ with their defaults' types):
 `extrude`, `cut`, `revolve`, `cut_revolve`, `sweep`, `cut_sweep`, `loft`, `cut_loft`,
 `hole`, `fillet`, `chamfer`, `shell`, `draft`, `convert_to_sheet`, `plane`, `axis`, `point`, `coordinate_system`, `base_flange`,
 `edge_flange`, `sheet_cut`, `hem`, `sketched_bend`, `jog`, `miter_flange`, `corner`, `break_corner`,
-`dimple`, `emboss`, `louver`, `linear_pattern`, `circular_pattern`, `mirror`.
+`unfold`, `fold`, `dimple`, `emboss`, `louver`, `linear_pattern`, `circular_pattern`, `mirror`.
 
 - `plane`: `from` + `distance` (offset), `from` + `about` + `angle` (angled), or `a` + `b`
   (halfway between).
@@ -397,6 +397,14 @@ with their defaults' types):
   flanges with a face in the sketch's plane. Its copies in a pattern or a mirror cut each
   flange with a face in their plane, and one that lands off the sheet is left out with a
   warning.
+- `unfold` lays bends of a sheet metal body flat, as SolidWorks' unfold: `fixed` (a
+  flange's top or bottom face; left out, the largest flat face) stays where it is, and
+  `bends` (a face of each bend; left out, every bend) open out flat, what lies beyond
+  them turning into their parent's plane. The features after it are made on the part as it lies, until a `fold` (`bends`;
+  left out, every bend laid flat) folds them back round, carrying what was cut while they
+  were flat. A `sheet_cut` with an `end` between them cuts straight through the part as
+  it lies; suppress the unfold and the fold and the same cut goes straight through the
+  folded part, as SolidWorks' cut-extrude does there.
 - `extrude` and `cut` take `end` `through_next`, SolidWorks' "up to next": a cut goes until
   it comes out of the first material in its way, an extrusion until it meets material.
 - `linear_pattern`, `circular_pattern` and `mirror` copy edge flanges too: each copy is the

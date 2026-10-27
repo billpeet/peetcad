@@ -1017,6 +1017,8 @@ impl<'a> Recognizer<'a> {
                 attachments: Vec::new(),
                 corners: Vec::new(),
                 forms: Vec::new(),
+                flat_bends: Vec::new(),
+                fixed: 0,
             },
             self.seed,
         ))

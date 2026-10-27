@@ -580,7 +580,18 @@ pub const SPLINE_REFUSAL: &str = "Sheet metal can't use splines yet: flat patter
 pub fn build(layout: Layout) -> Result<(Solid, SheetBody), SheetError> {
     // The geometry comes from the layout with its corners worked out; the body keeps the
     // layout as defined, so later features can add to it and change its corners.
-    let resolved = layout.resolved();
+    // Corners are worked out on the folded part: one whose bends an unfold has laid flat
+    // keeps the corners it has folded, and lies flat where it is unfolded.
+    let resolved = if layout.flat_bends.is_empty() {
+        layout.resolved()
+    } else {
+        let mut r = layout.folded().resolved();
+        for (piece, at) in r.pieces.iter_mut().zip(&layout.pieces) {
+            piece.frame = at.frame;
+        }
+        r.flat_bends.clone_from(&layout.flat_bends);
+        r
+    };
     let flat = Flat::new(&resolved)?;
     let (local, faces, info) = flat.thicken(&resolved)?;
     if let Err(problems) = validate::validate(&local) {
@@ -1802,6 +1813,8 @@ fn piece_map(layout: &Layout, piece: usize) -> Map<'_> {
     let p = &layout.pieces[piece];
     match &p.kind {
         PieceKind::Flange => Map::Rigid(p.frame),
+        // A bend laid flat lies in its parent's plane
+        PieceKind::Bend(_) if layout.flat_bends.contains(&piece) => Map::Rigid(p.frame),
         PieceKind::Bend(b) => Map::Bend {
             parent: p.frame,
             bend: b,
