@@ -187,6 +187,24 @@ the first one's name. The `offset` edit draws new curves; this keeps existing on
 {"op":"feature","feature":"Plate"}
 ```
 
+To measure to the **near or far side of a circle or arc** rather than its centre
+(SolidWorks' arc conditions, Min and Max), give `distance`, `horizontal_distance` or
+`vertical_distance` a `sides` list, one for each end in `of`: `"center"`, `"near"` or
+`"far"`. Ends are points, circles or arcs, or (for `distance` only) a line and a circle or
+arc; a point or a line is always `"center"`. Near is the side facing the other end, far the
+side away from it. For a circle inside another (a ring round a hole), near to near is the
+gap between them on the side where they are closest. The `feature` query lists the
+dimension with its `sides` and `along`. Without `sides` the ends must be points (or a point
+and a line), as before; a circle there is refused.
+
+```jsonl
+{"op":"sketch","on":"top","name":"Hook","draw":[{"type":"point","at":[0,0],"as":"datum"},{"type":"circle","center":[120,0],"radius":2.1,"as":"hole"},{"type":"circle","center":[0,40],"radius":6,"as":"boss"},{"type":"circle","center":[0.5,40],"radius":3,"as":"bore"},{"type":"horizontal_distance","of":["datum","hole"],"sides":["center","far"],"value":130,"name":"reach"},{"type":"distance","of":["boss","bore"],"sides":["near","near"],"value":2.5,"name":"wall"}]}
+{"op":"feature","feature":"Hook"}
+```
+
+The hole's far side ends 130 to the right of the point; the bore's wall is 2.5 thick on its
+thin side.
+
 ## Editing what is drawn
 
 `fillet` (a corner point and a radius), `trim` and `extend` (a curve and a point `near`

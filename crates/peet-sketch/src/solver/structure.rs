@@ -157,6 +157,11 @@ pub(crate) fn constraint_refs(kind: &ConstraintKind) -> ([EntityId; 3], usize, u
         Angle(a, b) => ([a, b, z], 2, 20),
         Patterned { seed, copy, first } => ([seed, copy, first], 3, 22),
         Offset(a, b) => ([a, b, z], 2, 23),
+        SideDistance { a, b, sides, along } => (
+            [a, b, z],
+            2,
+            24 + 9 * along as u8 + 3 * sides[0] as u8 + sides[1] as u8,
+        ),
     }
 }
 

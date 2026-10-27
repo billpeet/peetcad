@@ -265,7 +265,7 @@ A `draw` list holds items with a `type`:
 | `text` | `at`, `string`, `height`, `font`, `angle`, `width`, `spacing`, `align` (part `point`) |
 | `coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `tangent`, `equal`, `concentric`, `collinear`, `coradial`, `midpoint` (of a line or an arc), `symmetric`, `fix` | `of` (entities) |
 | `patterned` | `of`: a seed, a copy of it in a linear sketch pattern, and the pattern's first copy where that is another (points, lines or circles) |
-| `distance`, `doubled_distance`, `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle`, `offset_distance` | `of`, `value`, `name`, `driven` (`offset_distance`: a curve, then the curve it is offset from) |
+| `distance`, `doubled_distance`, `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle`, `offset_distance` | `of`, `value`, `name`, `driven` (`offset_distance`: a curve, then the curve it is offset from); `sides` on `distance`, `horizontal_distance`, `vertical_distance` |
 | `fillet` | `corner`, `radius` |
 | `trim`, `extend` | `curve`, `near` |
 | `offset` | `of`, `distance` |
@@ -309,6 +309,12 @@ plus equal-radius relations. Each returns both relation ids. `doubled_distance` 
 the perpendicular distance from a point to a line, with its own editable dimension name.
 `offset_distance` keeps a curve offset from another, as SolidWorks' Offset Entities does: two lines
 parallel and the value apart, two circles or arcs concentric with radii the value apart.
+`sides` (`["center" | "near" | "far", ...]`, one per end) measures `distance`,
+`horizontal_distance` or `vertical_distance` to a circle's or arc's near or far side, as
+SolidWorks' arc conditions (Min, Max) do; ends are then points, circles or arcs, or a line
+and a circle or arc (straight `distance` only). Of two circles one inside the other, near to
+near is the gap where they are closest. The `feature` query gives such a dimension's
+`sides` and `along`.
 
 A relation or dimension that the others already imply is accepted, as in SolidWorks: the
 sketch stays `under_defined` or `fully_defined`, and the `feature` query marks it

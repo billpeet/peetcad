@@ -531,6 +531,12 @@ fn map_ids(kind: ConstraintKind, f: impl Fn(EntityId) -> EntityId) -> Constraint
             first: f(first),
         },
         Offset(a, b) => Offset(f(a), f(b)),
+        SideDistance { a, b, sides, along } => SideDistance {
+            a: f(a),
+            b: f(b),
+            sides,
+            along,
+        },
     }
 }
 

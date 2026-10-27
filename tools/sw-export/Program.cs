@@ -25,7 +25,7 @@ using Json = Dictionary<string, object?>;
 internal static class Program
 {
     /// <summary>Raise this when the output changes shape, so the importer can tell exports apart.</summary>
-    private const int FormatVersion = 5;
+    private const int FormatVersion = 6;
     private const string FlatPatternSuffix = "SM-FLAT-PATTERN";
     private const int MaxRestarts = 5;
 
@@ -34,6 +34,7 @@ internal static class Program
     private static bool exportDxf;
     private static bool readSelections = true;
     private static ModelDoc2? currentDoc;
+    private static SldWorks? application;
 
     /// <summary>Every feature data interface of the API. Which of them a feature's definition answers to is asked of the object.</summary>
     private static readonly Type[] DataInterfaces = LoadableTypes(typeof(SldWorks).Assembly)
@@ -145,6 +146,7 @@ internal static class Program
     private static Json Export(SldWorks sw, string path)
     {
         var timer = Stopwatch.StartNew();
+        application = sw;
         var isAssembly = Path.GetExtension(path).Equals(".sldasm", StringComparison.OrdinalIgnoreCase);
         var configurations = new List<Json>();
         var root = new Json {
@@ -308,8 +310,9 @@ internal static class Program
         }
 
         if (isAssembly) {
-            if (!flatPattern)
-                result["components"] = ArrayOf(((AssemblyDoc)doc).GetComponents(false)).Cast<Component2>().Select(c => new Json {
+            if (!flatPattern) {
+                var listed = ArrayOf(((AssemblyDoc)doc).GetComponents(false)).Cast<Component2>().ToList();
+                result["components"] = listed.Select(c => new Json {
                     ["path"] = c.Name2,
                     ["file"] = c.GetPathName(),
                     ["configuration"] = c.ReferencedConfiguration,
@@ -324,6 +327,20 @@ internal static class Program
                     // 16 numbers: a 3x3 rotation by rows, the translation, the scale, and three unused
                     ["transform"] = Try(() => c.Transform2?.ArrayData)
                 }).ToList();
+                // A suppressed sub-assembly lists nothing under it, but mates can name its parts: they are read from
+                // its own document, in the configuration the component shows, placed by the component's transform
+                var hidden = new List<Json>();
+                foreach (var c in listed)
+                    if (TryJson(() => SuppressedChildren(doc, c, hidden), "the components of suppressed " + c.Name2) is { } failed)
+                        Log("  " + failed["error"]);
+                if (hidden.Count > 0)
+                    result["suppressedChildren"] = hidden;
+
+                // The whole assembly as SolidWorks has it in this configuration, to compare an import with
+                result["massProperties"] = TryJson(() => AssemblyMass(doc), "mass properties of " + name);
+                if (exportStep)
+                    result["step"] = SaveCopy(doc, fileName + "." + SafeFileName(name) + ".step");
+            }
         }
         else {
             var part = (PartDoc)doc;
@@ -336,6 +353,121 @@ internal static class Program
                 result["step"] = SaveCopy(doc, fileName + "." + SafeFileName(name) + ".step");
         }
 
+        return result;
+    }
+
+    /// <summary>
+    /// The components under a suppressed sub-assembly <paramref name="component"/>, from its own document in the
+    /// configuration the component shows, added to <paramref name="into"/> with their paths as SolidWorks names
+    /// them below the component and their transforms in this assembly. Null when it is done (or there is nothing
+    /// to do); the reason otherwise.
+    /// </summary>
+    private static Json? SuppressedChildren(ModelDoc2 doc, Component2 component, List<Json> into)
+    {
+        var path = component.GetPathName();
+        if (component.GetSuppression() != (int)swComponentSuppressionState_e.swComponentSuppressed
+            || !path.EndsWith(".sldasm", StringComparison.OrdinalIgnoreCase) || application == null)
+            return null;
+        var sw = application;
+        var configuration = component.ReferencedConfiguration;
+        var placed = component.Transform2;
+        var sub = sw.GetOpenDocumentByName(path) as ModelDoc2;
+        var opened = false;
+        try {
+            if (sub == null) {
+                int errors = 0, warnings = 0;
+                sub = sw.OpenDoc6(path, (int)swDocumentTypes_e.swDocASSEMBLY,
+                    (int)(swOpenDocOptions_e.swOpenDocOptions_Silent | swOpenDocOptions_e.swOpenDocOptions_ReadOnly), configuration ?? "", ref errors, ref warnings);
+                if (sub == null)
+                    return new Json { ["error"] = $"{path} could not be opened, error={errors}" };
+                opened = true;
+            }
+            var shown = sub.ConfigurationManager.ActiveConfiguration.Name;
+            // Another configuration is shown only of a document this export opened itself
+            if (!string.IsNullOrEmpty(configuration) && shown != configuration && opened && sub.ShowConfiguration2(configuration))
+                shown = configuration;
+            Log($"  {ArrayOf(((AssemblyDoc)sub).GetComponents(false)).Length} components of suppressed {component.Name2} from {Path.GetFileName(path)} ({shown})");
+            foreach (var child in ArrayOf(((AssemblyDoc)sub).GetComponents(false)).Cast<Component2>()) {
+                var own = Try(() => child.Transform2);
+                into.Add(new Json {
+                    ["path"] = component.Name2 + "/" + child.Name2,
+                    ["file"] = child.GetPathName(),
+                    ["configuration"] = child.ReferencedConfiguration,
+                    // In the sub-assembly's configuration: the component itself is suppressed here
+                    ["suppression"] = child.GetSuppression(),
+                    ["fixed"] = child.IsFixed(),
+                    ["under"] = component.Name2,
+                    ["underConfiguration"] = shown,
+                    ["ownTransform"] = (own as MathTransform)?.ArrayData,
+                    // Where it would be in this assembly: its transform in the sub-assembly, then the sub-assembly's
+                    ["transform"] = Try(() => placed == null || own is not MathTransform t ? null : (t.Multiply(placed) as MathTransform)?.ArrayData)
+                });
+            }
+            return null;
+        }
+        finally {
+            if (opened && sub != null) {
+                var title = sub.GetTitle();
+                Try(() => { sw.CloseDoc(title); return null; });
+            }
+            var errors = 0;
+            Try(() => sw.ActivateDoc3(doc.GetTitle(), false, (int)swRebuildOnActivation_e.swDontRebuildActiveDoc, ref errors));
+        }
+    }
+
+    /// <summary>The assembly's mass properties (volume, area, centre) and box, in this configuration.</summary>
+    private static Json AssemblyMass(ModelDoc2 doc)
+    {
+        var result = new Json();
+        if (doc.Extension.CreateMassProperty() is MassProperty mass) {
+            Try(() => { mass.UseSystemUnits = true; return null; });
+            result["volume"] = Try(() => (object)mass.Volume);
+            result["area"] = Try(() => (object)mass.SurfaceArea);
+            result["mass"] = Try(() => (object)mass.Mass);
+            result["centreOfMass"] = Try(() => mass.CenterOfMass);
+        }
+        // Centre of gravity, volume, area, mass, ... as the mass properties dialog has them (status 0 is fine)
+        var status = 0;
+        var values = Try(() => doc.Extension.GetMassProperties2(1, out status, false)) as double[];
+        if (values is { Length: > 5 }) {
+            result["volume"] ??= values[3];
+            result["area"] ??= values[4];
+            result["centreOfMass"] ??= values.Take(3).ToArray();
+        }
+        result["massStatus"] = status;
+        // SolidWorks' box of the assembly (it can be loose), and one from the bodies' extreme points
+        result["box"] = Try(() => ((AssemblyDoc)doc).GetBox(0));
+        var tight = new double[] { double.MaxValue, double.MaxValue, double.MaxValue, double.MinValue, double.MinValue, double.MinValue };
+        var counted = 0;
+        foreach (var c in ArrayOf(((AssemblyDoc)doc).GetComponents(false)).Cast<Component2>()) {
+            if (c.IsSuppressed() || c.GetPathName().EndsWith(".sldasm", StringComparison.OrdinalIgnoreCase))
+                continue;
+            var bodies = ArrayOf(Try(() => c.GetBodies3((int)swBodyType_e.swSolidBody, out _))).OfType<Body2>();
+            var componentBox = Try(() => c.GetBox(false, false)) as double[];
+            foreach (var body in bodies) {
+                // Whether the body is already where the component is: its box is within the component's
+                var box = Try(() => body.GetBodyBox()) as double[];
+                var inPlace = box is { Length: 6 } && componentBox is { Length: 6 }
+                    && Enumerable.Range(0, 3).All(k => box[k] >= componentBox[k] - 1e-6 && box[k + 3] <= componentBox[k + 3] + 1e-6);
+                var measured = body;
+                if (!inPlace && c.Transform2 is MathTransform placement) {
+                    if (Try(() => body.Copy()) is not Body2 copy || !(Try(() => (object)copy.ApplyTransform(placement)) is true))
+                        continue;
+                    measured = copy;
+                }
+                if (TightBox(measured) is not { } extreme)
+                    continue;
+                for (var k = 0; k < 3; k++) {
+                    tight[k] = Math.Min(tight[k], extreme[k]);
+                    tight[k + 3] = Math.Max(tight[k + 3], extreme[k + 3]);
+                }
+                counted++;
+            }
+        }
+        if (counted > 0) {
+            result["tightBox"] = tight;
+            result["tightBoxBodies"] = counted;
+        }
         return result;
     }
 
@@ -405,7 +537,10 @@ internal static class Program
                 ["extensionDirection"] = Try(() => dimension.ExtensionLineDirection?.ArrayData),
                 // swDimensionDrivenState_e: 1 driven, 2 driving
                 ["drivenState"] = dimension.DrivenState,
-                ["readOnly"] = dimension.ReadOnly
+                ["readOnly"] = dimension.ReadOnly,
+                // Where on a circle or arc each end is measured (swArcEndCondition_e: 0 none, 1 centre, 2 min,
+                // 3 max), for the first and the second thing dimensioned. Null where it can't be read.
+                ["arcEndConditions"] = ArcEndConditions(dimension)
             });
         }
         if (dimensions.Count > 0)
@@ -431,13 +566,27 @@ internal static class Program
         var specific = Try(() => feature.GetSpecificFeature2());
         if (specific is Sketch sketch)
             result["sketch"] = TryJson(() => DumpSketch(sketch), "sketch of " + feature.Name);
+        else if (specific is ReferenceCurve curve)
+            // A composite curve's edges, as they are now (its definition can't be read in an assembly: it faults)
+            result["curve"] = TryJson(() => new Json {
+                ["segmentCount"] = Try(() => (object)curve.GetSegmentCount()),
+                ["segments"] = ArrayOf(Try(() => curve.GetSegments())).Select(Describe).ToList()
+            }, "curve of " + feature.Name);
         else if (specific is RefPlane plane)
             // Model space to the plane's own space: its normal is the third row of the rotation
             result["planeTransform"] = Try(() => plane.Transform?.ArrayData);
-        else if (specific is Mate2 mate)
+        else if (specific is Mate2 mate) {
             result["mate"] = TryJson(() => DumpMate(mate), "mate " + feature.Name);
+            // SolidWorks 2018 gives a path mate's path neither as a mate entity nor through a definition
+            // (IPathMateFeatureData is from 2019): it is read from what editing the mate selects
+            if (readSelections && Try(() => (object)mate.Type) is int kind && kind == (int)swMateType_e.swMatePATH)
+                result["pathSelections"] = TryJson(() => PathSelections(doc, feature), "path of " + feature.Name);
+        }
 
-        var definition = TryJson(() => DumpDefinition(doc, feature, type, suppressed), "definition of " + feature.Name);
+        // A composite curve's definition faults SolidWorks 2018 in an assembly (RPC_E_SERVERFAULT, in format 5): its
+        // edges are read from the curve above instead
+        var definition = type == "CompositeCurve" && doc is AssemblyDoc ? null
+            : TryJson(() => DumpDefinition(doc, feature, type, suppressed), "definition of " + feature.Name);
         if (definition != null)
             result["definition"] = definition;
 
@@ -905,13 +1054,36 @@ internal static class Program
         if (blocks.Count > 0)
             result["blocks"] = blocks;
 
+        // Slots: a relation to a slot (two slots symmetric about a line) gives the slot as a null entity
+        var slots = new List<Json>();
+        foreach (var slot in ArrayOf(Try(() => sketch.GetSketchSlots())).OfType<SketchSlot>()) {
+            var center = (Try(() => slot.GetCenterPoint()) as MathPoint)?.ArrayData as double[];
+            slots.Add(new Json {
+                ["center"] = center == null ? null : new Json { ["x"] = center[0], ["y"] = center[1], ["z"] = center.Length > 2 && center[2] != 0 ? center[2] : null },
+                ["centerPoint"] = Point(Try(() => slot.GetCenterPointHandle())),
+                ["points"] = Try(() => Describe(slot.GetSlotPoints())),
+                ["creationType"] = Try(() => (object)slot.CreationType),
+                ["length"] = Try(() => (object)slot.Length),
+                ["width"] = Try(() => (object)slot.Width)
+            });
+        }
+        if (slots.Count > 0)
+            result["slots"] = slots;
+
         var relations = new List<Json>();
         foreach (var relation in ArrayOf(sketch.RelationManager?.GetRelations((int)swSketchRelationFilterType_e.swAll)).Cast<SketchRelation>()) {
             var display = Try(() => relation.GetDisplayDimension()) as DisplayDimension;
+            var entities = ArrayOf(Try(() => relation.GetEntities())).Select(Describe).ToList();
+            var type = ((swConstraintType_e)relation.GetRelationType()).ToString().Replace("swConstraintType_", "").ToLowerInvariant();
+            var resolved = type == "symmetric" ? Try(() => MirroredSlots(entities, slots)) as string : null;
             relations.Add(new Json {
                 // swConstraintType_e
-                ["type"] = ((swConstraintType_e)relation.GetRelationType()).ToString().Replace("swConstraintType_", "").ToLowerInvariant(),
-                ["entities"] = ArrayOf(Try(() => relation.GetEntities())).Select(Describe).ToList(),
+                ["type"] = type,
+                ["entities"] = entities,
+                // swSketchRelationEntityTypes_e of each entity (1 is a sub-sketch: a slot is one)
+                ["entityTypes"] = Try(() => relation.GetEntitiesType()),
+                // How null entities were filled in, where they were
+                ["resolved"] = resolved,
                 // What the relation is defined by when that is outside the sketch: the model edge a converted
                 // line follows, for one
                 ["defined"] = Defined(relation),
@@ -921,6 +1093,51 @@ internal static class Program
         }
         result["relations"] = relations;
         return result;
+    }
+
+    /// <summary>
+    /// SolidWorks gives the two slots of a symmetric relation between slots as null entities. Where two of the
+    /// sketch's slots have centres that are mirror images about the relation's line, they are written in their
+    /// place (as `sketchSlot`s, by their centres). Returns how they were found, or null if they weren't.
+    /// </summary>
+    private static string? MirroredSlots(List<object?> entities, List<Json> slots)
+    {
+        if (entities.Count != 3 || entities.Count(e => e == null) != 2)
+            return null;
+        if (entities.OfType<Json>().FirstOrDefault(e => e["kind"] as string == "sketchSegment" && e["start"] is Json) is not { } line)
+            return null;
+        static (double X, double Y)? XY(object? point) =>
+            point is Json p && p["x"] is double x && p["y"] is double y ? (x, y) : null;
+        if (XY(line["start"]) is not { } a || XY(line["end"]) is not { } b)
+            return null;
+        var (dx, dy) = (b.X - a.X, b.Y - a.Y);
+        var l2 = dx * dx + dy * dy;
+        if (l2 < 1e-18)
+            return null;
+        (double X, double Y) Mirror((double X, double Y) p)
+        {
+            var t = ((p.X - a.X) * dx + (p.Y - a.Y) * dy) / l2;
+            var (fx, fy) = (a.X + t * dx, a.Y + t * dy);
+            return (2 * fx - p.X, 2 * fy - p.Y);
+        }
+        var centers = slots.Select(s => XY(s["center"]) ?? XY(s["centerPoint"])).ToList();
+        for (var i = 0; i < slots.Count; i++)
+            for (var j = i + 1; j < slots.Count; j++) {
+                if (centers[i] is not { } ci || centers[j] is not { } cj)
+                    continue;
+                var m = Mirror(ci);
+                if (Math.Abs(m.X - cj.X) > 1e-8 || Math.Abs(m.Y - cj.Y) > 1e-8)
+                    continue;
+                var found = new[] { i, j }.Select(k => (object?)new Json {
+                    ["kind"] = "sketchSlot", ["center"] = slots[k]["center"], ["centerPoint"] = slots[k]["centerPoint"]
+                }).ToList();
+                var n = 0;
+                for (var k = 0; k < entities.Count; k++)
+                    if (entities[k] == null)
+                        entities[k] = found[n++];
+                return "two slots whose centres are mirror images about the line";
+            }
+        return null;
     }
 
     private static List<Json> Segments(Sketch sketch)
@@ -1036,8 +1253,70 @@ internal static class Program
             ["type"] = ((swMateType_e)mate.Type).ToString().Replace("swMate", "").ToLowerInvariant(),
             ["alignment"] = mate.Alignment,
             ["flipped"] = mate.Flipped,
+            // A distance mate to the near or far side of a round face or edge (swDistanceMateArcConditions_e:
+            // 0 not set, 1 centre, 2 min, 3 max)
+            ["firstArcCondition"] = Try(() => (object)mate.DistanceFirstArcCondition),
+            ["secondArcCondition"] = Try(() => (object)mate.DistanceSecondArcCondition),
             ["entities"] = entities
         };
+    }
+
+    /// <summary>The arc end condition of each end of a dimension, first and second; null if none can be read.</summary>
+    private static List<object?>? ArcEndConditions(Dimension dimension)
+    {
+        // The API help numbers the ends 1 and 2; 0 and 1 are tried where that fails
+        foreach (var first in new[] { 1, 0 }) {
+            var conditions = new List<object?> {
+                Try(() => (object)dimension.GetArcEndCondition(first)),
+                Try(() => (object)dimension.GetArcEndCondition(first + 1))
+            };
+            if (conditions.Any(c => c != null))
+                return conditions;
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// What a path mate's PropertyManager selects: the point and the path's edges or sketch segments, each with
+    /// its component and selection mark. The mate is edited (as Edit Feature does), what is selected is read, and
+    /// the edit is cancelled. Nothing is changed. Entities picked in the assembly give their geometry in the
+    /// assembly's space; sketch segments give theirs in their sketch.
+    /// </summary>
+    private static Json? PathSelections(ModelDoc2 doc, Feature feature)
+    {
+        var sw = application;
+        Log("  Editing " + feature.Name + " to read its path");
+        var selected = new List<Json>();
+        try {
+            doc.ClearSelection2(true);
+            if (!feature.Select2(false, 0))
+                return new Json { ["error"] = "the mate could not be selected" };
+            doc.FeatEditDef();
+            var manager = (SelectionMgr)doc.SelectionManager;
+            var count = manager.GetSelectedObjectCount2(-1);
+            for (var i = 1; i <= count; i++) {
+                var index = i;
+                var item = new Json {
+                    // swSelectType_e
+                    ["type"] = Try(() => (object)manager.GetSelectedObjectType3(index, -1)),
+                    ["mark"] = Try(() => (object)manager.GetSelectedObjectMark(index)),
+                    ["component"] = (Try(() => manager.GetSelectedObjectsComponent4(index, -1)) as Component2)?.Name2,
+                    ["entity"] = Describe(Try(() => manager.GetSelectedObject6(index, -1)))
+                };
+                selected.Add(item);
+            }
+        }
+        finally {
+            // Cancel the edit: the PropertyManager's Cancel (swCommands_PmCancel, -1), then the general one
+            // (swCommands_Cancel, 767)
+            Try(() => { doc.ClearSelection2(true); return null; });
+            var cancelled = false;
+            foreach (var command in new[] { -1, 767 })
+                if (!cancelled && sw != null)
+                    cancelled = Try(() => (object)sw.RunCommand(command, "")) is true;
+            Log($"  Read {selected.Count} selections of {feature.Name}; edit {(cancelled ? "cancelled" : "not cancelled by command")}");
+        }
+        return new Json { ["selections"] = selected };
     }
 
     private static Json DumpBody(ModelDoc2 doc, Body2 body)

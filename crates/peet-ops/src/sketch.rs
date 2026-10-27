@@ -21,6 +21,7 @@ use peet_sketch::expr;
 use peet_sketch::expr::Units;
 use peet_sketch::text::{SketchText, TextAlign};
 use peet_sketch::{
+    Along, ArcSide,
     ConstraintId, ConstraintKind, EntityId, EntityKind, Geometry, Sketch, ops, shapes,
 };
 use serde_json::{Map, Value, json};
@@ -146,7 +147,7 @@ const MEASURES: [(Measure, &str, &str); 9] = [
     (
         Measure::Distance,
         "distance",
-        "two points, or a point and a line",
+        "two points, or a point and a line; with `sides`, points, circles or arcs, or a line and a circle or arc, to a circle's near or far side",
     ),
     (
         Measure::DoubledDistance,
@@ -157,9 +158,13 @@ const MEASURES: [(Measure, &str, &str); 9] = [
     (
         Measure::HorizontalDistance,
         "horizontal_distance",
-        "two points",
+        "two points; with `sides`, points, circles or arcs",
     ),
-    (Measure::VerticalDistance, "vertical_distance", "two points"),
+    (
+        Measure::VerticalDistance,
+        "vertical_distance",
+        "two points; with `sides`, points, circles or arcs",
+    ),
     (Measure::Radius, "radius", "a circle or arc"),
     (Measure::Diameter, "diameter", "a circle or arc"),
     (Measure::Angle, "angle", "two lines"),
@@ -325,6 +330,8 @@ pub enum Draw {
         name: Option<String>,
         /// A reference dimension: it reports, and doesn't drive.
         driven: bool,
+        /// For a distance to a circle's side: where on each end it is measured.
+        sides: Option<[ArcSide; 2]>,
     },
     Fillet {
         corner: Ent,
@@ -445,6 +452,7 @@ impl DrawItem {
                 value: a.parsed("value", Input::parse)?,
                 name: a.string("name")?,
                 driven: a.flag("driven", false)?,
+                sides: a.parsed("sides", parse_sides)?,
             }
         } else {
             match kind {
@@ -780,8 +788,44 @@ fn relation(sketch: &Sketch, kind: Relation, of: &[EntityId]) -> Result<Constrai
     })
 }
 
-fn measure(kind: Measure, of: &[EntityId]) -> Result<ConstraintKind, String> {
+/// `sides`: two of "center", "near" and "far" (SolidWorks' Min and Max), one for each end.
+fn parse_sides(v: &Value) -> Result<[ArcSide; 2], String> {
+    let words = list(v)?;
+    let side = |w: &Value| {
+        text(w).and_then(|t| {
+            ArcSide::from_word(t).ok_or_else(|| {
+                format!("'{t}' is not a side: give \"center\", \"near\" or \"far\"")
+            })
+        })
+    };
+    match words {
+        [a, b] => Ok([side(a)?, side(b)?]),
+        _ => Err("sides takes two, one for each end in 'of': \"center\", \"near\" or \"far\"".to_owned()),
+    }
+}
+
+fn measure(
+    kind: Measure,
+    of: &[EntityId],
+    sides: Option<[ArcSide; 2]>,
+) -> Result<ConstraintKind, String> {
     use ConstraintKind as K;
+    if let Some(sides) = sides {
+        let along = match kind {
+            Measure::Distance => Along::Straight,
+            Measure::HorizontalDistance => Along::Horizontal,
+            Measure::VerticalDistance => Along::Vertical,
+            _ => {
+                return Err(
+                    "sides is for distance, horizontal_distance and vertical_distance".to_owned(),
+                );
+            }
+        };
+        let &[a, b] = of else {
+            return Err("it takes two entities in 'of'".to_owned());
+        };
+        return Ok(K::SideDistance { a, b, sides, along });
+    }
     Ok(match (kind, of) {
         (Measure::Distance, &[a, b]) => K::Distance(a, b),
         (Measure::DoubledDistance, &[a, b]) => K::DoubledDistance(a, b),
@@ -1225,9 +1269,10 @@ fn one(
             value,
             name,
             driven,
+            sides,
         } => {
             let of = resolve_all(sketch, labels, of)?;
-            let k = measure(*kind, &of)?;
+            let k = measure(*kind, &of, *sides)?;
             let measured = sketch.measure(&k).unwrap_or(0.0);
             let id = sketch
                 .add_dimension(k, measured)
