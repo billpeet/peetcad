@@ -174,6 +174,19 @@ A copy turned about a point (a circular pattern) has no `patterned`.
 {"op":"feature","feature":"Holes"}
 ```
 
+To keep a curve offset from another (SolidWorks' Offset Entities, from a projected edge or
+another curve), dimension the pair with `offset_distance`: the curve first, then what it is offset
+from. Two lines stay parallel, the value apart, on the side they are on; two circles or
+arcs stay concentric, their radii the value apart, the bigger staying bigger. Give each
+piece its own `offset_distance` and, for one distance over all of them, make the others' `value`
+the first one's name. The `offset` edit draws new curves; this keeps existing ones offset.
+
+```jsonl
+{"op":"sketch","on":"top","name":"Plate","draw":[{"type":"line","from":[0,0],"to":[60,0],"as":"edge"},{"type":"circle","center":[30,20],"radius":4,"as":"hole"},{"type":"line","from":[5,8],"to":[55,8],"as":"rail"},{"type":"circle","center":[30,20],"radius":6,"as":"ring"},{"type":"offset_distance","of":["rail","edge"],"value":8,"name":"inset"},{"type":"offset_distance","of":["ring","hole"],"value":"inset/4","name":"ring_gap"}]}
+{"op":"set_dimension","sketch":"Plate","name":"inset","value":12}
+{"op":"feature","feature":"Plate"}
+```
+
 ## Editing what is drawn
 
 `fillet` (a corner point and a radius), `trim` and `extend` (a curve and a point `near`

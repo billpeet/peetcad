@@ -450,6 +450,10 @@ pub fn dimension_anchor(sketch: &Sketch, kind: &ConstraintKind) -> Option<DVec2>
             let (p, q) = distance_points(sketch, a, b)?;
             Some((p + q) * 0.5)
         }
+        Offset(a, b) => {
+            let (p, q) = offset_points(sketch, a, b)?;
+            Some((p + q) * 0.5)
+        }
         HorizontalDistance(a, b) | VerticalDistance(a, b) => {
             Some((sketch.try_point(a)? + sketch.try_point(b)?) * 0.5)
         }
@@ -468,6 +472,22 @@ pub fn dimension_anchor(sketch: &Sketch, kind: &ConstraintKind) -> Option<DVec2>
             )
         }
         _ => None,
+    }
+}
+
+/// The two points an offset is measured between: from the first line's start square to
+/// the other line, or across the two circles' radii.
+fn offset_points(sketch: &Sketch, a: EntityId, b: EntityId) -> Option<(DVec2, DVec2)> {
+    let (ca, cb) = (sketch.curve(a)?, sketch.curve(b)?);
+    match (ca.radius(), cb.radius()) {
+        (Some(ra), Some(rb)) => {
+            let c = ca.center()?;
+            Some((c + DVec2::X * ra, c + DVec2::X * rb))
+        }
+        _ => {
+            let p = ca.start();
+            Some((p, cb.point_at(cb.project(p))))
+        }
     }
 }
 
@@ -520,11 +540,13 @@ fn draw_dimension(
     match *kind {
         Distance(..)
         | DoubledDistance(..)
+        | Offset(..)
         | Length(_)
         | HorizontalDistance(..)
         | VerticalDistance(..) => {
             let (p1, p2) = match *kind {
                 Distance(a, b) | DoubledDistance(a, b) => distance_points(sketch, a, b)?,
+                Offset(a, b) => offset_points(sketch, a, b)?,
                 Length(l) => {
                     let c = sketch.curve(l)?;
                     (c.start(), c.end())

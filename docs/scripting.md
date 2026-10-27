@@ -263,7 +263,7 @@ A `draw` list holds items with a `type`:
 | `text` | `at`, `string`, `height`, `font`, `angle`, `width`, `spacing`, `align` (part `point`) |
 | `coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `tangent`, `equal`, `concentric`, `collinear`, `coradial`, `midpoint` (of a line or an arc), `symmetric`, `fix` | `of` (entities) |
 | `patterned` | `of`: a seed, a copy of it in a linear sketch pattern, and the pattern's first copy where that is another (points, lines or circles) |
-| `distance`, `doubled_distance`, `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle` | `of`, `value`, `name`, `driven` |
+| `distance`, `doubled_distance`, `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle`, `offset_distance` | `of`, `value`, `name`, `driven` (`offset_distance`: a curve, then the curve it is offset from) |
 | `fillet` | `corner`, `radius` |
 | `trim`, `extend` | `curve`, `near` |
 | `offset` | `of`, `distance` |
@@ -305,6 +305,8 @@ change spread over everything by least squares.
 `collinear` creates parallel plus point-on-line relations; `coradial` creates concentric
 plus equal-radius relations. Each returns both relation ids. `doubled_distance` is twice
 the perpendicular distance from a point to a line, with its own editable dimension name.
+`offset_distance` keeps a curve offset from another, as SolidWorks' Offset Entities does: two lines
+parallel and the value apart, two circles or arcs concentric with radii the value apart.
 
 A relation or dimension that the others already imply is accepted, as in SolidWorks: the
 sketch stays `under_defined` or `fully_defined`, and the `feature` query marks it

@@ -123,6 +123,15 @@ pub(super) fn violation(s: &Sketch, c: &Constraint) -> f64 {
             };
             off(&cp, n).max(off(&fp, 1.0)).max(size)
         }
+        K::Offset(a, b) if kind(a) == EntityKind::Line => {
+            let (start, _) = line_ab(s, a);
+            dir(a).perp_dot(dir(b)).abs()
+                + (s.curve(b).unwrap().distance_to_line(start) - val.unwrap()).abs()
+        }
+        K::Offset(a, b) => {
+            let ((c1, r1), (c2, r2)) = (circ(s, a), circ(s, b));
+            c1.distance(c2) + ((r1 - r2).abs() - val.unwrap()).abs()
+        }
         K::Angle(l1, l2) => {
             // atan2 rather than `Sketch::measure` (acos based, only ~1e-8 accurate near
             // 0° and 180°).
@@ -377,6 +386,39 @@ fn midpoint_of_an_arc() {
     let (c, r) = circ(&s, a);
     assert!((r - 20.0).abs() < 1e-8);
     assert!((s.point(m).distance(c) - 20.0).abs() < 1e-8);
+}
+
+#[test]
+fn offset_follows_what_it_is_offset_from() {
+    // A line and a circle offset from a line and a circle, a little out of place to start with
+    let mut s = Sketch::new();
+    let source = s.add_line(v(0.0, 0.0), v(40.0, 0.0));
+    let line = s.add_line(v(5.0, 9.8), v(35.0, 10.3));
+    let hole = s.add_circle(v(60.0, 0.0), 4.0);
+    let ring = s.add_circle(v(60.2, 0.1), 6.1);
+    dim!(s, K::Offset(line, source), 10.0);
+    let gap = dim!(s, K::Offset(ring, hole), 2.0);
+    assert_solved(&mut s);
+    // The source moves and grows: the offsets follow, on the same side, the same way out
+    add!(s, K::Horizontal(source));
+    dim!(s, K::Radius(hole), 5.0);
+    s.constraint_mut(gap)
+        .unwrap()
+        .dimension
+        .as_mut()
+        .unwrap()
+        .value = 3.0;
+    assert_solved(&mut s);
+    let ((a, b), (from, _)) = (line_ab(&s, line), line_ab(&s, source));
+    assert!(
+        (a.y - from.y - 10.0).abs() < 1e-8 && (b.y - a.y).abs() < 1e-8,
+        "{a} {b}"
+    );
+    let ((c1, r1), (c2, r2)) = (circ(&s, ring), circ(&s, hole));
+    assert!(
+        c1.distance(c2) < 1e-8 && (r1 - r2 - 3.0).abs() < 1e-8,
+        "{r1} {r2}"
+    );
 }
 
 #[test]
