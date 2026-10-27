@@ -228,6 +228,10 @@ pub enum ConstraintKind {
         copy: EntityId,
         first: EntityId,
     },
+    /// A dimension: a curve offset from another by the value, as SolidWorks' Offset
+    /// Entities keeps it. Two lines: parallel, the value apart. Two circles or arcs:
+    /// concentric, their radii differing by the value (either way).
+    Offset(EntityId, EntityId),
 }
 
 impl ConstraintKind {
@@ -249,7 +253,8 @@ impl ConstraintKind {
             | DoubledDistance(a, b)
             | HorizontalDistance(a, b)
             | VerticalDistance(a, b)
-            | Angle(a, b) => vec![a, b],
+            | Angle(a, b)
+            | Offset(a, b) => vec![a, b],
             PointOnCurve { point, curve } => vec![point, curve],
             Midpoint { point, line } => vec![point, line],
             Symmetric { a, b, axis } => vec![a, b, axis],
@@ -271,6 +276,7 @@ impl ConstraintKind {
                 | Radius(_)
                 | Diameter(_)
                 | Angle(..)
+                | Offset(..)
         )
     }
 
@@ -303,6 +309,7 @@ impl ConstraintKind {
             Diameter(_) => "Diameter",
             Angle(..) => "Angle",
             Patterned { .. } => "Patterned",
+            Offset(..) => "Offset",
         }
     }
 }
@@ -588,6 +595,12 @@ impl Sketch {
                 let d2 = self.curve(l2)?.line_direction()?;
                 Some(d1.perp_dot(d2).atan2(d1.dot(d2)).abs().to_degrees())
             }
+            Offset(a, b) => match (self.curve(a)?, self.curve(b)?) {
+                (Curve::Line { a: p, .. }, line @ Curve::Line { .. }) => {
+                    Some(line.distance_to_line(p))
+                }
+                (ca, cb) => Some((ca.radius()? - cb.radius()?).abs()),
+            },
             _ => None,
         }
     }
@@ -891,6 +904,11 @@ impl Sketch {
                     && k(copy) == k(seed)
                     && k(first) == k(seed)
             }
+            Offset(a, b) => {
+                a != b
+                    && ((k(a) == K::Line && k(b) == K::Line)
+                        || (k(a).is_circular() && k(b).is_circular()))
+            }
         };
         if ok {
             Ok(())
@@ -1101,6 +1119,7 @@ fn expected_kinds(kind: &ConstraintKind) -> &'static str {
         Patterned { .. } => {
             "a point, line or circle, a copy of it, and the pattern's first copy, all of one kind"
         }
+        Offset(..) => "two lines, or two circles/arcs",
     }
 }
 

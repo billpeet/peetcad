@@ -705,6 +705,24 @@ impl Ctx<'_> {
                     .with_k0(value * 0.5),
             ),
             K::Patterned { seed, copy, first } => self.patterned(seed, copy, first, out),
+            K::Offset(a, b) if self.is_line(a) => {
+                // Parallel, and the first one's start the value from the other, on its side
+                out.push(self.four(EqKind::Parallel, a, b));
+                let (start, _) = self.line_pts(a);
+                let side = sign(self.signed_dist(start, b));
+                out.push(self.line_dist(start, b).with_k0(side * value));
+            }
+            K::Offset(a, b) => {
+                // Concentric, the radii the value apart, the bigger staying the bigger
+                self.coincident(self.center(a), self.center(b), out);
+                let t = sign(self.radius_value(a) - self.radius_value(b));
+                out.push(
+                    Eq::new(EqKind::Zero, &[], owner)
+                        .minus_radius(self.radius(a), -1.0)
+                        .minus_radius(self.radius(b), 1.0)
+                        .with_k0(t * value),
+                );
+            }
             K::Angle(l1, l2) => {
                 let (a1, b1) = self.line_pts(l1);
                 let (a2, b2) = self.line_pts(l2);

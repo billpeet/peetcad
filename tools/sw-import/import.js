@@ -273,6 +273,17 @@ function importPart(doc, dir) {
   const sometimesOff = new Set();
   for (const c of doc.configurations) (function walk(list) { for (const x of list || []) { if (x.suppressed) sometimesOff.add(x.name); walk(x.sub); } })(c.features);
   const switched = { has: name => !!name && [...sometimesOff].some(n => name === n || name.startsWith(n + " ")) };
+  // Each configuration's suppressed features, with what is built on them (which SolidWorks suppresses with
+  // them), and so those suppressed somewhere a feature is live
+  const offIn = doc.configurations.filter(c => c.features).map(c => {
+    const off = new Set();
+    (function walk(list) { for (const x of list || []) { walk(x.sub); if (x.suppressed || (x.parents || []).some(p => off.has(p))) off.add(x.name); } })(c.features);
+    return off;
+  });
+  const switchedWhereLive = feature => {
+    const names = new Set(offIn.filter(off => !off.has(feature)).flatMap(off => [...off]));
+    return { has: name => !!name && [...names].some(n => name === n || name.startsWith(n + " ")) };
+  };
   /** A configuration's features by name, sub-features included. */
   const flatten = c => { const m = new Map(); (function walk(list) { for (const x of list || []) { if (!m.has(x.name)) m.set(x.name, x); walk(x.sub); } })(c.features); return m; };
   // The configuration being imported from: the active one first, then each other one for the features
@@ -475,6 +486,17 @@ function importPart(doc, dir) {
     if (away > 1e-4) report.notes.push(`${name} is on a face ${away.toFixed(3)} mm from where SolidWorks has it.`);
     const result = { name: reply.created[0].name, toPeet, frame: pf, partial, dimensions: new Map(), ids: new Map(), values: new Map((f.dimensions || []).map(d => [d.fullName, d.value])) };
     for (const o of own) { const d = (reply.drawn || []).find(x => x.as === o.as); if (d && o.g) result.ids.set(o.g.id.join("."), d.id); }
+    // What was drawn where SolidWorks has it, in the model, for another sketch that relates to it
+    result.drawnAt = [];
+    for (const o of own) {
+      const d = (reply.drawn || []).find(x => x.as === o.as);
+      if (!d || o.text) continue;
+      const at = p => p && mul(fromSketch(sf, p), 1);
+      if (o.point) { result.drawnAt.push({ type: "point", id: d.id, at: at(o.point) }); continue; }
+      const g = o.g;
+      result.drawnAt.push({ type: g.type, circle: !!g.circle, id: d.id, start: at(g.start), end: at(g.end), center: at(g.center), radius: g.radius && g.radius * MM, normal: sf.n });
+      for (const [k, id] of [["start", o.turned ? d.end : d.start], ["end", o.turned ? d.start : d.end], ["center", d.center]]) if (g[k] && id !== undefined) result.drawnAt.push({ type: "point", id, at: at(g[k]) });
+    }
     for (const o of own) if (o.text) fitText(f, result, o.g, (reply.drawn || []).find(x => x.as === o.as));
     if (!draw && relations) relate(f, result, s, sf, own, reply.drawn || []);
     return result;
@@ -556,7 +578,8 @@ function importPart(doc, dir) {
     const pf = sk.frame, name = sk.name;
     const unsolved = unsolvedSketches.has(f.name);
     const tally = { relations: s.relations.length, kept: 0, dropped: {} };
-    const drop = why => { tally.dropped[why] = (tally.dropped[why] || 0) + 1; };
+    let current = null;
+    const drop = why => { tally.dropped[why] = (tally.dropped[why] || 0) + 1; if (process.env.SW_DROPS && current) console.error("DROP", name, why, JSON.stringify(current)); };
     report.sketches = report.sketches || {};
     report.sketches[name] = tally;
 
@@ -618,7 +641,7 @@ function importPart(doc, dir) {
         const round = !!made && (made.type === "arc" || made.type === "circle");
         // A straight edge projects to a line from its start to its end
         const ends = made && made.type === "line" && item.edge && item.edge.between ? item.edge.between.map((p, i) => ({ id: [made.start, made.end][i], at: flat(p) })) : undefined;
-        projected.set(key, made ? { id: made.id !== undefined ? made.id : (made.curves || made.points || [])[0], point: item.vertex !== undefined, round, center: round ? made.center : undefined, ends } : null);
+        projected.set(key, made ? { id: made.id !== undefined ? made.id : (made.curves || made.points || [])[0], point: item.vertex !== undefined || made.type === "point", round, circle: made.type === "circle", center: round ? made.center : undefined, ends } : null);
       }
       return projected.get(key) || undefined;
     };
@@ -632,11 +655,36 @@ function importPart(doc, dir) {
         if (whole && whole.id !== undefined) return whole;
         item = { type: "project", edge: { at: mid(mm(d.start), mm(d.end)).map(tidy) } };
       }
-      else if (d.kind === "edge" && d.curve === "circle" && d.start && d.end && d.circle) {
-        // An arc (a bend's end), found by the middle of it
-        const c = mm(d.circle.slice(0, 3)), r = d.circle[6] * MM;
-        const half = add(sub(mm(d.start), c), sub(mm(d.end), c)), n = Math.hypot(...half);
-        if (n > 1e-6 * r) item = { type: "project", edge: { at: add(c, mul(half, r / n)).map(tidy) } };
+      else if (d.kind === "edge" && d.curve === "circle" && d.circle) {
+        // An arc (a bend's end), found by the middle of it; a half circle by a point a quarter round from its
+        // start, either way; a whole circle (the export gives no ends) by any point of it
+        const c = mm(d.circle.slice(0, 3)), axis = unit(d.circle.slice(3, 6)), r = d.circle[6] * MM;
+        const tries = [];
+        if (d.start && d.end) {
+          const half = add(sub(mm(d.start), c), sub(mm(d.end), c)), n = len(half);
+          const q = cross(axis, sub(mm(d.start), c)), l = len(q);
+          if (n > 1e-6 * r) tries.push(add(c, mul(half, r / n)));
+          else if (l > 1e-9) tries.push(add(c, mul(q, r / l)), sub(c, mul(q, r / l)));
+        } else {
+          const q = cross(axis, Math.abs(axis[0]) < 0.9 ? [1, 0, 0] : [0, 1, 0]);
+          tries.push(add(c, mul(q, r / len(q))));
+        }
+        for (const at of tries) {
+          const p = projectItem({ type: "project", edge: { at: at.map(tidy) } });
+          if (p && p.id !== undefined) return p;
+        }
+        return undefined;
+      }
+      else if (d.kind === "face" && d.surface === "cylinder" && d.cylinder) {
+        // A point on a cylinder's axis (a circle's centre put on a hole's): the centre of a circular edge of it
+        const c = mm(d.cylinder.slice(0, 3)), axis = unit(d.cylinder.slice(3, 6)), r = d.cylinder[6] * MM;
+        const off = p => { const v = sub(p, c); return len(sub(v, mul(axis, dot(v, axis)))); };
+        for (const x of modelEdges()) {
+          if (x.curve !== "circle" || [x.from, x.middle].some(p => Math.abs(off(p) - r) > 1e-3) || Math.abs(dot(sub(x.from, x.middle), axis)) > 1e-6) continue;
+          const p = projectItem({ type: "project", edge: { at: x.middle } });
+          if (p && p.round && p.center !== undefined) return { id: p.center, point: true };
+        }
+        return undefined;
       }
       else if (d.kind === "vertex" && d.point) item = { type: "project", vertex: { at: mm(d.point).map(tidy) } };
       else if (d.kind === "feature" && d.type === "RefPlane" && planes.has(d.name)) item = { type: "project", plane: planes.get(d.name) };
@@ -650,12 +698,12 @@ function importPart(doc, dir) {
     // projected. Its copy is where the edge is seen from the sketch, so the edge may be off the sketch's plane.
     let edgesNow = null;
     const flat = p => { const d = sub(p, pf.o); return [dot(d, pf.x), dot(d, pf.y), dot(d, pf.n)]; };
-    // Not an edge of a feature that is suppressed in some configuration: the sketch would lose it there,
-    // where SolidWorks' copy stays where it was
+    // Not an edge of a feature that is suppressed in some configuration the sketch is live in: the sketch
+    // would lose it there, where SolidWorks' copy stays where it was
     const modelEdges = () => {
       if (edgesNow) return edgesNow;
-      const unsure = new Set();
-      for (const face of peet.ask({ op: "faces" }).faces || []) if ((face.made_by || []).some(m => switched.has(m.feature))) unsure.add(face.body + "|" + face.index);
+      const unsure = new Set(), off = switchedWhereLive(f.name);
+      for (const face of peet.ask({ op: "faces" }).faces || []) if ((face.made_by || []).some(m => off.has(m.feature))) unsure.add(face.body + "|" + face.index);
       edgesNow = (peet.ask({ op: "edges" }).edges || []).filter(e => !(e.faces || []).some(i => unsure.has(e.body + "|" + i)))
         .map(e => ({ ...e, a: flat(e.from), b: flat(e.to), m: flat(e.middle) }));
       return edgesNow;
@@ -695,7 +743,30 @@ function importPart(doc, dir) {
           consider(Math.abs(x.m[2]), { type: "project", edge: { at: x.middle } });
         }
       }
-      return item ? projectItem(item) : undefined;
+      return item ? projectItem(item) : fromSketches(e);
+    };
+    // Failing the model, a copy of another sketch's point, line, circle or arc (SolidWorks relates a sketch
+    // to another's entities, and converts them): that entity, seen from this sketch, projected so that it
+    // follows the other sketch
+    const fromSketches = e => {
+      const seen = p => { const d = sub(p, pf.o); return [dot(d, pf.x), dot(d, pf.y)]; };
+      const near = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 1e-4;
+      for (const other of sketches.values()) {
+        if (other.name === name || !other.drawnAt) continue;
+        const parallel = x => x.normal && Math.abs(Math.abs(dot(x.normal, pf.n)) - 1) < 1e-9;
+        const hit = other.drawnAt.find(x => {
+          if (e.kind === "sketchPoint") return x.type === "point" && near(seen(x.at), sk.toPeet(e));
+          if (e.type === "line" && e.start && e.end && x.type === "line" && x.start && x.end) {
+            const [a, b] = [sk.toPeet(e.start), sk.toPeet(e.end)], [p, q] = [seen(x.start), seen(x.end)];
+            return (near(a, p) && near(b, q)) || (near(a, q) && near(b, p));
+          }
+          if (e.type === "arc" && e.center && x.type === "arc" && x.center && parallel(x))
+            return near(sk.toPeet(e.center), seen(x.center)) && Math.abs(e.radius * MM - x.radius) < 1e-4;
+          return false;
+        });
+        if (hit) return projectItem({ type: "project", sketch: other.name, entity: hit.id });
+      }
+      return undefined;
     };
     // A point of SolidWorks' that is not the sketch's own is a model vertex its relation refers to (Battery
     // Bracket's Sketch8 measures its flange's height from the far corner of the flange's edge): it is
@@ -731,6 +802,10 @@ function importPart(doc, dir) {
       const [t, u] = off(...straight) <= off(...crossed) ? straight : crossed;
       return off(t, u) < 1e-9 ? t : null;
     };
+    // Offset Entities' distance, which SolidWorks gives a relation of its own, with nothing it ties
+    const offsetRelation = s.relations.find(r => r.type === "offsetedge" && !r.suppressed && r.dimension && dimensions.get(r.dimension));
+    const offsetDim = offsetRelation && dimensions.get(offsetRelation.dimension);
+    let offsetUsed = false, offsetItem = null;
     const copiesOf = new Map();
     for (const r of s.relations) if (r.type === "patterned" && !r.suppressed && (r.entities || []).length === 2 && r.entities.every(e => e && e.kind === "sketchSegment")) {
       const [seed, copy] = r.entities.map(segmentOf);
@@ -739,10 +814,17 @@ function importPart(doc, dir) {
       copiesOf.get(seed.id).push(copy);
     }
     for (const r of s.relations) {
+      current = r;
       if (r.suppressed) { drop("suppressed"); continue; }
       const pts = [], segs = [], copies = [], unplaced = [], seen = [];
+      // A point that is not the sketch's own, tied to one of its own where it lies, in a relation to the model,
+      // is the hidden copy of what the relation is defined by (on it, as the relation has it). So is one a point
+      // pierces, which is on another sketch or the model, not this one.
+      const hiddenPoint = e => e && e.kind === "sketchPoint" && ((r.defined || []).length || r.type === "atpierce") && e.x !== undefined && !byId.has(e.id.join("."))
+        && (r.entities || []).some(o => o && o !== e && o.kind === "sketchPoint" && o.x !== undefined && byId.has(o.id.join(".")) && spot(o) === spot(e));
       for (const e of r.entities || []) {
         if (!e) continue;
+        if (hiddenPoint(e)) { copies.push(e); continue; }
         if (e.kind === "sketchPoint") { const id = pointOf(e); if (id !== undefined) pts.push({ id, e: e.x !== undefined ? e : byId.get(e.id.join(".")) }); else if (e.x !== undefined) unplaced.push(e); }
         else if (e.kind === "sketchSegment") {
           const g = segmentOf(e);
@@ -775,7 +857,7 @@ function importPart(doc, dir) {
         if (p && p.id !== undefined) {
           outside.push(p);
           // A vertex where the sketch sees it, in the sketch's own coordinates (metres)
-          if (p.point && d.point) { const q = sub(mm(d.point), sf.o); seen.push({ id: p.id, e: { x: dot(q, sf.x) / MM, y: dot(q, sf.y) / MM } }); }
+          if (p.point && d.kind === "vertex" && d.point) { const q = sub(mm(d.point), sf.o); seen.push({ id: p.id, e: { x: dot(q, sf.x) / MM, y: dot(q, sf.y) / MM } }); }
         } else lost = true;
       }
       // The hidden copies stand for what the relation is defined by where the export has nothing for it, or
@@ -788,8 +870,11 @@ function importPart(doc, dir) {
           copies.forEach((e, i) => { if (found[i].point && e.x !== undefined) seen.push({ id: found[i].id, e }); });
         }
       }
+      // An offset's hidden copy is the offset curve itself, which nothing in the model is: its source is found
+      // from the offset's distance below
+      if (r.type === "offsetedge") { lost = false; outside = []; }
       if (lost) { drop(`${r.type} to something outside the sketch that could not be projected`); continue; }
-      for (const o of outside) if (o.round) segs.push({ id: o.id, center: o.center, g: { type: "arc" }, projected: true });
+      for (const o of outside) if (o.round) segs.push({ id: o.id, center: o.center, g: { type: "arc", circle: o.circle }, projected: true });
       const lines = segs.filter(g => g.g.type === "line"), rounds = segs.filter(g => g.g.type === "arc");
       const outLines = outside.filter(o => !o.point && !o.round).map(o => o.id), outPoints = outside.filter(o => o.point).map(o => o.id);
       const anyLines = [...lines.map(l => l.id), ...outLines], anyPoints = [...pts.map(p => p.id), ...outPoints];
@@ -806,6 +891,9 @@ function importPart(doc, dir) {
         case "horizpoints": case "vertpoints":
           if (level(r.type.slice(0, 4) === "hori" ? "horizontal" : "vertical") && anyPoints.length === 2) item = { type: level(r.type.slice(0, 4) === "hori" ? "horizontal" : "vertical"), of: anyPoints };
           break;
+        // A point where a curve of another sketch, or of the model, pierces this one's plane: SolidWorks' copy of
+        // it is a point there, which this one is on
+        case "atpierce": if (anyPoints.length === 2 && all.length === 2) item = { type: "coincident", of: anyPoints }; break;
         case "coincident": if (all.length === 2 && anyPoints.length >= 1) item = { type: "coincident", of: [anyPoints[0], all.find(x => x !== anyPoints[0])] }; break;
         case "colinear": case "useedge": {
           // A line converted from an edge is the edge: its ends are the edge's ends, which it follows
@@ -866,6 +954,14 @@ function importPart(doc, dir) {
           if (segs.length !== 2 || outside.length || segs.some(g => !g.g.start && !g.g.center)) break;
           const [seed, copy] = segs;
           const moved = moveOf(seed.g, copy.g);
+          // A side of a polygon turned from the one before (SolidWorks' polygon ties each side to the next so): the
+          // same length, both tangent to the polygon's circle, which keeps it regular as SolidWorks' does
+          const touching = !moved && seed.g.type === "line" && copy.g.type === "line" && [...segments.values()].find(c => {
+            if (c.g.type !== "arc" || !c.g.center || !(c.g.radius > 0)) return false;
+            const gap = l => { const d = [l.end.x - l.start.x, l.end.y - l.start.y]; return Math.abs(d[0] * (c.g.center.y - l.start.y) - d[1] * (c.g.center.x - l.start.x)) / Math.hypot(...d); };
+            return [seed.g, copy.g].every(l => Math.abs(gap(l) - c.g.radius) < 1e-9);
+          });
+          if (touching) { item = { type: "equal", of: [seed.id, copy.id], with: [{ type: "tangent", of: [copy.id, touching.id] }] }; break; }
           if (!moved && seed.g.type === copy.g.type && (seed.g.type === "line" || (seed.g.circle && copy.g.circle))) { drop("patterned: a copy turned from its seed (a circular sketch pattern), which PeetCAD has no relation for"); continue; }
           if (!moved) break;
           // The first copy: the nearest of the seed's copies that this one is a whole number of steps from
@@ -880,6 +976,49 @@ function importPart(doc, dir) {
           }
           if (first) item = { type: "patterned", of: first.g.id === copy.id ? [seed.id, copy.id] : [seed.id, copy.id, first.g.id] };
           break;
+        }
+        // Offset Entities: the offset curve kept offset from the model edge it is offset from (PeetCAD's
+        // `offset` dimension), one distance (SolidWorks' dimension) for every piece. The edge is the one that far
+        // from the curve (parallel to a line, round the same centre as an arc), nearest the sketch.
+        case "offsetedge": {
+          if (!offsetDim) break;
+          // (The distance's own relation is kept with the first piece)
+          if (!r.entities || !r.entities.length) continue;
+          const own = segs.length === 1 && !segs[0].projected ? segs[0] : null;
+          if (!own || !(own.g.type === "line" ? own.g.start && own.g.end : own.g.center && own.g.radius)) break;
+          const gap = offsetDim.value * MM, near = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]);
+          let best = null;
+          const consider = (x, it) => { if (!best || Math.abs(x.m[2]) < best.z) best = { it, z: Math.abs(x.m[2]) }; };
+          if (own.g.type === "line") {
+            const [s0, s1] = [sk.toPeet(own.g.start), sk.toPeet(own.g.end)];
+            const d = [s1[0] - s0[0], s1[1] - s0[1]], l = Math.hypot(...d);
+            const off = q => (d[0] * (q[1] - s0[1]) - d[1] * (q[0] - s0[0])) / l;
+            for (const x of modelEdges()) {
+              if (x.curve !== "line" || Math.abs(x.a[2] - x.b[2]) > 1e-3) continue;
+              const [u, v] = [off(x.a), off(x.b)];
+              if (Math.abs(u - v) > 1e-6 || Math.abs(Math.abs(u) - gap) > 1e-4) continue;
+              consider(x, { type: "project", edge: { between: [x.from, x.to] } });
+            }
+          } else {
+            const c = sk.toPeet(own.g.center), r0 = own.g.radius * MM;
+            for (const x of modelEdges()) {
+              if (x.curve !== "circle" || Math.abs(x.a[2] - x.m[2]) > 1e-3) continue;
+              const rr = near(x.m, c);
+              if (Math.abs(near(x.a, c) - rr) > 1e-4 || Math.abs(Math.abs(rr - r0) - gap) > 1e-4) continue;
+              consider(x, { type: "project", edge: { at: x.middle } });
+            }
+          }
+          const source = best && projectItem(best.it);
+          if (!source || source.id === undefined || source.point || source.round !== (own.g.type === "arc")) break;
+          // An offset of nothing is the curve itself, converted: PeetCAD's dimensions are never 0
+          if (gap < 1e-9) { item = { type: own.g.type === "arc" ? "coradial" : "collinear", of: [own.id, source.id] }; break; }
+          const first = !offsetUsed;
+          offsetUsed = true;
+          item = { type: "offset_distance", of: [own.id, source.id], value: tidy(gap) };
+          if (first) { offsetItem = item; item.extra = 1; item.sw = offsetDim.fullName; item.name = offsetDim.name.trim().replace(/["@]/g, "_") || "D"; while (names.has(item.name)) item.name += "_"; names.add(item.name); }
+          else { item.value = offsetItem.name; item.name = offsetItem.name + "_"; while (names.has(item.name)) item.name += "_"; names.add(item.name); }
+          items.push(item);
+          continue;
         }
         case "linearpattcnt": case "circularpattcnt":
           drop(`${r.type}: the count of a sketch pattern, which PeetCAD's sketch has no match for (the copies are drawn, and tied to the seed)`);
@@ -953,6 +1092,8 @@ function importPart(doc, dir) {
       if (outside.length || item.value !== undefined) item.moves = true;
       items.push(item);
     }
+    current = null;
+    if (offsetRelation && !offsetUsed) drop(offsetDim.value === 0 ? "offsetedge: an offset of 0, which PeetCAD's dimensions can't be (its pieces are on what they are offset from)" : "offsetedge: the offset's distance, with none of its pieces found");
     if (items.length === 0) return;
 
     const entities = () => peet.ask({ op: "feature", feature: name }).entities || [];
@@ -971,9 +1112,10 @@ function importPart(doc, dir) {
       return most;
     };
     // A relation PeetCAD makes of more than one (`with`) is kept or dropped as one
-    const clean = item => { const { sw, supplementary, moves, with: also, ...rest } = item; return [rest, ...(also || [])]; };
+    const clean = item => { const { sw, supplementary, moves, extra, with: also, ...rest } = item; return [rest, ...(also || [])]; };
     const keep = item => {
       if (!item.also) tally.kept++;
+      if (item.extra) tally.kept += item.extra;
       if (item.sw) sk.dimensions.set(item.sw, item.name);
       if (item.sw && item.supplementary) (sk.supplementary || (sk.supplementary = new Set())).add(item.sw);
     };
@@ -1000,7 +1142,10 @@ function importPart(doc, dir) {
         else {
           restore(mark);
           if (reply.ok && reply.definition !== "over_defined" && unsolved && item.moves) moving.push(item);
-          else if (!item.also) drop(`${item.type}: ${!reply.ok ? "refused" : reply.definition === "over_defined" ? "over-defines the sketch" : "moves the sketch"}`);
+          else {
+            if (item.extra) drop("offsetedge: the offset's distance, its first piece dropped");
+            if (!item.also) drop(`${item.type}: ${!reply.ok ? "refused" : reply.definition === "over_defined" ? "over-defines the sketch" : "moves the sketch"}`);
+          }
         }
       }
     }
@@ -2167,7 +2312,8 @@ function importPart(doc, dir) {
       const tried = build(f, op);
       if (!tried.ok) { if (!best) best = { failed: tried }; continue; }
       const ours = (peet.ask({ op: "faces" }).faces || []).filter(x => (x.made_by || []).some(m => tried.names.includes(m.feature))).reduce((sum, x) => sum + x.area_mm2, 0);
-      const off = Math.abs(ours - theirs), planes = wallsMatched(f.name, tried.names);
+      // With nothing of it in SolidWorks' body (it is suppressed there), the way that makes something
+      const off = theirs > 0 ? Math.abs(ours - theirs) : -ours, planes = wallsMatched(f.name, tried.names);
       peet.apply({ op: "delete", features: tried.names });
       if (!best || best.failed || planes > best.planes + 1e-6 || (planes > best.planes - 1e-6 && off < best.off - 1e-6)) best = { op, off, planes };
     }
@@ -2529,7 +2675,21 @@ function importPart(doc, dir) {
     // of what it is on (Meter Bracket's Sketch69, on the left-hand return where the right-hand one is).
     if (cur === config && liveElsewhere(f.name)) return record(f, LATER);
     const before = report.features.length, had = made.has(f.name);
+    // What it is built on that was imported asleep (a flange its sketch is on, the slot a sketch converts the
+    // edges of) is woken while it is built, as it is there in SolidWorks wherever this is unsuppressed
+    const woken = [], seen = new Set();
+    (function wake(parents) {
+      for (const p of parents || []) {
+        if (seen.has(p)) continue;
+        seen.add(p);
+        if (asleep.has(p)) woken.push(...made.get(p));
+        wake((byName.get(p) || {}).parents);
+      }
+    })(f.parents);
+    const sleep = on => { for (const n of woken) peet.apply({ op: "suppress", feature: n, on, configurations: "all" }); };
+    sleep(false);
     handleLive({ ...f, suppressed: false });
+    sleep(true);
     const names = made.get(f.name);
     const built = !had && names && names.length > 0 && names.every(n => peet.apply({ op: "suppress", feature: n, on: true, configurations: "all" }).ok);
     if (built) asleep.add(f.name);

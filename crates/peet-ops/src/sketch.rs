@@ -94,6 +94,7 @@ pub enum Measure {
     Radius,
     Diameter,
     Angle,
+    Offset,
 }
 
 const RELATIONS: [(Relation, &str, &str); 14] = [
@@ -141,7 +142,7 @@ const RELATIONS: [(Relation, &str, &str); 14] = [
     ),
 ];
 
-const MEASURES: [(Measure, &str, &str); 8] = [
+const MEASURES: [(Measure, &str, &str); 9] = [
     (
         Measure::Distance,
         "distance",
@@ -162,12 +163,17 @@ const MEASURES: [(Measure, &str, &str); 8] = [
     (Measure::Radius, "radius", "a circle or arc"),
     (Measure::Diameter, "diameter", "a circle or arc"),
     (Measure::Angle, "angle", "two lines"),
+    (
+        Measure::Offset,
+        "offset_distance",
+        "a curve offset from another: two lines (parallel, the value apart) or two circles or arcs (concentric, radii the value apart)",
+    ),
 ];
 
 const GEOMETRY: [(&str, &str); 12] = [
     (
         "project",
-        "exactly one of edge, vertex, plane, face; convert: use the projected edge in profiles",
+        "exactly one of edge, vertex, plane, face, or sketch with entity (an earlier sketch's entity, by its id there); convert: use the projected edge in profiles",
     ),
     ("point", "at"),
     ("line", "from, to"),
@@ -238,6 +244,11 @@ pub enum ProjectionSel {
     Vertex(crate::value::VertexSel),
     Plane(crate::value::PlaneSel),
     Face(crate::value::FaceSel),
+    /// An entity of another, earlier sketch, by its id there.
+    SketchEntity {
+        sketch: crate::value::FeatureSel,
+        entity: EntityId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -442,14 +453,22 @@ impl DrawItem {
                     let vertex = a.parsed("vertex", crate::value::VertexSel::parse)?;
                     let plane = a.parsed("plane", crate::value::PlaneSel::parse)?;
                     let face = a.parsed("face", crate::value::FaceSel::parse)?;
-                    let source = match (edge, vertex, plane, face) {
-                        (Some(e), None, None, None) => ProjectionSel::Edge(e),
-                        (None, Some(v), None, None) => ProjectionSel::Vertex(v),
-                        (None, None, Some(p), None) => ProjectionSel::Plane(p),
-                        (None, None, None, Some(f)) => ProjectionSel::Face(f),
+                    let sketch = a.parsed("sketch", crate::value::FeatureSel::parse)?;
+                    let entity = a.parsed("entity", integer)?;
+                    let source = match (edge, vertex, plane, face, sketch) {
+                        (Some(e), None, None, None, None) => ProjectionSel::Edge(e),
+                        (None, Some(v), None, None, None) => ProjectionSel::Vertex(v),
+                        (None, None, Some(p), None, None) => ProjectionSel::Plane(p),
+                        (None, None, None, Some(f), None) => ProjectionSel::Face(f),
+                        (None, None, None, None, Some(sketch)) => ProjectionSel::SketchEntity {
+                            sketch,
+                            entity: EntityId(entity.ok_or(
+                                "project from another sketch needs the entity's id there in 'entity'",
+                            )?),
+                        },
                         _ => {
                             return Err(
-                                "project needs exactly one of edge, vertex, plane or face".into()
+                                "project needs exactly one of edge, vertex, plane, face or sketch (with entity)".into()
                             );
                         }
                     };
@@ -772,6 +791,7 @@ fn measure(kind: Measure, of: &[EntityId]) -> Result<ConstraintKind, String> {
         (Measure::Radius, &[a]) => K::Radius(a),
         (Measure::Diameter, &[a]) => K::Diameter(a),
         (Measure::Angle, &[a, b]) => K::Angle(a, b),
+        (Measure::Offset, &[a, b]) => K::Offset(a, b),
         (Measure::Length | Measure::Radius | Measure::Diameter, _) => {
             return Err("it takes one entity in 'of'".to_owned());
         }
@@ -1029,6 +1049,29 @@ fn one(
                     (
                         Source::Point(peet_model::PointRef::Vertex(r.clone())),
                         Shape::Point(plane.to_plane_coords(r.hint)),
+                    )
+                }
+                ProjectionSel::SketchEntity {
+                    sketch: other,
+                    entity,
+                } => {
+                    let other = other.resolve(doc)?;
+                    let from = doc
+                        .model
+                        .sketch(other)
+                        .ok_or_else(|| format!("{} is not a sketch.", doc.model.name_of(other)))?;
+                    let shape = peet_model::projection::project_sketch_entity(
+                        &from.sketch,
+                        from.placement,
+                        *entity,
+                        plane,
+                    )?;
+                    (
+                        Source::SketchEntity {
+                            sketch: other,
+                            entity: *entity,
+                        },
+                        shape,
                     )
                 }
                 ProjectionSel::Plane(p) => {

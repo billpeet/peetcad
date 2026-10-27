@@ -530,6 +530,7 @@ fn map_ids(kind: ConstraintKind, f: impl Fn(EntityId) -> EntityId) -> Constraint
             copy: f(copy),
             first: f(first),
         },
+        Offset(a, b) => Offset(f(a), f(b)),
     }
 }
 

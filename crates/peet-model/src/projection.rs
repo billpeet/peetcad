@@ -1,5 +1,5 @@
 //! Persistent model geometry projected into a sketch before solving.
-use crate::{EdgeRef, PlaneRef, PointRef};
+use crate::{EdgeRef, FeatureId, PlaneRef, PointRef};
 use peet_kernel::Curve3;
 use peet_math::{DVec2, Plane};
 use peet_sketch::{EntityId, Geometry, Sketch};
@@ -10,6 +10,12 @@ pub enum Source {
     Edge(EdgeRef),
     Point(PointRef),
     Plane(PlaneRef),
+    /// An entity of another (earlier) sketch: a point, line, circle or arc, as SolidWorks
+    /// relates a sketch to (and converts) another sketch's entities.
+    SketchEntity {
+        sketch: FeatureId,
+        entity: EntityId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -63,6 +69,45 @@ pub fn project_edge(edge: &peet_kernel::topo::Edge, plane: Plane) -> Result<Shap
             Ok(Shape::Line(off + along * lo, off + along * hi))
         }
         _ => Err("Project a straight edge, a circular edge parallel to the sketch plane or one seen edge on. This edge projects to a collapsed line or an unsupported curve.".into()),
+    }
+}
+
+/// Another sketch's entity, seen from `plane`: a point or a line anywhere, a circle or an
+/// arc where the two sketches are parallel (seen from behind, an arc runs the other way).
+pub fn project_sketch_entity(
+    from: &Sketch,
+    from_plane: Plane,
+    entity: EntityId,
+    plane: Plane,
+) -> Result<Shape, String> {
+    let e = from
+        .entity(entity)
+        .ok_or("The entity it projects was deleted from its sketch.")?;
+    let at = |id: EntityId| plane.to_plane_coords(from_plane.from_plane_coords(from.point(id)));
+    let parallel = from_plane.normal().cross(plane.normal()).length() < 1e-9;
+    let facing = from_plane.normal().dot(plane.normal()) > 0.0;
+    match e.geometry {
+        Geometry::Point { pos } => Ok(Shape::Point(
+            plane.to_plane_coords(from_plane.from_plane_coords(pos)),
+        )),
+        Geometry::Line { start, end } => {
+            let (a, b) = (at(start), at(end));
+            if a.distance(b) <= 1e-9 {
+                return Err("The line it projects is seen end on: it projects to a point.".into());
+            }
+            Ok(Shape::Line(a, b))
+        }
+        Geometry::Circle { center, radius } if parallel => Ok(Shape::Circle(at(center), radius)),
+        Geometry::Arc { center, start, end } if parallel => Ok(if facing {
+            Shape::Arc(at(center), at(start), at(end))
+        } else {
+            Shape::Arc(at(center), at(end), at(start))
+        }),
+        Geometry::Circle { .. } | Geometry::Arc { .. } => Err(
+            "A circle or arc of another sketch can only be projected into a sketch parallel to it."
+                .into(),
+        ),
+        _ => Err("Project a point, line, circle or arc of the other sketch.".into()),
     }
 }
 

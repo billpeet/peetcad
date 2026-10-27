@@ -174,6 +174,19 @@ A copy turned about a point (a circular pattern) has no `patterned`.
 {"op":"feature","feature":"Holes"}
 ```
 
+To keep a curve offset from another (SolidWorks' Offset Entities, from a projected edge or
+another curve), dimension the pair with `offset_distance`: the curve first, then what it is offset
+from. Two lines stay parallel, the value apart, on the side they are on; two circles or
+arcs stay concentric, their radii the value apart, the bigger staying bigger. Give each
+piece its own `offset_distance` and, for one distance over all of them, make the others' `value`
+the first one's name. The `offset` edit draws new curves; this keeps existing ones offset.
+
+```jsonl
+{"op":"sketch","on":"top","name":"Plate","draw":[{"type":"line","from":[0,0],"to":[60,0],"as":"edge"},{"type":"circle","center":[30,20],"radius":4,"as":"hole"},{"type":"line","from":[5,8],"to":[55,8],"as":"rail"},{"type":"circle","center":[30,20],"radius":6,"as":"ring"},{"type":"offset_distance","of":["rail","edge"],"value":8,"name":"inset"},{"type":"offset_distance","of":["ring","hole"],"value":"inset/4","name":"ring_gap"}]}
+{"op":"set_dimension","sketch":"Plate","name":"inset","value":12}
+{"op":"feature","feature":"Plate"}
+```
+
 ## Editing what is drawn
 
 `fillet` (a corner point and a radius), `trim` and `extend` (a curve and a point `near`
@@ -215,6 +228,22 @@ its relations. Use `feature` to inspect `projections`, locked entities, and fail
 {"op": "edge_flange", "name": "Side", "length": 20, "edge": {"between": [[0, 0, 2], [100, 0, 2]]}}
 {"op": "sketch", "name": "Hole", "on": {"at": [50, 30, 2], "normal": [0, 0, 1]}, "draw": [{"type": "project", "edge": {"at": [0, 0.87868, 0.87868]}, "as": "bend_end"}, {"type": "circle", "center": [10, 20], "radius": 2, "as": "hole"}, {"type": "distance", "of": ["hole.center", "bend_end"], "value": 10}]}
 {"op": "sheet_cut", "sketch": "Hole"}
+```
+
+To relate a sketch to another sketch's geometry (as SolidWorks relates to, or converts,
+another sketch's entities), project it with `sketch` (the earlier sketch's name) and
+`entity` (the entity's id there, from that sketch's reply or `feature`). Lines and points
+project into any sketch; circles and arcs only into a sketch parallel to theirs, else it
+fails. The projection follows the other sketch when its dimensions change; if that sketch
+is suppressed or deleted it stays where it was, with a warning. Add `convert: true` to
+use it in a profile.
+
+```jsonl
+{"op":"sketch","on":"top","name":"Base","draw":[{"type":"line","from":[0,0],"to":[40,0],"as":"edge"},{"type":"circle","center":[20,15],"radius":4,"as":"hole"},{"type":"length","of":["edge"],"value":40,"name":"width"}]}
+{"op":"plane","from":"top","distance":10,"name":"Above"}
+{"op":"sketch","on":"Above","name":"Over","draw":[{"type":"project","sketch":"Base","entity":1,"as":"edge"},{"type":"project","sketch":"Base","entity":4,"convert":true,"as":"ring"},{"type":"point","at":[20,-5],"as":"p"},{"type":"midpoint","of":["p","edge"]}]}
+{"op":"set_dimension","sketch":"Base","name":"width","value":60}
+{"op":"feature","feature":"Over"}
 ```
 
 `collinear` adds parallel and point-on-line relations; `coradial` adds concentric and

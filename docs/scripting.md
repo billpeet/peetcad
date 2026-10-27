@@ -251,7 +251,7 @@ A `draw` list holds items with a `type`:
 
 | Types | Fields |
 |---|---|
-| `project` | exactly one of `edge`, `vertex`, `plane`, `face` selectors; `convert` includes projected edges in profiles |
+| `project` | exactly one of `edge`, `vertex`, `plane`, `face` selectors, or `sketch` with `entity` (another sketch's entity); `convert` includes projected edges in profiles |
 | `point` | `at` |
 | `line` | `from`, `to` |
 | `polyline` | `points`, `closed` |
@@ -265,7 +265,7 @@ A `draw` list holds items with a `type`:
 | `text` | `at`, `string`, `height`, `font`, `angle`, `width`, `spacing`, `align` (part `point`) |
 | `coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `tangent`, `equal`, `concentric`, `collinear`, `coradial`, `midpoint` (of a line or an arc), `symmetric`, `fix` | `of` (entities) |
 | `patterned` | `of`: a seed, a copy of it in a linear sketch pattern, and the pattern's first copy where that is another (points, lines or circles) |
-| `distance`, `doubled_distance`, `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle` | `of`, `value`, `name`, `driven` |
+| `distance`, `doubled_distance`, `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle`, `offset_distance` | `of`, `value`, `name`, `driven` (`offset_distance`: a curve, then the curve it is offset from) |
 | `fillet` | `corner`, `radius` |
 | `trim`, `extend` | `curve`, `near` |
 | `offset` | `of`, `distance` |
@@ -283,6 +283,8 @@ same list, or a part of one: `"a.start"`, `"a.end"`, `"c.center"`, `"r.bottom"`,
 solving. It defaults to construction geometry. `convert: true` makes projected edges
 profile geometry; `face` projects every boundary edge, addressed as `label.0`, etc.
 Vertices project to points and planes to their intersection line with the sketch.
+`sketch` with `entity` projects an entity of an earlier sketch (its id there): points and
+lines into any sketch, circles and arcs into a parallel one; it follows that sketch.
 Straight edges and circles/arcs parallel to the sketch plane are supported; a circle or
 arc seen edge-on (its plane square to the sketch's) projects to the line it covers. Parallel
 planes, collapsed edges and other projected curve types fail with a diagnostic. A
@@ -305,6 +307,8 @@ change spread over everything by least squares.
 `collinear` creates parallel plus point-on-line relations; `coradial` creates concentric
 plus equal-radius relations. Each returns both relation ids. `doubled_distance` is twice
 the perpendicular distance from a point to a line, with its own editable dimension name.
+`offset_distance` keeps a curve offset from another, as SolidWorks' Offset Entities does: two lines
+parallel and the value apart, two circles or arcs concentric with radii the value apart.
 
 A relation or dimension that the others already imply is accepted, as in SolidWorks: the
 sketch stays `under_defined` or `fully_defined`, and the `feature` query marks it
