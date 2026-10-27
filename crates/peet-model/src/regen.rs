@@ -802,7 +802,9 @@ impl Engine {
                 // stays where it was, as SolidWorks leaves a dangling relation.
                 let mut dangling = 0usize;
                 for projection in &s.projections {
-                    use crate::projection::{Shape, Source, intersect_plane, project_edge};
+                    use crate::projection::{
+                        Shape, Source, intersect_plane, project_edge, project_sketch_entity,
+                    };
                     let shape = match &projection.source {
                         Source::Point(p) => match ctx.point(p) {
                             Ok(at) => Shape::Point(plane.to_plane_coords(at)),
@@ -813,6 +815,18 @@ impl Engine {
                         },
                         Source::Plane(p) => match ctx.plane(p) {
                             Ok(other) => intersect_plane(plane, other)?,
+                            Err(_) => {
+                                dangling += 1;
+                                continue;
+                            }
+                        },
+                        Source::SketchEntity {
+                            sketch: other,
+                            entity,
+                        } => match ctx.sketch_input(*other) {
+                            Ok((from_plane, from)) => {
+                                project_sketch_entity(from, from_plane, *entity, plane)?
+                            }
                             Err(_) => {
                                 dangling += 1;
                                 continue;

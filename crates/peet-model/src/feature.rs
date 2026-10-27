@@ -1212,6 +1212,7 @@ impl FeatureKind {
                         crate::projection::Source::Edge(e) => out.extend(e.features()),
                         crate::projection::Source::Point(p) => point_deps(p, &mut out),
                         crate::projection::Source::Plane(p) => plane_deps(p, &mut out),
+                        crate::projection::Source::SketchEntity { sketch, .. } => out.push(*sketch),
                     }
                 }
             }

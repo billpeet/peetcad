@@ -217,6 +217,22 @@ its relations. Use `feature` to inspect `projections`, locked entities, and fail
 {"op": "sheet_cut", "sketch": "Hole"}
 ```
 
+To relate a sketch to another sketch's geometry (as SolidWorks relates to, or converts,
+another sketch's entities), project it with `sketch` (the earlier sketch's name) and
+`entity` (the entity's id there, from that sketch's reply or `feature`). Lines and points
+project into any sketch; circles and arcs only into a sketch parallel to theirs, else it
+fails. The projection follows the other sketch when its dimensions change; if that sketch
+is suppressed or deleted it stays where it was, with a warning. Add `convert: true` to
+use it in a profile.
+
+```jsonl
+{"op":"sketch","on":"top","name":"Base","draw":[{"type":"line","from":[0,0],"to":[40,0],"as":"edge"},{"type":"circle","center":[20,15],"radius":4,"as":"hole"},{"type":"length","of":["edge"],"value":40,"name":"width"}]}
+{"op":"plane","from":"top","distance":10,"name":"Above"}
+{"op":"sketch","on":"Above","name":"Over","draw":[{"type":"project","sketch":"Base","entity":1,"as":"edge"},{"type":"project","sketch":"Base","entity":4,"convert":true,"as":"ring"},{"type":"point","at":[20,-5],"as":"p"},{"type":"midpoint","of":["p","edge"]}]}
+{"op":"set_dimension","sketch":"Base","name":"width","value":60}
+{"op":"feature","feature":"Over"}
+```
+
 `collinear` adds parallel and point-on-line relations; `coradial` adds concentric and
 equal-radius relations. Remove both returned relation ids to remove either composite
 relation. `equal` already covers equal line lengths, `midpoint` places a point at a
