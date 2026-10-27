@@ -100,6 +100,19 @@ rough placement decides which of several possible positions is taken.
   `"flip": true` puts them the same way round instead (two side faces flush). If a
   component ends up inside another or upside down, this is what to change:
   `{"op": "edit_mate", "mate": "Coincident1", "flip": true}`.
+- **`align`** says which way round in SolidWorks' terms: `aligned` (what `flip` does),
+  `anti_aligned` or `closest` (whichever way the components are nearer now). Give `flip`
+  or `align`, not both. Two axes (a pin in a hole) go whichever way is nearer unless
+  `align` says: `aligned` points the axes alike, `anti_aligned` apart. An axis's
+  direction is the `axis` that `faces` or `edges` gives for it, in its part.
+- **`flip_dimension`** measures a distance (or an angle) the other way. A distance from
+  a flat face goes out along its outward normal, from the first end if it is a flat face:
+  the other end is in front of the face. With `"flip_dimension": true` it is behind the
+  face, the same distance away. This is SolidWorks' "Flip dimension", and independent of
+  `flip`.
+- **`"suppressed": true`** adds the mate without solving it: nothing moves. It is solved
+  when unsuppressed (`{"op": "suppress", "mate": NAME, "on": false}`), as any mate is,
+  and fails then if it can't hold. Use it for a mate that should hold only sometimes.
 - **Read the reply.** `mate.status` is `ok` or `failed` with a `message`; `moved` lists
   the components the mate moved, with where they are now (`at`, `min`, `max`);
   `freedom` is how many ways the assembly's components can still move (0: fully held).
@@ -114,7 +127,7 @@ rough placement decides which of several possible positions is taken.
   value, its `flip` or its faces (delete it and add another), or delete the one it
   contradicts. A message about a face that "is gone" means the part was changed: delete
   the mate and add it again on the part as it is now.
-- `edit_mate` changes a `distance`, an `angle` or `flip`. `rename`, `suppress` and
+- `edit_mate` changes a `distance`, an `angle`, `flip` or `align`, or `flip_dimension`. `rename`, `suppress` and
   `delete` take `mate`. Deleting a component deletes its mates.
 - A mate's `distance` or `angle` can be an expression over the assembly's parameters
   (`set_parameter`): the components follow when the parameter changes.
@@ -132,7 +145,17 @@ rough placement decides which of several possible positions is taken.
 {"op": "mate", "type": "distance", "distance": 10, "a": {"component": "Base", "face": {"normal": [0, 0, 1]}}, "b": {"component": "Lid", "face": {"normal": [0, 0, -1]}}}
 {"op": "set", "name": "D1@Distance1", "value": 20}
 {"op": "components"}
+{"op": "edit_mate", "mate": "Distance1", "flip_dimension": true}
+{"op": "components"}
+{"op": "insert", "part": 1, "name": "Side", "at": [80, 0, 0]}
+{"op": "mate", "type": "coincident", "align": "aligned", "suppressed": true, "a": {"component": "Base", "face": {"normal": [1, 0, 0]}}, "b": {"component": "Side", "face": {"normal": [1, 0, 0]}}}
+{"op": "suppress", "mate": "Coincident1", "on": false}
+{"op": "mates"}
 ```
+
+The lid's underside goes 20 above the base's top, then 20 below it once the dimension is
+flipped. `Coincident1` moves nothing until it is unsuppressed; then `Side`'s right face is
+flush with the base's.
 
 ### Reference planes and parts inside sub-assemblies
 
@@ -217,10 +240,12 @@ Dimension and Percent. Values can be expressions over the assembly's parameters.
 A planar tab keeps three freedoms in Centered, Dimension and Percent, or four in
 Free when clearance is positive. It can slide along the mating planes and rotate
 about their normal. A cylindrical tab keeps its axis in the midplane and its spin
-free. Width mates keep the nearest orientation and do not take `flip`.
+free. Width mates keep the nearest orientation and do not take `flip`, `align` or
+`flip_dimension`.
 
-Nonparallel or coincident pairs, a tab wider than the gap, an out-of-range distance or
-a percent outside 0 to 100 fail the mate with a message. Correct the geometry or value;
+Centred, the tab may be wider than the width pair: their midplanes coincide, as in
+SolidWorks. Nonparallel or coincident pairs, a tab wider than the gap in another mode,
+an out-of-range distance or a percent outside 0 to 100 fail the mate with a message. Correct the geometry or value;
 the stored mate recovers on rebuild. Drafted and angular width pairs are not supported.
 Changing either selected face or plane recomputes the midpoint and clearance. If an
 end is gone, restore it or delete the mate and select new ends. `mates` lists both ends

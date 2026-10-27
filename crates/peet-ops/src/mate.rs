@@ -10,7 +10,7 @@
 use peet_document::Document;
 use peet_math::Frame;
 use peet_model::{
-    Assembly, CompId, Mate, MateEnd, MateGeom, MateId, MateKind, Model, ScalarKind, Status,
+    Align, Assembly, CompId, Mate, MateEnd, MateGeom, MateId, MateKind, Model, ScalarKind, Status,
     WidthMode,
 };
 use serde_json::{Map, Value, json};
@@ -322,10 +322,13 @@ impl MateType {
 /// What to do to a mate.
 #[derive(Clone, Debug, PartialEq)]
 pub enum MateChange {
-    /// Its distance or angle, and which way round two flat faces are: the ones given.
+    /// Its distance or angle, which way round its ends go, and which way its distance
+    /// or angle is measured: the ones given.
     Edit {
         value: Option<Input>,
         flip: Option<bool>,
+        align: Option<Align>,
+        flip_dimension: Option<bool>,
     },
     Rename(String),
     /// Leave it out of the solve without deleting it, or put it back.
@@ -349,13 +352,13 @@ impl MateChange {
 pub(crate) const MATE_OPS: &[(&str, &str, &str)] = &[
     (
         "mate",
-        "type (coincident, concentric, parallel, distance, angle, fasten, width), a, b (each {component: name, id or nonempty path array, and face, edge, vertex or plane: a selector in the part's own coordinates}; plane: top, front, right or a reference plane's name or id; for fasten the component alone). Width: a is a pair of planar ends, b is a pair of planar ends or one axis end; each pair belongs to one top-level component; mode (centered, free, dimension, percent; default centered), distance for dimension, percent for percent (number or expression). Other mates: distance, angle, flip. All: name",
+        "type (coincident, concentric, parallel, distance, angle, fasten, width), a, b (each {component: name, id or nonempty path array, and face, edge, vertex or plane: a selector in the part's own coordinates}; plane: top, front, right or a reference plane's name or id; for fasten the component alone). Width: a is a pair of planar ends, b is a pair of planar ends or one axis end; each pair belongs to one top-level component; mode (centered, free, dimension, percent; default centered), distance for dimension, percent for percent (number or expression). Other mates: distance, angle, flip (true: aligned), align (aligned, anti_aligned, closest; default: planes anti_aligned, axes closest), flip_dimension (bool: the distance or angle measured the other way). All: name, suppressed (bool: added without being solved)",
         "Hold two components together by geometry of their parts. The components move to where the mates hold, as little as they can.",
     ),
     (
         "edit_mate",
-        "mate, distance or angle, flip; width mates: mode (centered, free, dimension, percent), distance for dimension, percent for percent",
-        "Change a mate's value or orientation, or a width mate's mode and position.",
+        "mate, distance or angle, flip, align (aligned, anti_aligned, closest), flip_dimension; width mates: mode (centered, free, dimension, percent), distance for dimension, percent for percent",
+        "Change a mate's value, which way round its ends go or which way its value is measured, or a width mate's mode and position.",
     ),
     ("rename", "mate, name", "Rename a mate."),
     (
@@ -382,11 +385,15 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
     Some(match op {
         "mate" => (|| {
             let (kind, first, second) = MateType::parse(a)?;
+            let (flip, align) = orientation(a)?;
             Ok(Op::Mate {
                 kind,
                 a: first,
                 b: second,
-                flip: a.parsed("flip", boolean)?,
+                flip,
+                align,
+                flip_dimension: a.parsed("flip_dimension", boolean)?,
+                suppressed: a.flag("suppressed", false)?,
                 name: a.string("name")?,
             })
         })(),
@@ -399,17 +406,25 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
             let edit = (|| {
                 let distance = a.parsed("distance", Input::parse)?;
                 let angle = a.parsed("angle", Input::parse)?;
-                let flip = a.parsed("flip", boolean)?;
+                let (flip, align) = orientation(a)?;
+                let flip_dimension = a.parsed("flip_dimension", boolean)?;
                 if distance.is_some() && angle.is_some() {
                     return Err("Give 'distance' or 'angle', not both.".to_owned());
                 }
                 let value = distance.or(angle);
-                if value.is_none() && flip.is_none() {
+                if value.is_none() && flip.is_none() && align.is_none() && flip_dimension.is_none()
+                {
                     return Err(
-                        "'edit_mate' needs a 'distance', an 'angle' or a 'flip' field.".to_owned(),
+                        "'edit_mate' needs a 'distance', an 'angle', 'flip', 'align' or 'flip_dimension' field."
+                            .to_owned(),
                     );
                 }
-                Ok(MateChange::Edit { value, flip })
+                Ok(MateChange::Edit {
+                    value,
+                    flip,
+                    align,
+                    flip_dimension,
+                })
             })();
             change(a, edit)
         }
@@ -427,6 +442,33 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
         "delete" if a.has("mate") => change(a, Ok(MateChange::Delete)),
         _ => return None,
     })
+}
+
+/// A mate's `flip` and `align`: one or the other.
+fn orientation(a: &mut Args) -> Result<(Option<bool>, Option<Align>), String> {
+    let flip = a.parsed("flip", boolean)?;
+    let align = a.parsed("align", |v| {
+        let word = text(v)?;
+        Align::from_word(word).ok_or_else(|| {
+            format!("align: '{word}' is not an alignment: use aligned, anti_aligned or closest.")
+        })
+    })?;
+    if flip.is_some() && align.is_some() {
+        return Err(
+            "Give 'flip' or 'align', not both: 'flip': true is 'align': 'aligned'.".to_owned(),
+        );
+    }
+    Ok((flip, align))
+}
+
+/// What a mate's `flip` and `align` fields ask for, if either is given.
+pub(crate) fn align_of(flip: Option<bool>, align: Option<Align>) -> Option<Option<Align>> {
+    match (flip, align) {
+        (_, Some(align)) => Some(Some(align)),
+        (Some(true), None) => Some(Some(Align::Aligned)),
+        (Some(false), None) => Some(None),
+        (None, None) => None,
+    }
 }
 
 fn status_word(status: Option<&Status>) -> &'static str {
@@ -534,8 +576,14 @@ pub(crate) fn mate_out(doc: &Document, id: MateId) -> Value {
         }
         _ => {}
     }
-    if mate.flip {
+    if mate.flip() {
         m.insert("flip".to_owned(), json!(true));
+    }
+    if let Some(align) = mate.align {
+        m.insert("align".to_owned(), json!(align.word()));
+    }
+    if mate.flip_dimension {
+        m.insert("flip_dimension".to_owned(), json!(true));
     }
     m.insert("status".to_owned(), json!(status_word(status)));
     if let Some(message) = status.and_then(Status::message) {
@@ -584,6 +632,16 @@ fn rename(assembly: &mut Assembly, id: MateId, name: &str) -> Result<(), String>
     Ok(())
 }
 
+/// How a new mate is set: which way round, which way its value is measured, whether it
+/// is suppressed.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub(crate) struct MateSettings {
+    pub flip: Option<bool>,
+    pub align: Option<Align>,
+    pub flip_dimension: Option<bool>,
+    pub suppressed: bool,
+}
+
 /// Adds a mate. Returns it, with the undo label.
 pub(crate) fn add(
     doc: &Document,
@@ -591,9 +649,10 @@ pub(crate) fn add(
     kind: &MateType,
     a: &MateEndSel,
     b: &MateEndSel,
-    flip: Option<bool>,
+    settings: MateSettings,
     name: Option<&str>,
 ) -> Result<(MateId, String), String> {
+    let align = align_of(settings.flip, settings.align).flatten();
     let (mut a, mut b) = (a.resolve(doc)?, b.resolve(doc)?);
     let assembly = the_assembly(doc)?;
     let component = |end: &MateEnd| -> Result<CompId, String> {
@@ -622,9 +681,10 @@ pub(crate) fn add(
     };
     let kind = match kind {
         MateType::Width { a2, b2, mode } => {
-            if flip == Some(true) {
+            if align.is_some() || settings.flip_dimension == Some(true) {
                 return Err(
-                    "A width mate keeps the nearest orientation and does not take flip.".to_owned(),
+                    "A width mate keeps the nearest orientation and does not take flip, align or flip_dimension."
+                        .to_owned(),
                 );
             }
             let a2 = a2.resolve(doc)?;
@@ -684,8 +744,11 @@ pub(crate) fn add(
     if let Some(name) = name {
         rename(assembly, id, name)?;
     }
-    if let (Some(flip), Some(m)) = (flip, assembly.mate_mut(id)) {
-        m.flip = flip;
+    if let Some(m) = assembly.mate_mut(id) {
+        m.align = align;
+        m.flip_dimension = settings.flip_dimension.unwrap_or(false);
+        // Added as it is, without being solved: nothing moves until it is unsuppressed.
+        m.suppressed = settings.suppressed;
     }
     let label = format!(
         "Add {}",
@@ -738,10 +801,18 @@ pub(crate) fn change(
     if matches!(
         the_assembly(doc)?.mate(id).map(|m| &m.kind),
         Some(MateKind::Width { .. })
-    ) && matches!(change, MateChange::Edit { flip: Some(_), .. })
-    {
+    ) && matches!(
+        change,
+        MateChange::Edit { flip: Some(_), .. }
+            | MateChange::Edit { align: Some(_), .. }
+            | MateChange::Edit {
+                flip_dimension: Some(_),
+                ..
+            }
+    ) {
         return Err(
-            "A width mate keeps the nearest orientation and does not take flip.".to_owned(),
+            "A width mate keeps the nearest orientation and does not take flip, align or flip_dimension."
+                .to_owned(),
         );
     }
     let was = the_assembly(doc)?
@@ -781,7 +852,12 @@ pub(crate) fn change(
         .ok_or_else(|| "The document is not an assembly.".to_owned())?;
     let gone = || "The mate no longer exists.".to_owned();
     Ok(match change {
-        MateChange::Edit { flip, .. } => {
+        MateChange::Edit {
+            flip,
+            align,
+            flip_dimension,
+            ..
+        } => {
             let mate = assembly.mate_mut(id).ok_or_else(gone)?;
             match value {
                 Some((ScalarKind::Length, s)) => {
@@ -794,8 +870,11 @@ pub(crate) fn change(
                 Some((_, s)) => mate.kind = MateKind::Angle(s),
                 None => {}
             }
-            if let Some(flip) = flip {
-                mate.flip = *flip;
+            if let Some(align) = align_of(*flip, *align) {
+                mate.align = align;
+            }
+            if let Some(flip_dimension) = flip_dimension {
+                mate.flip_dimension = *flip_dimension;
             }
             format!("Edit {was}")
         }

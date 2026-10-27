@@ -437,7 +437,10 @@ mod tests {
                 .any(|f| matches!(f.kind, peet_model::FeatureKind::EdgeFlange(_)))
         );
         let mut assembly = Model::new_assembly();
-        let def = assembly.assembly_mut().unwrap().define(Arc::new(part.clone()));
+        let def = assembly
+            .assembly_mut()
+            .unwrap()
+            .define(Arc::new(part.clone()));
         assembly
             .assembly_mut()
             .unwrap()
@@ -448,6 +451,19 @@ mod tests {
                 .unwrap();
             assert_eq!(open(&w.finish()).unwrap().model, model);
         }
+    }
+
+    #[test]
+    fn schema_11_mates_still_open() {
+        // Mates as schema 11 wrote them: one `flip` (aligned), no alignment or flipped
+        // dimension of their own.
+        let (model, _) = peet_model::samples::enclosure_assembly();
+        let mates: Vec<_> = model.assembly().unwrap().mates().collect();
+        assert!(mates.iter().any(|m| m.flip()) && mates.iter().any(|m| !m.flip()));
+        let mut w = Writer::new();
+        w.section(SectionKind::MODEL, 11, &peet_model::ModelV11::of(&model))
+            .unwrap();
+        assert_eq!(open(&w.finish()).unwrap().model, model);
     }
 
     #[test]

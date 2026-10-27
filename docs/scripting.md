@@ -664,13 +664,13 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `explode_steps` | every step (`id`, `name`, `components`, `by`), whether the assembly is shown `exploded`, and under `moved` each component the steps move with its total `by` and where it is drawn exploded (`at`) |
 | `open_component` | `component`: opens its part as a document of its own and makes it current. `save` without a `path` on that document stores it back, as one undo step of the assembly, for every component of the part. Needs a session |
 | `components` | every component (`id`, `name`, `part`, `at`, `rotate`, `fixed`, `freedom`, `mates`, `status`, `message`, `min`, `max`) and every part (`id`, `name`, `kind`, how many `components`, `material`); how many `mates`, and the `freedom` left |
-| `mate` | `type` (`coincident`, `concentric`, `parallel`, `distance`, `angle`, `fasten`), `a`, `b`, `distance` or `angle` for those types, `flip`, `name`. An end is `{"component": …, "face": selector}` (or `"edge"`, `"vertex"`, `"plane"`), the selector in the part's own coordinates. `component` is a name, id or nonempty path array from the top-level component down through sub-assemblies. `plane` takes `"top"`, `"front"`, `"right"`, a reference plane or coordinate system by name or id, or a planar face selector; for `fasten` the component alone |
-| `mate`, `type: "width"` | `a`: two planar ends, the width pair. `b`: two planar ends, the tab pair, or one cylindrical face / edge used as an axis. `mode`: `centered` by default, `free`, `dimension` with `distance`, or `percent` with `percent`. Values accept numbers or expressions. Each pair is parallel, distinct and within one top-level component; the width pair and tab are on different components. No `flip`. `name` |
+| `mate` | `type` (`coincident`, `concentric`, `parallel`, `distance`, `angle`, `fasten`), `a`, `b`, `distance` or `angle` for those types, `flip` (`true`: aligned), `align` (`aligned`, `anti_aligned` or `closest`: which way round the ends go, SolidWorks' alignment; not with `flip`), `flip_dimension` (the distance or angle measured the other way: SolidWorks' "flip dimension"), `suppressed` (added without being solved: nothing moves until it is unsuppressed), `name`. An end is `{"component": …, "face": selector}` (or `"edge"`, `"vertex"`, `"plane"`), the selector in the part's own coordinates. `component` is a name, id or nonempty path array from the top-level component down through sub-assemblies. `plane` takes `"top"`, `"front"`, `"right"`, a reference plane or coordinate system by name or id, or a planar face selector; for `fasten` the component alone |
+| `mate`, `type: "width"` | `a`: two planar ends, the width pair. `b`: two planar ends, the tab pair, or one cylindrical face / edge used as an axis. `mode`: `centered` by default, `free`, `dimension` with `distance`, or `percent` with `percent`. Values accept numbers or expressions. Each pair is parallel, distinct and within one top-level component; the width pair and tab are on different components. Centred, the tab may be wider than the width pair (their midplanes coincide); the other modes need it to fit. No `flip`, `align` or `flip_dimension`. `name`, `suppressed` |
 | `edit_mate` for width | `mate`, `mode`, and `distance` for Dimension or `percent` for Percent. `distance` alone edits a Dimension mate; `percent` alone selects/edits Percent. Rename, suppress and delete use the ordinary mate operations |
-| `edit_mate` | `mate`, and `distance` or `angle`, `flip` |
+| `edit_mate` | `mate`, and `distance` or `angle`, `flip` or `align`, `flip_dimension` |
 | `set` | `name` `D1@MATE` (SolidWorks' name for a mate's value, `D1@Distance6`), `value`: a distance or angle mate's value; or an assembly parameter by name |
 | `rename`, `suppress`, `delete` | `mate` in place of `feature` |
-| `mates` | every mate (`id`, `name`, `type`, `a`, `b`, `distance` or `angle`, `flip`, `status`, `message`) and the `freedom` left |
+| `mates` | every mate (`id`, `name`, `type`, `a`, `b`, `distance` or `angle`, `flip`, `align` if one was given, `flip_dimension`, `status`, `message`) and the `freedom` left |
 
 | `interference` | `component` (left out: every pair): the pairs of components that share space, each with `a`, `b`, `volume_mm3`, `min`, `max`; `clear`; how many pairs were `compared`; `unchecked` pairs that couldn't be |
 | `bom` | `level` (`parts`, the default: every part, through sub-assemblies; `top`: a sub-assembly is one line): `rows`, each with `item`, `part`, `quantity`, `material`, `volume_mm3`, `mass_kg`, `total_mass_kg`, the `components`, and for sheet metal `thickness`, `flat_size`, `bends`; the total `quantity` and `mass_kg`, or `without_mass` |
@@ -702,7 +702,11 @@ has no mass, and the centre of gravity given is that of the volume.
 
 **Mates.** A flat face or a reference plane stands for its plane, a round face or a round edge for its axis,
 a straight edge for a line, a vertex for a point. Two planes are put against each other
-unless `flip` is true. The mates are solved whenever the assembly is rebuilt, and the
+unless `flip` is true (`align: "aligned"`); `align: "closest"` keeps them whichever way they
+are nearer. Two axes go whichever way is nearer unless `align` is `aligned` (pointing alike)
+or `anti_aligned`; an axis's direction is the one `faces` and `edges` give. A distance from a
+plane is measured along its outward normal (the first end's, if it is a plane), behind it
+with `flip_dimension`. A mate added `suppressed` is solved when it is unsuppressed. The mates are solved whenever the assembly is rebuilt, and the
 components move as little as they can from where they are: so `place` on a mated
 component is a suggestion, and where a component is placed before it is mated decides
 which of several positions it takes. A reply to an operation that moved other components

@@ -323,12 +323,12 @@ pub fn diff_scoped(
                 },
                 a: MateEndSel::Ref(m.a.clone()),
                 b: MateEndSel::Ref(m.b.clone()),
-                flip: Some(m.flip),
+                flip: None,
+                align: m.align,
+                flip_dimension: m.flip_dimension.then_some(true),
+                suppressed: m.suppressed,
                 name: Some(m.name.clone()),
             });
-            if m.suppressed {
-                ops.push(edit(m, MateChange::Suppress(true)));
-            }
         }
         for m in after.mates() {
             let Some(o) = before.mate(m.id) else {
@@ -365,12 +365,17 @@ pub fn diff_scoped(
                     ));
                 }
             };
-            if value.is_some() || o.flip != m.flip {
+            let turned = o.align != m.align;
+            let measured = o.flip_dimension != m.flip_dimension;
+            if value.is_some() || turned || measured {
                 ops.push(edit(
                     m,
                     MateChange::Edit {
                         value,
-                        flip: (o.flip != m.flip).then_some(m.flip),
+                        // Back to the default is `flip: false`.
+                        flip: (turned && m.align.is_none()).then_some(false),
+                        align: m.align.filter(|_| turned),
+                        flip_dimension: measured.then_some(m.flip_dimension),
                     },
                 ));
             }

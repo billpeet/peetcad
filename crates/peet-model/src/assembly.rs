@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Model;
 use crate::feature::Scalar;
-use crate::mate::{Mate, MateEnd, MateId, MateKind};
+use crate::mate::{Mate, MateEnd, MateId, MateKind, MateV11};
 
 /// Identifies a definition within its assembly. Ids are not reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -331,7 +331,7 @@ pub(crate) struct AssemblyLegacy<F> {
     components: Vec<Arc<Component>>,
     next_definition: u32,
     next_component: u32,
-    mates: Vec<Arc<Mate>>,
+    mates: Vec<MateV11>,
     next_mate: u32,
     explode: Vec<Arc<ExplodeStep>>,
     next_explode: u32,
@@ -346,7 +346,7 @@ pub(crate) struct AssemblyV11 {
     components: Vec<Arc<Component>>,
     next_definition: u32,
     next_component: u32,
-    mates: Vec<Arc<Mate>>,
+    mates: Vec<MateV11>,
     next_mate: u32,
     explode: Vec<Arc<ExplodeStep>>,
     next_explode: u32,
@@ -375,7 +375,7 @@ impl AssemblyV11 {
             components: a.components.clone(),
             next_definition: a.next_definition,
             next_component: a.next_component,
-            mates: a.mates.clone(),
+            mates: a.mates.iter().map(|m| MateV11::from(&**m)).collect(),
             next_mate: a.next_mate,
             explode: a.explode.clone(),
             next_explode: a.next_explode,
@@ -402,7 +402,7 @@ impl From<AssemblyV11> for Assembly {
             components: a.components,
             next_definition: a.next_definition,
             next_component: a.next_component,
-            mates: a.mates,
+            mates: a.mates.into_iter().map(|m| Arc::new(m.into())).collect(),
             next_mate: a.next_mate,
             explode: a.explode,
             next_explode: a.next_explode,
@@ -433,7 +433,7 @@ impl<F: From<crate::Feature>> AssemblyLegacy<F> {
             components: a.components.clone(),
             next_definition: a.next_definition,
             next_component: a.next_component,
-            mates: a.mates.clone(),
+            mates: a.mates.iter().map(|m| MateV11::from(&**m)).collect(),
             next_mate: a.next_mate,
             explode: a.explode.clone(),
             next_explode: a.next_explode,
@@ -460,7 +460,7 @@ impl<F: Into<crate::Feature>> From<AssemblyLegacy<F>> for Assembly {
             components: a.components,
             next_definition: a.next_definition,
             next_component: a.next_component,
-            mates: a.mates,
+            mates: a.mates.into_iter().map(|m| Arc::new(m.into())).collect(),
             next_mate: a.next_mate,
             explode: a.explode,
             next_explode: a.next_explode,
@@ -666,7 +666,8 @@ impl Assembly {
             kind,
             a,
             b,
-            flip: false,
+            align: None,
+            flip_dimension: false,
             suppressed: false,
         }));
         id
