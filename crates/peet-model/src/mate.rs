@@ -506,8 +506,6 @@ impl Element {
     }
 }
 
-/// The id the assembly itself has in a solve: its standard planes and origin, fixed.
-pub(crate) const ASSEMBLY: CompId = CompId(u32::MAX);
 
 /// A body of a component: the components below it down to its part (none for a part
 /// placed directly), the body, and where the part is in the component's coordinates.
@@ -534,10 +532,10 @@ pub(crate) type ComponentModel = (Vec<CompId>, Arc<crate::Model>, Frame);
 
 impl Placed {
     /// The assembly itself, as an end of a mate sees it: its standard planes and its
-    /// origin, which don't move.
-    fn assembly() -> Self {
+    /// origin, which don't move. `id` is one no component of the solve has.
+    fn assembly(id: CompId) -> Self {
         Self {
-            id: ASSEMBLY,
+            id,
             name: "the assembly".to_owned(),
             frame: Frame::WORLD,
             fixed: true,
@@ -2214,7 +2212,11 @@ pub(crate) fn solve(
     }
     // The assembly's own planes and origin, for the ends on them: a component that
     // doesn't move.
-    components.push(Placed::assembly());
+    let ground = (0..)
+        .map(CompId)
+        .find(|id| components.iter().all(|c| c.id != *id))
+        .expect("an unused id");
+    components.push(Placed::assembly(ground));
     let index: HashMap<CompId, usize> = components
         .iter()
         .enumerate()
@@ -2232,7 +2234,7 @@ pub(crate) fn solve(
             continue;
         }
         let find = |end: &MateEnd| match end.component() {
-            None => index.get(&ASSEMBLY).copied(),
+            None => index.get(&ground).copied(),
             Some(c) => index.get(&c).copied(),
         };
         let ends = mate_ends(mate);
@@ -2694,9 +2696,9 @@ pub(crate) fn solve(
         frames.insert(c.id, frame);
     }
     // The assembly itself is no component.
-    frames.remove(&ASSEMBLY);
+    frames.remove(&ground);
     let mut component_freedom: HashMap<CompId, usize> = component_freedom;
-    component_freedom.remove(&ASSEMBLY);
+    component_freedom.remove(&ground);
     Solved {
         frames,
         statuses,
