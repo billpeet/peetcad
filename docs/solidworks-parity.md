@@ -3,7 +3,7 @@
 What PeetCAD can't yet do that the SolidWorks component library needs. The aim is for
 FabSys to drive PeetCAD in place of SolidWorks; parts come first, assemblies after.
 
-**Status, 27 October 2026:** first written on 9 October from names and counts; since then
+**Status, 27 October 2026 (after round 4):** first written on 9 October from names and counts; since then
 the whole library has been exported and imported, and the entries below say what that
 found. Update an entry when it is confirmed, fixed or decided against.
 
@@ -106,17 +106,19 @@ read off SolidWorks' body (8), fillets on a sheet's corners likewise (5), sketch
 left out (2); a part can be in more than one of these. Those have the right shape and do
 not follow the part when it changes.
 
-**Beyond shape**, on 23 October and after round 3 (27 October, `run-m9`, from the fifth export;
-`scratch\beyond.js` counts it):
+**Beyond shape**, on 23 October, after round 3 (`run-m9`) and after round 4 (`run-m10`, both
+from the fifth export; `scratch\beyond.js` counts them):
 
-| | 23 Oct | 27 Oct | Of (27 Oct) |
-|---|---|---|---|
-| Sketch relations and dimensions kept | 5,869 (81%) | 8,130 (95%) | 8,557; every one kept in 734 of 949 sketches |
-| Names of faces and edges | 311 | | 320 |
-| Equations in force imported | 48 | 82 | 91 |
-| Other configurations that match SolidWorks | 42 | 84 | 86, in 51 parts |
+| | 23 Oct | Round 3 | Round 4 | Of (round 4) |
+|---|---|---|---|---|
+| Sketch relations and dimensions kept | 5,869 (81%) | 8,130 (95%) | 8,364 (97.8%) | 8,554; every one kept in 850 of 950 sketches |
+| Names of faces and edges | 311 | | | 320 |
+| Equations in force imported | 48 | 82 | 85 | 91 |
+| Other configurations that match SolidWorks | 42 | 84 | 86 | 86, in 51 parts |
+| FabSys `SetDimension` on template parts that exist | | 60 | 66 | 81 calls (the rest are on assemblies, retired documents and a 3D sketch) |
 
-In 47 of the 51 parts with more than one configuration, every configuration matches.
+In 49 of the 51 parts with more than one configuration, every configuration matches; the
+other two are Box Roof End Left and Right, whose active configuration is SolidWorks' error.
 (The counts of 27 October include hole wizard sketches, now imported with their relations.)
 
 - **Relations that were dropped.** Coincident relations PeetCAD refused (most join
@@ -470,22 +472,39 @@ Movement assembly had been edited on the NAS since the fourth (Meter Bracket is 
 and still match; Meter Bracket_old and two Meter Movement assemblies are gone from it.
 Run against `exports\step-v5`, the fifth export's STEP files.
 
-## Next, after round 3
+## Round 4 (27 October): what could be closed
 
-1. **Box Roof End Left and Right** and **ABB Flow Meter**: SolidWorks' or the file's
-   errors (see round 2): Box Roof End's mass properties are 5 mm³ under its own STEP
-   body, which PeetCAD matches to 0.06 mm³; ABB's original is 18 open shells SolidWorks
-   stitched with tolerance.
-2. **Gear tray / No Mounting Holes** (0.38%): Unfold1 and Fold1 are suppressed there, so
-   SolidWorks makes Cut-Extrude1 through the folded part; PeetCAD makes sheet metal cuts
-   in the flat. Needs Unfold and Fold features in PeetCAD.
-3. **Weather Shield Door / HingeRight** (0.003%): a blind cut through a bend, which
-   PeetCAD's `sheet_cut` leaves a sliver of in the bend.
-4. **Relations still dropped** (427): 74 midpoints of hole wizard slots the importer
-   leaves suppressed (Esc Surround), 88 that move the sketch because a projected edge is
-   not where SolidWorks' is, relations to another sketch's segments (PeetCAD projects only
-   model geometry), circular sketch patterns.
-5. **Driving the parts**: FabSys addresses still missing (Wall Inner Vertical's outline
-   set-backs, Wall Inner Horizontal's `CutoutDist`); global variables by SolidWorks' name
-   with spaces; mate dimensions by name and per configuration; a newer SolidWorks for
-   patterns up to a reference and corner reliefs.
+- **Unfold and fold** (`unfold`, `fold`), as SolidWorks has them: between the two the body
+  is flat and cuts made there are carried back round the bends; with them suppressed, a
+  cut goes straight through the folded part. Gear tray / No Mounting Holes matches, and the
+  ten other parts with them still do.
+- **Faces picked at a point** keep to the piece there when a later cut splits the face.
+  Weather Shield Door / HingeRight's break corner rounded the wrong pieces; it matches.
+- **Sketches SolidWorks left unsolved.** A sketch suppressed in the active configuration is
+  in the export as SolidWorks last solved it, often long ago; its relations to the model and
+  its dimensions are kept, and move it onto the model as SolidWorks does when it comes back.
+- **Relations to another sketch's entities** (a `project` of a `sketch`'s entity, which
+  follows it), **Offset Entities** (`offset_distance`), pierce points, polygons, and features
+  built on suppressed parents (Esc Surround's slot).
+- **FabSys names.** Global variables keep SolidWorks' names, spaces included (`"Base
+  Height"`), and disabled ones their value; addresses are found in any case, as
+  SolidWorks' `Parameter()` finds them; a moved body's mate values are `D1@Distance2`;
+  `set` reaches an assembly's mates; the sheet's thickness is `Thickness@Sheet-Metal`; a
+  flange's set-backs are named by the end of the edge they measure from.
+
+## Next, after round 4
+
+1. **Assemblies.** What FabSys does that PeetCAD can't take is now almost all on
+   assemblies: dimensions and suppression in a component (`Height@Sketch1@<part>-1`),
+   `SuppressComponent`, `ResolveComponent`, a component's configuration, sheet metal
+   settings of a component's part, and global variables on assemblies. The 29 template
+   assemblies are exported and not imported.
+2. **3D sketches** (P15): Weldment 30x30x2's structural member is swept along planar
+   stand-ins, so FabSys's `D1`–`D3@3DSketch1` drive nothing.
+3. **Relations still dropped** (190): stale hidden copies in SolidWorks' own data (sketches
+   last solved in another configuration), 6 symmetric relations the exporter writes empty,
+   the 32 of Esc Surround R Top and Bottom (an edge flange imported 3.8 mm long), 2 to the
+   near or far side of an arc (the export doesn't say which), sketch pattern counts.
+4. **Box Roof End Left and Right** and **ABB Flow Meter**: SolidWorks' or the file's errors.
+5. **SolidWorks 2018's API** has no "up to reference" for patterns and no corner relief
+   data; a newer SolidWorks would let Top Hat's counts follow the part.
