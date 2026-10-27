@@ -494,10 +494,14 @@ The importer brings in every configuration and checks each against SolidWorks' p
 | Suppressed mates imported | 71 of 114 | 100 of 114 |
 | Other configurations placed as SolidWorks has them | (not imported) | 8 of 8 (3 match, 5 with mates left out); 108 of 121 of their live mates |
 
-FabSys: SetSubComponentConfig 2 of 4 and SetConfiguration on assemblies 6 of 8; the others ask
-for configurations the templates don't have ("Wide1" where the part has "Wide", a Door Assembly
-"…90DegreeRestriction"), which SolidWorks ignores silently: a FabSys driver should ignore
-PeetCAD's error for a missing name. Not done: equations that differ between configurations (only
+FabSys: SetSubComponentConfig and SetConfiguration work wherever the configuration exists.
+**Decided:** PeetCAD reports a configuration name that isn't there, where SolidWorks ignores it
+silently: such a call is a bug in the script, to be fixed there. In `enclosure_script MASTER.boo`
+(and `enclosure_script mw refactor.boo`): `SetSubComponentConfig("Esc Surround R L-1", "Wide1")`
+and `("Esc Surround R R-1", "Wide1")` (lines 1530, 1532), where the parts' configuration is
+"Wide"; Light Bracket's `SetConfiguration("CON 510mm")`, `("CON 310mm")`, `("CON 210mm")`
+(lines 2298–2304), where the part has "CON510", "CON310", "CON210", and `("Sunny 1140mm")`,
+which it doesn't have at all. (Door Stiffener D does have "…90DegreeRestriction".) Not done: equations that differ between configurations (only
 disabled ones and one suppression equation do in the library), derived configurations (none in
 the library), display states, and the app's configuration list for assemblies.
 

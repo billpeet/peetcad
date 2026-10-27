@@ -674,8 +674,9 @@ the 6 thick lid is 50 above it and the spare is there.
   part in two configurations as two rows.
 - **A configuration that is not there.** `insert` and `component_configuration` with a
   name the part doesn't have fail and list its configurations; `configuration` with a
-  name the assembly doesn't have fails the same way. (FabSys's `SetConfiguration` in
-  SolidWorks silently ignores a missing name.) A part that loses the configuration a
+  name the assembly doesn't have fails the same way. SolidWorks silently ignores a missing
+  name; PeetCAD doesn't, on purpose: a script that asks for a configuration that isn't
+  there has a mistake in it, so fix the name rather than ignore the error. A part that loses the configuration a
   component shows leaves the component showing its active one, with a warning in
   `components`.
 - A sub-assembly is a component like a part: it shows one of its configurations, and its

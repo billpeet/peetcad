@@ -818,9 +818,9 @@ is 12.
 {"op": "configuration", "configuration": "Left Hinged"}
 ```
 
-`configuration` with a name the assembly doesn't have fails and lists the names (FabSys's
-`SetConfiguration` on SolidWorks ignores a missing name: a FabSys driver should do the
-same with the error).
+`configuration` with a name the assembly doesn't have fails and lists the names. SolidWorks
+ignores a missing name silently; PeetCAD reports it, on purpose, so that a script asking for
+a configuration that isn't there is fixed rather than going on with the wrong one.
 
 `failures` (in `status` and in replies) lists the components that need attention (a part
 with no bodies, or with features that can't be built) and the mates that don't hold. `export` writes every component's
