@@ -2314,3 +2314,80 @@ fn a_flange_beside_a_cut_may_share_a_sliver() {
     .unwrap();
     assert!(matches!(build(long), Err(SheetError::Overlap { .. })));
 }
+
+fn slot_across_the_bend() -> Area {
+    Area::polygon(
+        &[
+            DVec2::new(40.0, 45.0),
+            DVec2::new(50.0, 45.0),
+            DVec2::new(50.0, 70.0),
+            DVec2::new(40.0, 70.0),
+        ],
+        |i| CurveTag::Sketch {
+            owner: 3,
+            entity: i as u32,
+        },
+    )
+}
+
+#[test]
+fn unfold_lays_bends_flat_and_fold_carries_a_cut_back() {
+    let mut layout = plate_layout(settings(0.5));
+    layout
+        .add_edge_flange(
+            2,
+            &top_edge(true),
+            &flange(25.0, FlangePosition::MaterialInside),
+        )
+        .unwrap();
+    let (folded, _) = built(layout.clone());
+    let mut flat = layout.clone();
+    flat.unfold(0, &[]).unwrap();
+    let (solid, body) = built(flat.clone());
+    // Flat: one thickness deep, as long as the blank, the plate where it was
+    let b = bounds(&solid);
+    assert_close(b.min.z, 0.0, 1e-9);
+    assert_close(b.max.z, T, 1e-9);
+    let (lo, hi) = body.flat_bounds();
+    assert_close(b.max.y - b.min.y, hi.y - lo.y, 1e-9);
+    assert_close(b.min.y, 0.0, 1e-9);
+    assert_close(measure::volume(&solid), measure::volume(&folded), 1e-6);
+    // A slot across the flat bend, then folded again: as if cut in the flat pattern
+    flat.add_cut(slot_across_the_bend());
+    flat.fold(&[]);
+    assert!(flat.flat_bends.is_empty());
+    let (again, _) = built(flat);
+    layout.add_cut(slot_across_the_bend());
+    let (direct, _) = built(layout);
+    assert_close(measure::volume(&again), measure::volume(&direct), 1e-6);
+    let (a, d) = (bounds(&again), bounds(&direct));
+    assert!(a.min.abs_diff_eq(d.min, 1e-9) && a.max.abs_diff_eq(d.max, 1e-9));
+}
+
+#[test]
+fn unfold_keeps_the_fixed_flange_where_it_is() {
+    let mut layout = plate_layout(settings(0.5));
+    layout
+        .add_edge_flange(
+            2,
+            &top_edge(true),
+            &flange(25.0, FlangePosition::MaterialInside),
+        )
+        .unwrap();
+    // Fixed on the flange: the plate turns into the flange's plane
+    let (wall, bend) = (2, 1);
+    let mut flat = layout.clone();
+    let before = flat.pieces[wall].frame;
+    flat.unfold(wall, &[bend]).unwrap();
+    assert_eq!(flat.pieces[wall].frame, before);
+    let (solid, _) = built(flat.clone());
+    let b = bounds(&solid);
+    assert!(b.max.z - b.min.z > H, "{b:?}");
+    assert!(b.max.y - b.min.y < T + 1e-6, "{b:?}");
+    flat.fold(&[bend]);
+    let (again, _) = built(flat);
+    let (direct, _) = built(layout);
+    let (a, d) = (bounds(&again), bounds(&direct));
+    assert!(a.min.abs_diff_eq(d.min, 1e-9) && a.max.abs_diff_eq(d.max, 1e-9));
+    assert!(plate_layout(settings(0.5)).unfold(0, &[3]).is_err());
+}

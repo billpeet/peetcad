@@ -880,9 +880,12 @@ fn reaches_into(span: (f64, f64), a: f64, b: f64) -> bool {
 /// the end of the bend joins them.
 fn straight_into_bends(layout: &Layout, piece: usize, far_top: bool, area: Area) -> Area {
     use peet_sheetmetal::layout::Edge2;
+    // A bend an unfold has laid flat is cut straight through, as the flange is
     let bends: Vec<_> = layout
         .bends()
-        .filter(|(_, b)| b.parent == piece || b.child == Some(piece))
+        .filter(|(i, b)| {
+            (b.parent == piece || b.child == Some(piece)) && !layout.flat_bends.contains(i)
+        })
         .map(|(_, b)| *b)
         .collect();
     if bends.is_empty() {
@@ -1975,4 +1978,117 @@ pub(crate) fn apply_form(
         warning = w;
     }
     Ok((out, warning))
+}
+
+/// The bends that faces belong to, each a bend piece of body `body` (the first face's
+/// body if `None`): the body, and the pieces.
+fn bends_of(
+    model: &Model,
+    bodies: &[Arc<Body>],
+    mut body: Option<usize>,
+    faces: &[FaceRef],
+) -> Result<(Option<usize>, Vec<usize>), FeatureError> {
+    let mut pieces = Vec::new();
+    for face in faces {
+        let found = find_face(bodies, face).ok_or_else(|| {
+            FeatureError(format!(
+                "A bend it refers to no longer exists ({}). Edit it and pick the bends again.",
+                model.describe_face(&face.name)
+            ))
+        })?;
+        if body.is_some_and(|b| b != found.body) {
+            return Err(FeatureError(
+                "The bends must be on the same sheet metal body as the fixed face.".to_owned(),
+            ));
+        }
+        body = Some(found.body);
+        let sheet = bodies[found.body].sheet.as_ref().ok_or_else(|| {
+            FeatureError("Pick a face of a bend of a sheet metal body.".to_owned())
+        })?;
+        let piece = sheet.faces[found.id.index()].piece();
+        if sheet.layout.pieces[piece].bend().is_none() {
+            return Err(FeatureError(format!(
+                "{} is not a bend's face: pick the bend's inside or outside face.",
+                model.describe_face(&face.name)
+            )));
+        }
+        if !pieces.contains(&piece) {
+            pieces.push(piece);
+        }
+    }
+    Ok((body, pieces))
+}
+
+/// Lays bends of a sheet metal body flat, the fixed face staying where it is.
+pub(crate) fn apply_unfold(
+    model: &Model,
+    bodies: &[Arc<Body>],
+    def: &crate::feature::UnfoldFeature,
+    seed: u64,
+) -> Result<Applied, FeatureError> {
+    let fixed = def.fixed.as_ref().ok_or_else(|| {
+        FeatureError(
+            "Pick the fixed face: a flat face of a flange, which stays where it is.".to_owned(),
+        )
+    })?;
+    let found = find_face(bodies, fixed).ok_or_else(|| {
+        FeatureError(format!(
+            "The fixed face no longer exists ({}).",
+            model.describe_face(&fixed.name)
+        ))
+    })?;
+    let sheet = bodies[found.body]
+        .sheet
+        .as_ref()
+        .ok_or_else(|| FeatureError("The fixed face is not on a sheet metal body.".to_owned()))?;
+    let (piece, _, _) = sheet.flange_face(found.id).ok_or_else(|| {
+        FeatureError(
+            "The fixed face must be a flange's top or bottom face, not a bend or an edge."
+                .to_owned(),
+        )
+    })?;
+    let (_, bends) = bends_of(model, bodies, Some(found.body), &def.bends)?;
+    if sheet.layout.bends().next().is_none() {
+        return Err(FeatureError("The body has no bends to unfold.".to_owned()));
+    }
+    let mut layout = sheet.layout.clone();
+    layout.unfold(piece, &bends).map_err(FeatureError)?;
+    rebuild_sheet(model, bodies, found.body, layout, seed)
+}
+
+/// Folds bends an unfold laid flat back, the unfold's fixed face staying where it is.
+pub(crate) fn apply_fold(
+    model: &Model,
+    bodies: &[Arc<Body>],
+    def: &crate::feature::FoldFeature,
+    seed: u64,
+) -> Result<Applied, FeatureError> {
+    let (body, bends) = bends_of(model, bodies, None, &def.bends)?;
+    let index = body
+        .or_else(|| {
+            bodies.iter().position(|b| {
+                b.sheet
+                    .as_ref()
+                    .is_some_and(|s| !s.layout.flat_bends.is_empty())
+            })
+        })
+        .ok_or_else(|| {
+            FeatureError(
+                "No bends are laid flat: an unfold before the fold lays them flat.".to_owned(),
+            )
+        })?;
+    let Some(sheet) = bodies[index].sheet.as_ref() else {
+        return Err(FeatureError(
+            "The bends are not of a sheet metal body.".to_owned(),
+        ));
+    };
+    if bends.iter().any(|b| !sheet.layout.flat_bends.contains(b)) {
+        return Err(FeatureError(
+            "A bend it folds is not laid flat: pick bends an unfold before it laid flat."
+                .to_owned(),
+        ));
+    }
+    let mut layout = sheet.layout.clone();
+    layout.fold(&bends);
+    rebuild_sheet(model, bodies, index, layout, seed)
 }

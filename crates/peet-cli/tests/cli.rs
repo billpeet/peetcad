@@ -1207,6 +1207,79 @@ fn what_the_skills_say_about_operations_is_true() {
 }
 
 #[test]
+fn what_the_sheet_metal_skill_says_about_unfold_and_fold_is_true() {
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "sheet-metal")
+        .unwrap()
+        .1;
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"unfold\""))
+        .expect("a script with an unfold");
+    let ran = peet_with(&["run", "-q"], &script);
+    assert_eq!(ran.code, OK, "{}", ran.err);
+    let volume = |r: &Value| r["total"]["volume_mm3"].as_f64().unwrap();
+    let flat = ran.replies.iter().find(|r| r["op"] == "bodies").unwrap();
+    assert!(
+        (flat["bodies"][0]["min"][2].as_f64().unwrap()).abs() < 1e-9,
+        "{flat}"
+    );
+    assert!((flat["bodies"][0]["max"][2].as_f64().unwrap() - 2.0).abs() < 1e-9);
+    let masses: Vec<f64> = ran
+        .replies
+        .iter()
+        .filter(|r| r["op"] == "mass")
+        .map(volume)
+        .collect();
+    // The part before the cut is 22856.637 mm³
+    let flat_cut = 22856.637 - masses[0];
+    let straight_cut = 22856.637 - masses[1];
+    assert!((flat_cut - 404.0).abs() < 5.0, "{flat_cut}");
+    assert!((straight_cut - 543.0).abs() < 5.0, "{straight_cut}");
+
+    // A fold with nothing laid flat fails; so does an unfold fixed on a bend
+    let ran = peet_with(
+        &["run", "-q", "--keep-going"],
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Wall", "length": 15, "edge": {"between": [[0, 0, 2], [60, 0, 2]]}}
+{"op": "fold"}
+{"op": "faces"}
+"#,
+    );
+    assert_eq!(ran.replies[3]["created"][0]["status"], "failed");
+    let bend = ran.replies[4]["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["made_by"][0]["side"] == "bend")
+        .unwrap()["index"]
+        .clone();
+    let ran = peet_with(
+        &["run", "-q", "--keep-going"],
+        &format!(
+            r#"{{"op": "sketch", "on": "top", "draw": [{{"type": "rectangle", "from": [0, 0], "to": [60, 40]}}]}}
+{{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}}
+{{"op": "edge_flange", "name": "Wall", "length": 15, "edge": {{"between": [[0, 0, 2], [60, 0, 2]]}}}}
+{{"op": "unfold", "fixed": {{"body": 0, "index": {bend}}}}}
+{{"op": "unfold", "fixed": {{"feature": "Base-Flange1", "side": "top"}}, "bends": [{{"body": 0, "index": {bend}}}]}}
+"#
+        ),
+    );
+    assert_eq!(
+        ran.replies[3]["created"][0]["status"], "failed",
+        "{}",
+        ran.replies[3]
+    );
+    assert_eq!(
+        ran.replies[4]["created"][0]["status"], "ok",
+        "{}",
+        ran.replies[4]
+    );
+}
+
+#[test]
 fn every_operation_that_adds_a_feature_is_named_in_a_skill() {
     // AGENTS.md asks for this: a feature an agent isn't told about is not finished.
     let ops = peet(&["ops"]);

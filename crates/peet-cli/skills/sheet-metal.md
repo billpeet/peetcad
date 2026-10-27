@@ -588,6 +588,50 @@ A gutter (a mitre flange) mirrored to the other end of a plate:
   the plate's top face. Once flanges exist they have `top` faces of their own (made by
   the flange features), so name the feature that made the face you want.
 
+## Unfold and fold
+
+`unfold` lays bends flat and `fold` folds them back, as SolidWorks' Unfold and Fold do.
+Between the two, features are made on the part as it lies, partly or wholly flat, and the
+fold carries them back round the bends. Use the pair to cut something that is drawn flat
+but must also be right with the bends folded (in a configuration that suppresses the
+pair), or to mirror a SolidWorks part that has them. A plain cut across a bend needs
+neither: `sheet_cut` draws over the blank already.
+
+- `fixed`: a flange's `top` or `bottom` face, which stays where it is. A bend's face or
+  an edge face is refused.
+- `bends`: a face of each bend to lay flat (`{"feature": "Wall1", "side": "bend", ...}`;
+  `peet faces` lists them). Leave it out to lay every bend flat. A face that is not a
+  bend's is refused.
+- `fold` takes `bends` the same way; left out, it folds every bend laid flat, the
+  unfold's fixed face staying put. It fails if no bend is flat (no unfold before it).
+- Between them, sketch on the fixed face and use `sheet_cut` with an `end`: it cuts
+  straight through the part as it lies, the flat flanges as flat sheet and the bends still
+  folded as `end` cuts them. Suppress the `unfold` and the `fold` together (in a
+  configuration) and the same cut goes straight through the folded part instead.
+- Add flanges before the unfold, not between it and the fold.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-50, -40], "to": [50, 40]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Walls", "length": 20, "edges": [{"between": [[-50, -40, 0], [50, -40, 0]]}, {"between": [[50, 40, 0], [-50, 40, 0]]}]}
+{"op": "unfold", "fixed": {"feature": "Base-Flange1", "side": "top"}}
+{"op": "bodies"}
+{"op": "sketch", "name": "Slot", "on": {"at": [0, 0, 2], "normal": [0, 0, 1]}, "draw": [{"type": "rectangle", "from": [-5, 30], "to": [5, 50]}]}
+{"op": "sheet_cut", "sketch": "Slot", "end": "through_all"}
+{"op": "fold"}
+{"op": "mass"}
+{"op": "add_configuration", "name": "Folded cut"}
+{"op": "suppress", "feature": "Fold1", "on": true}
+{"op": "suppress", "feature": "Unfold1", "on": true}
+{"op": "mass"}
+```
+
+The walls hang down from the plate. While unfolded, `bodies` shows the part flat (z
+from 0 to 2): the slot runs 20 mm from the plate across the flat bend into the wall, and
+folded it is a slot that turns down the wall. In `Folded cut` the same cut goes straight
+down through the folded part: it notches the wall over its whole height, and takes more
+(about 540 mm³ against 400). Suppress the fold first: a fold with nothing laid flat fails.
+
 ## Flat pattern and export
 
 - `bend_table`: the flat size, and each bend's direction, angle, radius and allowance.

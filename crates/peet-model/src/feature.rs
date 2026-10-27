@@ -799,6 +799,26 @@ impl From<&BreakCornerFeature> for BreakCornerFeatureV11 {
     }
 }
 
+/// Bends of a sheet metal body laid flat, as SolidWorks' unfold does: the features after
+/// it, up to a [`FoldFeature`], are made on the part with those bends flat (a cut across
+/// where a bend was is cut through the flat sheet), and the fold carries them back round
+/// the bends.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UnfoldFeature {
+    /// The flat face of a flange that stays where it is.
+    pub fixed: Option<FaceRef>,
+    /// The bends to lay flat, each by one of its faces. Empty: every bend of the body.
+    pub bends: Vec<FaceRef>,
+}
+
+/// Bends laid flat by an [`UnfoldFeature`] folded again, the unfold's fixed face staying
+/// where it is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FoldFeature {
+    /// The bends to fold, each by one of its faces. Empty: every bend laid flat.
+    pub bends: Vec<FaceRef>,
+}
+
 /// How the corners where flanges meet are treated.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CornerFeature {
@@ -993,6 +1013,8 @@ pub enum FeatureKind {
     MoveBody(Box<crate::bodies::MoveBodyFeature>),
     InsertPart(Box<crate::bodies::InsertPartFeature>),
     StructuralMember(Box<crate::weldment::StructuralMemberFeature>),
+    Unfold(Box<UnfoldFeature>),
+    Fold(Box<FoldFeature>),
 }
 
 impl FeatureKind {
@@ -1014,6 +1036,8 @@ impl FeatureKind {
             Self::MiterFlange(_) => "Miter flange",
             Self::Corner(_) => "Corner",
             Self::BreakCorner(_) => "Break corner",
+            Self::Unfold(_) => "Unfold",
+            Self::Fold(_) => "Fold",
             Self::Form(f) => match f.kind {
                 FormKind::Dimple => "Dimple",
                 FormKind::Emboss => "Emboss",
@@ -1066,6 +1090,8 @@ impl FeatureKind {
             Self::MiterFlange(_) => "Miter-Flange",
             Self::Corner(_) => "Corner",
             Self::BreakCorner(_) => "Break-Corner",
+            Self::Unfold(_) => "Unfold",
+            Self::Fold(_) => "Fold",
             Self::Form(f) => match f.kind {
                 FormKind::Dimple => "Dimple",
                 FormKind::Emboss => "Emboss",
@@ -1126,6 +1152,8 @@ impl FeatureKind {
                 | Self::MoveBody(_)
                 | Self::InsertPart(_)
                 | Self::StructuralMember(_)
+                | Self::Unfold(_)
+                | Self::Fold(_)
         )
     }
 
@@ -1144,6 +1172,8 @@ impl FeatureKind {
                 | Self::BreakCorner(_)
                 | Self::Form(_)
                 | Self::ConvertToSheet(_)
+                | Self::Unfold(_)
+                | Self::Fold(_)
         )
     }
 
@@ -1368,6 +1398,16 @@ impl FeatureKind {
                 out.push(m.profile);
                 out.extend(&m.paths);
             }
+            Self::Unfold(u) => {
+                for f in u.fixed.iter().chain(&u.bends) {
+                    out.extend(f.name.features());
+                }
+            }
+            Self::Fold(f) => {
+                for b in &f.bends {
+                    out.extend(b.name.features());
+                }
+            }
         }
         out.sort_unstable();
         out.dedup();
@@ -1459,7 +1499,12 @@ impl FeatureKind {
                 &h.countersink_diameter,
                 &h.countersink_angle,
             ],
-            Self::Import(_) | Self::Sweep(_) | Self::Loft(_) | Self::InsertPart(_) => Vec::new(),
+            Self::Import(_)
+            | Self::Sweep(_)
+            | Self::Loft(_)
+            | Self::InsertPart(_)
+            | Self::Unfold(_)
+            | Self::Fold(_) => Vec::new(),
             Self::ConvertToSheet(c) => c.scalars(),
             Self::MoveBody(m) => {
                 let mut v: Vec<&Scalar> = m.translate.iter().chain(&m.rotate).collect();
@@ -1642,6 +1687,7 @@ macro_rules! slots {
                     ]
                 }
                 Self::StructuralMember(m) => vec![("rotate", Angle, & $($m)? m.rotate)],
+                Self::Unfold(_) | Self::Fold(_) => Vec::new(),
                 Self::Sketch(_)
                 | Self::Axis(_)
                 | Self::CoordSystem(_)
@@ -1896,7 +1942,9 @@ impl From<FeatureKind> for FeatureKindV9 {
             FeatureKind::BreakCorner(v) => Self::BreakCorner(Box::new((&*v).into())),
             FeatureKind::MoveBody(_)
             | FeatureKind::InsertPart(_)
-            | FeatureKind::StructuralMember(_) => {
+            | FeatureKind::StructuralMember(_)
+            | FeatureKind::Unfold(_)
+            | FeatureKind::Fold(_) => {
                 panic!("schemas before 12 have bodies moved or parts inserted")
             }
         }
@@ -2161,7 +2209,9 @@ impl From<FeatureKind> for FeatureKindV11 {
             FeatureKind::BreakCorner(v) => Self::BreakCorner(Box::new((&*v).into())),
             FeatureKind::MoveBody(_)
             | FeatureKind::InsertPart(_)
-            | FeatureKind::StructuralMember(_) => {
+            | FeatureKind::StructuralMember(_)
+            | FeatureKind::Unfold(_)
+            | FeatureKind::Fold(_) => {
                 panic!("schemas before 12 have bodies moved or parts inserted")
             }
         }
@@ -2422,7 +2472,9 @@ impl From<&FeatureKind> for FeatureKindV8 {
             FeatureKind::BreakCorner(v) => Self::BreakCorner(Box::new((&**v).into())),
             FeatureKind::MoveBody(_)
             | FeatureKind::InsertPart(_)
-            | FeatureKind::StructuralMember(_) => {
+            | FeatureKind::StructuralMember(_)
+            | FeatureKind::Unfold(_)
+            | FeatureKind::Fold(_) => {
                 panic!("schemas before 12 have no {}", kind.type_name())
             }
         }

@@ -69,7 +69,7 @@ pub use feature::{
     JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, PatternDef, PatternFeature,
     PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind, SheetCutEnd, SheetCutFeature,
     SheetSettingsDef,
-    SketchFeature, SketchedBendFeature, StdAxis, StdPlane,
+    SketchFeature, SketchedBendFeature, StdAxis, StdPlane, UnfoldFeature, FoldFeature,
 };
 pub use history::History;
 pub use hole::{HoleEnd, HoleFeature, HoleFit, HoleKind, HoleSizes, METRIC, MetricSize};

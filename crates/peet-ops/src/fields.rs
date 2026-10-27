@@ -30,7 +30,7 @@ use peet_model::{
 use peet_model::{
     BlendFeature, BlendKind, ConvertToSheetFeature, DraftFeature, HoleEnd, HoleFeature, HoleFit,
     BodyMate, HoleKind, InsertPartFeature, LoftFeature, METRIC, MateGeom, MateKind, MemberCorner,
-    MoveBodyFeature, PartSource,
+    FoldFeature, MoveBodyFeature, PartSource, UnfoldFeature,
     RevolveAxisRef, RevolveFeature, ShellFeature, StructuralMemberFeature, SweepFeature,
 };
 use peet_sheetmetal::corner::{CornerKind, CornerRelief};
@@ -1430,6 +1430,26 @@ feature_args! {
 }
 
 feature_args! {
+    /// Bends of a sheet metal body laid flat, a face staying where it is (SolidWorks' unfold).
+    Unfold: FeatureKind::Unfold(f) => &mut **f,
+        UnfoldFeature { fixed, bends } => {
+    /// The flat face of a flange that stays where it is.
+    fixed: Option<FaceSel> as OptFace = fixed,
+    /// A face of each bend to lay flat. None: every bend.
+    bends: Vec<FaceSel> as Faces = bends,
+    }
+}
+
+feature_args! {
+    /// Bends an unfold laid flat folded again (SolidWorks' fold).
+    Fold: FeatureKind::Fold(f) => &mut **f,
+        FoldFeature { bends } => {
+    /// A face of each bend to fold. None: every bend laid flat.
+    bends: Vec<FaceSel> as Faces = bends,
+    }
+}
+
+feature_args! {
     /// A flange with a sketched profile along several edges of one face.
     MiterFlange: FeatureKind::MiterFlange(f) => &mut **f,
         MiterFlangeFeature { sketch, edges, gap, offset_start, offset_end } => {
@@ -2144,6 +2164,12 @@ feature_ops! {
     BreakCorner(BreakCorner) "break_corner"
         "Round or chamfer corners of a sheet metal body: each the edge through the sheet where two sides of a flat face meet."
         => Some(FeatureKind::BreakCorner(Box::new(BreakCornerFeature::new(Vec::new())))),
+    Unfold(Unfold) "unfold"
+        "Lay bends of a sheet metal body flat, the fixed face staying put (SolidWorks' unfold): features after it are made on the flat part until a fold."
+        => Some(FeatureKind::Unfold(Box::new(UnfoldFeature { fixed: None, bends: Vec::new() }))),
+    Fold(Fold) "fold"
+        "Fold bends an unfold laid flat back round, carrying what was cut while they were flat (SolidWorks' fold)."
+        => Some(FeatureKind::Fold(Box::new(FoldFeature { bends: Vec::new() }))),
     Corner(Corner) "corner"
         "How the corners between flanges are treated (every corner if no faces are given)."
         => Some(FeatureKind::Corner(Box::new(CornerFeature::new(Vec::new())))),
@@ -2253,6 +2279,8 @@ fn word_of(kind: &FeatureKind) -> Option<&'static str> {
         FeatureKind::MiterFlange(_) => "miter_flange",
         FeatureKind::Corner(_) => "corner",
         FeatureKind::BreakCorner(_) => "break_corner",
+        FeatureKind::Unfold(_) => "unfold",
+        FeatureKind::Fold(_) => "fold",
         FeatureKind::Form(_) => "dimple",
         FeatureKind::Pattern(p) => match p.def {
             PatternDef::Linear { .. } => "linear_pattern",

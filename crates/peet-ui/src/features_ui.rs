@@ -788,6 +788,8 @@ pub fn reference_panel(
             | FeatureKind::MiterFlange(_)
             | FeatureKind::Corner(_)
             | FeatureKind::BreakCorner(_)
+            | FeatureKind::Unfold(_)
+            | FeatureKind::Fold(_)
             | FeatureKind::Form(_)
             | FeatureKind::Pattern(_)
             | FeatureKind::Mirror(_)

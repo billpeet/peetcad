@@ -924,7 +924,14 @@ fn sheet_copies(
                         .map(|(i, _)| i)
                         .collect();
                     layout.add_cut_on(area, in_line);
-                } else if piece == on.piece {
+                } else if piece == on.piece
+                    || probes.iter().all(|q| {
+                        let at = world(*q);
+                        frame.to_local(at).distance(on.frame.to_local(at)) < 1e-6
+                    })
+                {
+                    // On the original's flange, or on one an unfold has laid out in line with
+                    // it: cut from every piece there, the flat bends between them too
                     layout.add_cut(area);
                 } else {
                     layout.add_cut_on(area, vec![piece]);

@@ -1188,6 +1188,18 @@ impl Engine {
                     }
                 }
             }
+            FeatureKind::Unfold(u) => {
+                let key = hash::of(&(26u8, id, &**u, run.body_key));
+                self.solid_feature(id, key, run, |bodies| {
+                    sheet::apply_unfold(model, bodies, u, key)
+                })
+            }
+            FeatureKind::Fold(f) => {
+                let key = hash::of(&(27u8, id, &**f, run.body_key));
+                self.solid_feature(id, key, run, |bodies| {
+                    sheet::apply_fold(model, bodies, f, key)
+                })
+            }
             FeatureKind::Form(f) => {
                 let inputs = (|| {
                     let (plane, sketch) = ctx.sketch_input(f.sketch)?;
