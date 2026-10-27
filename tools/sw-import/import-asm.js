@@ -325,6 +325,174 @@ function endOf(e, byPath, assembly, partFile) {
   return { component, ...where, element, sign: signOf(dir), ...(e.entity ? {} : { guessed: true }) };
 }
 
+// ---- Equations ----
+
+/** A component's name as SolidWorks writes it in equations (`Door<1>.Part`, `Door-1.Part`), as PeetCAD's. */
+const componentName = t => {
+  const bare = t.trim().replace(/\.(part|assembly|sldprt|sldasm)$/i, "");
+  const m = /^(.*)<(\d+)>$/.exec(bare);
+  return m ? `${m[1]}-${m[2]}` : bare;
+};
+const isComponentRef = t => /\.(part|assembly)$/i.test(t.trim()) || /<\d+>$/.test(t.trim());
+const WORD = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const globalName = t => (t = t.trim()) && !/["@]/.test(t) ? t : t.replace(/[^A-Za-z0-9_]/g, "_").replace(/^(?=\d)/, "_");
+const inExpression = n => WORD.test(n) ? n : `"${n}"`;
+const stripEnd = e => { const { guessed, element, sign, ...rest } = e; return rest; };
+
+/**
+ * The two faces a reference dimension of the assembly measures between. The export has only its value and
+ * direction: of the flat mate ends facing along it, a pair on two components that far apart, preferring one
+ * on a component the equation's target is mated to. All such pairs measure the same while the assembly holds.
+ */
+function referenceEnds(cfg, rd, target, byPath, name, partFile) {
+  const L = rd.lineDirection;
+  const ends = [];
+  const matedTo = new Set();
+  walkFeatures(cfg.features, f => {
+    if (!/^Mate/.test(f.type) || !f.mate || f.suppressed) return;
+    const comps = (f.mate.entities || []).map(e => e.component);
+    if (target && comps.includes(target)) comps.forEach(c => c && c !== target && matedTo.add(c));
+    for (const e of f.mate.entities || []) {
+      if (!e.params || e.referenceType !== 2 || !e.component || e.component === name) continue;
+      if (Math.abs(Math.abs(dot3(e.params.slice(3, 6), L)) - 1) > 1e-6) continue;
+      ends.push({ e, h: dot3(e.params.slice(0, 3), L) });
+    }
+  });
+  const pairs = [];
+  for (const x of ends) for (const y of ends) {
+    if (x.e.component === y.e.component || x.e.component === target || y.e.component === target) continue;
+    if (x.h >= y.h || Math.abs(y.h - x.h - rd.value) > 1e-7) continue;
+    pairs.push([x, y]);
+  }
+  const near = p => matedTo.has(p[0].e.component) || matedTo.has(p[1].e.component) ? 1 : 0;
+  pairs.sort((p, q) => near(q) - near(p));
+  for (const [x, y] of pairs) {
+    const a = endOf(x.e, byPath, name, partFile), b = endOf(y.e, byPath, name, partFile);
+    if (!a.error && !b.error) return { a: stripEnd(a), b: stripEnd(b) };
+  }
+  // Failing those, any two flat faces of the components (where SolidWorks has them) that far apart
+  const faces = [];
+  for (const c of cfg.components || []) {
+    if (c.path.includes("/") || c.path === target || c.suppression === 0) continue;
+    const file = partFile(c);
+    if (!file) continue;
+    const m = matrixOf(c.transform);
+    for (const f of geometryOf(file).faces) {
+      if (f.surface !== "plane" || !f.normal) continue;
+      const n = toWorld({ R: m.R, t: [0, 0, 0] }, f.normal);
+      if (Math.abs(Math.abs(dot3(n, L)) - 1) > 1e-6) continue;
+      faces.push({ c: c.path, h: dot3(toWorld(m, f.center.map(v => v / MM)), L), sel: { component: [c.path], face: { body: f.body, index: f.index } } });
+    }
+  }
+  const found = [];
+  for (const x of faces) for (const y of faces) {
+    if (x.c !== y.c && x.h < y.h && Math.abs(y.h - x.h - rd.value) <= 1e-7) found.push([x, y]);
+  }
+  const nearFace = p => matedTo.has(p[0].c) || matedTo.has(p[1].c) ? 1 : 0;
+  found.sort((p, q) => nearFace(q) - nearFace(p));
+  return found.length ? { a: found[0][0].sel, b: found[0][1].sel, guessed: true } : null;
+}
+
+/**
+ * An assembly's equations, as SolidWorks has them: global variables become parameters (a disabled one keeps its
+ * value, as in SolidWorks), a component's dimension set by an equation an equation of the assembly (`set` with
+ * an expression), a component suppressed by a condition a suppression expression, and the reference dimensions
+ * they read reference dimensions. A disabled equation is not imported: SolidWorks doesn't apply it. Each is kept
+ * only if PeetCAD works it out to SolidWorks' value.
+ */
+function importEquations(peet, cfg, report, byPath, want, name) {
+  report.equations = [];
+  const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partIn(comp.file, comp.configuration).path || null : null;
+  const globals = new Map();
+  const references = new Set();
+  const annotations = ((cfg.features || []).find(f => f.type === "DetailCabinet") || {}).dimensions || [];
+  const parse = e => /^\s*"([^"]+)"\s*=\s*([\s\S]*)$/.exec(e.expression);
+  // Disabled global variables keep their value
+  for (const e of cfg.equations) {
+    const m = parse(e);
+    if (!m || !e.disabled || !e.globalVariable || isComponentRef(m[1]) || m[1].includes("@")) continue;
+    const n = globalName(m[1]);
+    if (peet.apply({ op: "set_parameter", name: n, value: String(e.value || 0) }).ok) globals.set(m[1].trim(), inExpression(n));
+  }
+  const translate = (text, target) => {
+    let failed = null;
+    let out = text.replace(/"([^"]*)"/g, (whole, inner) => {
+      const ref = inner.trim();
+      if (/^(un)?suppressed$/i.test(ref)) return /^un/i.test(ref) ? "0" : "1";
+      if (/@Annotations$/i.test(ref)) {
+        const rdName = ref.split("@")[0];
+        if (!references.has(rdName)) {
+          const rd = annotations.find(d => d.name === rdName);
+          const ends = rd && referenceEnds(cfg, rd, target, byPath, name, partFile);
+          if (!ends) { failed = `it reads ${ref}, whose ends were not found`; return "0"; }
+          const { guessed, ...between } = ends;
+          if (guessed) report.notes.push(`${rdName}@Annotations is measured between two faces that are as far apart as SolidWorks' is, which may not be the ones it measures (the export does not say)`);
+          const reply = peet.apply({ op: "reference_dimension", name: rdName, ...between });
+          const v = reply.reference && reply.reference.value;
+          if (!reply.ok || typeof v !== "number" || Math.abs(v - rd.value * MM) > 1e-4) {
+            failed = `its reference dimension ${rdName} measures ${v} where SolidWorks' is ${tidy(rd.value * MM)}`;
+            return "0";
+          }
+          references.add(rdName);
+        }
+        return `"${ref}"`;
+      }
+      if (ref.includes("@")) {
+        // A dimension of a component (PeetCAD reads SolidWorks' form of it), or a mate's value
+        if (!peet.ask({ op: "dimensions", name: ref }).ok) { failed = `it reads ${ref}, which PeetCAD's part does not have`; return "0"; }
+        return `"${ref}"`;
+      }
+      if (!globals.has(ref)) { failed = `it reads the variable ${ref}, which is not defined`; return "0"; }
+      return globals.get(ref);
+    });
+    out = out.replace(/\b(un)?suppressed\b/gi, w => /^un/i.test(w) ? "0" : "1");
+    out = out.replace(/([<>])\s+(?=[=>])/g, "$1");
+    return failed ? { failed } : { value: out.trim() };
+  };
+  for (const e of cfg.equations) {
+    const row = { equation: e.expression.trim(), value: e.value };
+    report.equations.push(row);
+    const m = parse(e);
+    if (!m) { row.result = "failed"; row.why = "not understood"; continue; }
+    const target = m[1].trim();
+    if (e.disabled) {
+      row.result = "disabled";
+      if (globals.has(target)) row.note = "a parameter with SolidWorks' value";
+      continue;
+    }
+    const mark = peet.backup();
+    const fail = why => { peet.restore(mark); row.result = "failed"; row.why = why; };
+    const suppression = isComponentRef(target) && !target.includes("@");
+    const last = target.split("@").pop();
+    const component = suppression ? componentName(target) : target.includes("@") && isComponentRef(last) ? componentName(last) : null;
+    if (component && !want.has(component)) { fail(`it sets something of ${component}, which was not imported`); continue; }
+    const t = translate(m[2], component);
+    if (t.failed) { fail(t.failed); continue; }
+    if (suppression) {
+      const reply = peet.apply({ op: "set_suppression_expression", component, value: t.value });
+      if (!reply.ok) { fail(reply.error); continue; }
+      const c = (peet.ask({ op: "components" }).components || []).find(x => x.name === component);
+      const swSuppressed = (byPath.get(component) || {}).suppression === 0;
+      if (!c || (c.status === "suppressed") !== swSuppressed) { fail(`PeetCAD has ${component} ${c && c.status === "suppressed" ? "suppressed" : "not suppressed"} by it, SolidWorks the other way`); continue; }
+    } else if (e.globalVariable && !target.includes("@")) {
+      const n = globalName(target);
+      const reply = peet.apply({ op: "set_parameter", name: n, value: t.value || String(e.value || 0) });
+      if (!reply.ok) { fail(reply.error); continue; }
+      globals.set(target, inExpression(n));
+    } else if (target.includes("@")) {
+      const reply = peet.apply({ op: "set", name: target, value: t.value });
+      if (!reply.ok) { fail(reply.error); continue; }
+      const now = peet.ask({ op: "dimensions", name: target });
+      const v = now.ok && now.dimensions && now.dimensions[0] && now.dimensions[0].value;
+      if (typeof v !== "number" || Math.abs(v - e.value) > 1e-4 * Math.max(1, Math.abs(e.value))) { fail(`PeetCAD works it out to ${v} where SolidWorks has ${tidy(e.value)}`); continue; }
+    } else { fail("it sets something PeetCAD has no address for"); continue; }
+    row.result = "imported";
+  }
+  const live = report.equations.filter(r => r.result !== "disabled");
+  const left = live.filter(r => r.result !== "imported").length;
+  if (left) report.notes.push(`${left} of ${live.length} live equations not imported`);
+}
+
 // ---- Import ----
 
 const reports = [];
@@ -344,7 +512,6 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
     cfg = exp.configurations.find(c => c.name === exp.activeConfiguration) || exp.configurations[0];
     report.configuration = cfg.name;
     if (exp.configurations.length > 1) report.notes.push(`${exp.configurations.length} configurations: only "${cfg.name}" is imported (PeetCAD's assemblies have none, parity A5)`);
-    if ((cfg.equations || []).length) report.notes.push(`${cfg.equations.length} equations not imported (parity A6, A7)`);
   }
   const all = listed || cfg.components || [];
   // In the sub-assembly's own coordinates
@@ -385,6 +552,9 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
     want.set(c.path, m);
     if (c.suppression === 0) peet.apply({ op: "suppress", component: c.path });
   }
+
+  // Equations, before the mates: a part an equation sizes (Plinth Folded's pipes) is mated at its size
+  if (cfg && (cfg.equations || []).length) importEquations(peet, cfg, report, byPath, want, name);
 
   // Mates
   if (cfg) walkFeatures(cfg.features, f => {
@@ -553,6 +723,7 @@ for (const file of inputs.filter(f => !only || path.basename(f).toLowerCase().in
     components: (r.components || []).length, componentsLeft: (r.components || []).filter(c => c.result !== "inserted").length,
     mates: mates.length, matesImported: mates.filter(m => m.result === "imported").length,
     matesNotSupported: mates.filter(m => m.result === "not supported").length, standIns: (r.standIns || []).length,
+    equations: (r.equations || []).filter(e => e.result !== "disabled").length, equationsImported: (r.equations || []).filter(e => e.result === "imported").length,
   };
   summary.push(row);
   console.log(`${r.verdict.padEnd(60)} ${name}  (components ${row.components - row.componentsLeft}/${row.components}, mates ${row.matesImported}/${row.mates}, off ${r.off_mm} mm)`);

@@ -265,8 +265,12 @@ impl Model {
 
     /// The value of every dimension as it is now, worked out against the parameters (and
     /// the dimension values they have now).
-    fn dimension_table(&self) -> DimensionValues {
-        let mut table = BTreeMap::new();
+    fn dimension_table(&self, components: &[(String, Quantity)]) -> DimensionValues {
+        let mut table: BTreeMap<String, Quantity> = components.iter().cloned().collect();
+        // An assembly's own: its mates' values and its reference dimensions.
+        for (a, q) in self.assembly_values() {
+            table.entry(a).or_insert(q);
+        }
         for f in self.features() {
             match &f.kind {
                 FeatureKind::Sketch(s) => {
@@ -297,10 +301,14 @@ impl Model {
     /// Works out the parameters and the value of every dimension, which expressions read
     /// by address. Dimensions and parameters may read each other: they are worked out
     /// again until nothing changes (a few rounds at most).
+    ///
+    /// In an assembly they are its components' dimensions and parameters (see
+    /// [`crate::equations`]), its mates' values and its reference dimensions.
     pub fn refresh_dimension_values(&mut self) {
+        let components = self.component_values();
         for round in 0.. {
             self.parameters.evaluate();
-            let next = self.dimension_table();
+            let next = self.dimension_table(&components);
             let settled = next.same(&self.parameters.dimensions);
             self.parameters.dimensions = next;
             if settled {

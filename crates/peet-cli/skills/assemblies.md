@@ -1,6 +1,6 @@
 ---
 name: assemblies
-description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
+description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis), equations that size and suppress components from the assembly (SolidWorks addresses like Height@Sketch1@Door-1, reference dimensions, making a component independent), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
 ---
 
 # Assemblies
@@ -134,7 +134,7 @@ rough placement decides which of several possible positions is taken.
 - `set` on an assembly takes a mate's value by SolidWorks' name for it, `D1@` the mate's
   name (`D1@Distance1`, in any case), as FabSys sets it, or an assembly parameter by its
   name. An assembly has no configurations, so `set` there takes none. A dimension of a
-  part (`Width@Sketch1`) is set in the part: `open_component` it.
+  component's part is set from the assembly too: see "Equations" below.
 
 ```jsonl
 {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
@@ -385,6 +385,71 @@ None of these moves a component or changes a mate: they are about what is seen.
   `rename` and `delete` take `explode_step` in place of `feature`. Deleting a component
   takes it out of its steps, and a step left with none goes too.
 - `explode` with no steps fails: add one first.
+
+## Equations: sizing and suppressing components from the assembly
+
+An assembly reads and sets its components' dimensions as SolidWorks' assembly equations
+and FabSys do. Use it when one part's size follows another's (a shield 50 narrower than
+its door), when a component is there only at some sizes (a third hinge on a tall door),
+or to set a part's size while building the assembly.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [800, 40], "as": "r"}, {"type": "coincident", "of": ["r.bottom.start", "origin"]}, {"type": "length", "of": ["r.bottom"], "value": 800, "name": "Width"}, {"type": "length", "of": ["r.left"], "value": 40, "name": "Height"}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 2}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [700, 30], "as": "r"}, {"type": "coincident", "of": ["r.bottom.start", "origin"]}, {"type": "length", "of": ["r.bottom"], "value": 700, "name": "Width"}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 2}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Door-1"}
+{"op": "insert", "part": 2, "name": "Shield-1", "at": [0, 0, 20]}
+{"op": "insert", "part": 2, "name": "Stiffener-1", "at": [0, 0, 40]}
+{"op": "make_independent", "component": "Stiffener-1", "name": "Stiffener"}
+{"op": "set", "name": "Height@Sketch1@Door-1", "value": 1600}
+{"op": "set", "name": "Width@Sketch1@Shield-1", "value": "\"Width@Sketch1@Door-1\" - 50"}
+{"op": "set_suppression_expression", "component": "Stiffener-1", "value": "iif(\"Height@Sketch1@Door-1\" > 1500, 0, 1)"}
+{"op": "reference_dimension", "a": {"component": "Door-1", "face": {"normal": [0, 0, 1]}}, "b": {"component": "Shield-1", "face": {"normal": [0, 0, -1]}}}
+{"op": "set_parameter", "name": "gap", "value": "\"RD1@Annotations\""}
+{"op": "suppress", "feature": "Extrude1@Stiffener-1"}
+{"op": "suppress", "feature": "Extrude1@Stiffener-1", "on": false}
+{"op": "dimensions"}
+{"op": "dimensions", "component": "Shield-1"}
+{"op": "set", "name": "Height@Sketch1@Door-1", "value": 1200}
+{"op": "components"}
+```
+
+The shield ends 750 wide and follows the door's width; the stiffener is there while the
+door is over 1500 high, so the last `set` suppresses it.
+
+- **An address that reaches into a component** is the part's address followed by the
+  component's name: `Height@Sketch1@Door-1` (a dimension), `Thickness@Door-1` (a
+  parameter of its part), `Height@Sketch1@Door-1@Door Assembly-1` (through a
+  sub-assembly). SolidWorks' forms are taken too: `Height@Sketch1@Door<1>.Part`,
+  `Door-1.Part`. As in SolidWorks, a component's name is found in any case where only
+  one component matches. Quote it in an expression: `"Height@Sketch1@Door-1" - 20`.
+- **`set` with a number changes the part**, and so every component of it, as setting a
+  part's dimension in a SolidWorks assembly changes the part's file. A linked part's file
+  is written (the reply's `written`). To change one component alone, `make_independent`
+  it first: it gets a copy of the part called `name`, and is renamed `name-1` (FabSys's
+  `ResolveComponent`). Address it by its new name afterwards.
+- **`set` with an expression** that reads anything (`"Width@Sketch1@Door-1" - 50`) makes
+  an **equation** of the assembly: worked out again at every rebuild, so the part follows.
+  A number set later replaces it. An equation lives in the assembly: opened on its own,
+  the part has the value the equation last gave it.
+- **`set_suppression_expression` with `component`** suppresses the component while the
+  expression is not 0, and unsuppresses it while it is 0 (SolidWorks' `suppressed` is 1,
+  `unsuppressed` 0). It decides over `suppress` until cleared with `"value": null`.
+- **`suppress` with `"feature": "FEATURE@COMPONENT"`** suppresses (or with `"on": false`
+  unsuppresses) a feature of the component's part, in every instance of it.
+- **`reference_dimension`** measures the distance between two ends (as a mate's: two
+  parallel flat faces or planes, a point and a plane, points, lines) where the mates put
+  the components. Expressions read it as `RD1@Annotations`, as SolidWorks does, so a pipe
+  can be as long as the gap it spans. The reply's `reference.value` is what it measures.
+  `{"op": "delete", "reference_dimension": "RD1"}` removes it.
+- **`dimensions`** on an assembly lists its own values (`D1@` each distance mate,
+  `RD1@Annotations`), its `equations` and `references`; with `component`, the addresses
+  of that component's part from the assembly. An equation that can't be worked out (a
+  dimension that is gone, a component renamed) is listed under `failures` with why: fix
+  the address with `set` again.
 
 ## Changing a part of an assembly
 

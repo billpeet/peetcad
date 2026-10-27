@@ -147,7 +147,9 @@ fn expressions(doc: &Document, name: &str) -> Map<String, Value> {
 /// Every feature that failed to build, in tree order.
 pub fn failures(doc: &Document) -> Vec<Value> {
     if doc.is_assembly() {
-        return crate::assembly::problems(doc);
+        let mut out = crate::assembly::problems(doc);
+        out.extend(crate::equations::failures(doc));
+        return out;
     }
     doc.model
         .features()

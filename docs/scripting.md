@@ -187,7 +187,7 @@ rebuild measured).
 
 | Operation | Fields |
 |---|---|
-| `set` | `name` (an address, or a parameter), `value`, `configurations` (as for `edit`; a parameter: as for `set_parameter`). A reference dimension can't be set. An address's case doesn't matter where only one dimension matches it, as in SolidWorks. On an assembly: a mate's value `D1@MATE`, or a parameter, without `configurations` |
+| `set` | `name` (an address, or a parameter), `value`, `configurations` (as for `edit`; a parameter: as for `set_parameter`). A reference dimension can't be set. An address's case doesn't matter where only one dimension matches it, as in SolidWorks. On an assembly: a mate's value `D1@MATE`, a parameter, or a component's dimension `NAME@FEATURE@COMPONENT` (see Assemblies), without `configurations` |
 | `name_dimension` | `feature`, `dimension` (its name or field), `name`. A sketch dimension's name has no `"` or `@`; another feature's value may take a whole address |
 | `dimensions` | `feature`, `name`: every address, its feature, field, value, `driven` for a reference dimension, and each configuration's value where they differ |
 
@@ -669,6 +669,12 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `edit_mate` for width | `mate`, `mode`, and `distance` for Dimension or `percent` for Percent. `distance` alone edits a Dimension mate; `percent` alone selects/edits Percent. Rename, suppress and delete use the ordinary mate operations |
 | `edit_mate` | `mate`, and `distance` or `angle`, `flip` or `align`, `flip_dimension` |
 | `set` | `name` `D1@MATE` (SolidWorks' name for a mate's value, `D1@Distance6`), `value`: a distance or angle mate's value; or an assembly parameter by name |
+| `set` with a component | `name`: an address that reaches into a component, `NAME@FEATURE@COMPONENT` (`Height@Sketch1@Door-1`; SolidWorks' `Height@Sketch1@Door<1>.Part` and `Door-1.Part` too), a parameter of its part `NAME@COMPONENT`, through a sub-assembly `…@Door-1@Door Assembly-1`; `value`. A number sets the part, so every instance of it (a linked part's file is written: the reply's `written`); an expression is an equation of the assembly, worked out at every rebuild. A value replaces an equation on it |
+| `set_suppression_expression` with `component` | `value`: an expression of the assembly (nonzero suppresses, 0 unsuppresses: SolidWorks' `suppressed` and `unsuppressed`), or `null` to clear. It decides over `suppress` while it is set |
+| `suppress` with a component's feature | `feature`: `FEATURE@COMPONENT` (`Vent@Door-1`), `on`: suppresses the feature in the component's part (every instance; a linked part's file is written) |
+| `reference_dimension` | `a`, `b` (ends as a mate's: flat faces, planes, edges, vertices), `name` (default `RD1`, `RD2`, …): the distance between them, measured after the mates are solved, which expressions read as `RD1@Annotations`. The reply's `reference` has its `value`. `delete` takes `reference_dimension` |
+| `make_independent` | `component`, `name`: the component gets a copy of its part, called `name`, and is renamed `name-1` (SolidWorks' Make Independent, FabSys's `ResolveComponent`). A linked part's copy is written beside its file as `name.peet` |
+| `dimensions` on an assembly | the assembly's own values (mates' `D1@MATE`, reference dimensions' `RD1@Annotations`), its `equations` (`target`, `expression`, `suppresses`, `status`, `message`) and `references`; with `component`, that component's part's dimensions and parameters by their address from the assembly (`equation`: set by one); with `name`, the value at any address |
 | `rename`, `suppress`, `delete` | `mate` in place of `feature` |
 | `mates` | every mate (`id`, `name`, `type`, `a`, `b`, `distance` or `angle`, `flip`, `align` if one was given, `flip_dimension`, `status`, `message`) and the `freedom` left |
 
@@ -747,6 +753,19 @@ ends remain persistent references. Query replies give `a` and paired `b` as arra
 plus `mode`, and `distance` or `percent` when applicable. A single-axis `b` stays an
 object. Width mates keep the nearest orientation. Their properties show the pairs
 and allow mode/value editing.
+
+**Equations and reaching into components**, as SolidWorks' assembly equations and FabSys
+do. An expression of the assembly (a parameter, a mate's value, an equation) reads a
+component's dimension as `"Height@Sketch1@Door-1"` and a parameter of its part as
+`"Thickness@Door-1"`. A component's part is shared by all its instances, so a value set
+in it from the assembly reaches every instance, as SolidWorks changes the part's document
+(use `make_independent` first to change one instance alone). Equations are worked out at
+every rebuild, before the mates are solved: those that read what others set are worked
+out again, and if one reads a reference dimension, the parts it changed are rebuilt and
+the mates solved again until the values hold. An equation that can't be worked out is
+not a failed operation: it is listed under `failures` (`equation`, `expression`,
+`message`). An assembly's equations live in the assembly: the part keeps the value they
+last set, and a linked part's file is not written by them.
 
 **Linked parts** (desktop only: they are files on disk, and are refused in the browser).
 A linked part is read from its file when the assembly is opened, by `update_links`, and

@@ -13,6 +13,7 @@
 //! - [`naming`]: persistent names for faces, edges and vertices, so references survive
 //!   upstream edits.
 //! - [`dimensions`]: every dimension's address `NAME@FEATURE`, as SolidWorks names them.
+//! - [`equations`]: an assembly's equations, which read and set its components' dimensions.
 //! - [`config`]: configurations, named versions of the part that differ in what is
 //!   suppressed and in the parameters' values.
 //! - [`DependencyGraph`]: which feature uses which.
@@ -29,6 +30,7 @@ pub mod config;
 mod convert;
 pub mod dimensions;
 mod dressup;
+pub mod equations;
 mod extrude;
 pub mod feature;
 pub mod hash;
@@ -58,6 +60,7 @@ pub use assembly::{
 pub use bodies::{InsertPartFeature, MoveBodyFeature, PartSource, body_motion};
 pub use config::{ConfigId, Configuration, Scope, Slot, SlotValue};
 pub use convert::ConvertToSheetFeature;
+pub use equations::{Equation, EquationTarget, ReferenceDimension};
 pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
 pub use extrude::{
     EndCondition, Extrude, ExtrudeInput, Operation, RegionSelection, apply_extrude, default_regions,
