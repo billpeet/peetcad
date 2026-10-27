@@ -106,7 +106,7 @@ read off SolidWorks' body (8), fillets on a sheet's corners likewise (5), sketch
 left out (2); a part can be in more than one of these. Those have the right shape and do
 not follow the part when it changes.
 
-**Beyond shape**, on 23 October and after round 3 (27 October, `run-m8`;
+**Beyond shape**, on 23 October and after round 3 (27 October, `run-m9`, from the fifth export;
 `scratch\beyond.js` counts it):
 
 | | 23 Oct | 27 Oct | Of (27 Oct) |
@@ -463,6 +463,12 @@ Seven pieces of work, each in a worktree; what each changed:
 - **The exporter, format 5.** Members newer than its 2018 interop are read by name where
   SolidWorks has them; on 2018 that is each pattern instance's transform. Sketch texts
   carry their font, height and spacing.
+
+The fifth export (`exports\out-all-v5`, format 5, 27 October) changes nothing for the worse
+(`run-m9` against `run-m8`). Meter Arm, Meter Bracket, Meter Panel and the Meter Panel
+Movement assembly had been edited on the NAS since the fourth (Meter Bracket is 2% bigger)
+and still match; Meter Bracket_old and two Meter Movement assemblies are gone from it.
+Run against `exports\step-v5`, the fifth export's STEP files.
 
 ## Next, after round 3
 
