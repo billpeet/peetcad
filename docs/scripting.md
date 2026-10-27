@@ -646,9 +646,10 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `update_links` | reads every linked part from its file again, and in a part every inserted part (`insert_part`). Replies `updated` (the parts or features that changed) and `warnings` (files that can't be found or read) |
 | `link` | `part` (a part's name or id, as `components` lists the parts), `path`, `absolute` (default false): links the part to the file if there is one (the part becomes what is in it), else writes the part there first |
 | `unlink` | `part`: the assembly keeps the part as it is and no longer follows the file |
-| `place` | `component`, `at`, `rotate`: the ones given are set, the other is kept |
+| `place` | `component`, `at`, `rotate`: the ones given are set, the other is kept. `component` can be a path (`["Hinge", "Arm"]`) to a component that moves in a flexible sub-assembly: it is placed there, in this assembly's coordinates |
 | `drag` | `component`, `to` (`[x, y, z]`, in the assembly), `point` (`[x, y, z]` on the component, in its own coordinates; default its origin): pulls the point towards the place as far as the component's mates allow. `short_by` in the reply is how far it still is |
 | `fix` | `component`, `on` (default true) |
+| `flexible` | `component` (a sub-assembly), `on` (default true): solves the sub-assembly as flexible (SolidWorks' "Solve as: Flexible"): its own mates are solved in this assembly with this one's, so what is not fixed in it moves as they let it, each instance posed on its own. `components` then gives `"flexible": true` and `moving` (each moving component's `path`, `at`, `rotate`, `freedom`). Off: rigid, as its file has it (model schema 12) |
 | `replace` | `component`, and `path`, `sample` or `part`: another part, in the same place |
 | `rename`, `suppress`, `show`, `delete` | `component` in place of `feature` |
 | `component_pattern` | `components` (the originals), `type` (`linear`, `circular`), `name`. Linear: `direction`, `spacing`, `count` (the original included), `flip`, `second` (`{direction, spacing, count, flip}`). Circular: `axis`, `angle` (default 360), `count`, `flip`. A direction or axis is `"x"`, `"y"`, `"z"`, `[x, y, z]`, `{"origin": …, "direction": …}`, or `{"component": …, "edge" or "face": selector}` |

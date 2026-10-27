@@ -1779,6 +1779,11 @@ impl PeetApp {
         };
         let mut origin = c.placement.origin.to_array().map(|v| units.from_mm(v));
         let mut fixed = c.fixed;
+        let mut flexible = c.flexible;
+        // Only a sub-assembly can be solved as flexible.
+        let sub_assembly = assembly
+            .definition(c.definition)
+            .is_some_and(|d| d.model.is_assembly());
         // A copy a pattern made is where the pattern puts it.
         let by_pattern = assembly.pattern_of(id).map(|p| p.name.clone());
         let own = by_pattern.is_none();
@@ -1870,6 +1875,13 @@ impl PeetApp {
                 );
                 ui.add_enabled(own, egui::Checkbox::new(&mut fixed, ""));
                 ui.end_row();
+                if sub_assembly {
+                    ui.label("Flexible").on_hover_text(
+                        "Solve the sub-assembly's own mates in this assembly, as SolidWorks' \"Solve as: Flexible\": what is not fixed in it moves as this assembly's mates put it (a hinge opens). Off: rigid, as its own file has it.",
+                    );
+                    ui.add_enabled(own, egui::Checkbox::new(&mut flexible, ""));
+                    ui.end_row();
+                }
                 ui.label("Shown").on_hover_text(
                     "A hidden component is not drawn, but is still part of the assembly: counted, weighed and exported.",
                 );
@@ -1928,6 +1940,9 @@ impl PeetApp {
         }
         if fixed != c.fixed {
             self.change_component(id, ComponentChange::Fix(fixed));
+        }
+        if flexible != c.flexible {
+            self.change_component(id, ComponentChange::Flexible(flexible));
         }
         if visible != c.visible {
             self.change_component(id, ComponentChange::Show(visible));

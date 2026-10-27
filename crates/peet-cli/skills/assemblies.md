@@ -26,7 +26,7 @@ A file becomes an assembly by its script starting with `{"op": "new", "assembly"
 `insert` takes the part from one of:
 
 - `path`: a `.peet` file. A part, or an assembly (it becomes a sub-assembly: one rigid
-  component).
+  component, unless it is made flexible: see "Flexible sub-assemblies").
 - `component`: one more instance of that component's part. Use this, not `path` again,
   after changing the part inside the assembly.
 - `part`: a document that is open in the same run (`peet skills core`, several
@@ -185,7 +185,7 @@ assembly. Geometry selectors still use the final part's own coordinates.
 
 The example moves `Stand` to Z = -90. Its plate stays 100 above the sub-assembly's
 origin, leaving 10 between the two mating planes. The sub-assembly moves as one rigid
-component. Two ends inside the same top-level component cannot be joined here. Add
+component. Two ends inside the same rigid top-level component cannot be joined here. Add
 that mate inside the sub-assembly instead. `fasten` holds the top-level components
 as wholes even when its ends name nested paths.
 
@@ -193,6 +193,64 @@ as wholes even when its ends name nested paths.
 name. An invalid path fails before adding a mate and names the level that could not
 be found. A stored mate fails if its plane or nested component is deleted or suppressed.
 Restore it, or delete the mate and select another end.
+
+### Flexible sub-assemblies
+
+A sub-assembly is **rigid** by default: it moves as one thing, posed as its own file has
+it. Make it **flexible** when something in it has to move in this assembly: a hinge that
+this assembly's mates open, a slide, a door stay. This is SolidWorks' "Solve as:
+Flexible".
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 5}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 25}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-10, -10], "to": [70, 10]}, {"type": "circle", "center": [0, 0], "radius": 5}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 6}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Post"}
+{"op": "insert", "part": 2, "name": "Arm"}
+{"op": "mate", "type": "concentric", "a": {"component": "Post", "face": {"at": [5, 0, 10]}}, "b": {"component": "Arm", "face": {"at": [5, 0, 3]}}}
+{"op": "mate", "type": "coincident", "flip": true, "a": {"component": "Post", "face": {"normal": [0, 0, -1]}}, "b": {"component": "Arm", "face": {"normal": [0, 0, -1]}}}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-50, -50], "to": [50, 50]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 4, "name": "Base"}
+{"op": "insert", "part": 3, "name": "Hinge", "at": [0, 0, 5], "fixed": true}
+{"op": "flexible", "component": "Hinge"}
+{"op": "place", "component": ["Hinge", "Arm"], "rotate": {"axis": "z", "angle": 60}}
+{"op": "mate", "type": "parallel", "align": "closest", "a": {"component": "Base", "face": {"normal": [0, 1, 0]}}, "b": {"component": ["Hinge", "Arm"], "face": {"normal": [1, 0, 0]}}}
+{"op": "components"}
+```
+
+Document 3 is a hinge: the post fixed, the arm free to turn round it. In the assembly
+the arm is turned to 60° and then mated to turn to 90°, along Y.
+
+- **`flexible`** (`component`, `on`, default true) solves the sub-assembly's own mates
+  here, together with this assembly's. What is fixed in the sub-assembly moves with it;
+  each component that is not fixed there moves as those mates and this assembly's let
+  it. `"on": false` makes it rigid again, posed as its file has it.
+- **Mate into it** with a component path (`["Hinge", "Arm"]`), as for any part inside a
+  sub-assembly. Then a mate that a rigid sub-assembly would fail ("can't hold") can
+  turn the arm instead.
+- **Each instance is posed on its own**: two instances of one hinge can be open to
+  different angles. The sub-assembly's file is not changed.
+- **`place`** takes a path to a component that moves in a flexible sub-assembly:
+  `{"op": "place", "component": ["Hinge", "Arm"], "rotate": ...}` (`at` and `rotate` in
+  this assembly's coordinates). Use it to start the arm near where it should end, so the
+  mates take it there and not to the other of two solutions. A component fixed in its
+  sub-assembly, or one in a rigid sub-assembly, is refused: place the sub-assembly.
+- **Read `components`**: a flexible component has `"flexible": true` and `moving`: each
+  component that moves in it, by its `path` below it, with where it is (`at`,
+  `rotate`) and its own `freedom`. The assembly's `freedom` counts them too: the
+  hinge above has 1 until the parallel mate holds the arm.
+- A flexible sub-assembly in a flexible one is taken apart too: reach it with a longer
+  path (`["Door", "Hinge", "Arm"]`). Make the inner one flexible in its own assembly
+  (the door's), and the outer one here.
+- A pattern's copy of a flexible sub-assembly is placed as one thing.
+- When the sub-assembly's mates and this assembly's can't all hold, the sub-assembly's
+  win and this assembly's mate fails, as a hinge can't come apart.
 
 ### Width mates
 

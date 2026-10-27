@@ -3445,3 +3445,211 @@ fn the_applications_patterns_are_made_by_operations() {
     });
     assert_eq!(ops.len(), 1, "{ops:?}");
 }
+
+/// A hinge: a post, fixed, and an arm round it (concentric, bottoms flush), free to turn.
+/// Saved as an assembly file in `dir`.
+fn hinge_file(dir: &std::path::Path) -> String {
+    let file = dir.join("hinge.peet").to_string_lossy().into_owned();
+    let mut host = Headless::default();
+    let mut session = Session::default();
+    for op in [
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 5}]}),
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 25}),
+        json!({"op": "new", "keep": true}),
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-10, -10], "to": [70, 10]}, {"type": "circle", "center": [0, 0], "radius": 5}]}),
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 6}),
+        json!({"op": "new", "assembly": true, "keep": true}),
+        json!({"op": "insert", "part": 1, "name": "Post"}),
+        json!({"op": "insert", "part": 2, "name": "Arm"}),
+        json!({"op": "mate", "type": "concentric", "a": {"component": "Post", "face": {"at": [5, 0, 10]}}, "b": {"component": "Arm", "face": {"at": [5, 0, 3]}}}),
+        json!({"op": "mate", "type": "coincident", "flip": true, "a": {"component": "Post", "face": {"normal": [0, 0, -1]}}, "b": {"component": "Arm", "face": {"normal": [0, 0, -1]}}}),
+        json!({"op": "save", "path": file}),
+    ] {
+        let reply = apply_session_json(&mut host, &mut session, &op, Undo::Step);
+        assert!(reply.ok, "{op}: {}", reply.json);
+    }
+    file
+}
+
+fn plate_file(dir: &std::path::Path) -> String {
+    let file = dir.join("base.peet").to_string_lossy().into_owned();
+    let mut plate = Document::default();
+    ok(
+        &mut plate,
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-50, -50], "to": [50, 50]}]}),
+    );
+    ok(
+        &mut plate,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+    );
+    ok(&mut plate, json!({"op": "save", "path": file}));
+    file
+}
+
+/// The component called `name` in a `components` reply.
+fn listed<'a>(reply: &'a Value, name: &str) -> &'a Value {
+    reply["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .unwrap_or_else(|| panic!("no {name} in {reply}"))
+}
+
+#[test]
+fn a_flexible_sub_assembly_moves_as_its_parents_mates_ask() {
+    let dir = temp("flexible");
+    let hinge = hinge_file(&dir);
+    let base = plate_file(&dir);
+    let mut doc = assembly();
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": base, "name": "Base"}),
+    );
+    for (name, x) in [("Hinge", 0), ("Rigid", 200)] {
+        ok(
+            &mut doc,
+            json!({"op": "insert", "path": hinge, "name": name, "at": [x, 0, 5], "fixed": true}),
+        );
+    }
+    let parallel = |to: &str| {
+        json!({"op": "mate", "type": "parallel", "align": "closest",
+            "a": {"component": "Base", "face": {"normal": [0, 1, 0]}},
+            "b": {"component": [to, "Arm"], "face": {"normal": [1, 0, 0]}}})
+    };
+    // Rigid: the arm is posed as the hinge's file has it, so the mate can't turn it.
+    let rigid = ok(&mut doc, parallel("Rigid"));
+    assert_eq!(rigid["mate"]["status"], "failed", "{rigid}");
+    ok(&mut doc, json!({"op": "delete", "mate": "Parallel1"}));
+
+    // Mistakes.
+    let e = error(&mut doc, json!({"op": "flexible", "component": "Base"}));
+    assert!(e.contains("only a sub-assembly"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "place", "component": ["Rigid", "Arm"], "rotate": {"axis": "z", "angle": 30}}),
+    );
+    assert!(e.contains("rigid sub-assembly"), "{e}");
+
+    // Flexible: the arm turns. Its own freedom is reported under `moving`.
+    let made = ok(&mut doc, json!({"op": "flexible", "component": "Hinge"}));
+    assert_eq!(made["component"]["flexible"], true);
+    assert_eq!(made["freedom"], 1, "{made}");
+    assert_eq!(made["component"]["moving"][0]["path"], json!(["Arm"]));
+    assert_eq!(made["component"]["moving"][0]["freedom"], 1);
+    let e = error(
+        &mut doc,
+        json!({"op": "place", "component": ["Hinge", "Post"], "at": [0, 0, 0]}),
+    );
+    assert!(e.contains("fixed in its sub-assembly"), "{e}");
+    let placed = ok(
+        &mut doc,
+        json!({"op": "place", "component": ["Hinge", "Arm"], "rotate": {"axis": "z", "angle": 60}}),
+    );
+    assert_eq!(
+        placed["component"]["moving"][0]["rotate"],
+        json!({"axis": [0.0, 0.0, 1.0], "angle": 60.0})
+    );
+    let mated = ok(&mut doc, parallel("Hinge"));
+    assert_eq!(mated["mate"]["status"], "ok", "{mated}");
+    assert_eq!(mated["freedom"], 0);
+    let all = ok(&mut doc, json!({"op": "components"}));
+    let h = listed(&all, "Hinge");
+    assert_eq!(
+        h["moving"][0]["rotate"],
+        json!({"axis": [0.0, 0.0, 1.0], "angle": 90.0})
+    );
+    assert_eq!(h["moving"][0]["freedom"], 0);
+    // The arm along Y now; the other hinge's along X still.
+    assert_eq!(h["max"], json!([10.0, 70.0, 30.0]));
+    assert_eq!(listed(&all, "Rigid")["max"], json!([270.0, 10.0, 30.0]));
+
+    // Saved and opened, posed as it was.
+    let file = dir.join("flexible.peet").to_string_lossy().into_owned();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let mut again = Document::default();
+    ok(&mut again, json!({"op": "open", "path": file}));
+    assert_eq!(again.model, doc.model);
+    let all = ok(&mut again, json!({"op": "components"}));
+    assert_eq!(listed(&all, "Hinge")["max"], json!([10.0, 70.0, 30.0]));
+
+    // Exported where it is: the posed hinge is a product of its own.
+    let step = dir.join("flexible.step").to_string_lossy().into_owned();
+    let out = ok(&mut doc, json!({"op": "export", "path": step}));
+    assert_eq!(out["bodies"], 5, "{out}");
+    let mut read = assembly();
+    ok(&mut read, json!({"op": "import_step", "path": step}));
+    let imported = ok(&mut read, json!({"op": "components"}));
+    let maxes: Vec<&Value> = imported["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| &c["max"])
+        .collect();
+    assert!(maxes.contains(&&json!([10.0, 70.0, 30.0])), "{maxes:?}");
+    assert!(maxes.contains(&&json!([270.0, 10.0, 30.0])), "{maxes:?}");
+
+    // Rigid again: as its file has it, and the mate can't hold.
+    let back = ok(
+        &mut doc,
+        json!({"op": "flexible", "component": "Hinge", "on": false}),
+    );
+    assert_eq!(back["component"]["max"], json!([70.0, 10.0, 30.0]));
+    let mates = ok(&mut doc, json!({"op": "mates"}));
+    assert_eq!(mates["mates"][0]["status"], "failed", "{mates}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_flexible_sub_assembly_inside_a_flexible_one_moves_too() {
+    let dir = temp("flexible-nested");
+    let hinge = hinge_file(&dir);
+    let base = plate_file(&dir);
+    // A door: a plate with the hinge on it, flexible there too.
+    let mut door = assembly();
+    ok(
+        &mut door,
+        json!({"op": "insert", "path": base, "name": "Panel"}),
+    );
+    ok(
+        &mut door,
+        json!({"op": "insert", "path": hinge, "name": "Hinge", "at": [0, 0, 5], "fixed": true}),
+    );
+    ok(&mut door, json!({"op": "flexible", "component": "Hinge"}));
+    let door_file = dir.join("door.peet").to_string_lossy().into_owned();
+    ok(&mut door, json!({"op": "save", "path": door_file}));
+
+    let mut doc = assembly();
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": base, "name": "Base"}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": door_file, "name": "Door", "at": [0, 0, 100], "fixed": true}),
+    );
+    let made = ok(&mut doc, json!({"op": "flexible", "component": "Door"}));
+    assert_eq!(made["freedom"], 1, "{made}");
+    assert_eq!(
+        made["component"]["moving"][0]["path"],
+        json!(["Hinge", "Arm"])
+    );
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": ["Door", "Hinge", "Arm"], "rotate": {"axis": "z", "angle": 60}}),
+    );
+    let mated = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "parallel", "align": "closest",
+            "a": {"component": "Base", "face": {"normal": [0, 1, 0]}},
+            "b": {"component": ["Door", "Hinge", "Arm"], "face": {"normal": [1, 0, 0]}}}),
+    );
+    assert_eq!(mated["mate"]["status"], "ok", "{mated}");
+    assert_eq!(mated["freedom"], 0);
+    let all = ok(&mut doc, json!({"op": "components"}));
+    let d = listed(&all, "Door");
+    assert_eq!(d["moving"][0]["rotate"]["angle"], 90.0, "{d}");
+    // The door's plate is 100 square; the arm reaches 70 along Y from the post.
+    assert_eq!(d["max"], json!([50.0, 70.0, 130.0]));
+    std::fs::remove_dir_all(dir).ok();
+}

@@ -47,7 +47,9 @@ components down to it), not bodies of the assembly's own; the document shows one
 per instance, the instances of one body sharing a view.
 
 **Sub-assemblies are rigid.** A sub-assembly is solved on its own and placed as one
-body in its parent. Flexible sub-assemblies are left for later.
+body in its parent. Flexible sub-assemblies are left for later. *Superseded in part
+(October 2026): rigid stays the default, and a sub-assembly can be solved as flexible,
+as SolidWorks does; see "Flexible sub-assemblies" below.*
 
 **A part is edited on its own, not in context.** Opening a component for editing shows
 the part alone. A part's features can't refer to its neighbours in the assembly.
@@ -387,6 +389,31 @@ which no released version writes, without another version number.
   not be made wider. Its solid, flat pattern and STEP file are unchanged (the Phase 5
   tests pass as they were).
 
+## Flexible sub-assemblies
+
+*Supersedes in part "Sub-assemblies are rigid" above.* PeetCAD follows SolidWorks, whose
+sub-assemblies are rigid unless set to "Solve as: Flexible"; the template library has
+hinges opened to another angle in their parent than in their own file (SolidWorks API:
+`IComponent2.Solving`).
+
+- `Component::flexible` (model schema 12) marks a sub-assembly flexible. For the
+  parent's solve it is taken apart into *units*: the sub-assembly with what is fixed in
+  it, and each component not fixed in it (taken apart in turn if it is itself flexible).
+  Its own mates between different units are solved with the parent's, first, so when
+  they can't all hold the hinge holds and the parent's mate fails. The solver is not
+  changed: a unit is a component to it under an id of its own, and the mates' ends are
+  rewritten to name it (`peet-model/src/flexible.rs`).
+- Where each moving component ends up is stored on the parent's component
+  (`Component::poses`, in the sub-assembly's coordinates), not in the shared definition,
+  so instances of one sub-assembly are posed independently and its file is unchanged.
+  Instances, mate geometry, reference planes and STEP export (a posed sub-assembly is a
+  product of its own) all read the poses; `Evaluation::component_frame` gives every
+  component's place at any depth.
+- Freedom counts the moving components; `components` lists them under `moving`, each
+  with its own freedom. `place` takes a path to one, to start it near its solution.
+- Not done: dragging a component inside a flexible sub-assembly (a drag pulls the
+  sub-assembly), and pattern copies of a flexible sub-assembly are placed rigid.
+
 ## Consequences
 
 - A machine whose graphics can't draw instanced geometry can't run the viewport (WebGL2
@@ -395,7 +422,8 @@ which no released version writes, without another version number.
   copies until linking exists.
 - A part can't be shaped by its neighbours (a hole placed from the mating part). It has
   to be dimensioned by shared parameter values kept in step by hand.
-- A mechanism inside a sub-assembly doesn't move in its parent.
+- A mechanism inside a sub-assembly doesn't move in its parent unless the sub-assembly
+  is made flexible.
 - Moving the solver's core is a refactoring of the most heavily tested numerical code in
   the project; its tests and benchmark must pass unchanged, and the drag benchmark must
   not slow down.
