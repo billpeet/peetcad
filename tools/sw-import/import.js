@@ -480,6 +480,17 @@ function importPart(doc, dir) {
     if (away > 1e-4) report.notes.push(`${name} is on a face ${away.toFixed(3)} mm from where SolidWorks has it.`);
     const result = { name: reply.created[0].name, toPeet, frame: pf, partial, dimensions: new Map(), ids: new Map(), values: new Map((f.dimensions || []).map(d => [d.fullName, d.value])) };
     for (const o of own) { const d = (reply.drawn || []).find(x => x.as === o.as); if (d && o.g) result.ids.set(o.g.id.join("."), d.id); }
+    // What was drawn where SolidWorks has it, in the model, for another sketch that relates to it
+    result.drawnAt = [];
+    for (const o of own) {
+      const d = (reply.drawn || []).find(x => x.as === o.as);
+      if (!d || o.text) continue;
+      const at = p => p && mul(fromSketch(sf, p), 1);
+      if (o.point) { result.drawnAt.push({ type: "point", id: d.id, at: at(o.point) }); continue; }
+      const g = o.g;
+      result.drawnAt.push({ type: g.type, circle: !!g.circle, id: d.id, start: at(g.start), end: at(g.end), center: at(g.center), radius: g.radius && g.radius * MM, normal: sf.n });
+      for (const [k, id] of [["start", o.turned ? d.end : d.start], ["end", o.turned ? d.start : d.end], ["center", d.center]]) if (g[k] && id !== undefined) result.drawnAt.push({ type: "point", id, at: at(g[k]) });
+    }
     for (const o of own) if (o.text) fitText(f, result, o.g, (reply.drawn || []).find(x => x.as === o.as));
     if (!draw && relations) relate(f, result, s, sf, own, reply.drawn || []);
     return result;
@@ -622,7 +633,7 @@ function importPart(doc, dir) {
         const round = !!made && (made.type === "arc" || made.type === "circle");
         // A straight edge projects to a line from its start to its end
         const ends = made && made.type === "line" && item.edge && item.edge.between ? item.edge.between.map((p, i) => ({ id: [made.start, made.end][i], at: flat(p) })) : undefined;
-        projected.set(key, made ? { id: made.id !== undefined ? made.id : (made.curves || made.points || [])[0], point: item.vertex !== undefined, round, circle: made.type === "circle", center: round ? made.center : undefined, ends } : null);
+        projected.set(key, made ? { id: made.id !== undefined ? made.id : (made.curves || made.points || [])[0], point: item.vertex !== undefined || made.type === "point", round, circle: made.type === "circle", center: round ? made.center : undefined, ends } : null);
       }
       return projected.get(key) || undefined;
     };
@@ -724,7 +735,30 @@ function importPart(doc, dir) {
           consider(Math.abs(x.m[2]), { type: "project", edge: { at: x.middle } });
         }
       }
-      return item ? projectItem(item) : undefined;
+      return item ? projectItem(item) : fromSketches(e);
+    };
+    // Failing the model, a copy of another sketch's point, line, circle or arc (SolidWorks relates a sketch
+    // to another's entities, and converts them): that entity, seen from this sketch, projected so that it
+    // follows the other sketch
+    const fromSketches = e => {
+      const seen = p => { const d = sub(p, pf.o); return [dot(d, pf.x), dot(d, pf.y)]; };
+      const near = (p, q) => Math.hypot(p[0] - q[0], p[1] - q[1]) < 1e-4;
+      for (const other of sketches.values()) {
+        if (other.name === name || !other.drawnAt) continue;
+        const parallel = x => x.normal && Math.abs(Math.abs(dot(x.normal, pf.n)) - 1) < 1e-9;
+        const hit = other.drawnAt.find(x => {
+          if (e.kind === "sketchPoint") return x.type === "point" && near(seen(x.at), sk.toPeet(e));
+          if (e.type === "line" && e.start && e.end && x.type === "line" && x.start && x.end) {
+            const [a, b] = [sk.toPeet(e.start), sk.toPeet(e.end)], [p, q] = [seen(x.start), seen(x.end)];
+            return (near(a, p) && near(b, q)) || (near(a, q) && near(b, p));
+          }
+          if (e.type === "arc" && e.center && x.type === "arc" && x.center && parallel(x))
+            return near(sk.toPeet(e.center), seen(x.center)) && Math.abs(e.radius * MM - x.radius) < 1e-4;
+          return false;
+        });
+        if (hit) return projectItem({ type: "project", sketch: other.name, entity: hit.id });
+      }
+      return undefined;
     };
     // A point of SolidWorks' that is not the sketch's own is a model vertex its relation refers to (Battery
     // Bracket's Sketch8 measures its flange's height from the far corner of the flange's edge): it is
