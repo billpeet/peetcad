@@ -3,7 +3,7 @@
 What PeetCAD can't yet do that the SolidWorks component library needs. The aim is for
 FabSys to drive PeetCAD in place of SolidWorks; parts come first, assemblies after.
 
-**Status, 27 October 2026 (after round 4):** first written on 9 October from names and counts; since then
+**Status, 28 October 2026 (assemblies: 14 of 26 match):** first written on 9 October from names and counts; since then
 the whole library has been exported and imported, and the entries below say what that
 found. Update an entry when it is confirmed, fixed or decided against.
 
@@ -408,13 +408,13 @@ PeetCAD:
 | AI1 | **Which side a distance mate is measured to.** Done (`flip_dimension`). SolidWorks' "flip dimension"; `move_body`'s mates have it (`reversed` in `mate::solve`), assembly mates pass none. The main cause of components placed differently: Sliding Doorstay's Distance3 puts parts 344 mm off, Perforated Louver Filter's Distance1 222 mm | Most of the 9 assemblies placed differently | A11 |
 | AI2 | **A mate added suppressed.** Done (`suppressed`), without solving it: `mate` has no `suppressed`, so adding one of SolidWorks' suppressed mates moves components first | 114 suppressed mates; FabSys unsuppresses them | |
 | AI3 | **SolidWorks' alignment.** Done (`align`) (aligned, anti-aligned, closest) for coincident and concentric: Plinth Folded's pipes come out turned end for end (8 mm) | 1 assembly so far | A11 |
-| AI4 | **Mates to the assembly's own planes and origin** | 27 in 6 assemblies | A12 |
-| AI5 | **Mate kinds**: slot (6), limit angle (2), symmetric (2), coordinate (1), path (1); mate ends on sketch points and lines (4); width mates with a round tab or ends on more than two components (6) | | A4, A3 |
+| AI4 | **Mates to the assembly's own planes and origin.** Done. | 27 in 6 assemblies | A12 |
+| AI5 | **Mate kinds.** Done but the path mate.: slot (6), limit angle (2), symmetric (2), coordinate (1), path (1); mate ends on sketch points and lines (4); width mates with a round tab or ends on more than two components (6) | | A4, A3 |
 | AI6 | **Assembly configurations**, each with its components' configurations and suppression, and its mates' suppression. Now only the active configuration is imported, and a part used in another configuration than its file's is a copy with that configuration active (a stand-in) | 8 assemblies with two configurations (left and right hinged); 24 instances in a non-default configuration | A5 |
-| AI7 | **Flexible sub-assemblies**: four Hinge Assembly instances (Meter Panel Movement, Laptop Shelf Assembly) are opened to another angle than the sub-assembly's own | 2 assemblies | A9 |
-| AI8 | **Assembly equations**: reading and setting a component's dimension (`"Height@Sketch1@Door<1>.Part"`), suppressing a component by condition (`"Hinge Assembly-3.Assembly" = IIF(...)`, 5 assemblies), global variables (`SectionID`), reference dimensions in the assembly (`RD1@Annotations`) | 50 equations in 11 assemblies, most of those that set part sizes disabled | A6, A7 |
+| AI7 | **Flexible sub-assemblies.** Done.: four Hinge Assembly instances (Meter Panel Movement, Laptop Shelf Assembly) are opened to another angle than the sub-assembly's own | 2 assemblies | A9 |
+| AI8 | **Assembly equations.** Done.: reading and setting a component's dimension (`"Height@Sketch1@Door<1>.Part"`), suppressing a component by condition (`"Hinge Assembly-3.Assembly" = IIF(...)`, 5 assemblies), global variables (`SectionID`), reference dimensions in the assembly (`RD1@Annotations`) | 50 equations in 11 assemblies, most of those that set part sizes disabled | A6, A7 |
 | AI9 | **Assembly features**: a cut with its sketch (Escutcheon Assembly), layout sketches (3), a component pattern driven by equations (Gear Tray Assembly's LocalLPattern1, count and spacing from Gear tray's height), composite curves (33, Laptop Shelf); in-context features in parts (24 holders in 9 assemblies) | | A8, A10 |
-| AI10 | **FabSys reaching into components**: `SetDimension` and suppression in a component (`Height@Sketch1@<part>-1`), `SuppressComponent`, `ResolveComponent`, a component's configuration, a component's sheet metal | Most of what FabSys does that PeetCAD can't take | F |
+| AI10 | **FabSys reaching into components.** Done but SetSubComponentConfig (AI6).: `SetDimension` and suppression in a component (`Height@Sketch1@<part>-1`), `SuppressComponent`, `ResolveComponent`, a component's configuration, a component's sheet metal | Most of what FabSys does that PeetCAD can't take | F |
 
 **After AI1–AI3** (27 October, `agents\M1\run`):
 
@@ -442,6 +442,54 @@ PeetCAD:
   Laptop Shelf and Meter Panel Movement, a limit angle and sketch points (AI5), Plinth Folded's
   equation (AI8). Also: a round edge coincident with a plane (the circle lies in the plane), which
   PeetCAD takes as the edge's axis (Rod Doorstay).
+
+**After AI4, AI5, AI7, AI8 and AI10** (28 October, `scratch\asm3\run`):
+
+| Result | First run | After AI1–AI3 | Now |
+|---|---|---|---|
+| Matches | 4 | 6 | **14** |
+| Placed as SolidWorks has them; a part differs | 1 | 1 | 1 |
+| Placed as SolidWorks has them, with components or mates left out | 12 | 13 | 11 |
+| Components placed differently | 9 | 6 | **0** |
+| Live mates imported | 204 of 303 | 231 | 269 |
+| Suppressed mates imported | 1 of 114 | 67 | 71 |
+
+- **AI4, done.** A mate end with no component is the assembly's own plane or origin
+  (`{"plane": "top"}`, `{"origin": true}`); a part's origin is `{"component": C, "origin": true}`.
+  No mate in the library uses an assembly's own reference plane, so those aren't ends yet.
+- **AI5, done but the path mate.** `slot` (free, centred, a distance or a percentage along it),
+  `limit_angle` and `limit_distance` (`min`, `max`), `symmetric` (`plane`), width pairs spread over
+  two components, ends on a part's sketch points, lines, circles and arcs (`sketch`, `entity`), and a
+  round edge coincident with a plane lying in it, as in SolidWorks. A coordinate mate is imported as
+  the two origins coincident. The path mate's path is empty in the export.
+- **AI7, done.** A sub-assembly component can be `flexible`: its own mates are solved with its
+  parent's, and each instance keeps its pose. The ADR's rigid-only rule is superseded in part. The
+  exporter now writes each sub-assembly's `solving`; until it is run again the importer infers
+  flexible where a sub-assembly's parts sit otherwise than in its file. SolidWorks' transform of
+  such a sub-assembly is not where its fixed part is (by 87 to 1,600 mm, opened or not), while its
+  parts' transforms agree with the mates: the importer places it by its fixed part.
+- **AI8 and AI10, done but configurations.** An assembly reads and sets its components' dimensions
+  (`Height@Sketch1@Door-1`; SolidWorks' `Door<1>.Part` is taken too), has equations and global
+  variables, suppresses components by expression (`set_suppression_expression`) and features in a
+  component (`FEATURE@COMPONENT`), measures reference dimensions (`reference_dimension`) and makes a
+  component independent (`make_independent`, FabSys's ResolveComponent). Setting a part's dimension
+  from the assembly changes the part, every instance of it, as in SolidWorks. 8 of 11 live
+  equations import (two read components their assemblies don't have, SolidWorks' error; one a
+  dimension a part import lacks). FabSys's calls into components: SetDimension in a component 50 of
+  54, ConfigurePartSheetMetal 22 of 23, ResolveComponent 25 of 26, SuppressFeature in a component
+  11 of 14, SuppressComponent and SetGlobalVariable all; SetSubComponentConfig needs AI6.
+
+What is left:
+
+- **AI6, configurations**: the one item not done. 8 assemblies have two configurations; parts used
+  in another configuration than their file's are copies; SetSubComponentConfig.
+- **The templates and the export**: 11 live mates SolidWorks names the assembly for with no entity
+  (Escutcheon Assembly's are on the Escutcheon Surround that doesn't exist; the Escutcheon Doors'
+  point at a suppressed hinge, whose parts the export doesn't list), the path mate's empty path,
+  two parts outside Templates (Battery Floor Mount, Limit switch assy).
+- **Parts**: a few mates' faces aren't on the imported parts (Meter Arm, Meter Bracket, the
+  Escutcheon parts, ABB Flow Meter, Plinth PFC Long B), mostly suppressed mates whose faces belong
+  to another configuration of the part.
 
 The importer: width mates (which pair is the gap and which the tab), mates on components that are
 suppressed (19, not failures), sub-assemblies in another configuration than their file's, and the
