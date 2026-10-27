@@ -85,7 +85,10 @@ rough placement decides which of several possible positions is taken.
   not where the component is in the assembly (`peet skills selectors`). To see a part's
   faces, `open_component` it and run `faces`.
 - **What an end stands for:** a flat face is a plane; a round face (a hole, a shaft) or
-  a round edge is its axis; a straight edge is a line; a vertex is a point.
+  a round edge is its axis; a straight edge is a line; a vertex is a point. A round edge
+  `coincident` with a plane is the exception: the circle lies in the plane (the edge of
+  a disc flat on a face), as SolidWorks has it. `"origin": true` (with or without a
+  `component`) and sketch entities are ends too: see below.
 - **Types:**
   - `coincident`: two planes against each other, two lines in line, two points
     together, or a point or line in a plane.
@@ -256,8 +259,8 @@ the arm is turned to 60° and then mated to turn to 90°, along Y.
 
 Use `width` to locate a tab between two faces without creating midpoint planes in
 each part. Select parallel, distinct planar faces or reference planes for each pair.
-The width pair is `a`, the tab is `b`. Each pair must belong to one top-level component;
-the ends may use different nested paths within that rigid component. A single tab end
+The width pair is `a`, the tab is `b`. Each pair is usually on one top-level component
+(the ends may use different nested paths within it); see below for a pair on two. A single tab end
 can be a cylindrical face or an edge used as an axis. A cylinder uses its diameter for
 clearance; an edge used as an axis has zero thickness.
 
@@ -309,6 +312,107 @@ Changing either selected face or plane recomputes the midpoint and clearance. If
 end is gone, restore it or delete the mate and select new ends. `mates` lists both ends
 of each pair and the current mode and value. The properties panel can edit the mode
 and value too.
+
+A pair may also be on **two components** (a tab centred between two separate side
+plates, or a gap between two parts that a third fills). Give the four ends as before;
+each face then counts by where it is along the first width face's normal, and a tab
+face is kept parallel to that face. Here the tab goes to X = 25, 17.5, then 14:
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [10, 30]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [20, 30]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Left"}
+{"op": "insert", "part": 1, "name": "Right", "at": [60, 0, 0], "fixed": true}
+{"op": "insert", "part": 2, "name": "Tab", "at": [15, 0, 0]}
+{"op": "mate", "type": "width", "a": [{"component": "Left", "face": {"normal": [1, 0, 0]}}, {"component": "Right", "face": {"normal": [-1, 0, 0]}}], "b": [{"component": "Tab", "face": {"normal": [-1, 0, 0]}}, {"component": "Tab", "face": {"normal": [1, 0, 0]}}]}
+{"op": "components"}
+{"op": "edit_mate", "mate": "Width1", "mode": "percent", "percent": 25}
+{"op": "edit_mate", "mate": "Width1", "mode": "dimension", "distance": 4}
+{"op": "components"}
+```
+
+### The assembly's own planes and origin, origins and sketches
+
+- **An end with no `component`** is the assembly's own standard plane or origin:
+  `{"plane": "top"}` (or `front`, `right`), `{"origin": true}`. They don't move, so a
+  part mated to them is placed in the assembly as SolidWorks places a part on the
+  assembly's planes. A mate needs a component at one end at least.
+- **`{"component": C, "origin": true}`** is the part's origin (with a path, the origin
+  of the part or sub-assembly the path ends at). Two origins `coincident` put the points
+  together and leave the part free to turn: add plane mates for its axes.
+- **`{"component": C, "sketch": "Sketch1", "entity": 13}`** is a point, line, circle or
+  arc of a sketch of the part: a point, a line, or a round edge (its axis, or in a plane
+  for `coincident` with one). Find the entity's id with
+  `{"op": "feature", "feature": "Sketch1"}` in the part (`open_component`, or before
+  inserting it); a line's ends and a circle's centre are points too (`start`, `end`,
+  `center`). It follows the sketch when it is edited.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 20]}, {"type": "point", "at": [10, 5]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 4}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 5}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 10}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Block", "at": [3, 4, 50], "fixed": false}
+{"op": "mate", "type": "coincident", "a": {"plane": "top"}, "b": {"component": "Block", "face": {"normal": [0, 0, -1]}}}
+{"op": "mate", "type": "coincident", "a": {"origin": true}, "b": {"component": "Block", "origin": true}}
+{"op": "insert", "part": 2, "name": "Disc", "at": [70, 3, 20]}
+{"op": "mate", "type": "coincident", "a": {"component": "Block", "face": {"normal": [0, 0, 1]}}, "b": {"component": "Disc", "edge": {"at": [-5, 0, 0]}}}
+{"op": "mate", "type": "coincident", "a": {"component": "Block", "sketch": "Sketch1", "entity": 13}, "b": {"component": "Disc", "face": {"at": [5, 0, 5]}}}
+{"op": "components"}
+```
+
+The block's underside goes onto the assembly's top plane with its origin at the
+assembly's; the disc's bottom edge lies on the block's top and its axis goes through the
+sketch point (10, 5).
+
+### Slot, limit and symmetric mates
+
+- **`slot`**: a pin in a straight slot. `a` and `b` are a face of the slot (one of its
+  round ends or a flat side) and the pin's round face or edge, either way round. The pin
+  stays parallel to the slot's ends, on the line between their axes. `mode`: `free` (the
+  default: anywhere between the ends, so `drag` slides it), `centered`, `dimension` with
+  `distance` from the first end's axis (the round end you picked, else the one the part
+  lists first; `flip_dimension` measures from the other), or `percent`. It fails if
+  neither end is a face of a straight slot (two round ends of one radius joined by flat
+  sides): pick a face of the slot itself, not of the plate around it.
+- **`limit_angle`** with `min` and `max` (degrees), and **`limit_distance`** with `min`
+  and `max` (lengths): the angle or distance, measured as `angle` and `distance` measure
+  it (`flip_dimension` too), kept anywhere between them. Nothing else is held, so add the
+  hinge or slide they limit. A component outside the range is brought just inside it.
+- **`symmetric`**: `a` and `b` (two planes, points or lines) mirror images in `plane`,
+  an end like any other (`{"plane": "right"}` for the assembly's). Both ends on one
+  component centre it on the plane: two opposite faces of a part about the assembly's
+  planes. The plane must be on one of the two components, a fixed one, or the
+  assembly; it fails otherwise.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [80, 40]}, {"type": "slot", "from": [20, 20], "to": [60, 20], "radius": 4}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 3}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 20}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Base"}
+{"op": "insert", "part": 2, "name": "Pin", "at": [30, 25, -5]}
+{"op": "mate", "type": "slot", "a": {"component": "Base", "face": {"at": [40, 16, 2.5]}}, "b": {"component": "Pin", "face": {"at": [3, 0, 10]}}}
+{"op": "edit_mate", "mate": "Slot1", "mode": "percent", "percent": 75}
+{"op": "insert", "part": 1, "name": "Lid", "at": [0, 0, 30]}
+{"op": "mate", "type": "symmetric", "a": {"component": "Lid", "face": {"normal": [-1, 0, 0]}}, "b": {"component": "Lid", "face": {"normal": [1, 0, 0]}}, "plane": {"plane": "right"}}
+{"op": "mate", "type": "concentric", "a": {"component": "Base", "edge": {"at": [40, 0, 5]}}, "b": {"component": "Lid", "edge": {"at": [40, 0, 0]}}}
+{"op": "mate", "type": "limit_angle", "min": 10, "max": 60, "a": {"component": "Base", "face": {"normal": [0, 0, 1]}}, "b": {"component": "Lid", "face": {"normal": [0, 0, 1]}}}
+{"op": "components"}
+{"op": "mates"}
+```
+
+The pin goes to X = 50, three quarters along the slot. The lid is centred on the
+assembly's right plane, hinged on the base's front top edge, and opened to between
+10° and 60°.
 
 ## Posing what the mates leave free
 

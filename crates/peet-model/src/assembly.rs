@@ -1120,7 +1120,19 @@ impl Assembly {
                     m.id.0
                 ));
             }
-            if m.ends().any(|e| e.path.is_empty()) {
+            // An end on the assembly itself is on one of its standard planes or its
+            // origin; any other is on a component.
+            let not_planes = |e: &crate::MateEnd| {
+                e.path.is_empty()
+                    && !matches!(
+                        e.geom,
+                        Some(
+                            crate::MateGeom::Plane(crate::PlaneRef::Standard(_))
+                                | crate::MateGeom::Origin
+                        )
+                    )
+            };
+            if m.ends().any(not_planes) || m.ends().all(|e| e.path.is_empty()) {
                 return Err(format!(
                     "The assembly is damaged: {} is not on two components.",
                     m.name

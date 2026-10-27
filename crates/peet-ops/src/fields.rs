@@ -1664,6 +1664,9 @@ feature_args! {
 pub enum BodyMateEndSel {
     Geom(GeomSel),
     Plane(PlaneSel),
+    /// Already resolved, with no selector of its own (an origin or a sketch entity, which
+    /// only an assembly's mates take).
+    Ref(MateGeom),
 }
 
 impl BodyMateEndSel {
@@ -1686,6 +1689,7 @@ impl BodyMateEndSel {
             Self::Geom(GeomSel::Edge(e)) => MateGeom::Edge(select::edge_ref(doc, e)?),
             Self::Geom(GeomSel::Vertex(v)) => MateGeom::Vertex(select::vertex_ref(doc, v)?),
             Self::Plane(p) => MateGeom::Plane(select::plane(doc, p)?.0),
+            Self::Ref(g) => g.clone(),
         })
     }
 
@@ -1695,6 +1699,7 @@ impl BodyMateEndSel {
             MateGeom::Edge(e) => Self::Geom(GeomSel::Edge(EdgeSel::Ref(e.clone()))),
             MateGeom::Vertex(v) => Self::Geom(GeomSel::Vertex(VertexSel::Ref(v.clone()))),
             MateGeom::Plane(p) => Self::Plane(p.clone().into()),
+            MateGeom::Origin | MateGeom::Sketch(_) => Self::Ref(g.clone()),
         }
     }
 }
@@ -1705,6 +1710,10 @@ fn mate_geom_out(g: &MateGeom, doc: &Document) -> Value {
         MateGeom::Edge(e) => edge_out(e, doc),
         MateGeom::Vertex(v) => vertex_out(v, doc),
         MateGeom::Plane(p) => json!({ "plane": plane_out(p, doc) }),
+        MateGeom::Origin => json!({ "origin": true }),
+        MateGeom::Sketch(s) => {
+            json!({ "sketch": doc.model.name_of(s.feature), "entity": s.entity.0 })
+        }
     }
 }
 

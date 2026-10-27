@@ -599,6 +599,11 @@ pub fn edges(doc: &Document, body: Option<usize>) -> Result<Value, String> {
                     Curve3::Nurbs(_) => "freeform",
                 }),
             );
+            // A straight edge's direction, as mates take it (its alignment refers to
+            // this), which need not run from `from` to `to`.
+            if let Curve3::Line(l) = &edge.curve {
+                m.insert("direction".to_owned(), direction_out(l.dir));
+            }
             if let Curve3::Circle(c) = &edge.curve {
                 m.insert("center".to_owned(), point3_out(c.frame.origin, units));
                 m.insert("axis".to_owned(), direction_out(c.frame.z_axis()));

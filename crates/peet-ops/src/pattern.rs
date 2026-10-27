@@ -150,10 +150,13 @@ impl PatternLineSel {
             Self::Geom(end) => {
                 let end = end.resolve(doc)?;
                 match &end.geom {
-                    Some(MateGeom::Face(_) | MateGeom::Edge(_) | MateGeom::Plane(_)) => {
-                        Ok(PatternLine::Geom(end))
-                    }
-                    Some(MateGeom::Vertex(_)) => Err(format!(
+                    Some(
+                        MateGeom::Face(_)
+                        | MateGeom::Edge(_)
+                        | MateGeom::Plane(_)
+                        | MateGeom::Sketch(_),
+                    ) => Ok(PatternLine::Geom(end)),
+                    Some(MateGeom::Vertex(_) | MateGeom::Origin) => Err(format!(
                         "'{what}' is a corner, which has no direction: give a straight edge, a round face or edge (its axis), or a flat face (its normal)."
                     )),
                     None => Err(format!(

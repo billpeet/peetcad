@@ -154,7 +154,16 @@ function partIn(file, configuration, report) {
 
 // ---- Mates ----
 
-const MATE_KINDS = { MateCoincident: "coincident", MateConcentric: "concentric", MateParallel: "parallel", MateDistanceDim: "distance", MateWidth: "width" };
+const MATE_KINDS = {
+  MateCoincident: "coincident", MateConcentric: "concentric", MateParallel: "parallel", MateDistanceDim: "distance", MateWidth: "width",
+  MateSlot: "slot", MateLimitPlanarAngleDim: "limit_angle", MateLimitAngleDim: "limit_angle", MateLimitDistanceDim: "limit_distance",
+  MateSymmetric: "symmetric",
+  // SolidWorks' coincident of two origins (or coordinate systems): the points together
+  MateCoordinate: "coincident",
+};
+const WHY_NOT = {
+  MatePath: "PeetCAD has no path mate: it needs the path (a chain of edges or sketch curves), which the export doesn't give (the end is empty), and a position along it",
+};
 // SolidWorks' Front Plane is XY, PeetCAD's top; its Top Plane is XZ, PeetCAD's front (whose normal is -Y where
 // SolidWorks' is +Y); Right is YZ in both.
 const STANDARD_PLANES = { "Front Plane": "top", "Top Plane": "front", "Right Plane": "right" };
@@ -200,19 +209,28 @@ function shapeOf(e, comp) {
     if (x.start && x.end) return { kind: "line", a: mm(x.start), b: mm(x.end) };
   }
   if (x && x.kind === "vertex" && x.point) return { kind: "point", p: mm(x.point) };
-  if (!x && e.params && comp) {
-    // swMateEntity2ReferenceType_e: 0 point, 1 line, 2 plane, 3 cylinder, 4 cone, 5 sphere, 7 circle
-    const back = inverse(matrixOf(comp.transform));
-    const p = mm(toWorld(back, e.params.slice(0, 3)));
-    const d = norm3(toWorld({ R: back.R, t: [0, 0, 0] }, e.params.slice(3, 6)));
-    const r = e.params[6] * MM;
-    // A plane's direction is its face's outward normal (the mates' alignments agree with it), and the point
-    // where SolidWorks has the face: one of several faces in that plane facing that way, the nearest
-    if (e.referenceType === 2) return { kind: "plane", n: d, oriented: true, p, near: p };
-    if (e.referenceType === 0) return { kind: "point", p };
-    if (e.referenceType === 7) return { kind: "circle", c: p, n: d, r };
-    if ([1, 3, 4].includes(e.referenceType)) return { kind: "axis", o: p, d, r: r > 0 ? r : null };
-  }
+  if (!x && e.params && comp) return shapeFromParams(e, comp.transform);
+  return null;
+}
+
+/**
+ * What SolidWorks' numbers for an end in the assembly (`params`: a point, a direction, a radius) say it is, in
+ * the part placed by `transform`. `referenceType` is the kind of thing selected (swSelectType_e): 1 an edge,
+ * 2 a face, 3 a vertex. A face with a radius is round (its axis), without one flat; an edge with a radius is
+ * a circle, without one straight.
+ */
+function shapeFromParams(e, transform) {
+  const mm = p => p.map(v => v * MM);
+  const back = inverse(matrixOf(transform));
+  const p = mm(toWorld(back, e.params.slice(0, 3)));
+  const d = norm3(toWorld({ R: back.R, t: [0, 0, 0] }, e.params.slice(3, 6)));
+  const r = e.params[6] * MM;
+  // A plane's direction is its face's outward normal (the mates' alignments agree with it), and the point
+  // where SolidWorks has the face: one of several faces in that plane facing that way, the nearest
+  if (e.referenceType === 2) return r > 0 ? { kind: "axis", o: p, d, r, near: null } : { kind: "plane", n: d, oriented: true, p, near: p };
+  if (e.referenceType === 1) return r > 0 ? { kind: "axis", o: p, d, r } : { kind: "straight", o: p, d };
+  if (e.referenceType === 3) return { kind: "point", p };
+  if (e.referenceType === 4) return { kind: "refplane", n: d, p };
   return null;
 }
 
@@ -252,18 +270,94 @@ function findIn(file, shape) {
     return edge && { edge: sel(edge), dir: edge.axis };
   }
   if (shape.kind === "line") {
-    // A straight edge's direction in PeetCAD's mates is its curve's, which `edges` doesn't give: none
+    // A straight edge's direction in PeetCAD's mates is its curve's (`direction`), which need not run from
+    // `from` to `to`
     const edge = pick(edges.filter(g => g.curve === "line"), g => {
       const d = Math.min(len3(sub3(g.from, shape.a)) + len3(sub3(g.to, shape.b)), len3(sub3(g.from, shape.b)) + len3(sub3(g.to, shape.a)));
       return d < 2 * TOL ? d : null;
     });
-    return edge && { edge: sel(edge) };
+    return edge && { edge: sel(edge), dir: edge.direction };
+  }
+  if (shape.kind === "refplane") {
+    // A reference plane of the part in that plane (SolidWorks gives only its numbers), else a flat face in it
+    const plane = referencePlanes(file).find(r => Math.abs(Math.abs(dot3(r.normal, shape.n)) - 1) < 1e-6
+      && Math.abs(dot3(sub3(r.origin, shape.p), shape.n)) < TOL);
+    if (plane) return { plane: plane.name, dir: plane.normal };
+    return findIn(file, { kind: "plane", n: shape.n, p: shape.p, near: null });
+  }
+  if (shape.kind === "straight") {
+    // A straight edge on a line: of several, the one SolidWorks' point is on (or nearest)
+    const edge = pick(edges.filter(g => g.curve === "line" && g.direction && Math.abs(Math.abs(dot3(g.direction, shape.d)) - 1) < 1e-6
+      && offLine(g.from, shape.o, shape.d) < TOL), g => len3(sub3(g.middle, shape.o)));
+    return edge && { edge: sel(edge), dir: edge.direction };
   }
   if (shape.kind === "point") {
     const vertex = edges.flatMap(g => [g.from, g.to]).find(q => q && len3(sub3(q, shape.p)) < TOL);
     return vertex ? { vertex: { at: vertex.map(tidy) } } : null;
   }
   return null;
+}
+
+/**
+ * The entity of a part's sketch that SolidWorks' sketch end is: `e.entity` names the sketch, and SolidWorks'
+ * numbers for the end (its point, its direction, a circle's radius) are taken back into the part and set against
+ * the sketch's entities where PeetCAD has them (its sketch axes need not be SolidWorks'). A sketch's own points
+ * (a line's ends, a circle's centre) count as points. Returns {sketch, entity, element, dir} or null.
+ */
+const sketchCache = new Map();
+function findSketchEntity(file, e, transform) {
+  const key = file + "|" + e.entity.sketch;
+  if (!sketchCache.has(key)) {
+    const r = spawnSync(peetExe, ["op", JSON.stringify({ op: "feature", feature: e.entity.sketch }), "-f", file, "-q", "--no-save"], { encoding: "utf8", maxBuffer: 1 << 26 });
+    const line = (r.stdout || "").split("\n").find(l => l.startsWith("{"));
+    sketchCache.set(key, line ? JSON.parse(line) : null);
+  }
+  const s = sketchCache.get(key);
+  if (!s || !s.plane || !s.entities) return null;
+  const { origin, x, y, normal } = s.plane;
+  const at = q => [0, 1, 2].map(i => origin[i] + q[0] * x[i] + q[1] * y[i]);
+  const shape = shapeFromParams({ ...e, referenceType: 3 }, transform);
+  const p = shape.p;
+  const d = norm3(toWorld({ R: inverse(matrixOf(transform)).R, t: [0, 0, 0] }, e.params.slice(3, 6)));
+  const kind = e.entity.kind === "sketchPoint" ? "point" : e.entity.type;
+  if (kind === "point") {
+    const points = [];
+    for (const n of s.entities) {
+      if (n.type === "point") points.push([n.id, n.at]);
+      if (n.type === "line") points.push([n.start, n.from], [n.end, n.to]);
+      if (n.type === "circle" || n.type === "arc") points.push([n.center, n.at]);
+      if (n.type === "arc") points.push([n.start, n.from], [n.end, n.to]);
+    }
+    const found = points.find(([, q]) => len3(sub3(at(q), p)) < TOL);
+    return found ? { sketch: s.name, entity: found[0], element: "point" } : null;
+  }
+  if (kind === "arc" || kind === "circle") {
+    const r = e.params[6] * MM;
+    const found = s.entities.find(n => (n.type === "circle" || n.type === "arc") && Math.abs(Math.abs(dot3(normal, d)) - 1) < 1e-6
+      && offLine(at(n.at), p, d) < TOL && (n.type === "circle" ? Math.abs(n.radius - r) < TOL : Math.abs(len3(sub3(at(n.from), at(n.at))) - r) < TOL));
+    return found ? { sketch: s.name, entity: found.id, element: "axis", dir: normal } : null;
+  }
+  if (kind === "line") {
+    const found = s.entities.find(n => n.type === "line" && offLine(at(n.from), p, d) < TOL && offLine(at(n.to), p, d) < TOL);
+    return found ? { sketch: s.name, entity: found.id, element: "axis", dir: norm3(sub3(at(found.to), at(found.from))) } : null;
+  }
+  return null;
+}
+
+/** The reference planes of a part, with where each is: {name, origin, normal}. */
+const refPlaneCache = new Map();
+function referencePlanes(file) {
+  if (refPlaneCache.has(file)) return refPlaneCache.get(file);
+  const ask = op => {
+    const r = spawnSync(peetExe, ["op", JSON.stringify(op), "-f", file, "-q", "--no-save"], { encoding: "utf8", maxBuffer: 1 << 26 });
+    const line = (r.stdout || "").split("\n").find(l => l.startsWith("{"));
+    return line ? JSON.parse(line) : {};
+  };
+  const planes = (ask({ op: "features" }).features || []).filter(f => /plane|coordinate/i.test(f.type))
+    .map(f => ({ name: f.name, plane: ask({ op: "feature", feature: f.id }).plane }))
+    .filter(f => f.plane).map(f => ({ name: f.name, origin: f.plane.origin, normal: f.plane.normal }));
+  refPlaneCache.set(file, planes);
+  return planes;
 }
 
 /** A reference plane's normal in its part, as PeetCAD has it. */
@@ -298,12 +392,41 @@ function swDirection(e, comp) {
 }
 
 /**
- * A mate end in PeetCAD's terms: the component path, and the face, edge, vertex or plane of its part. With it,
- * what it is to a mate (`element`: plane or axis) and `sign`: whether PeetCAD's direction for it is SolidWorks'
- * (1) or the other way (-1), so that SolidWorks' alignment and flipped dimension can be said in PeetCAD's terms.
+ * A mate end in PeetCAD's terms: the component path (none for the assembly's own plane or origin), and the
+ * face, edge, vertex, plane, origin or sketch entity of its part. With it, what it is to a mate (`element`:
+ * plane, axis or point) and `sign`: whether PeetCAD's direction for it is SolidWorks' (1) or the other way
+ * (-1), so that SolidWorks' alignment and flipped dimension can be said in PeetCAD's terms.
  */
-function endOf(e, byPath, assembly, partFile) {
-  if (!e.component || e.component === assembly) return { error: "an end on the assembly's own planes or origin, which PeetCAD's mates can't take (parity A12)" };
+function endOf(e, byPath, assembly, partFile, others = []) {
+  const own = !e.component || e.component === assembly;
+  const isOrigin = e.entity && e.entity.kind === "sketchPoint" && e.entity.sketch === "Origin";
+  const isPlane = e.entity && e.entity.kind === "feature" && e.entity.type === "RefPlane";
+  if (own) {
+    // The assembly's own standard planes and origin, fixed where the assembly is
+    if (isOrigin) return { origin: true, element: "point" };
+    if (isPlane && STANDARD_PLANES[e.entity.name]) {
+      const plane = STANDARD_PLANES[e.entity.name];
+      const sw = e.params && len3(e.params.slice(3, 6)) > 0.5 ? norm3(e.params.slice(3, 6)) : null;
+      const d = sw && dot3(STANDARD_NORMALS[plane], sw);
+      return { plane, element: "plane", sign: d && Math.abs(Math.abs(d) - 1) < 1e-4 ? Math.sign(d) : null };
+    }
+    if (isPlane) return { error: `an end on the assembly's own reference plane ${e.entity.name}, which PeetCAD's assemblies don't have` };
+    if (e.entity || !e.params) return { error: `an end on the assembly itself that is neither a standard plane nor the origin (${e.entity ? e.entity.kind : "nothing"})` };
+    // SolidWorks names the assembly and gives no entity, only its numbers: geometry of a component it could not
+    // resolve. The component whose part has that face or edge where SolidWorks' numbers put it is the one.
+    const hits = [];
+    for (const comp of byPath.values()) {
+      // Not on a top-level component the mate's other ends are on: a mate joins two
+      if (others.some(o => o.split("/")[0] === comp.path.split("/")[0])) continue;
+      const file = /\.sldprt$/i.test(comp.file || "") ? partFile(comp) : null;
+      const shape = file && shapeFromParams(e, comp.transform);
+      const found = shape && findIn(file, shape);
+      if (found) hits.push(comp.path);
+    }
+    if (!hits.length) return { error: "an end SolidWorks names the assembly for, with no entity: on a component it couldn't resolve (no face or edge of the assembly's parts is where its numbers put it)", unmatched: true };
+    const end = endOf({ ...e, component: hits[0] }, byPath, assembly, partFile);
+    return end.error ? end : { ...end, guessed: true, note: `SolidWorks names the assembly for an end with no entity; ${hits.length > 1 ? `of ${hits.join(", ")}, ` : ""}${hits[0]} has it` };
+  }
   const comp = byPath.get(e.component);
   if (!comp) return { error: `its component ${e.component} is not in the assembly` };
   const component = e.component.split("/");
@@ -313,20 +436,31 @@ function endOf(e, byPath, assembly, partFile) {
     const d = dot3(norm3(dir), sw);
     return Math.abs(Math.abs(d) - 1) < 1e-4 ? Math.sign(d) : null;
   };
-  if (e.entity && e.entity.kind === "feature" && e.entity.type === "RefPlane") {
+  if (isOrigin) return { component, origin: true, element: "point" };
+  if (isPlane) {
     const plane = STANDARD_PLANES[e.entity.name] || e.entity.name;
     const file = partFile(comp);
     return { component, plane, element: "plane", sign: file ? signOf(planeNormal(file, plane)) : null };
   }
-  if (e.entity && /^sketch/.test(e.entity.kind)) return { error: "an end on a sketch's point or line, which PeetCAD's mates can't take" };
+  const file = partFile(comp);
+  if (e.entity && /^sketch/.test(e.entity.kind)) {
+    if (!file) return { error: "its part was not imported" };
+    if (!e.params) return { error: "a sketch end SolidWorks gives no numbers for" };
+    const found = findSketchEntity(file, e, comp.transform);
+    if (!found) return { error: `no ${e.entity.type || "point"} of ${e.entity.sketch} in ${path.basename(file, ".peet")} is where SolidWorks' is`, unmatched: true };
+    const { dir, element, ...where } = found;
+    return { component, ...where, element, sign: signOf(dir) };
+  }
   const shape = shapeOf(e, comp);
   if (!shape) return { error: `an end PeetCAD has no match for (${e.entity ? e.entity.kind : "reference type " + e.referenceType})` };
-  const file = partFile(comp);
   if (!file) return { error: "its part was not imported" };
-  const found = findIn(file, shape);
-  if (!found) return { error: `no ${shape.kind === "plane" ? "flat face" : shape.kind === "axis" ? "round face or edge on that axis" : shape.kind} of ${path.basename(file, ".peet")} is where SolidWorks' is`, unmatched: true };
+  // A round edge SolidWorks gives only numbers for: the circle where it has one, else a round face on its axis
+  let found = null;
+  if (!e.entity && e.referenceType === 1 && shape.kind === "axis") found = findIn(file, { kind: "circle", c: shape.o, n: shape.d, r: shape.r });
+  found = found || findIn(file, shape);
+  if (!found) return { error: `no ${shape.kind === "plane" ? "flat face" : shape.kind === "axis" ? "round face or edge on that axis" : shape.kind === "straight" ? "straight edge on that line" : shape.kind} of ${path.basename(file, ".peet")} is where SolidWorks' is`, unmatched: true };
   const { dir, ...where } = found;
-  const element = shape.kind === "plane" ? "plane" : shape.kind === "axis" || shape.kind === "circle" ? "axis" : shape.kind;
+  const element = shape.kind === "plane" || shape.kind === "refplane" ? "plane" : shape.kind === "point" ? "point" : "axis";
   return { component, ...where, element, sign: signOf(dir), ...(e.entity ? {} : { guessed: true }) };
 }
 
@@ -587,43 +721,71 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
     const row = { mate: f.name, type: f.type, suppressed: !!f.suppressed };
     report.mates.push(row);
     const kind = MATE_KINDS[f.type];
-    if (!kind) { row.result = "not supported"; row.why = `PeetCAD has no ${f.type.replace(/^Mate/, "")} mate (parity A4)`; return; }
+    if (!kind) { row.result = "not supported"; row.why = WHY_NOT[f.type] || `PeetCAD has no ${f.type.replace(/^Mate/, "")} mate (parity A4)`; return; }
     const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partIn(comp.file, comp.configuration).path || null : null;
-    const ends = (f.mate.entities || []).map(e => endOf(e, byPath, name, partFile));
+    const named = (f.mate.entities || []).map(e => e.component).filter(c => c && c !== name);
+    const ends = (f.mate.entities || []).map(e => endOf(e, byPath, name, partFile, named));
     const bad = ends.find(e => e.error);
     if (bad) { row.result = bad.unmatched ? "failed" : "not supported"; row.why = bad.error; return; }
-    if (ends.some(e => !want.has(e.component[0]))) { row.result = "left out"; row.why = "a component it joins was left out"; return; }
+    // An end with no component is on the assembly's own plane or origin
+    const comps = ends.filter(e => e.component);
+    if (comps.some(e => !want.has(e.component[0]))) { row.result = "left out"; row.why = "a component it joins was left out"; return; }
     if (ends.some(e => e.guessed)) row.guessed = true;
-    const strip = e => { const { guessed, element, sign, ...rest } = e; return rest; };
+    const notes = ends.map(e => e.note).filter(Boolean);
+    if (notes.length) row.ends = notes;
+    const strip = e => { const { guessed, element, sign, note, ...rest } = e; return rest; };
     // A component SolidWorks has suppressed: its mates wait for it, as SolidWorks' do
-    const waits = ends.some(e => (byPath.get(e.component[0]) || {}).suppression === 0);
+    const waits = comps.some(e => (byPath.get(e.component[0]) || {}).suppression === 0);
     if (waits) row.waits = "a component it joins is suppressed";
+    const values = (f.definition && f.definition.values) || {};
     let op;
     if (kind === "width") {
-      // SolidWorks lists the width's pair, then the tab: two faces, or one round face or axis
+      // SolidWorks lists the width's pair, then the tab: two faces, or one round face or axis. Either pair may
+      // be on two components.
       if (ends.length !== 4 && ends.length !== 3) { row.result = "not supported"; row.why = `a width mate of ${ends.length} ends`; return; }
       const width = ends.slice(0, 2), tab = ends.slice(2);
-      const one = list => new Set(list.map(e => e.component[0])).size === 1;
-      if (!one(width) || !one(tab) || width[0].component[0] === tab[0].component[0]) {
-        row.result = "not supported"; row.why = "a width mate whose width pair or tab is on more than one component"; return;
-      }
       if (tab.length === 1 && tab[0].element !== "axis") { row.result = "not supported"; row.why = "a width mate whose one tab end is not round"; return; }
       op = { op: "mate", type: "width", name: f.name, a: width.map(strip), b: tab.length === 1 ? strip(tab[0]) : tab.map(strip) };
       // swWidthMateConstraintType_e: 0 centred, 1 free, 2 dimension, 3 percent
-      const v = (f.definition && f.definition.values) || {};
+      const v = values;
       if (v.ConstraintType === 1) op.mode = "free";
       else if (v.ConstraintType === 2) { op.mode = "dimension"; op.distance = tidy(v.DistanceFromEnd * MM); }
       else if (v.ConstraintType === 3) { op.mode = "percent"; op.percent = tidy(v.PercentDistanceFromEnd * 100); }
       if (v.FlipDimension && op.mode && op.mode !== "free") op.a.reverse();
+    } else if (kind === "symmetric") {
+      // The two ends, then the plane of symmetry
+      if (ends.length !== 3) { row.result = "not supported"; row.why = `a symmetric mate of ${ends.length} ends`; return; }
+      op = { op: "mate", type: "symmetric", name: f.name, a: strip(ends[0]), b: strip(ends[1]), plane: strip(ends[2]) };
     } else {
       if (ends.length !== 2) { row.result = "not supported"; row.why = `${ends.length} ends`; return; }
       const [ea, eb] = ends;
       op = { op: "mate", type: kind, name: f.name, a: strip(ea), b: strip(eb) };
-      // swMateAlign_e: 0 aligned, 1 anti-aligned, 2 closest, of the ends' directions as SolidWorks has them;
-      // PeetCAD's may point the other way (a reference plane's, an axis's), which `sign` says.
+      if (f.type === "MateCoordinate") row.note = "SolidWorks' coordinate mate of two origins: the points together (whether it also lines up their axes is not exported)";
       const same = ea.element === eb.element && (ea.element === "plane" || ea.element === "axis");
       const known = ea.sign && eb.sign;
-      if (same && f.mate.alignment === 2) {
+      if (kind === "slot") {
+        // No constraint type is exported for any of the library's slot mates: SolidWorks' default, free
+        // (swSlotMateConstraintType_e: 0 free, 1 centre, 2 distance along, 3 percent along)
+        if (values.ConstraintType === 1) op.mode = "centered";
+        else if (values.ConstraintType === 2) { op.mode = "dimension"; op.distance = tidy(values.DistanceFromEnd * MM); }
+        else if (values.ConstraintType === 3) { op.mode = "percent"; op.percent = tidy(values.PercentDistanceFromEnd * 100); }
+        if (values.FlipDimension && op.mode) op.flip_dimension = true;
+      } else if (kind === "limit_angle" || kind === "limit_distance") {
+        const angle = kind === "limit_angle";
+        const [lo, hi] = angle ? [values.MinimumAngle, values.MaximumAngle] : [values.MinimumDistance, values.MaximumDistance];
+        if (typeof lo !== "number" || typeof hi !== "number") { row.result = "failed"; row.why = "its limits were not exported"; return; }
+        const scale = angle ? 180 / Math.PI : MM;
+        op.min = tidy(lo * scale);
+        op.max = tidy(hi * scale);
+        // Measured between the ends' directions as SolidWorks has them, or with the second turned round when it
+        // flips the dimension; PeetCAD's directions may point the other way (`sign`)
+        let flip = !!values.FlipDimension;
+        if (angle && known && ea.sign * eb.sign < 0) flip = !flip;
+        if (angle && !known) row.note = "the side the angle is measured on is SolidWorks', not checked against PeetCAD's directions";
+        if (flip) op.flip_dimension = true;
+      } else if (same && f.mate.alignment === 2) {
+        // swMateAlign_e: 0 aligned, 1 anti-aligned, 2 closest, of the ends' directions as SolidWorks has them;
+        // PeetCAD's may point the other way (a reference plane's, an axis's), which `sign` says.
         if (ea.element === "plane") op.align = "closest";
       } else if (same && known && (f.mate.alignment === 0 || f.mate.alignment === 1)) {
         const aligned = (f.mate.alignment === 0 ? 1 : -1) * ea.sign * eb.sign > 0;

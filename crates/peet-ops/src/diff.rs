@@ -339,6 +339,18 @@ pub fn diff_scoped(
                         b2: b2.as_ref().map(|e| Box::new(MateEndSel::Ref(e.clone()))),
                         mode: width_mode(mode),
                     },
+                    MateKind::Slot { mode } => MateType::Slot(width_mode(mode)),
+                    MateKind::LimitAngle { min, max } => MateType::LimitAngle {
+                        min: input_of(min),
+                        max: input_of(max),
+                    },
+                    MateKind::LimitDistance { min, max } => MateType::LimitDistance {
+                        min: input_of(min),
+                        max: input_of(max),
+                    },
+                    MateKind::Symmetric { plane } => {
+                        MateType::Symmetric(Box::new(MateEndSel::Ref(plane.clone())))
+                    }
                 },
                 a: MateEndSel::Ref(m.a.clone()),
                 b: MateEndSel::Ref(m.b.clone()),
@@ -375,6 +387,21 @@ pub fn diff_scoped(
                     MateKind::Width { a2, b2, mode },
                 ) if old_a2 == a2 && old_b2 == b2 => {
                     ops.push(edit(m, MateChange::Width(width_mode(mode))));
+                    None
+                }
+                (MateKind::Slot { .. }, MateKind::Slot { mode }) => {
+                    ops.push(edit(m, MateChange::Width(width_mode(mode))));
+                    None
+                }
+                (MateKind::LimitAngle { .. }, MateKind::LimitAngle { min, max })
+                | (MateKind::LimitDistance { .. }, MateKind::LimitDistance { min, max }) => {
+                    ops.push(edit(
+                        m,
+                        MateChange::Limits {
+                            min: Some(input_of(min)),
+                            max: Some(input_of(max)),
+                        },
+                    ));
                     None
                 }
                 _ => {

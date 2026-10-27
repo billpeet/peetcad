@@ -499,9 +499,11 @@ fn invalid_width_selections_values_and_modes_are_explained_and_recover() {
     let mut malformed = width_op();
     malformed["a"] = json!([]);
     assert!(error(&mut doc, malformed).contains("exactly two"));
+    // A pair may be on two components (as in SolidWorks), but not every end on one.
     let mut mixed = width_op();
+    mixed["a"][0]["component"] = json!("Tab");
     mixed["a"][1]["component"] = json!("Tab");
-    assert!(error(&mut doc, mixed).contains("one top-level"));
+    assert!(error(&mut doc, mixed).contains("a mate joins two components"));
     let mut wrong = width_op();
     wrong["mode"] = json!("unknown");
     assert!(error(&mut doc, wrong).contains("Width mode"));

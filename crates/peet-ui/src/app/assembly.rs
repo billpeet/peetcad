@@ -1603,9 +1603,12 @@ impl PeetApp {
                     Some(MateGeom::Edge(_)) => "An edge",
                     Some(MateGeom::Vertex(_)) => "A corner",
                     Some(MateGeom::Plane(_)) => "A reference plane",
+                    Some(MateGeom::Origin) => "The origin",
+                    Some(MateGeom::Sketch(_)) => "A sketch entity",
                     None => "The whole",
                 },
-                end.component().map_or("?", |c| assembly.name_of(c))
+                end.component()
+                    .map_or("the assembly", |c| assembly.name_of(c))
             )
         };
         let (first, second) = match &mate.kind {
