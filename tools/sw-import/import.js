@@ -2022,6 +2022,53 @@ function importPart(doc, dir) {
     return built;
   }
 
+  /** SolidWorks' bends of feature `top` (its OneBend and SketchBend sub-features), in order. */
+  const bendsOf = top => {
+    const out = [];
+    const walk = g => { if (g.suppressed) return; if (/^(OneBend|SketchBend)$/.test(g.type)) out.push(g.name); (g.sub || []).forEach(walk); };
+    (top.sub || []).forEach(walk);
+    return out;
+  };
+  const sameBends = (a, b) => {
+    const x = (a || []).map(g => g.name).sort(), y = (b || []).map(g => g.name).sort();
+    return x.length === y.length && x.every((n, i) => n === y[i]);
+  };
+
+  /**
+   * The bends an Unfold or a Fold names, as PeetCAD selectors: none (every bend) where it names every bend
+   * SolidWorks has before it, else a face of each, among the bend faces of what its feature was imported as.
+   */
+  function bendSelectors(f, bends) {
+    const names = (bends || []).map(b => b.name);
+    if (!names.length) return {};
+    const before = [];
+    for (const top of cur.features) {
+      if (top.name === f.name) break;
+      if (!top.suppressed && top.type !== "FlatPattern") before.push(...bendsOf(top));
+    }
+    if (before.every(n => names.includes(n))) return {};
+    const faces = peet.ask({ op: "faces" }).faces || [];
+    const list = [];
+    for (const name of names) {
+      const owner = cur.features.find(top => bendsOf(top).includes(name));
+      const ours = owner && made.get(owner.name);
+      if (!ours) return { error: `the feature bend ${name} is of was not imported` };
+      // PeetCAD's bends of it in order, each its faces round one axis
+      const groups = [];
+      for (const n of ours) {
+        for (const face of faces) {
+          if (!face.axis_point || !(face.made_by || []).some(m => m.feature === n && m.side === "bend")) continue;
+          const key = n + "|" + face.axis_point.map(x => x.toFixed(3)).join(",");
+          if (!groups.some(g => g.key === key)) groups.push({ key, face });
+        }
+      }
+      const g = groups[bendsOf(owner).indexOf(name)];
+      if (!g) return { error: `PeetCAD's ${owner.name} has no bend for ${name}` };
+      list.push({ body: g.face.body, index: g.face.index });
+    }
+    return { list };
+  }
+
   /**
    * Of several ways to build a feature, the one that comes out nearest SolidWorks': that makes the most of
    * SolidWorks' flat faces of it where they are, and then whose faces come nearest SolidWorks' in area. Each
@@ -2866,8 +2913,12 @@ function importPart(doc, dir) {
         if (sheetPart) {
           if (end === 0 && !v.LinkToThickness && thickness && depth < thickness - 1e-6)
             return record(f, "not supported", `a cut ${tidy(depth)} mm deep into ${tidy(thickness)} mm sheet (an etch): sheet metal cuts go through`);
-          // Cut while the part is unfolded: through the sheet, where it lies in the blank
-          const reach = unfolded ? null : reachOf(end, depth, v.BothDirections);
+          // Cut while the part is unfolded: with PeetCAD's unfold, as SolidWorks cuts it, straight
+          // through the part as it lies (through the folded part where the unfold is suppressed). Through
+          // next goes through all of it, the cut starting in the sheet it ends in. With no unfold of
+          // PeetCAD's: through the sheet, where it lies in the blank.
+          let reach = unfolded && !unfolded.live ? null : reachOf(end, depth, v.BothDirections);
+          if (unfolded && unfolded.live && reach && reach.next) reach = { end: "through_all", ...(reach.both ? { both: true } : {}) };
           const sk = useSketch(f);
           let built = sk.error ? { ok: false, message: sk.error } : sheetCut(f, sk.name, reach, sk.frame);
           if (!built.ok && sketchOf(f)) {
@@ -2903,12 +2954,31 @@ function importPart(doc, dir) {
       case "CornerRelief": return cornerRelief(f);
       case "LibraryFeature": return libraryFeature(f);
 
-      case "UnFold":
-        unfolded = v.FixedFace || {};
-        return record(f, "imported", "nothing to do: a sheet metal cut is made in the flat pattern");
-      case "Fold":
+      case "UnFold": {
+        // SolidWorks lays the bends flat, the fixed face staying where it is; the features up to
+        // the Fold are made on the flat part (and where Unfold and Fold are suppressed, on the
+        // folded one)
+        unfolded = { ...(v.FixedFace || {}) };
+        const fixed = v.FixedFace && v.FixedFace.point && v.FixedFace.normal
+          ? { at: mm(v.FixedFace.point).map(tidy), normal: v.FixedFace.normal.map(tidy) } : null;
+        if (!fixed) return record(f, "failed", "SolidWorks' fixed face is not in the export");
+        const bends = bendSelectors(f, v.Bends);
+        if (bends.error) return record(f, "failed", bends.error);
+        const built = build(f, { op: "unfold", name: f.name, fixed, ...(bends.list ? { bends: bends.list } : {}) });
+        if (built.ok) unfolded.live = true;
+        return finish(f, built);
+      }
+      case "Fold": {
+        const live = unfolded && unfolded.live;
         unfolded = null;
-        return record(f, "imported", "nothing to do: a sheet metal cut is made in the flat pattern");
+        if (!live) return record(f, "failed", "the Unfold it folds back was not imported");
+        // Every bend laid flat, as SolidWorks' folds do in the library; other bends are named
+        const unfold = [...cur.features].reverse().find(g => g.type === "UnFold" && !g.suppressed && made.has(g.name));
+        const same = unfold && sameBends(values(unfold).Bends, v.Bends);
+        const bends = same ? {} : bendSelectors(f, v.Bends);
+        if (bends.error) return record(f, "failed", bends.error);
+        return finish(f, build(f, { op: "fold", name: f.name, ...(bends.list ? { bends: bends.list } : {}) }));
+      }
 
       case "Revolution": case "RevCut": {
         const sk = useSketch(f);
@@ -3871,7 +3941,7 @@ function importPart(doc, dir) {
         const tree = () => (peet.ask({ op: "features" }).features || []).map(x => x.name);
         for (const f of other.features) {
           // A feature between an Unfold and its Fold is cut in the flat here too (Top Hat's Cut-Extrude2)
-          if (!f.suppressed && f.type === "UnFold") unfolded = values(f).FixedFace || {};
+          if (!f.suppressed && f.type === "UnFold") unfolded = { ...(values(f).FixedFace || {}), live: made.has(f.name) };
           if (!f.suppressed && f.type === "Fold") unfolded = null;
           if (f.suppressed || STRUCTURE.test(f.type) || f.type === "SheetMetal" || f.type === "RefPlane" || made.has(f.name) || sketches.has(f.name)) continue;
           if (report.features.some(x => x.name === f.name && x.result !== "suppressed" && x.result !== LATER)) continue;   // tried already, where it was live
