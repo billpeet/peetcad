@@ -254,6 +254,11 @@ function importPart(doc, dir) {
   peet.note(`${path.basename(doc.sourcePath)}, configuration ${config.name}, imported from its SolidWorks export.`);
 
   const report = { name: doc.name, configuration: config.name, features: [], notes: [] };
+  // The sketches SolidWorks has suppressed in the active configuration, or that are under a feature it has
+  // suppressed there: SolidWorks does not solve them, and the export has them as they were last solved
+  // (the export reads every configuration's sketches in the active one)
+  const unsolvedSketches = new Set();
+  (function walk(list, off) { for (const x of list || []) { const now = off || !!x.suppressed; if (now && SKETCH.test(x.type)) unsolvedSketches.add(x.name); walk(x.sub, now); } })(config.features, false);
   // A feature that fails to rebuild in a configuration (an error, not a warning) leaves nothing in
   // SolidWorks' body there, as if it were suppressed (Top Hat's Edge-Flange3, whose outline crosses itself
   // where its edge is short): it is treated as suppressed in that configuration, and built where it is not
@@ -543,10 +548,12 @@ function importPart(doc, dir) {
   /**
    * Adds a sketch's relations and dimensions, so that the sketch can be driven as it is in SolidWorks.
    * They are added all at once; if that moves the geometry or over-defines the sketch they are taken back and
-   * added one at a time, keeping those that leave the sketch as it was drawn.
+   * added one at a time, keeping those that leave the sketch as it was drawn. In a sketch SolidWorks has
+   * suppressed, relations to the model and dimensions that move it are kept too, as SolidWorks solves it again.
    */
   function relate(f, sk, s, sf, own, drawn) {
     const pf = sk.frame, name = sk.name;
+    const unsolved = unsolvedSketches.has(f.name);
     const tally = { relations: s.relations.length, kept: 0, dropped: {} };
     const drop = why => { tally.dropped[why] = (tally.dropped[why] || 0) + 1; };
     report.sketches = report.sketches || {};
@@ -941,14 +948,29 @@ function importPart(doc, dir) {
         if (dim.drivenState === 1 && !byEquation.has(dim.fullName.split("@").slice(0, 2).join("@"))) item.driven = true;
         item.sw = dim.fullName;
       }
+      // What the model or a dimension's value sets, which may have changed since SolidWorks last solved the sketch
+      if (outside.length || item.value !== undefined) item.moves = true;
       items.push(item);
     }
     if (items.length === 0) return;
 
-    const shape = () => JSON.stringify((peet.ask({ op: "feature", feature: name }).entities || []).map(e => [e.id, e.from, e.to, e.center, e.radius, e.at].map(x => Array.isArray(x) ? x.map(v => +v.toFixed(4)) : typeof x === "number" ? +x.toFixed(4) : x)));
-    const before = shape();
+    const entities = () => peet.ask({ op: "feature", feature: name }).entities || [];
+    const shapeKey = list => JSON.stringify(list.map(e => [e.id, e.from, e.to, e.center, e.radius, e.at].map(x => Array.isArray(x) ? x.map(v => +v.toFixed(4)) : typeof x === "number" ? +x.toFixed(4) : x)));
+    const drawn0 = entities(), before = shapeKey(drawn0);
+    // How far anything in the sketch is from where it was drawn
+    const movedBy = now => {
+      const was = new Map(drawn0.map(e => [e.id, e]));
+      let most = 0;
+      for (const e of now) {
+        const b = was.get(e.id);
+        if (!b) continue;
+        for (const k of ["from", "to", "at"]) if (Array.isArray(b[k]) && Array.isArray(e[k])) most = Math.max(most, Math.hypot(...b[k].map((v, i) => v - e[k][i])));
+        if (typeof b.radius === "number" && typeof e.radius === "number") most = Math.max(most, Math.abs(b.radius - e.radius));
+      }
+      return most;
+    };
     // A relation PeetCAD makes of more than one (`with`) is kept or dropped as one
-    const clean = item => { const { sw, supplementary, with: also, ...rest } = item; return [rest, ...(also || [])]; };
+    const clean = item => { const { sw, supplementary, moves, with: also, ...rest } = item; return [rest, ...(also || [])]; };
     const keep = item => {
       if (!item.also) tally.kept++;
       if (item.sw) sk.dimensions.set(item.sw, item.name);
@@ -957,9 +979,16 @@ function importPart(doc, dir) {
     const backup = peet.file + ".before";
     const save = () => { fs.copyFileSync(peet.file, backup); return peet.script.length; };
     const restore = mark => { fs.copyFileSync(backup, peet.file); peet.script.length = mark; };
-    const fits = reply => reply.ok && reply.definition !== "over_defined" && shape() === before;
+    // Left where it was drawn, to within a micron: PeetCAD's model edges can be that far from SolidWorks'
+    // (a roof at an angle), which a relation to one makes up
+    const fits = reply => {
+      if (!reply.ok || reply.definition === "over_defined") return false;
+      const now = entities();
+      return shapeKey(now) === before || movedBy(now) <= 1e-3;
+    };
 
     let mark = save();
+    const moving = [];
     if (fits(peet.apply({ op: "draw", sketch: name, draw: items.flatMap(clean) }))) items.forEach(keep);
     else {
       restore(mark);
@@ -967,9 +996,24 @@ function importPart(doc, dir) {
         mark = save();
         const reply = peet.apply({ op: "draw", sketch: name, draw: clean(item) });
         if (fits(reply)) keep(item);
-        else { restore(mark); if (!item.also) drop(`${item.type}: ${!reply.ok ? "refused" : reply.definition === "over_defined" ? "over-defines the sketch" : "moves the sketch"}`); }
+        else {
+          restore(mark);
+          if (reply.ok && reply.definition !== "over_defined" && unsolved && item.moves) moving.push(item);
+          else if (!item.also) drop(`${item.type}: ${!reply.ok ? "refused" : reply.definition === "over_defined" ? "over-defines the sketch" : "moves the sketch"}`);
+        }
       }
     }
+    // A sketch SolidWorks has suppressed is in the export as it was last solved, which the model and the
+    // sketch's dimensions may have moved on from. SolidWorks solves it again when it is brought back, which
+    // moves it to where its relations to the model and its dimensions put it: those are kept, and move it.
+    for (const item of moving) {
+      mark = save();
+      const reply = peet.apply({ op: "draw", sketch: name, draw: clean(item) });
+      if (reply.ok && reply.definition !== "over_defined") keep(item);
+      else { restore(mark); if (!item.also) drop(`${item.type}: ${!reply.ok ? "refused" : "over-defines the sketch"}`); }
+    }
+    const by = moving.length ? movedBy(entities()) : 0;
+    if (by > 1e-3) report.notes.push(`${name} is suppressed in SolidWorks, whose export has it as it was last solved: its relations to the model and its dimensions move it up to ${by.toFixed(3)} mm, as SolidWorks moves it when it solves it again.`);
     if (fs.existsSync(backup)) fs.unlinkSync(backup);
   }
 
