@@ -73,7 +73,10 @@ given must match.
 
 A selector is resolved once, when the operation is applied, and stored as a reference
 that follows the geometry: changing a size later moves the sketch or the flange with its
-face or edge.
+face or edge. A face picked with `at` keeps that point: if a cut before the feature splits
+the face later (unsuppressed, or in another configuration), the feature gets the flat piece
+at that point. Pick such a face at a point inside the piece you mean in every
+configuration.
 
 ## User names
 

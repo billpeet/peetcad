@@ -1443,7 +1443,19 @@ function importPart(doc, dir) {
     const theirs = facesOf(f.name);
     if (!theirs.length) return false;
     const kind = theirs.some(x => x.cylinder) ? "fillet" : "chamfer";
-    const faces = entities.map(e => ({ at: mm(e.point).map(tidy), normal: unit(e.normal).map(tidy) }));
+    // SolidWorks' selection is of pieces of faces: where a cut splits a face in another configuration, the
+    // same entity there is one of its pieces, and here (where the face is whole) a point on that piece
+    // finds the same face, and in that configuration finds the piece. Two entities on a face that is whole
+    // here are each a piece there (Weather Shield Door's flange, cut in two in HingeRight only).
+    const pieces = doc.configurations.filter(c => c !== config && !c.flatPattern && c.features)
+      .map(c => (values(flatten(c).get(f.name) || {}).Entities || []));
+    const within = (e, o) => o && o.kind === "face" && o.surface === "plane" && o.point && o.normal && e.box && o.area < e.area - 1e-12
+      && dot(unit(o.normal), unit(e.normal)) > 1 - 1e-9 && Math.abs(dot(sub(o.point, e.point), unit(e.normal))) < 1e-5
+      && o.point.every((x, k) => x > e.box[k] - 1e-5 && x < e.box[k + 3] + 1e-5);
+    const faces = entities.map((e, i) => {
+      const piece = pieces.map(list => list[i]).filter(o => within(e, o)).sort((a, b) => a.area - b.area)[0];
+      return { at: mm((piece || e).point).map(tidy), normal: unit(e.normal).map(tidy) };
+    });
     const mark = peet.script.length;
     const built = build(f, { op: "break_corner", name: f.name, kind, size: tidy(v.Distance * MM), edges: [], faces });
     if (!built.ok) { peet.script.length = mark; return false; }
