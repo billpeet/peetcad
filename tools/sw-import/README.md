@@ -36,6 +36,26 @@ feature data under SolidWorks' own names, and an importer inside `peet` would ti
 PeetCAD to that. What it finds missing goes to
 [docs/solidworks-parity.md](../../docs/solidworks-parity.md).
 
+## Assemblies
+
+```
+node tools/sw-import/import-asm.js <export.swx.json | folder of exports> <parts run folder> <output folder> [--peet <peet>] [--only <text>]
+node tools/sw-import/summarise-asm.js <output folder> [--assemblies]
+```
+
+`import-asm.js` rebuilds assemblies from their exports, using the `.peet` parts a run of `import.js`
+made. It writes `<name>.peet`, `<name>.jsonl` and `<name>.report.json` for each, sub-assemblies under
+`sub-assemblies\` (from their own export, or from what their parent lists under them) and parts used in
+another configuration than their file's under `parts\` (a copy with that configuration active: a
+stand-in until PeetCAD's components can choose a configuration).
+
+Each component is inserted where SolidWorks has it, then each mate is added; an end is found among its
+part's faces and edges by its geometry (SolidWorks' plane, axis and radius, circle or line, or its
+numbers for the end in the assembly). A mate that agrees with SolidWorks moves nothing: the report gives,
+for each mate, how far the components are from SolidWorks' placement after it (`moved`), and for each
+component how far it ended up (`off_mm`) and how free it still is. The verdict is `matches` when every
+component is within a micron of SolidWorks' placement and every live mate and component is imported.
+
 ## How it works
 
 It applies one operation at a time, one `peet` call each, because the next operation

@@ -376,6 +376,58 @@ suppression and linear patterns all have equivalents.
 | A11 | **Alignment and flip.** FabSys sets an alignment and a flip on a mate; PeetCAD has one `flip`. Whether it says which side a distance is measured to is not known. | Over half the scripts' mates set a distance; about a quarter flip | Check: on a distance mate between two reference planes, `flip` left the component on the same side (y = -25 both ways); on a coincident mate it turned it over. Which field picks the side of a distance is still to find |
 | A12 | **What the templates' own mates join.** Of 1,117 mate ends: 639 flat faces, 165 round faces, 82 round edges, 23 reference planes, 12 sketch lines, 6 straight edges, 3 sketch points; 188 came back empty (half of them on suppressed mates). So the templates' mates are nearly all on faces, which PeetCAD takes; reference planes (A1) matter for the mates FabSys adds, not for importing these. | The full export | Answered; the 93 empty ends on live mates need a look |
 
+### Importing the template assemblies (first run, 27 October)
+
+`tools/sw-import/import-asm.js` rebuilds the exported assemblies from the parts a run of
+`import.js` made (`run-m10`); `summarise-asm.js` counts what it left out and why. Each component
+is inserted where SolidWorks has it, then the mates are added one at a time, each end found among
+its part's faces and edges by its geometry (a plane, an axis and radius, a circle, a line). A mate
+that agrees with SolidWorks moves nothing, so the report says, after each mate, how far the
+components are from SolidWorks' placement. The run is in `peetcad-imports\scratch\asm\run`.
+
+Of the 29 assembly exports, 26 have content (3 are documents gone from the NAS). They hold 121
+top-level components and sub-assemblies (143 part instances in all), 303 live mates and 114
+suppressed ones. First run:
+
+| Result | Assemblies |
+|---|---|
+| Matches: every component where SolidWorks has it, every mate imported | 4 (Baffle Duct, Dummy, Escutcheon Surround Sealed, Hinge) |
+| Placed as SolidWorks has them; a part differs (Box Roof End, SolidWorks' error) | 1 |
+| Placed as SolidWorks has them, with components or mates left out | 12 |
+| Components placed differently | 9 |
+
+117 of 121 components are inserted (the other 4: two parts outside Templates, one sub-assembly
+SolidWorks itself can't load); 204 of 303 live mates and 1 of 114 suppressed mates are imported.
+
+**What it takes, by where the work is** (counts are mates unless said):
+
+PeetCAD:
+
+| | What | Evidence | Parity |
+|---|---|---|---|
+| AI1 | **Which side a distance mate is measured to.** SolidWorks' "flip dimension"; `move_body`'s mates have it (`reversed` in `mate::solve`), assembly mates pass none. The main cause of components placed differently: Sliding Doorstay's Distance3 puts parts 344 mm off, Perforated Louver Filter's Distance1 222 mm | Most of the 9 assemblies placed differently | A11 |
+| AI2 | **A mate added suppressed**, without solving it: `mate` has no `suppressed`, so adding one of SolidWorks' suppressed mates moves components first | 114 suppressed mates; FabSys unsuppresses them | |
+| AI3 | **SolidWorks' alignment** (aligned, anti-aligned, closest) for coincident and concentric: Plinth Folded's pipes come out turned end for end (8 mm) | 1 assembly so far | A11 |
+| AI4 | **Mates to the assembly's own planes and origin** | 27 in 6 assemblies | A12 |
+| AI5 | **Mate kinds**: slot (6), limit angle (2), symmetric (2), coordinate (1), path (1); mate ends on sketch points and lines (4); width mates with a round tab or ends on more than two components (6) | | A4, A3 |
+| AI6 | **Assembly configurations**, each with its components' configurations and suppression, and its mates' suppression. Now only the active configuration is imported, and a part used in another configuration than its file's is a copy with that configuration active (a stand-in) | 8 assemblies with two configurations (left and right hinged); 24 instances in a non-default configuration | A5 |
+| AI7 | **Flexible sub-assemblies**: four Hinge Assembly instances (Meter Panel Movement, Laptop Shelf Assembly) are opened to another angle than the sub-assembly's own | 2 assemblies | A9 |
+| AI8 | **Assembly equations**: reading and setting a component's dimension (`"Height@Sketch1@Door<1>.Part"`), suppressing a component by condition (`"Hinge Assembly-3.Assembly" = IIF(...)`, 5 assemblies), global variables (`SectionID`), reference dimensions in the assembly (`RD1@Annotations`) | 50 equations in 11 assemblies, most of those that set part sizes disabled | A6, A7 |
+| AI9 | **Assembly features**: a cut with its sketch (Escutcheon Assembly), layout sketches (3), a component pattern driven by equations (Gear Tray Assembly's LocalLPattern1, count and spacing from Gear tray's height), composite curves (33, Laptop Shelf); in-context features in parts (24 holders in 9 assemblies) | | A8, A10 |
+| AI10 | **FabSys reaching into components**: `SetDimension` and suppression in a component (`Height@Sketch1@<part>-1`), `SuppressComponent`, `ResolveComponent`, a component's configuration, a component's sheet metal | Most of what FabSys does that PeetCAD can't take | F |
+
+The importer: width mates (which pair is the gap and which the tab), mates on components that are
+suppressed (19, not failures), sub-assemblies in another configuration than their file's, and the
+ends it has only SolidWorks' numbers for (a guessed plane can be the wrong one of two coplanar faces).
+
+The exporter: assembly STEP files and mass properties, to check the assembled geometry and not
+only placements; composite curve definitions; what a mate joins when its component isn't loaded.
+
+The templates: Escutcheon Assembly uses `\\NAS\Metroid\Design\Solidworks\Templates\Escutcheon
+Surround.SLDASM`, which doesn't exist (SolidWorks lists the component with nothing in it); Battery
+Floor Mount Assembly uses `C:\Users\Dave\Desktop\Northern Views Estate SPS\Battery test.SLDPRT`
+(twice) and Limit switch assy a job's part under `\\nas\JobSys`.
+
 ## FabSys as the driver
 
 Not yet examined in detail: `ISolidWorksManager` has about 40 methods, and each needs a

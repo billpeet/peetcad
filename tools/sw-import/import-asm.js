@@ -1,0 +1,454 @@
+#!/usr/bin/env node
+/**
+ * Rebuilds SolidWorks assemblies in PeetCAD from their exports (tools/sw-export), using the parts a run
+ * of import.js made, and says how close each came out.
+ *
+ *   node tools/sw-import/import-asm.js <export.swx.json | folder of exports> <parts run folder> <output folder>
+ *        [--peet <peet>] [--only <text>]
+ *
+ * For each assembly it writes <name>.peet (an assembly), <name>.jsonl (the operations) and <name>.report.json.
+ * A component is inserted where SolidWorks has it, then the mates are added: a mate that holds there moves
+ * nothing, so the report's `moved` says how far PeetCAD's mates disagree with SolidWorks' placement.
+ *
+ * Sub-assemblies are imported first, from their own export where there is one (Hinge Assembly), or else
+ * from the components their parent lists under them (Escutcheon Surround, whose file is not in Templates).
+ */
+const fs = require("fs");
+const path = require("path");
+const { spawnSync } = require("child_process");
+
+const args = process.argv.slice(2);
+const option = name => { const i = args.indexOf(name); if (i < 0) return null; const v = args[i + 1]; args.splice(i, 2); return v; };
+const repo = path.resolve(__dirname, "..", "..");
+const peetExe = option("--peet")
+  || [path.join(repo, "target", "release", "peet.exe"), path.join(repo, "target", "debug", "peet.exe"), "peet"].find(p => p === "peet" || fs.existsSync(p));
+const only = option("--only");
+if (args.length !== 3) {
+  console.error("Usage: node import-asm.js <export.swx.json | folder of exports> <parts run folder> <output folder> [--peet <peet>] [--only <text>]");
+  process.exit(2);
+}
+const [input, partsDir, outDir] = args.map(a => path.resolve(a));
+const exportDir = fs.statSync(input).isDirectory() ? input : path.dirname(input);
+const MM = 1000;
+const tidy = v => Math.abs(v) < 1e-12 ? 0 : +v.toFixed(6);
+
+// ---- peet ----
+
+class Peet {
+  constructor(file) {
+    this.file = file;
+    this.script = [];
+    if (fs.existsSync(file)) fs.unlinkSync(file);
+    // `peet new` makes a part: an assembly is started in memory and saved where the file goes
+    const made = spawnSync(peetExe, ["op", JSON.stringify({ op: "new", assembly: true, discard: true }), JSON.stringify({ op: "save", path: file }), "-q"], { encoding: "utf8" });
+    if (made.status !== 0 || !fs.existsSync(file)) throw new Error("peet could not start an assembly: " + (made.stderr || made.stdout));
+  }
+  run(op, save) {
+    const r = spawnSync(peetExe, ["run", "-", "-f", this.file, "-q", ...(save ? [] : ["--no-save"])],
+      { input: JSON.stringify(op) + "\n", encoding: "utf8", maxBuffer: 1 << 28 });
+    const line = (r.stdout || "").split("\n").find(l => l.startsWith("{"));
+    if (!line) return { ok: false, error: (r.stderr || "no reply").trim() };
+    return JSON.parse(line);
+  }
+  apply(op) { const reply = this.run(op, true); if (reply.ok) this.script.push(op); return reply; }
+  ask(op) { return this.run(op, false); }
+  note(text) { this.script.push("# " + text); }
+  backup() { fs.copyFileSync(this.file, this.file + ".before"); return this.script.length; }
+  restore(mark) { fs.copyFileSync(this.file + ".before", this.file); this.script.length = mark; }
+}
+
+// ---- Transforms ----
+//
+// SolidWorks' transform (MathTransform.ArrayData) is a rotation R applied to row vectors, then a translation:
+// world = p·R + t, metres. PeetCAD places a component at a point with an axis-angle rotation, millimetres.
+
+const matrixOf = t => ({ R: [[t[0], t[1], t[2]], [t[3], t[4], t[5]], [t[6], t[7], t[8]]], t: [t[9], t[10], t[11]] });
+const toWorld = (m, p) => [0, 1, 2].map(j => p[0] * m.R[0][j] + p[1] * m.R[1][j] + p[2] * m.R[2][j] + m.t[j]);
+const inverse = m => {
+  const R = [0, 1, 2].map(i => [0, 1, 2].map(j => m.R[j][i]));
+  return { R, t: [0, 1, 2].map(j => -(m.t[0] * R[0][j] + m.t[1] * R[1][j] + m.t[2] * R[2][j])) };
+};
+/** The axis and angle (degrees) of the rotation that takes a part's axes to where SolidWorks' transform puts them. */
+function axisAngle(m) {
+  // Column-vector form A = Rᵀ: A[i][j] = R[j][i]
+  const A = (i, j) => m.R[j][i];
+  const c = Math.max(-1, Math.min(1, (A(0, 0) + A(1, 1) + A(2, 2) - 1) / 2));
+  const angle = Math.acos(c);
+  if (angle < 1e-12) return null;
+  let axis;
+  if (Math.PI - angle > 1e-6) axis = [A(2, 1) - A(1, 2), A(0, 2) - A(2, 0), A(1, 0) - A(0, 1)];
+  else {
+    // Half a turn: the axis from the diagonal
+    const d = [0, 1, 2].map(i => Math.sqrt(Math.max(0, (A(i, i) + 1) / 2)));
+    const k = d.indexOf(Math.max(...d));
+    axis = [0, 1, 2].map(i => i === k ? d[k] : (A(k, i) + A(i, k)) / (4 * d[k]));
+  }
+  const n = Math.hypot(...axis);
+  return { axis: axis.map(v => tidy(v / n)), angle: tidy(angle * 180 / Math.PI) };
+}
+/** Where PeetCAD says a component is, as a SolidWorks-style matrix, to set against SolidWorks' own. */
+function matrixFromPeet(c) {
+  const [x, y, z] = c.at.map(v => v / MM);
+  if (!c.rotate || !c.rotate.angle) return { R: [[1, 0, 0], [0, 1, 0], [0, 0, 1]], t: [x, y, z] };
+  const a = c.rotate.angle * Math.PI / 180, [u, v, w] = c.rotate.axis;
+  const C = Math.cos(a), S = Math.sin(a), T = 1 - C;
+  const A = [[T * u * u + C, T * u * v - S * w, T * u * w + S * v], [T * u * v + S * w, T * v * v + C, T * v * w - S * u], [T * u * w - S * v, T * v * w + S * u, T * w * w + C]];
+  return { R: [0, 1, 2].map(i => [0, 1, 2].map(j => A[j][i])), t: [x, y, z] };
+}
+/** How far apart two placements are: the largest distance between where they put points 100 mm round the origin. */
+function apart(a, b) {
+  return Math.max(...[[0, 0, 0], [0.1, 0, 0], [0, 0.1, 0], [0, 0, 0.1]].map(p => {
+    const [u, v] = [toWorld(a, p), toWorld(b, p)];
+    return Math.hypot(u[0] - v[0], u[1] - v[1], u[2] - v[2]) * MM;
+  }));
+}
+
+// ---- Files ----
+
+const exportsByName = new Map();
+for (const f of fs.readdirSync(exportDir).filter(f => f.endsWith(".swx.json"))) exportsByName.set(f.replace(/\.swx\.json$/, "").toLowerCase(), path.join(exportDir, f));
+const exportOf = file => exportsByName.get(path.basename(file).toLowerCase());
+const partFileOf = file => {
+  const p = path.join(partsDir, path.basename(file).replace(/\.sldprt$/i, "") + ".peet");
+  return fs.existsSync(p) ? p : null;
+};
+const partReport = file => {
+  const p = path.join(partsDir, path.basename(file).replace(/\.sldprt$/i, "") + ".report.json");
+  return fs.existsSync(p) ? JSON.parse(fs.readFileSync(p)) : null;
+};
+
+// A part in another configuration than the one its file is in: PeetCAD's components can't choose a part's
+// configuration (parity A5), so a copy of the part with that configuration made active stands in for it.
+const variants = new Map();
+function partIn(file, configuration, report) {
+  const base = partFileOf(file);
+  if (!base) return { error: "the part was not imported" };
+  const pr = partReport(file);
+  const active = pr && pr.configuration;
+  if (!configuration || configuration === active) return { path: base };
+  const key = base + "|" + configuration;
+  if (variants.has(key)) return variants.get(key);
+  const dir = path.join(outDir, "parts");
+  fs.mkdirSync(dir, { recursive: true });
+  const copy = path.join(dir, `${path.basename(base, ".peet")} @ ${configuration.replace(/[<>:"/\\|?*]/g, "_")}.peet`);
+  fs.copyFileSync(base, copy);
+  const r = spawnSync(peetExe, ["run", "-", "-f", copy, "-q"], { input: JSON.stringify({ op: "configuration", configuration }) + "\n", encoding: "utf8" });
+  const line = (r.stdout || "").split("\n").find(l => l.startsWith("{"));
+  const reply = line ? JSON.parse(line) : { ok: false, error: r.stderr };
+  const made = reply.ok ? { path: copy, standIn: `the part in its configuration "${configuration}" is a copy with that configuration active` }
+    : { error: `the part has no configuration "${configuration}" (${reply.error || "refused"})` };
+  variants.set(key, made);
+  return made;
+}
+
+// ---- Mates ----
+
+const MATE_KINDS = { MateCoincident: "coincident", MateConcentric: "concentric", MateParallel: "parallel", MateDistanceDim: "distance", MateWidth: "width" };
+const STANDARD_PLANES = { "Front Plane": "front", "Top Plane": "top", "Right Plane": "right" };
+
+// The faces and edges of each part file, as PeetCAD has them, to find a mate's end by its geometry
+const geometryCache = new Map();
+function geometryOf(file) {
+  if (geometryCache.has(file)) return geometryCache.get(file);
+  const ask = op => {
+    const r = spawnSync(peetExe, ["op", JSON.stringify(op), "-f", file, "-q", "--no-save"], { encoding: "utf8", maxBuffer: 1 << 28 });
+    const line = (r.stdout || "").split("\n").find(l => l.startsWith("{"));
+    return line ? JSON.parse(line) : {};
+  };
+  const g = { faces: ask({ op: "faces" }).faces || [], edges: ask({ op: "edges" }).edges || [] };
+  geometryCache.set(file, g);
+  return g;
+}
+const sub3 = (a, b) => [a[0] - b[0], a[1] - b[1], a[2] - b[2]];
+const dot3 = (a, b) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
+const len3 = a => Math.hypot(a[0], a[1], a[2]);
+const norm3 = a => { const l = len3(a); return a.map(v => v / l); };
+/** Distance from a point to the line through `o` along unit `d`. */
+const offLine = (p, o, d) => { const v = sub3(p, o); const t = dot3(v, d); return len3(sub3(v, d.map(x => x * t))); };
+const TOL = 1e-3;   // mm
+
+/**
+ * What SolidWorks says a mate end is, in the part's coordinates (mm): a plane, an axis (a cylinder, a cone, a
+ * circle's axis), a circle, a line or a point; from its description of the entity where it has one, else from
+ * its numbers for it in the assembly (`params`: a point, a direction and a radius).
+ */
+function shapeOf(e, comp) {
+  const x = e.entity;
+  const mm = p => p.map(v => v * MM);
+  if (x && x.kind === "face") {
+    if (x.plane) return { kind: "plane", n: norm3(x.plane.slice(0, 3)), p: mm(x.plane.slice(3, 6)), near: x.point && mm(x.point) };
+    if (x.cylinder) return { kind: "axis", o: mm(x.cylinder.slice(0, 3)), d: norm3(x.cylinder.slice(3, 6)), r: x.cylinder[6] * MM, near: x.point && mm(x.point) };
+    if (x.normal && x.point) return { kind: "plane", n: norm3(x.normal), p: mm(x.point), near: mm(x.point) };
+  }
+  if (x && x.kind === "edge") {
+    if (x.circle) return { kind: "circle", c: mm(x.circle.slice(0, 3)), n: norm3(x.circle.slice(3, 6)), r: x.circle[6] * MM };
+    if (x.start && x.end) return { kind: "line", a: mm(x.start), b: mm(x.end) };
+  }
+  if (x && x.kind === "vertex" && x.point) return { kind: "point", p: mm(x.point) };
+  if (!x && e.params && comp) {
+    // swMateEntity2ReferenceType_e: 0 point, 1 line, 2 plane, 3 cylinder, 4 cone, 5 sphere, 7 circle
+    const back = inverse(matrixOf(comp.transform));
+    const p = mm(toWorld(back, e.params.slice(0, 3)));
+    const d = norm3(toWorld({ R: back.R, t: [0, 0, 0] }, e.params.slice(3, 6)));
+    const r = e.params[6] * MM;
+    if (e.referenceType === 2) return { kind: "plane", n: d, p };
+    if (e.referenceType === 0) return { kind: "point", p };
+    if (e.referenceType === 7) return { kind: "circle", c: p, n: d, r };
+    if ([1, 3, 4].includes(e.referenceType)) return { kind: "axis", o: p, d, r: r > 0 ? r : null };
+  }
+  return null;
+}
+
+/** The face or edge of the part that is that shape: a {body, index} selector, or null. */
+function findIn(file, shape) {
+  const { faces, edges } = geometryOf(file);
+  const pick = (list, score) => {
+    const scored = list.map(x => [x, score(x)]).filter(([, v]) => v !== null).sort((a, b) => a[1] - b[1]);
+    return scored.length ? { body: scored[0][0].body, index: scored[0][0].index } : null;
+  };
+  if (shape.kind === "plane") {
+    const face = pick(faces.filter(f => f.surface === "plane" && f.normal && Math.abs(Math.abs(dot3(f.normal, shape.n)) - 1) < 1e-6
+      && Math.abs(dot3(sub3(f.center, shape.p), shape.n)) < TOL), f => shape.near ? len3(sub3(f.center, shape.near)) : 0);
+    return face && { face };
+  }
+  if (shape.kind === "axis") {
+    const face = pick(faces.filter(f => f.axis && f.axis_point && Math.abs(Math.abs(dot3(f.axis, shape.d)) - 1) < 1e-6
+      && offLine(f.axis_point, shape.o, shape.d) < TOL && (!shape.r || f.radius === undefined || Math.abs(f.radius - shape.r) < TOL)),
+      f => shape.near ? len3(sub3(f.center, shape.near)) : 0);
+    if (face) return { face };
+    const edge = pick(edges.filter(g => g.curve === "circle" && Math.abs(Math.abs(dot3(g.axis, shape.d)) - 1) < 1e-6 && offLine(g.center, shape.o, shape.d) < TOL
+      && (!shape.r || Math.abs(g.radius - shape.r) < TOL)), () => 0);
+    return edge && { edge };
+  }
+  if (shape.kind === "circle") {
+    const edge = pick(edges.filter(g => g.curve === "circle" && Math.abs(Math.abs(dot3(g.axis, shape.n)) - 1) < 1e-6
+      && len3(sub3(g.center, shape.c)) < TOL && Math.abs(g.radius - shape.r) < TOL), () => 0);
+    return edge && { edge };
+  }
+  if (shape.kind === "line") {
+    const edge = pick(edges.filter(g => g.curve === "line"), g => {
+      const d = Math.min(len3(sub3(g.from, shape.a)) + len3(sub3(g.to, shape.b)), len3(sub3(g.from, shape.b)) + len3(sub3(g.to, shape.a)));
+      return d < 2 * TOL ? d : null;
+    });
+    return edge && { edge };
+  }
+  if (shape.kind === "point") {
+    const vertex = edges.flatMap(g => [g.from, g.to]).find(q => q && len3(sub3(q, shape.p)) < TOL);
+    return vertex ? { vertex: { at: vertex.map(tidy) } } : null;
+  }
+  return null;
+}
+
+/** A mate end in PeetCAD's terms: the component path, and the face, edge, vertex or plane of its part. */
+function endOf(e, byPath, assembly, partFile) {
+  if (!e.component || e.component === assembly) return { error: "an end on the assembly's own planes or origin, which PeetCAD's mates can't take (parity A12)" };
+  const comp = byPath.get(e.component);
+  if (!comp) return { error: `its component ${e.component} is not in the assembly` };
+  const component = e.component.split("/");
+  if (e.entity && e.entity.kind === "feature" && e.entity.type === "RefPlane") return { component, plane: STANDARD_PLANES[e.entity.name] || e.entity.name };
+  if (e.entity && /^sketch/.test(e.entity.kind)) return { error: "an end on a sketch's point or line, which PeetCAD's mates can't take" };
+  const shape = shapeOf(e, comp);
+  if (!shape) return { error: `an end PeetCAD has no match for (${e.entity ? e.entity.kind : "reference type " + e.referenceType})` };
+  const file = partFile(comp);
+  if (!file) return { error: "its part was not imported" };
+  const found = findIn(file, shape);
+  if (!found) return { error: `no ${shape.kind === "plane" ? "flat face" : shape.kind === "axis" ? "round face or edge on that axis" : shape.kind} of ${path.basename(file, ".peet")} is where SolidWorks' is`, unmatched: true };
+  return { component, ...found, ...(e.entity ? {} : { guessed: true }) };
+}
+
+// ---- Import ----
+
+const reports = [];
+const imported = new Map();   // export file -> { peet, report }
+
+function walkFeatures(list, f) { for (const x of list || []) { f(x); walkFeatures(x.sub, f); } }
+
+/**
+ * Imports an assembly. `listed` is the components to use when its file has no export: those its parent lists
+ * under it, with their transforms in the parent's coordinates, and `frame` the sub-assembly's transform there.
+ */
+function importAssembly(name, exp, outFile, listed = null, frame = null) {
+  const report = { name, configuration: null, components: [], mates: [], left: [], standIns: [], notes: [] };
+  const peet = new Peet(outFile);
+  let cfg = null;
+  if (exp) {
+    cfg = exp.configurations.find(c => c.name === exp.activeConfiguration) || exp.configurations[0];
+    report.configuration = cfg.name;
+    if (exp.configurations.length > 1) report.notes.push(`${exp.configurations.length} configurations: only "${cfg.name}" is imported (PeetCAD's assemblies have none, parity A5)`);
+    if ((cfg.equations || []).length) report.notes.push(`${cfg.equations.length} equations not imported (parity A6, A7)`);
+  }
+  const all = listed || cfg.components || [];
+  // In the sub-assembly's own coordinates
+  const local = frame ? inverse(matrixOf(frame)) : null;
+  const placeOf = c => {
+    if (!local) return matrixOf(c.transform);
+    const m = matrixOf(c.transform);
+    const R = [0, 1, 2].map(i => [0, 1, 2].map(j => m.R[i][0] * local.R[0][j] + m.R[i][1] * local.R[1][j] + m.R[i][2] * local.R[2][j]));
+    return { R, t: toWorld(local, m.t) };
+  };
+  const top = all.filter(c => !c.path.includes("/"));
+  const byPath = new Map(all.map(c => [c.path, c]));
+  const want = new Map();
+
+  for (const c of top) {
+    const row = { component: c.path, file: path.basename(c.file || ""), configuration: c.configuration, suppressed: c.suppression === 0, fixed: !!c.fixed };
+    report.components.push(row);
+    let source;
+    if (/\.sldasm$/i.test(c.file || "")) {
+      const sub = importSub(c, all);
+      if (sub.error) { row.result = "left out"; row.why = sub.error; report.left.push(`${c.path}: ${sub.error}`); continue; }
+      source = sub.path;
+      if (sub.standIn) report.standIns.push(`${c.path}: ${sub.standIn}`);
+    } else {
+      const part = partIn(c.file, c.configuration, report);
+      if (part.error) { row.result = "left out"; row.why = part.error; report.left.push(`${c.path}: ${part.error}`); continue; }
+      source = part.path;
+      if (part.standIn) report.standIns.push(`${c.path}: ${part.standIn}`);
+      const pr = partReport(c.file);
+      if (pr && pr.verdict !== "matches") row.partVerdict = pr.verdict;
+    }
+    const m = placeOf(c);
+    const rot = axisAngle(m);
+    const op = { op: "insert", path: source, name: c.path, at: m.t.map(v => tidy(v * MM)), ...(rot ? { rotate: rot } : {}), fixed: !!c.fixed };
+    const reply = peet.apply(op);
+    if (!reply.ok) { row.result = "failed"; row.why = reply.error; report.left.push(`${c.path}: ${reply.error}`); continue; }
+    row.result = "inserted";
+    want.set(c.path, m);
+    if (c.suppression === 0) peet.apply({ op: "suppress", component: c.path });
+  }
+
+  // Mates
+  if (cfg) walkFeatures(cfg.features, f => {
+    if (!/^Mate/.test(f.type) || f.type === "MateGroup" || !f.mate) return;
+    const row = { mate: f.name, type: f.type, suppressed: !!f.suppressed };
+    report.mates.push(row);
+    const kind = MATE_KINDS[f.type];
+    if (!kind) { row.result = "not supported"; row.why = `PeetCAD has no ${f.type.replace(/^Mate/, "")} mate (parity A4)`; return; }
+    const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partIn(comp.file, comp.configuration).path || null : null;
+    const ends = (f.mate.entities || []).map(e => endOf(e, byPath, name, partFile));
+    const bad = ends.find(e => e.error);
+    if (bad) { row.result = bad.unmatched ? "failed" : "not supported"; row.why = bad.error; return; }
+    if (ends.some(e => !want.has(e.component[0]))) { row.result = "left out"; row.why = "a component it joins was left out"; return; }
+    if (ends.some(e => e.guessed)) row.guessed = true;
+    const strip = e => { const { guessed, ...rest } = e; return rest; };
+    let op;
+    if (kind === "width") {
+      if (ends.length !== 4) { row.result = "not supported"; row.why = `a width mate of ${ends.length} ends`; return; }
+      // Two ends on each component: the width's pair, then the tab's
+      const owners = [...new Set(ends.map(e => e.component[0]))];
+      if (owners.length !== 2) { row.result = "not supported"; row.why = "a width mate whose ends are not two on each of two components"; return; }
+      const [pa, pb] = owners.map(o => ends.filter(e => e.component[0] === o).map(strip));
+      op = { op: "mate", type: "width", name: f.name, a: pa, b: pb };
+    } else {
+      if (ends.length !== 2) { row.result = "not supported"; row.why = `${ends.length} ends`; return; }
+      op = { op: "mate", type: kind, name: f.name, a: strip(ends[0]), b: strip(ends[1]) };
+      // swMateAlign_e: 0 aligned, 1 anti-aligned, 2 closest. PeetCAD's planar mates are anti-aligned unless flipped.
+      if (f.mate.alignment === 0 && kind !== "concentric") op.flip = true;
+      if (kind === "distance") {
+        const d = (f.dimensions || [])[0];
+        if (!d) { row.result = "failed"; row.why = "its distance was not exported"; return; }
+        op.distance = tidy(d.value * MM);
+        if (f.mate.flipped) row.note = "SolidWorks flips which side the distance is measured to (parity A11)";
+      }
+    }
+    const mark = peet.backup();
+    const reply = peet.apply(op);
+    if (!reply.ok || (reply.mate && reply.mate.status && reply.mate.status !== "ok")) {
+      peet.restore(mark);
+      row.result = "failed";
+      row.why = reply.error || (reply.mate && (reply.mate.message || reply.mate.status));
+      return;
+    }
+    // How far from SolidWorks' placement the components are with this mate
+    const now = peet.ask({ op: "components" });
+    let moved = 0;
+    for (const c of now.components || []) { const m = want.get(c.name); if (m) moved = Math.max(moved, apart(matrixFromPeet(c), m)); }
+    moved = tidy(moved);
+    if (f.suppressed) {
+      if (moved > 1e-6) { peet.restore(mark); row.result = "left out"; row.why = "suppressed, and it would move components where SolidWorks has them"; return; }
+      peet.apply({ op: "suppress", mate: f.name });
+    }
+    row.result = "imported";
+    if (moved) row.moved = moved;
+  });
+
+  // Where the mates left each component, against SolidWorks
+  const placed = peet.ask({ op: "components" });
+  let worst = 0;
+  for (const c of placed.components || []) {
+    const m = want.get(c.name);
+    if (!m) continue;
+    const d = apart(matrixFromPeet(c), m);
+    worst = Math.max(worst, d);
+    const row = report.components.find(r => r.component === c.name);
+    if (row) { row.off_mm = tidy(d); row.status = c.status; row.freedom = c.freedom; }
+  }
+  report.freedom = placed.freedom;
+  report.off_mm = tidy(worst);
+  const live = report.mates.filter(m => !m.suppressed);
+  const missing = report.components.filter(c => c.result !== "inserted").length + live.filter(m => m.result !== "imported").length;
+  const partsOff = report.components.some(c => c.partVerdict);
+  report.verdict = worst > 1e-3 ? "components placed differently"
+    : missing ? "placed as SolidWorks has them, with components or mates left out"
+    : partsOff ? "placed as SolidWorks has them; a part differs"
+    : "matches";
+  fs.writeFileSync(outFile.replace(/\.peet$/, ".jsonl"), peet.script.map(o => typeof o === "string" ? o : JSON.stringify(o)).join("\n") + "\n");
+  fs.writeFileSync(outFile.replace(/\.peet$/, ".report.json"), JSON.stringify(report, null, 1));
+  try { fs.unlinkSync(outFile + ".before"); } catch {}
+  return report;
+}
+
+/** A sub-assembly, imported once per file (and per configuration), as an assembly of its own. */
+const subs = new Map();
+function importSub(c, all) {
+  const key = (c.file + "|" + (c.configuration || "")).toLowerCase();
+  if (subs.has(key)) return subs.get(key);
+  const exp = exportOf(c.file);
+  const name = path.basename(c.file).replace(/\.sldasm$/i, "");
+  const file = path.join(outDir, "sub-assemblies", `${name}${c.configuration && c.configuration !== "Default" ? " @ " + c.configuration : ""}.peet`);
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  let made;
+  try {
+    if (exp) {
+      const j = JSON.parse(fs.readFileSync(exp));
+      if (!j.configurations || !j.configurations.length) throw new Error("its export is empty: " + (j.error || ""));
+      const r = importAssembly(name, j, file);
+      made = { path: file, report: r };
+      if (c.configuration && c.configuration !== j.activeConfiguration) made.standIn = `it is used in its configuration "${c.configuration}" and imported in "${j.activeConfiguration}"`;
+    } else {
+      // Not exported (outside Templates): what its parent lists under it, placed relative to it
+      const prefix = c.path + "/";
+      const listed = all.filter(x => x.path.startsWith(prefix)).map(x => ({ ...x, path: x.path.slice(prefix.length) }));
+      if (!listed.length) throw new Error("not exported, and its parent lists nothing under it");
+      const r = importAssembly(name, null, file, listed, c.transform);
+      made = { path: file, report: r, standIn: "not exported: built from its components as its parent has them, without its mates" };
+    }
+  } catch (e) { made = { error: "the sub-assembly could not be imported: " + e.message }; }
+  subs.set(key, made);
+  return made;
+}
+
+fs.mkdirSync(outDir, { recursive: true });
+const inputs = fs.statSync(input).isDirectory()
+  ? fs.readdirSync(input).filter(f => /\.sldasm\.swx\.json$/i.test(f)).sort().map(f => path.join(input, f))
+  : [input];
+const summary = [];
+for (const file of inputs.filter(f => !only || path.basename(f).toLowerCase().includes(only.toLowerCase()))) {
+  const j = JSON.parse(fs.readFileSync(file));
+  const name = j.name || path.basename(file).replace(/\.sldasm\.swx\.json$/i, "");
+  if (!j.configurations || !j.configurations.length) { summary.push({ name, verdict: "not exported", error: j.error }); console.log(`${"not exported".padEnd(60)} ${name}`); continue; }
+  const started = Date.now();
+  let r;
+  try { r = importAssembly(name, j, path.join(outDir, name + ".peet")); }
+  catch (e) { r = { name, verdict: "the importer failed", error: e.stack }; }
+  const mates = r.mates || [];
+  const row = {
+    name, verdict: r.verdict, seconds: Math.round((Date.now() - started) / 1000), off_mm: r.off_mm,
+    components: (r.components || []).length, componentsLeft: (r.components || []).filter(c => c.result !== "inserted").length,
+    mates: mates.length, matesImported: mates.filter(m => m.result === "imported").length,
+    matesNotSupported: mates.filter(m => m.result === "not supported").length, standIns: (r.standIns || []).length,
+  };
+  summary.push(row);
+  console.log(`${r.verdict.padEnd(60)} ${name}  (components ${row.components - row.componentsLeft}/${row.components}, mates ${row.matesImported}/${row.mates}, off ${r.off_mm} mm)`);
+}
+fs.writeFileSync(path.join(outDir, "summary.json"), JSON.stringify(summary, null, 1));
