@@ -1019,6 +1019,31 @@ pub enum FeatureKind {
 }
 
 impl FeatureKind {
+    /// The yes-or-no settings that can differ between configurations, by the name their
+    /// operations give them (SolidWorks lets a cut's direction differ).
+    pub fn flags(&self) -> Vec<(&'static str, bool)> {
+        match self {
+            Self::SheetCut(c) => vec![("reverse", c.reverse), ("both", c.both)],
+            Self::Extrude(e) => vec![
+                ("reverse", e.params.reverse),
+                ("flip_side", e.params.flip_side),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    /// [`FeatureKind::flags`], to set.
+    pub fn flags_mut(&mut self) -> Vec<(&'static str, &mut bool)> {
+        match self {
+            Self::SheetCut(c) => vec![("reverse", &mut c.reverse), ("both", &mut c.both)],
+            Self::Extrude(e) => vec![
+                ("reverse", &mut e.params.reverse),
+                ("flip_side", &mut e.params.flip_side),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Sketch(_) => "Sketch",

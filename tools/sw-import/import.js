@@ -2333,17 +2333,23 @@ function importPart(doc, dir) {
    * is built and taken back again, and the tries are left out of the script.
    */
   function nearest(f, ops) {
-    const theirs = facesOf(f.name).reduce((sum, face) => sum + face.area * 1e6, 0);
+    const swFaces = facesOf(f.name);
+    const theirs = swFaces.reduce((sum, face) => sum + face.area * 1e6, 0);
+    // Where SolidWorks' faces of it are, by area: what tells round holes cut one way from the other
+    const swMiddle = theirs > 0 ? mul(swFaces.reduce((sum, face) => add(sum, mul(mid(mm(face.box.slice(0, 3)), mm(face.box.slice(3))), face.area * 1e6)), [0, 0, 0]), 1 / theirs) : null;
     const mark = peet.script.length;
     let best = null;
     for (const op of ops) {
       const tried = build(f, op);
       if (!tried.ok) { if (!best) best = { failed: tried }; continue; }
-      const ours = (peet.ask({ op: "faces" }).faces || []).filter(x => (x.made_by || []).some(m => tried.names.includes(m.feature))).reduce((sum, x) => sum + x.area_mm2, 0);
+      const mine = (peet.ask({ op: "faces" }).faces || []).filter(x => (x.made_by || []).some(m => tried.names.includes(m.feature)));
+      const ours = mine.reduce((sum, x) => sum + x.area_mm2, 0);
       // With nothing of it in SolidWorks' body (it is suppressed there), the way that makes something
       const off = theirs > 0 ? Math.abs(ours - theirs) : -ours, planes = wallsMatched(f.name, tried.names);
+      const away = swMiddle && ours > 0 ? len(sub(mul(mine.reduce((sum, x) => add(sum, mul(x.center, x.area_mm2)), [0, 0, 0]), 1 / ours), swMiddle)) : 0;
       peet.apply({ op: "delete", features: tried.names });
-      if (!best || best.failed || planes > best.planes + 1e-6 || (planes > best.planes - 1e-6 && off < best.off - 1e-6)) best = { op, off, planes };
+      const same = best && !best.failed && Math.abs(planes - best.planes) < 1e-6 && Math.abs(off - best.off) < 1e-6;
+      if (!best || best.failed || planes > best.planes + 1e-6 || (planes > best.planes - 1e-6 && off < best.off - 1e-6) || (same && away < best.away - 1)) best = { op, off, planes, away };
     }
     peet.script.length = mark;
     return best.failed ? best.failed : build(f, best.op);
@@ -4192,6 +4198,76 @@ function importPart(doc, dir) {
       // configurations added after are copies of: SwName -> how many had been added then
       const early = new Map();
       const addedAt = new Map();
+      /**
+       * What SolidWorks lets differ between configurations besides sizes and suppression: a sketch's plane
+       * (the Door's hinge holes, on the right-hand return in Default and the left-hand one in R Hinges) and a
+       * cut's or extrusion's direction. A sketch goes on a plane or face where SolidWorks' is in `c`, one that
+       * puts every point of it where SolidWorks has it there (its drawing is the same in every
+       * configuration); a direction that is the other way round from the active configuration's is turned.
+       */
+      const settleSettings = (c, entry, there) => {
+        const home = maps.get(config);
+        for (const [swName, sk] of sketches) {
+          const mine = there.get(swName), base = home.get(swName);
+          if (!mine || !base || !mine.sketch || !base.sketch || mine.sketch.is3D || done.has(c.name + "|plane|" + swName)) continue;
+          const sfC = frameOf(mine.sketch.modelToSketch), sfA = frameOf(base.sketch.modelToSketch);
+          const pts = [...(base.sketch.points || []), ...(base.sketch.segments || []).flatMap(g => [g.start, g.end, g.center]).filter(Boolean)];
+          const moved = pts.some(p => len(sub(fromSketch(sfC, p), fromSketch(sfA, p))) > 1e-4);
+          if (!moved || !sk.frame || !sk.toPeet) continue;
+          done.add(c.name + "|plane|" + swName);
+          const want = pts.map(p => sk.toPeet(p));
+          let placed = false;
+          for (const candidate of placements(mine.sketch, sfC, false)) {
+            const pf = probe(candidate);
+            if (!pf || Math.abs(dot(pf.n, sfC.n)) < 0.9999 || Math.abs(dot(sub(pf.o, sfC.o), sfC.n)) > 1e-4) continue;
+            const fits = pts.every((p, i) => { const d = sub(fromSketch(sfC, p), pf.o); return Math.abs(dot(d, pf.x) - want[i][0]) < 1e-4 && Math.abs(dot(d, pf.y) - want[i][1]) < 1e-4; });
+            if (!fits) continue;
+            placed = peet.apply({ op: "edit", feature: sk.name, on: candidate, configurations: [c.name] }).ok;
+            if (placed) break;
+          }
+          // Failing a face, a plane where SolidWorks' sketch is here, facing the way the sketch's plane
+          // faces in the active configuration (a face there faces the other way: the Door's other return):
+          // an offset of a standard plane, or of one turned right round
+          const axis = ["x", "y", "z"].find(k => Math.abs(Math.abs(dot(sfC.n, AXES[k])) - 1) < 1e-9);
+          if (!placed && axis) {
+            const name = `${sk.name} plane in ${c.name}`, from = { x: "right", y: "front", z: "top" }[axis];
+            const about = { x: "y", y: "z", z: "x" }[axis], turned = name + " turned";
+            const distance = tidy(Math.abs(dot(sfC.o, AXES[axis])));
+            const fitsOn = pf => pf && pts.every((p, i) => { const d = sub(fromSketch(sfC, p), pf.o); return Math.abs(dot(d, pf.n)) < 1e-4 && Math.abs(dot(d, pf.x) - want[i][0]) < 1e-4 && Math.abs(dot(d, pf.y) - want[i][1]) < 1e-4; });
+            for (const turn of [false, true]) {
+              if (turn && !peet.apply({ op: "plane", from, about, angle: 180, name: turned }).ok) break;
+              for (const flip of [false, true]) {
+                if (!peet.apply({ op: "plane", from: turn ? turned : from, distance, flip, name }).ok) continue;
+                if (fitsOn(probe(name))) {
+                  const made = turn ? [turned, name] : [name];
+                  if (made.every(n => peet.apply({ op: "move", feature: n, before: sk.name }).ok)
+                    && peet.apply({ op: "edit", feature: sk.name, on: name, configurations: [c.name] }).ok) { placed = true; break; }
+                }
+                peet.apply({ op: "delete", feature: name });
+              }
+              if (placed) break;
+              if (turn) peet.apply({ op: "delete", feature: turned });
+            }
+          }
+          if (placed) { if (entry) entry.dimensions++; }
+          else if (entry) entry.missing.push(`${swName}'s plane, which is elsewhere here`);
+        }
+        for (const [swName, names] of made) {
+          const mine = there.get(swName), base = home.get(swName);
+          if (!mine || !base || !/^(ICE|Cut|Extrusion|Boss)$/.test(mine.type) || done.has(c.name + "|reverse|" + swName)) continue;
+          const [a, b] = [values(mine), values(base)];
+          if (typeof a.ReverseDirection !== "boolean" || a.ReverseDirection === b.ReverseDirection) continue;
+          done.add(c.name + "|reverse|" + swName);
+          let turned = false;
+          for (const n of names) {
+            const f = peet.ask({ op: "feature", feature: n });
+            if (!f.ok || !f.fields || typeof f.fields.reverse !== "boolean") continue;
+            turned = peet.apply({ op: "edit", feature: n, reverse: !f.fields.reverse, configurations: [c.name] }).ok || turned;
+          }
+          if (turned) { if (entry) entry.dimensions++; }
+          else if (entry) entry.missing.push(`${swName}'s direction, the other way here`);
+        }
+      };
       /** Makes a configuration agree with SolidWorks' for what has been imported so far. */
       const settle = c => {
         const entry = entries.get(c), there = maps.get(c);
@@ -4219,6 +4295,7 @@ function importPart(doc, dir) {
             else if (entry) entry.missing.push(`${d.fullName.split("@").slice(0, 2).join("@")} = ${value}`);
           }
         }
+        if (c !== config) settleSettings(c, entry, there);
         for (const [swName, names] of made) {
           const feature = there.get(swName);
           if (!feature || done.has(c.name + "|suppress|" + swName)) continue;

@@ -62,7 +62,7 @@ pub use assembly::{
     relative_to,
 };
 pub use bodies::{InsertPartFeature, MoveBodyFeature, PartSource, body_motion};
-pub use config::{ConfigId, Configuration, Scope, Slot, SlotValue};
+pub use config::{ConfigId, Configuration, Held, Scope, Slot, SlotValue};
 pub use convert::ConvertToSheetFeature;
 pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
 pub use equations::{Equation, EquationTarget, ReferenceDimension};

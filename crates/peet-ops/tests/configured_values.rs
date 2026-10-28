@@ -234,12 +234,18 @@ fn left_out_a_value_changes_here_if_it_differs_and_everywhere_if_not() {
     assert_eq!(in_config(&doc, "Default", sketch, &hole), 20.0);
     assert_close(volume(&doc), (80.0 * 60.0 - PI * 100.0) * 10.0);
 
-    // Only numeric values can differ: the rest is the part's.
+    // Only numeric values, directions and sketch planes can differ: the rest is the part's.
     let e = error(
+        &mut doc,
+        json!({"op": "edit", "feature": "Extrude1", "end": "through_all", "configurations": "this"}),
+    );
+    assert!(e.contains("Only the numeric values"), "{e}");
+    ok(
         &mut doc,
         json!({"op": "edit", "feature": "Extrude1", "reverse": true, "configurations": "this"}),
     );
-    assert!(e.contains("Only the numeric values"), "{e}");
+    let settings = ok(&mut doc, json!({"op": "configurations"}))["settings"].clone();
+    assert!(settings["Extrude1"]["reverse"].is_object(), "{settings}");
     ok(
         &mut doc,
         json!({"op": "edit", "feature": "Extrude1", "reverse": true}),

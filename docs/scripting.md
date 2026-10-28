@@ -509,7 +509,7 @@ with their defaults' types):
 
 | Operation | Fields |
 |---|---|
-| `edit` | `feature`, then any of its fields; `configurations` for its numeric fields |
+| `edit` | `feature`, then any of its fields; `configurations` for its numeric fields, a cut's or extrusion's direction (`reverse`, `both`, `flip_side`) and a sketch's plane (`on`), which SolidWorks lets differ too |
 | `rename` | `feature`, `name` |
 | `set_suppression_expression` | `feature`, `value`: expression text, or `null` to clear. A part-wide rule evaluated with the active configuration's parameters; zero builds, finite nonzero suppresses |
 | `suppress` | `feature`, `on` (default true), `configurations`. What is built on a suppressed feature is suppressed with it |
@@ -565,7 +565,9 @@ and exports. An assembly has configurations too, made with the same operations: 
 `suppress` and `set_parameter` mean `"this"`; `edit`, `set_dimension` and `set` change a value
 that already differs between configurations in the active one, and a value that doesn't
 in all of them. Only the numeric fields of a feature can differ: an `edit` with
-`configurations` other than `"all"` that changes another field is refused.
+`configurations` other than `"all"` that changes another field is refused, but for a cut's or
+extrusion's direction (`reverse`, `both`, `flip_side`) and a sketch's plane (`on`), which can
+differ as in SolidWorks (a door's hinge holes on one return or the other).
 
 ```json
 {"op": "add_configuration", "name": "Thick"}
@@ -585,7 +587,7 @@ in all of them. Only the numeric fields of a feature can differ: an `edit` with
 | `feature` (`feature`) | its fields; a sketch's plane, definition, entities, relations and dimensions |
 | `parameters` | named values and units; a parameter that differs between configurations lists its expression in each |
 | `dimensions` (`feature`, `name`) | every dimension's address `NAME@FEATURE` and value: see [Dimensions by name](#dimensions-by-name) |
-| `configurations` | the configurations, the active one, and what differs: the configurations each feature is suppressed in, each parameter's expression in every configuration, and under `values` each feature value and sketch dimension in every configuration. In an assembly also `components` (for each component that differs, in every configuration, the fields that differ: `suppressed`, `configuration`, `fixed`, `placement`) and `mates` (for each mate that differs: `suppressed`, and its values) |
+| `configurations` | the configurations, the active one, and what differs: the configurations each feature is suppressed in, each parameter's expression in every configuration, under `values` each feature value and sketch dimension in every configuration, and under `settings` each direction (`reverse`, `both`, `flip_side`) and sketch plane (`on`) that differs. In an assembly also `components` (for each component that differs, in every configuration, the fields that differ: `suppressed`, `configuration`, `fixed`, `placement`) and `mates` (for each mate that differs: `suppressed`, and its values) |
 | `bodies` | bounds, volume, counts; flat size and thickness for sheet metal |
 | `faces`, `edges` (`body`) | what made each face, normals, centres, a round face's `radius`, `axis` and a point on it (`axis_point`); edge ends and the faces they join, a straight edge's `direction` (the one mates take) |
 | `bend_table` (`body`) | flat size, area, and each bend |

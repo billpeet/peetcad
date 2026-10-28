@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 use peet_sketch::ConstraintId;
 
 use crate::Model;
-use crate::feature::{Feature, FeatureId, FeatureKind, Scalar, ScalarKind};
+use crate::feature::{Feature, FeatureId, FeatureKind, PlaneRef, Scalar, ScalarKind};
 
 /// Stable identifier of a configuration within its model. Never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -59,6 +59,13 @@ pub enum Slot {
     Field(String),
     /// A driving dimension of a sketch.
     Dimension(ConstraintId),
+    // New kinds go at the end: files store the variant's index.
+    /// A yes-or-no setting of the feature, by its operations' name (`reverse`): see
+    /// [`FeatureKind::flags`]. SolidWorks lets a cut's direction differ.
+    Flag(String),
+    /// What a sketch is drawn on. SolidWorks lets it differ (the Door's hinge holes are on
+    /// the right-hand return in one configuration and the left-hand one in the other).
+    Plane,
 }
 
 /// What a [`Slot`] holds in one configuration.
@@ -66,6 +73,8 @@ pub enum Slot {
 pub enum Held {
     Scalar(Scalar),
     // New kinds go at the end: files store the variant's index.
+    Flag(bool),
+    Plane(PlaneRef),
 }
 
 /// Whether two values are the same as entered. An expression's last evaluated value is
@@ -79,8 +88,53 @@ fn same_scalar(a: &Scalar, b: &Scalar) -> bool {
 }
 
 fn same_held(a: &Held, b: &Held) -> bool {
-    let (Held::Scalar(a), Held::Scalar(b)) = (a, b);
-    same_scalar(a, b)
+    match (a, b) {
+        (Held::Scalar(a), Held::Scalar(b)) => same_scalar(a, b),
+        _ => a == b,
+    }
+}
+
+/// What a slot holds in a feature now, of any kind.
+fn read_held(feature: &Feature, slot: &Slot) -> Option<Held> {
+    match (slot, &feature.kind) {
+        (Slot::Flag(name), kind) => kind
+            .flags()
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| Held::Flag(v)),
+        (Slot::Plane, FeatureKind::Sketch(s)) => Some(Held::Plane(s.plane.clone())),
+        (Slot::Plane, _) => None,
+        _ => read_slot(feature, slot).map(|(_, s)| Held::Scalar(s)),
+    }
+}
+
+/// Sets what a slot holds in a feature. Returns whether the feature has the slot.
+fn write_held(feature: &mut Feature, slot: &Slot, held: Held) -> bool {
+    match (slot, held) {
+        (Slot::Flag(name), Held::Flag(v)) => {
+            match feature
+                .kind
+                .flags_mut()
+                .into_iter()
+                .find(|(n, _)| n == name)
+            {
+                Some((_, f)) => {
+                    *f = v;
+                    true
+                }
+                None => false,
+            }
+        }
+        (Slot::Plane, Held::Plane(plane)) => match &mut feature.kind {
+            FeatureKind::Sketch(s) => {
+                s.plane = plane;
+                true
+            }
+            _ => false,
+        },
+        (Slot::Field(_) | Slot::Dimension(_), Held::Scalar(v)) => write_slot(feature, slot, v),
+        _ => false,
+    }
 }
 
 /// A slot's value in a feature, with what it measures.
@@ -108,7 +162,7 @@ fn read_slot(feature: &Feature, slot: &Slot) -> Option<(ScalarKind, Scalar)> {
                 },
             ))
         }
-        (Slot::Dimension(_), _) => None,
+        (Slot::Dimension(_), _) | (Slot::Flag(_) | Slot::Plane, _) => None,
     }
 }
 
@@ -136,7 +190,7 @@ fn write_slot(feature: &mut Feature, slot: &Slot, value: Scalar) -> bool {
                 None => false,
             }
         }
-        (Slot::Dimension(_), _) => false,
+        (Slot::Dimension(_), _) | (Slot::Flag(_) | Slot::Plane, _) => false,
     }
 }
 
@@ -401,7 +455,7 @@ impl Model {
                 .and_then(|v| v.get(&config))
             {
                 Some(Held::Scalar(s)) => s.clone(),
-                None => now,
+                _ => now,
             },
         )
     }
@@ -410,6 +464,91 @@ impl Model {
     pub fn values_that_differ(&self) -> Vec<(FeatureId, Slot)> {
         let mut out: Vec<(FeatureId, Slot)> = self.configurations.values.keys().cloned().collect();
         out.sort_by_key(|(f, _)| self.index_of(*f));
+        out
+    }
+
+    /// What a slot holds in a configuration, of any kind: a numeric value, a yes-or-no
+    /// setting ([`Slot::Flag`]) or a sketch's plane ([`Slot::Plane`]).
+    pub fn held_in(&self, feature: FeatureId, slot: &Slot, config: ConfigId) -> Option<Held> {
+        let now = read_held(self.feature(feature)?, slot)?;
+        if config == self.configurations.active {
+            return Some(now);
+        }
+        Some(
+            self.configurations
+                .values
+                .get(&(feature, slot.clone()))
+                .and_then(|v| v.get(&config))
+                .cloned()
+                .unwrap_or(now),
+        )
+    }
+
+    /// The yes-or-no settings and sketch planes that differ between configurations, in
+    /// tree order (the numeric values are [`Model::values_that_differ`]).
+    pub fn settings_that_differ(&self) -> Vec<(FeatureId, Slot)> {
+        self.values_that_differ()
+            .into_iter()
+            .filter(|(_, s)| matches!(s, Slot::Flag(_) | Slot::Plane))
+            .collect()
+    }
+
+    /// Says which configurations a change made in the model to a yes-or-no setting or a
+    /// sketch's plane applies to, as [`Model::rescope_value`] does for a number: `before`
+    /// is what it was.
+    pub fn rescope_held(
+        &mut self,
+        feature: FeatureId,
+        slot: &Slot,
+        before: Held,
+        scope: &Scope,
+    ) -> Result<(), String> {
+        let Some(now) = self.feature(feature).and_then(|f| read_held(f, slot)) else {
+            return Err("The feature has no such setting.".to_owned());
+        };
+        let active = self.configurations.active;
+        let others = self.configurations.others();
+        let key = (feature, slot.clone());
+        match self.targets(scope)? {
+            None => {
+                self.configurations.values.remove(&key);
+            }
+            Some(targets) => {
+                if !others.is_empty() {
+                    let held =
+                        self.configurations.values.entry(key).or_insert_with(|| {
+                            others.iter().map(|c| (*c, before.clone())).collect()
+                        });
+                    for t in targets.iter().filter(|t| **t != active) {
+                        held.insert(*t, now.clone());
+                    }
+                    if !targets.contains(&active)
+                        && let Some(f) = self.feature_mut(feature)
+                    {
+                        write_held(f, slot, before);
+                    }
+                }
+            }
+        }
+        self.tidy_configurations();
+        Ok(())
+    }
+
+    /// The yes-or-no settings and the plane of a feature that can differ between
+    /// configurations, as they are now.
+    pub fn settings(&self, feature: FeatureId) -> Vec<(Slot, Held)> {
+        let Some(f) = self.feature(feature) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(Slot, Held)> = f
+            .kind
+            .flags()
+            .into_iter()
+            .map(|(n, v)| (Slot::Flag(n.to_owned()), Held::Flag(v)))
+            .collect();
+        if let FeatureKind::Sketch(s) = &f.kind {
+            out.push((Slot::Plane, Held::Plane(s.plane.clone())));
+        }
         out
     }
 
@@ -466,15 +605,15 @@ impl Model {
             .keys()
             .filter_map(|n| Some((n.clone(), self.parameter_in(n, source)?.to_owned())))
             .collect();
-        let values: Vec<((FeatureId, Slot), Scalar)> = self
+        let values: Vec<((FeatureId, Slot), Held)> = self
             .configurations
             .values
             .keys()
-            .filter_map(|k| Some((k.clone(), self.value_in(k.0, &k.1, source)?)))
+            .filter_map(|k| Some((k.clone(), self.held_in(k.0, &k.1, source)?)))
             .collect();
         let c = &mut self.configurations;
         for (k, v) in values {
-            c.values.entry(k).or_default().insert(id, Held::Scalar(v));
+            c.values.entry(k).or_default().insert(id, v);
         }
         for (f, v) in flags {
             c.suppressed.entry(f).or_default().insert(id, v);
@@ -565,16 +704,13 @@ impl Model {
             let Some(index) = self.index_of(*feature) else {
                 continue;
             };
-            let Some((_, now)) = read_slot(&self.features[index], slot) else {
+            let Some(now) = read_held(&self.features[index], slot) else {
                 continue;
             };
-            let next = match held.remove(&id) {
-                Some(Held::Scalar(s)) => s,
-                None => now.clone(),
-            };
-            held.insert(old, Held::Scalar(now.clone()));
+            let next = held.remove(&id).unwrap_or_else(|| now.clone());
+            held.insert(old, now.clone());
             if next != now {
-                write_slot(Arc::make_mut(&mut self.features[index]), slot, next);
+                write_held(Arc::make_mut(&mut self.features[index]), slot, next);
             }
         }
         self.configurations.values = values;
@@ -837,10 +973,7 @@ impl Model {
         tidy(
             &mut values,
             &others,
-            |(feature, slot)| {
-                self.value(*feature, slot)
-                    .map(|(_, value)| Held::Scalar(value))
-            },
+            |(feature, slot)| self.feature(*feature).and_then(|f| read_held(f, slot)),
             same_held,
         );
         self.configurations.values = values;
@@ -878,7 +1011,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feature::{PlaneRef, StdPlane};
+    use crate::feature::StdPlane;
     use peet_math::Plane;
 
     fn model() -> (Model, FeatureId, FeatureId) {
@@ -911,6 +1044,43 @@ mod tests {
             assert_eq!(m.parameters.get("w"), Some(30.0));
             assert_eq!(m.configurations, Configurations::default());
         }
+    }
+
+    #[test]
+    fn a_direction_and_a_sketch_plane_differ_per_configuration() {
+        // As SolidWorks lets them: the Door's hinge holes are on one return or the other.
+        let (mut m, a, _) = model();
+        let cut = m.add_sheet_cut(a);
+        let default = m.active_configuration().id;
+        let other = m.add_configuration("Other", None).unwrap();
+        let flag = Slot::Flag("reverse".to_owned());
+        assert!(m.activate_configuration(other));
+        let before = m.held_in(cut, &flag, other).unwrap();
+        if let Some(FeatureKind::SheetCut(c)) = m.feature_mut(cut).map(|f| &mut f.kind) {
+            c.reverse = true;
+        }
+        m.rescope_held(cut, &flag, before, &Scope::This).unwrap();
+        let plane = Held::Plane(PlaneRef::Standard(StdPlane::Right));
+        let was = m.held_in(a, &Slot::Plane, other).unwrap();
+        if let Some(FeatureKind::Sketch(s)) = m.feature_mut(a).map(|f| &mut f.kind) {
+            s.plane = PlaneRef::Standard(StdPlane::Right);
+        }
+        m.rescope_held(a, &Slot::Plane, was, &Scope::This).unwrap();
+        assert_eq!(m.settings_that_differ().len(), 2);
+        assert_eq!(m.held_in(cut, &flag, default), Some(Held::Flag(false)));
+        assert_eq!(m.held_in(a, &Slot::Plane, other), Some(plane.clone()));
+        assert!(m.activate_configuration(default));
+        assert!(matches!(&m.feature(cut).unwrap().kind, FeatureKind::SheetCut(c) if !c.reverse));
+        assert!(
+            matches!(&m.feature(a).unwrap().kind, FeatureKind::Sketch(s) if s.plane == PlaneRef::Standard(StdPlane::Top))
+        );
+        assert_eq!(m.held_in(cut, &flag, other), Some(Held::Flag(true)));
+        // A copy of Other has its settings; all the same again, nothing differs.
+        let copy = m.add_configuration("Copy", Some(other)).unwrap();
+        assert_eq!(m.held_in(a, &Slot::Plane, copy), Some(plane));
+        let now = m.held_in(cut, &flag, default).unwrap();
+        m.rescope_held(cut, &flag, now, &Scope::All).unwrap();
+        assert_eq!(m.settings_that_differ().len(), 1);
     }
 
     #[test]
