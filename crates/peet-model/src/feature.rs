@@ -872,7 +872,7 @@ impl FormFeature {
 
 /// Text dumps from older versions stored counts as integers. The binary layout uses
 /// the schema-specific migrations; current text also accepts the scalar representation.
-fn deserialize_pattern_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Scalar, D::Error> {
+pub(crate) fn deserialize_pattern_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Scalar, D::Error> {
     if !d.is_human_readable() {
         return Scalar::deserialize(d);
     }

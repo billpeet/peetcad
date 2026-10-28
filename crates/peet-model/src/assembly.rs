@@ -278,8 +278,11 @@ pub struct PatternStep {
     pub direction: PatternLine,
     /// From one instance to the next (mm).
     pub spacing: Scalar,
-    /// How many, the original included.
-    pub count: u32,
+    /// How many, the original included: a whole number, or an expression worked out at
+    /// every rebuild (model schema 12; a plain number before). Its `value` is the count
+    /// the copies were last made for.
+    #[serde(deserialize_with = "crate::feature::deserialize_pattern_count")]
+    pub count: Scalar,
     /// The other way along the direction.
     pub flip: bool,
 }
@@ -296,12 +299,218 @@ pub enum PatternKind {
     Circular {
         axis: PatternLine,
         angle: Scalar,
+        #[serde(deserialize_with = "crate::feature::deserialize_pattern_count")]
+        count: Scalar,
+        flip: bool,
+    },
+}
+
+/// A pattern's count as the copies were last made for: its value, whole, 1 or more.
+pub fn pattern_count(count: &Scalar) -> u32 {
+    let v = count.value.round();
+    if v.is_finite() && v >= 1.0 {
+        (v.min(f64::from(MAX_PATTERN))) as u32
+    } else {
+        1
+    }
+}
+
+/// Works out a pattern count: a whole number from 1 to [`MAX_PATTERN`], or why not.
+pub fn evaluate_pattern_count(
+    count: &Scalar,
+    params: &peet_sketch::expr::Parameters,
+) -> Result<u32, String> {
+    let v = match count.evaluate(crate::ScalarKind::Number, params) {
+        Ok(v) => v,
+        // A count worked out from lengths (`(Height - 64) / 1165`) is the number in mm.
+        Err(e) => match count.expression.as_deref() {
+            Some(source) => params
+                .evaluate_expression(source)
+                .map(|q| q.value)
+                .map_err(|_| e)?,
+            None => return Err(e),
+        },
+    };
+    let n = v.round();
+    if !n.is_finite() || (v - n).abs() > 1e-6 || n < 1.0 || n > f64::from(MAX_PATTERN) {
+        return Err(format!(
+            "The count must be a whole number from 1 to {MAX_PATTERN} (it is {}).",
+            crate::feature::format_number(v)
+        ));
+    }
+    Ok(n as u32)
+}
+
+/// One direction of a linear component pattern as model schemas through 11 stored it:
+/// a plain count.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct PatternStepV11 {
+    direction: PatternLine,
+    spacing: Scalar,
+    count: u32,
+    flip: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum PatternKindV11 {
+    Linear {
+        first: PatternStepV11,
+        second: Option<PatternStepV11>,
+    },
+    Circular {
+        axis: PatternLine,
+        angle: Scalar,
         count: u32,
         flip: bool,
     },
 }
 
+/// A component pattern as model schemas through 11 stored it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ComponentPatternV11 {
+    id: PatternId,
+    name: String,
+    seeds: Vec<CompId>,
+    kind: PatternKindV11,
+    instances: Vec<PatternInstance>,
+}
+
+impl From<&PatternStep> for PatternStepV11 {
+    fn from(s: &PatternStep) -> Self {
+        Self {
+            direction: s.direction.clone(),
+            spacing: s.spacing.clone(),
+            count: pattern_count(&s.count),
+            flip: s.flip,
+        }
+    }
+}
+
+impl From<PatternStepV11> for PatternStep {
+    fn from(s: PatternStepV11) -> Self {
+        Self {
+            direction: s.direction,
+            spacing: s.spacing,
+            count: Scalar::new(f64::from(s.count)),
+            flip: s.flip,
+        }
+    }
+}
+
+impl From<&Arc<ComponentPattern>> for ComponentPatternV11 {
+    fn from(p: &Arc<ComponentPattern>) -> Self {
+        Self {
+            id: p.id,
+            name: p.name.clone(),
+            seeds: p.seeds.clone(),
+            kind: match &p.kind {
+                PatternKind::Linear { first, second } => PatternKindV11::Linear {
+                    first: first.into(),
+                    second: second.as_ref().map(Into::into),
+                },
+                PatternKind::Circular {
+                    axis,
+                    angle,
+                    count,
+                    flip,
+                } => PatternKindV11::Circular {
+                    axis: axis.clone(),
+                    angle: angle.clone(),
+                    count: pattern_count(count),
+                    flip: *flip,
+                },
+            },
+            instances: p.instances.clone(),
+        }
+    }
+}
+
+impl From<ComponentPatternV11> for Arc<ComponentPattern> {
+    fn from(p: ComponentPatternV11) -> Self {
+        Arc::new(ComponentPattern {
+            id: p.id,
+            name: p.name,
+            seeds: p.seeds,
+            kind: match p.kind {
+                PatternKindV11::Linear { first, second } => PatternKind::Linear {
+                    first: first.into(),
+                    second: second.map(Into::into),
+                },
+                PatternKindV11::Circular {
+                    axis,
+                    angle,
+                    count,
+                    flip,
+                } => PatternKind::Circular {
+                    axis,
+                    angle,
+                    count: Scalar::new(f64::from(count)),
+                    flip,
+                },
+            },
+            instances: p.instances,
+        })
+    }
+}
+
 impl PatternKind {
+    /// The counts' scalars: the first direction's (or round the axis), and the second's.
+    pub fn counts(&self) -> [Option<&Scalar>; 2] {
+        match self {
+            Self::Linear { first, second } => [Some(&first.count), second.as_ref().map(|s| &s.count)],
+            Self::Circular { count, .. } => [Some(count), None],
+        }
+    }
+
+    /// The counts' scalars, to change them.
+    pub fn counts_mut(&mut self) -> [Option<&mut Scalar>; 2] {
+        match self {
+            Self::Linear { first, second } => {
+                [Some(&mut first.count), second.as_mut().map(|s| &mut s.count)]
+            }
+            Self::Circular { count, .. } => [Some(count), None],
+        }
+    }
+
+    /// The pattern's numeric values by SolidWorks' names for a component pattern's
+    /// dimensions, with their kinds: a linear pattern's counts are `D1` and `D2` and its
+    /// spacings `D3` and `D4` (as SolidWorks numbers a linear pattern's), a circular
+    /// pattern's count `D1` and angle `D3`.
+    pub fn values(&self) -> Vec<(&'static str, &Scalar, crate::ScalarKind)> {
+        use crate::ScalarKind::{Angle, Length, Number};
+        match self {
+            Self::Linear { first, second } => {
+                let mut out = vec![("D1", &first.count, Number)];
+                if let Some(s) = second {
+                    out.push(("D2", &s.count, Number));
+                }
+                out.push(("D3", &first.spacing, Length));
+                if let Some(s) = second {
+                    out.push(("D4", &s.spacing, Length));
+                }
+                out
+            }
+            Self::Circular { count, angle, .. } => {
+                vec![("D1", count, Number), ("D3", angle, Angle)]
+            }
+        }
+    }
+
+    /// The value called `name` (`D1`, `D3`, ...; see [`PatternKind::values`]), to change it.
+    pub fn value_mut(&mut self, name: &str) -> Option<(&mut Scalar, crate::ScalarKind)> {
+        use crate::ScalarKind::{Angle, Length, Number};
+        let name = name.trim().to_ascii_uppercase();
+        match (self, name.as_str()) {
+            (Self::Linear { first, .. }, "D1") => Some((&mut first.count, Number)),
+            (Self::Linear { second: Some(s), .. }, "D2") => Some((&mut s.count, Number)),
+            (Self::Linear { first, .. }, "D3") => Some((&mut first.spacing, Length)),
+            (Self::Linear { second: Some(s), .. }, "D4") => Some((&mut s.spacing, Length)),
+            (Self::Circular { count, .. }, "D1") => Some((count, Number)),
+            (Self::Circular { angle, .. }, "D3") => Some((angle, Angle)),
+            _ => None,
+        }
+    }
+
     /// The kind in one word, for names and messages.
     pub fn word(&self) -> &'static str {
         match self {
@@ -314,8 +523,11 @@ impl PatternKind {
     /// along each direction, for a circular one the step round the axis (and 0).
     pub fn places(&self) -> Vec<[u32; 2]> {
         let (first, second) = match self {
-            Self::Linear { first, second } => (first.count, second.as_ref().map_or(1, |s| s.count)),
-            Self::Circular { count, .. } => (*count, 1),
+            Self::Linear { first, second } => (
+                pattern_count(&first.count),
+                second.as_ref().map_or(1, |s| pattern_count(&s.count)),
+            ),
+            Self::Circular { count, .. } => (pattern_count(count), 1),
         };
         let (first, second) = (first.clamp(1, MAX_PATTERN), second.clamp(1, MAX_PATTERN));
         (0..second)
@@ -405,6 +617,12 @@ pub struct Assembly {
     /// see [`crate::asm_config`]).
     #[serde(default)]
     pub(crate) varying: crate::asm_config::Varying,
+    /// Assembly cuts, in the order they are worked out (model schema 12; see
+    /// [`crate::asm_cut`]).
+    #[serde(default)]
+    cuts: Vec<Arc<crate::asm_cut::AssemblyCut>>,
+    #[serde(default)]
+    next_cut: u32,
 }
 
 /// The assembly layout in schemas 8 through 10, with their feature layouts in definitions.
@@ -418,7 +636,7 @@ pub(crate) struct AssemblyLegacy<F> {
     next_mate: u32,
     explode: Vec<Arc<ExplodeStep>>,
     next_explode: u32,
-    patterns: Vec<Arc<ComponentPattern>>,
+    patterns: Vec<ComponentPatternV11>,
     next_pattern: u32,
 }
 
@@ -433,7 +651,7 @@ pub(crate) struct AssemblyV11 {
     next_mate: u32,
     explode: Vec<Arc<ExplodeStep>>,
     next_explode: u32,
-    patterns: Vec<Arc<ComponentPattern>>,
+    patterns: Vec<ComponentPatternV11>,
     next_pattern: u32,
 }
 
@@ -462,7 +680,7 @@ impl AssemblyV11 {
             next_mate: a.next_mate,
             explode: a.explode.clone(),
             next_explode: a.next_explode,
-            patterns: a.patterns.clone(),
+            patterns: a.patterns.iter().map(Into::into).collect(),
             next_pattern: a.next_pattern,
         }
     }
@@ -489,11 +707,13 @@ impl From<AssemblyV11> for Assembly {
             next_mate: a.next_mate,
             explode: a.explode,
             next_explode: a.next_explode,
-            patterns: a.patterns,
+            patterns: a.patterns.into_iter().map(Into::into).collect(),
             next_pattern: a.next_pattern,
             equations: Vec::new(),
             references: Vec::new(),
             varying: Default::default(),
+            cuts: Vec::new(),
+            next_cut: 0,
         }
     }
 }
@@ -523,7 +743,7 @@ impl<F: From<crate::Feature>> AssemblyLegacy<F> {
             next_mate: a.next_mate,
             explode: a.explode.clone(),
             next_explode: a.next_explode,
-            patterns: a.patterns.clone(),
+            patterns: a.patterns.iter().map(Into::into).collect(),
             next_pattern: a.next_pattern,
         }
     }
@@ -550,11 +770,13 @@ impl<F: Into<crate::Feature>> From<AssemblyLegacy<F>> for Assembly {
             next_mate: a.next_mate,
             explode: a.explode,
             next_explode: a.next_explode,
-            patterns: a.patterns,
+            patterns: a.patterns.into_iter().map(Into::into).collect(),
             next_pattern: a.next_pattern,
             equations: Vec::new(),
             references: Vec::new(),
             varying: Default::default(),
+            cuts: Vec::new(),
+            next_cut: 0,
         }
     }
 }
@@ -621,6 +843,52 @@ impl Assembly {
     /// The pattern that made a component and places it, if one did.
     pub fn pattern_of(&self, id: CompId) -> Option<&ComponentPattern> {
         self.pattern(self.component(id)?.pattern?)
+    }
+
+    /// The assembly cuts, in the order they are worked out.
+    pub fn cuts(&self) -> impl ExactSizeIterator<Item = &crate::asm_cut::AssemblyCut> {
+        self.cuts.iter().map(|c| &**c)
+    }
+
+    pub fn cut(&self, id: crate::asm_cut::CutId) -> Option<&crate::asm_cut::AssemblyCut> {
+        self.cuts.iter().find(|c| c.id == id).map(|c| &**c)
+    }
+
+    /// The cut, to change it. Other snapshots of the assembly are not affected.
+    pub fn cut_mut(&mut self, id: crate::asm_cut::CutId) -> Option<&mut crate::asm_cut::AssemblyCut> {
+        self.cuts.iter_mut().find(|c| c.id == id).map(Arc::make_mut)
+    }
+
+    /// A new id for a cut about to be added with [`Assembly::add_cut`].
+    pub fn next_cut_id(&self) -> crate::asm_cut::CutId {
+        crate::asm_cut::CutId(self.next_cut + 1)
+    }
+
+    /// Adds a cut, named `Cut-Extrude1`, ... and its sketch `Sketch1`, ... where it has no
+    /// names (unique among the cuts).
+    pub fn add_cut(&mut self, mut cut: crate::asm_cut::AssemblyCut) -> crate::asm_cut::CutId {
+        self.next_cut += 1;
+        cut.id = crate::asm_cut::CutId(self.next_cut);
+        if cut.name.is_empty() {
+            cut.name = (1..)
+                .map(|n| format!("Cut-Extrude{n}"))
+                .find(|name| !self.cuts.iter().any(|c| c.name == *name))
+                .unwrap_or_default();
+        }
+        if cut.sketch_name.is_empty() {
+            cut.sketch_name = (1..)
+                .map(|n| format!("Sketch{n}"))
+                .find(|name| !self.cuts.iter().any(|c| c.sketch_name == *name))
+                .unwrap_or_default();
+        }
+        let id = cut.id;
+        self.cuts.push(Arc::new(cut));
+        id
+    }
+
+    pub fn remove_cut(&mut self, id: crate::asm_cut::CutId) -> Option<crate::asm_cut::AssemblyCut> {
+        let index = self.cuts.iter().position(|c| c.id == id)?;
+        Some(Arc::unwrap_or_clone(self.cuts.remove(index)))
     }
 
     pub fn explode_steps(&self) -> impl ExactSizeIterator<Item = &ExplodeStep> {
@@ -839,6 +1107,37 @@ impl Assembly {
         Some(removed)
     }
 
+    /// Works out the patterns' counts that are expressions and makes or removes copies to
+    /// match, as SolidWorks does when an equation drives a pattern's count. A count that
+    /// can't be worked out is left as it was (the rebuild reports the pattern failed).
+    /// Returns whether any pattern changed.
+    pub fn sync_pattern_counts(&mut self, params: &peet_sketch::expr::Parameters) -> bool {
+        let mut changed = Vec::new();
+        for p in &mut self.patterns {
+            let mut kind = p.kind.clone();
+            let mut differs = false;
+            for count in kind.counts_mut().into_iter().flatten() {
+                if count.expression.is_none() {
+                    continue;
+                }
+                if let Ok(n) = evaluate_pattern_count(count, params)
+                    && n != pattern_count(count)
+                {
+                    count.value = f64::from(n);
+                    differs = true;
+                }
+            }
+            if differs {
+                Arc::make_mut(p).kind = kind;
+                changed.push(p.id);
+            }
+        }
+        for id in &changed {
+            self.sync_pattern(*id);
+        }
+        !changed.is_empty()
+    }
+
     /// Makes a pattern's components be those its originals and its places ask for:
     /// what is missing is added (where its original is, until the next rebuild puts it
     /// in its place), and what is no longer asked for is removed.
@@ -914,6 +1213,14 @@ impl Assembly {
         self.equations.retain(|e| e.target.component() != id);
         self.references
             .retain(|r| r.a.component() != Some(id) && r.b.component() != Some(id));
+        for cut in &mut self.cuts {
+            if cut.scope.as_ref().is_some_and(|s| s.contains(&id)) {
+                let cut = Arc::make_mut(cut);
+                if let Some(scope) = &mut cut.scope {
+                    scope.retain(|c| *c != id);
+                }
+            }
+        }
         Some(Arc::unwrap_or_clone(removed))
     }
 
@@ -1222,6 +1529,18 @@ impl Assembly {
         self.next_pattern = self
             .next_pattern
             .max(max(&mut self.patterns.iter().map(|p| p.id.0)));
+        let mut seen = std::collections::HashSet::new();
+        for c in &self.cuts {
+            if !seen.insert(c.id.0) {
+                return Err(format!(
+                    "The assembly is damaged: two cuts have the id {}.",
+                    c.id.0
+                ));
+            }
+        }
+        self.next_cut = self
+            .next_cut
+            .max(max(&mut self.cuts.iter().map(|c| c.id.0)));
         for e in &self.equations {
             if self.component(e.target.component()).is_none() {
                 return Err(

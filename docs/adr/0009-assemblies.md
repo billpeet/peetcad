@@ -501,3 +501,41 @@ components and positions, and its own mate suppression and values.
   configuration-specific colour, and the application's configuration list and a
   component's configuration in its properties. `open_component` opens the part with its
   own active configuration, not the one the component shows.
+
+## Assembly features
+
+PeetCAD follows SolidWorks' assembly-level features (template library, October 2026).
+
+- **A component pattern's count and spacing take expressions** (model schema 12:
+  `PatternStep::count` and a circular pattern's `count` are a `Scalar`, a plain `u32`
+  before). SolidWorks names a component pattern's values as it names a linear pattern's:
+  the counts `D1` and `D2`, the spacings `D3` and `D4` (a circular pattern's angle `D3`);
+  `set D1@LocalLPattern1` takes a number or an expression, and the assembly's expressions
+  read them by those addresses. A count that is an expression is worked out at every
+  rebuild, after the equations, and the copies are made or removed to match
+  (`Assembly::sync_pattern_counts`); the count's `value` is the count the copies were
+  last made for. Gear Tray Assembly's disabled equations (`D1@LocalLPattern1 =
+  IIF("Height@Base@Gear tray<1>.Part" > 1100, 3, 2)`, `D3@LocalLPattern1 = (Height - 64)
+  / (D1 - 1)`) work out to SolidWorks' values when tried.
+- **An assembly cut** (`asm_cut::AssemblyCut`, `Assembly::cuts`) is SolidWorks' assembly
+  feature cut: an extruded cut with its own sketch, worked out after the mates and
+  patterns on the component *instances*, never on the parts (SolidWorks' "propagate
+  feature to parts" off, the only way the library uses it). An instance it cuts gets a
+  body of its own, which is drawn, weighed, checked for interference and exported (a
+  STEP product of its own); mates are solved on the parts' own bodies. Its scope is every
+  component it reaches, or the ones listed. The sketch lies on a plane of the assembly,
+  a flat face or plane of a component (followed), or a fixed plane; entities can be
+  converted from components' edges (`CutConversion`), kept where the edge is seen on the
+  plane at every rebuild, as SolidWorks' converted entities. A converted circle within
+  1e-4 of a radian of parallel to the sketch is taken as parallel: mated components are
+  square only to the solve's accuracy.
+- **Layout sketches and composite curves are not modelled**: the library's three layout
+  sketches (Escutcheon Surround Removable, Gland Plate Frame, Panel Mount Battery
+  Bracket) are empty 3D sketches nothing references, and Laptop Shelf Assembly's 33
+  composite curves have no definition (SolidWorks fails to give one), no parents and no
+  children.
+- **In-context features are still not modelled** (the earlier decision stands for now, as
+  the evidence to do it as SolidWorks does is missing): the export gives each
+  `InContextFeatHolder` only the component it belongs to, and the part exports say
+  nothing of which features have external references or to what. The parts are imported
+  as SolidWorks last built them, which is what SolidWorks shows out of context.

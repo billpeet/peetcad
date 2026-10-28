@@ -533,7 +533,7 @@ pub(crate) type ComponentModel = (Vec<CompId>, Arc<crate::Model>, Frame);
 impl Placed {
     /// The assembly itself, as an end of a mate sees it: its standard planes and its
     /// origin, which don't move. `id` is one no component of the solve has.
-    fn assembly(id: CompId) -> Self {
+    pub(crate) fn assembly(id: CompId) -> Self {
         Self {
             id,
             name: "the assembly".to_owned(),
@@ -814,6 +814,81 @@ pub(crate) fn locate(end: &MateEnd, component: &Placed) -> Result<Located, Strin
         }
         Element::Point(p) => Located::Point(f.to_world(p)),
     })
+}
+
+/// The bodies under a component an end's path leads to, each with where it is in the
+/// assembly.
+fn bodies_at(end: &MateEnd, component: &Placed) -> (Vec<Arc<Body>>, Vec<Frame>) {
+    let inner = end.path.get(1..).unwrap_or_default();
+    component
+        .bodies
+        .iter()
+        .filter(|(path, ..)| path == inner)
+        .map(|(_, body, rel)| (body.clone(), component.frame.compose(rel)))
+        .unzip()
+}
+
+/// The edge of a component's part an end is on, and where its body is in the assembly:
+/// for what an assembly cut's sketch converts.
+pub(crate) fn edge_at(
+    end: &MateEnd,
+    component: &Placed,
+) -> Result<(peet_kernel::topo::Edge, Frame), String> {
+    let Some(MateGeom::Edge(r)) = &end.geom else {
+        return Err("Convert an edge of a component.".to_owned());
+    };
+    let (bodies, frames) = bodies_at(end, component);
+    let f = find_edge(&bodies, r).ok_or_else(|| {
+        format!(
+            "The edge of {} it converts is gone: the part was changed.",
+            component.name
+        )
+    })?;
+    Ok((bodies[f.body].solid.edge(f.id).clone(), frames[f.body]))
+}
+
+/// The plane, with its own axes, of an end that is flat: a flat face (its outward normal)
+/// or a reference plane of a component, or one of the assembly's standard planes. For an
+/// assembly cut's sketch.
+pub(crate) fn plane_at(end: &MateEnd, component: &Placed) -> Result<peet_math::Plane, String> {
+    let name = &component.name;
+    let inner = end.path.get(1..).unwrap_or_default();
+    let not_flat = || {
+        format!("The sketch must lie on a flat face or a plane: the end on {name} is neither.")
+    };
+    match &end.geom {
+        Some(MateGeom::Face(r) | MateGeom::Plane(PlaneRef::Face(r))) => {
+            let (bodies, frames) = bodies_at(end, component);
+            let f = find_face(&bodies, r).ok_or_else(|| {
+                format!("The face of {name} the sketch is on is gone: the part was changed.")
+            })?;
+            let face = bodies[f.body].solid.face(f.id);
+            let Surface::Plane(plane) = &face.surface else {
+                return Err(not_flat());
+            };
+            let mut local = plane.frame;
+            if face.reversed {
+                local.rotation *= DQuat::from_rotation_x(std::f64::consts::PI);
+            }
+            Ok(peet_math::Plane {
+                frame: frames[f.body].compose(&local),
+            })
+        }
+        Some(MateGeom::Plane(reference)) => {
+            let plane = component
+                .planes
+                .iter()
+                .find(|(path, r, _)| path == inner && r == reference)
+                .map(|(_, _, plane)| *plane)
+                .ok_or_else(|| {
+                    format!("The plane of {name} the sketch is on is missing or not built.")
+                })?;
+            Ok(peet_math::Plane {
+                frame: component.frame.compose(&plane.frame),
+            })
+        }
+        _ => Err(not_flat()),
+    }
 }
 
 // ---- Equations ----

@@ -340,6 +340,24 @@ impl Model {
                 ));
             }
         }
+        // A component pattern's counts and spacings (or angle), by SolidWorks' names:
+        // `D1@LocalLPattern1` (count), `D3@LocalLPattern1` (spacing).
+        for p in assembly.patterns() {
+            for (name, value, kind) in p.kind.values() {
+                let v = if kind == ScalarKind::Number {
+                    // The count the copies are made for.
+                    Ok(f64::from(crate::assembly::pattern_count(value)))
+                } else {
+                    value.evaluate(kind, &self.parameters)
+                };
+                if let Ok(v) = v {
+                    out.push((
+                        format!("{name}@{}", p.name),
+                        Quantity::new(v, quantity_kind(kind)),
+                    ));
+                }
+            }
+        }
         for r in assembly.references() {
             if let Some(v) = r.value {
                 out.push((
@@ -382,6 +400,26 @@ impl Model {
             self.refresh_dimension_values();
         }
         failures
+    }
+
+    /// Works out the counts of the assembly's component patterns that are expressions,
+    /// and makes or removes copies to match. Returns whether any pattern changed.
+    pub fn sync_pattern_counts(&mut self) -> bool {
+        let driven = self.assembly().is_some_and(|a| {
+            a.patterns()
+                .any(|p| p.kind.counts().into_iter().flatten().any(|c| c.expression.is_some()))
+        });
+        if !driven {
+            return false;
+        }
+        let params = self.parameters.clone();
+        let changed = self
+            .assembly_mut()
+            .is_some_and(|a| a.sync_pattern_counts(&params));
+        if changed {
+            self.refresh_dimension_values();
+        }
+        changed
     }
 
     fn apply_equation(&mut self, e: &Equation) -> Result<bool, String> {
