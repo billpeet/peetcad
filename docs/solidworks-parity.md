@@ -3,7 +3,7 @@
 What PeetCAD can't yet do that the SolidWorks component library needs. The aim is for
 FabSys to drive PeetCAD in place of SolidWorks; parts come first, assemblies after.
 
-**Status, 28 October 2026 (assemblies: 14 of 26 match, every configuration placed):** first written on 9 October from names and counts; since then
+**Status, 28 October 2026 (parts 198 of 201, assemblies 15 of 26 match, every configuration placed):** first written on 9 October from names and counts; since then
 the whole library has been exported and imported, and the entries below say what that
 found. Update an entry when it is confirmed, fixed or decided against.
 
@@ -505,8 +505,56 @@ which it doesn't have at all. (Door Stiffener D does have "…90DegreeRestrictio
 disabled ones and one suppression equation do in the library), derived configurations (none in
 the library), display states, and the app's configuration list for assemblies.
 
+**The remaining gaps** (28 October, four agents; parts `run-m11`, assemblies `scratch\asm5\run`):
+
+| | Before | Now |
+|---|---|---|
+| Parts matching SolidWorks | 198 of 201 | 198 of 201 (nothing moved) |
+| Sketch relations kept | 97.8% | 98.0% (8,541 of 8,712) |
+| Equations imported (parts) | 85 of 91 | 86 of 91 |
+| Assemblies matching | 14 of 26 | **15** (Sliding Doorstay) |
+| Live mates imported | 269 of 303 | 271 |
+| Suppressed mates imported | 100 of 114 | 102 |
+| Other configurations' live mates | 108 of 121 | 110 |
+
+- **Assembly features (AI9):** a component pattern's count and spacing take expressions, with
+  SolidWorks' addresses (`D1@LocalLPattern1` the count, `D3@…` the spacing; Gear Tray's pattern is
+  a pattern now, and its disabled equations would give SolidWorks' values); `assembly_cut` cuts
+  components in the assembly only, as SolidWorks' assembly cut (Escutcheon Assembly's cuts nothing:
+  the surround it would cut is the sub-assembly missing from the NAS). The layout sketches are
+  empty and the composite curves have no definition; nothing uses either. **In-context features
+  (24) are not done**: the export doesn't say what they reference. It needs the exporter to read
+  each part feature's external references, then a projection in a part from a component's
+  geometry, resolved when the part is rebuilt in its assembly.
+- **Configurations:** equations that differ per configuration (Escutcheon Door's Stiff and E
+  Stiff), derived configurations (`add_configuration` with `parent`), the app's configuration list
+  and a component's configuration for assemblies, `open_component` in the configuration shown.
+  Display states: the export has none, so whether the library uses them isn't known.
+- **The path mate**, keeping a point on a chain of edges or sketch curves (free, a distance or
+  percentage along it, centred; `follow`, `roll`). SolidWorks 2018 has no path mate data in its
+  API: the exporter now edits the mate to read its selections (format 6, not run yet).
+- **Parts:** 3D sketches (`sketch3d`), which `structural_member` follows: Weldment 30x30x2's
+  `D1`–`D3@3DSketch1` drive its frame (each later member group is a copy of the sketch tied to
+  its dimensions: a stand-in until a member can take some of a sketch's segments); a cut's direction
+  and a sketch's plane per configuration (Door's hinge holes); a sketch distance to a circle's near
+  or far side; slanted straight sweeps exact, with round ends; Box Roof Top's `Depth@Sketch13`;
+  Weather Shield Door's sketch dimensions driving; Esc Surround R Top and Bottom's flange length;
+  the slot pairs SolidWorks gives symmetric relations as nulls for.
+- **Exporter format 6** (built, not run: it needs `will` logged in to SolidWorks-PC): a
+  sub-assembly's `solving` (rigid or flexible), path mate selections, a suppressed
+  sub-assembly's components, arc end conditions of dimensions, slots, composite curves' edges,
+  and each assembly configuration's mass properties and STEP file, which `import-asm.js` then
+  checks the assembled volume and box against. To run: every assembly with `--step`, and the
+  parts (all, or at least HingeMale, HingeFemale, Escutcheon, Battery Clamp, Limit switch base and
+  the Esc Surround Horizontal, Horizontal Sealed, R Bottom and R Top).
+
+**More FabSys script bugs**, in `enclosure_script MASTER.boo`: lines 1999 and 2001 suppress Meter
+Panel features "NSW CTMetering" and "VIC CTMeterPanelCutout"; the part's are "NSW CT Metering" and
+"VIC CT Metering", so FabSys fails on them in SolidWorks too.
+
 What is left:
 
+- **In-context features** (above), and display states if the library has any.
 - **The templates and the export**: 11 live mates SolidWorks names the assembly for with no entity
   (Escutcheon Assembly's are on the Escutcheon Surround that doesn't exist; the Escutcheon Doors'
   point at a suppressed hinge, whose parts the export doesn't list), the path mate's empty path,
