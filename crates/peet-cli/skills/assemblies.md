@@ -1,6 +1,6 @@
 ---
 name: assemblies
-description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis), configurations (a component showing one of its part's configurations, and an assembly's own configurations: left and right hinged, with components and mates suppressed, configured and placed per configuration, equations that differ per configuration, derived configurations), equations that size and suppress components from the assembly (SolidWorks addresses like Height@Sketch1@Door-1, reference dimensions, making a component independent), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
+description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis, counts and spacings from expressions), assembly cuts (cutting components in the assembly only, with a sketch on a plane or face and edges converted from components), configurations (a component showing one of its part's configurations, and an assembly's own configurations: left and right hinged, with components and mates suppressed, configured and placed per configuration, equations that differ per configuration, derived configurations), equations that size and suppress components from the assembly (SolidWorks addresses like Height@Sketch1@Door-1, reference dimensions, making a component independent), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
 ---
 
 # Assemblies
@@ -494,11 +494,82 @@ else that repeats: **mate the original once, and the copies are in place**.
 - A pattern whose direction can't be found (the face it was taken from is gone, the
   component is suppressed) is not a failed operation: it is listed under `failures`
   with the reason, and its copies stay where they are.
+- **A count or spacing from an expression**, as SolidWorks' equations drive a component
+  pattern: `count` takes an expression, and `set` takes a pattern's values by SolidWorks'
+  names, `D1@PATTERN` (the count; `D2` the second direction's) and `D3@PATTERN` (the
+  spacing; `D4` the second's; a circular pattern's angle is `D3`). The expression is
+  worked out at every rebuild, and copies are made or removed as the count changes.
+  Expressions read the values by the same addresses. A count must work out to a whole
+  number; one that doesn't is refused when set, and leaves the pattern failed (its copies
+  as they were) when a later change makes it so.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [1200, 40], "as": "r"}, {"type": "coincident", "of": ["r.bottom.start", "origin"]}, {"type": "length", "of": ["r.bottom"], "value": 1200, "name": "Length"}, {"type": "length", "of": ["r.left"], "value": 40}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 2}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [20, 40]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 20}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Tray-1", "fixed": true}
+{"op": "insert", "part": 2, "name": "Bracket-1", "at": [0, 0, 2], "fixed": true}
+{"op": "component_pattern", "components": ["Bracket-1"], "type": "linear", "direction": "x", "spacing": 590, "count": "iif(\"Length@Sketch1@Tray-1\" > 1100, 3, 2)", "name": "Brackets"}
+{"op": "set", "name": "D3@Brackets", "value": "(\"Length@Sketch1@Tray-1\" - 20) / (\"D1@Brackets\" - 1)"}
+{"op": "set", "name": "Length@Sketch1@Tray-1", "value": 900}
+{"op": "components"}
+```
+
+  The tray made 900 long leaves two brackets, 880 apart.
 - `{"op": "open_sample", "sample": "assembly"}` opens a finished example: the chassis,
   a cover, the housing on the cover with six bolts (a circular pattern round the
   housing's bore) and four screws (a linear pattern along the chassis's walls), every
   component held, with an exploded view. The parts are samples too: `chassis`,
   `cover`, `housing`, `bolt`, `screw`.
+
+## Assembly cuts
+
+An assembly cut is SolidWorks' cut made in an assembly: an extruded sketch that removes
+material from **the components in the assembly only**. Their parts, and every other
+assembly that uses them, are unchanged (`open_component` shows the part whole). Use it
+for holes drilled through parts once they are put together. To change the part itself,
+cut it in the part.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Base", "fixed": true}
+{"op": "insert", "part": 1, "name": "Cover", "at": [0, 0, 5]}
+{"op": "assembly_cut", "on": "top", "draw": [{"type": "circle", "center": [50, 30], "radius": 10}], "end": "through_all", "flip": true, "components": ["Cover"]}
+{"op": "assembly_cut", "on": {"component": "Cover", "face": {"normal": [0, 0, 1]}}, "convert": [{"component": "Base", "edge": {"at": [100, 30, 5]}}], "draw": [{"type": "rectangle", "from": [0, 0], "to": [20, 10]}], "depth": 2, "name": "Notch"}
+{"op": "mass"}
+{"op": "components"}
+```
+
+The cover has a hole through it and a notch 2 deep in its top; the base is whole.
+
+- **What it lies on.** `on` is the assembly's own plane (`"top"`, `"front"`, `"right"`),
+  a flat face or a plane of a component (`{"component": ..., "face": ...}`), which the
+  sketch then follows when the component moves, or a plane at a place
+  (`{"origin": [x, y, z], "normal": [x, y, z], "x": [x, y, z]}`). `draw` is as for
+  `sketch`, in the plane's coordinates.
+- **Converted edges.** `convert` lists components' edges (`{"component": name or path,
+  "edge": selector}`) taken into the sketch where they are seen on its plane, as
+  SolidWorks' Convert Entities: they follow the components at every rebuild. A circle
+  converted from a bolt hole cuts that hole on through the parts it is bolted to. The
+  reply's `converted` gives each one's sketch `entity`.
+- **Which way, how far.** A cut goes against the plane's normal (into the face it is on);
+  `flip` turns it. `end` is `blind` (with `depth`), `mid_plane` or `through_all`.
+- **Scope.** Left out, it cuts every component it reaches (SolidWorks' feature scope
+  with every component); `components` limits it to those. A sub-assembly in the scope
+  is cut through all its parts.
+- **It cuts nothing?** Its `status` is `warning` with why: check the sketch, `flip`, the
+  depth and the scope. A cut whose plane or converted edge is gone fails, and the
+  components are whole until it is fixed.
+- The cut bodies are what is drawn, weighed (`mass`), checked for `interference` and
+  exported. Mates are solved on the parts as they are: mate to the part's own faces.
+- `edit_assembly_cut` (`cut`, and any of `on`, `draw` and `convert` (added), `end`,
+  `depth`, `flip`, `flip_side`, `components` (`null`: every one), `suppressed`);
+  `rename` and `delete` take `cut`. `components` lists the cuts under `cuts`.
 
 ## Changing components
 

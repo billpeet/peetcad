@@ -173,7 +173,8 @@ impl PatternLineSel {
 pub struct PatternStepSpec {
     pub direction: PatternLineSel,
     pub spacing: Input,
-    pub count: u32,
+    /// A whole number, or an expression worked out at every rebuild.
+    pub count: Input,
     pub flip: bool,
 }
 
@@ -182,7 +183,7 @@ impl PatternStepSpec {
         Ok(Self {
             direction: a.required("direction", PatternLineSel::parse)?,
             spacing: a.required("spacing", Input::parse)?,
-            count: a.required("count", integer)?,
+            count: a.required("count", Input::parse)?,
             flip: a.flag("flip", false)?,
         })
     }
@@ -206,20 +207,41 @@ impl PatternStepSpec {
                 .spacing
                 .scalar(ScalarKind::Length, doc)
                 .map_err(|e| format!("spacing: {e}"))?,
-            count: count(self.count)?,
+            count: count(&self.count, doc)?,
             flip: self.flip,
         })
     }
 }
 
-fn count(n: u32) -> Result<u32, String> {
-    if (1..=MAX_PATTERN).contains(&n) {
-        Ok(n)
-    } else {
-        Err(format!(
-            "'count' is how many there are, the original included: 1 to {MAX_PATTERN}, not {n}."
-        ))
+/// A count as a pattern stores it: a whole number, or an expression (`"D1@LPattern1 + 1"`,
+/// `iif("Height@Base@Tray-1" > 1100, 3, 2)`) that must work out to one now.
+fn count(input: &Input, doc: &Document) -> Result<peet_model::Scalar, String> {
+    let wrong = |e: String| {
+        format!(
+            "'count' is how many there are, the original included: a whole number from 1 to {MAX_PATTERN}, or an expression that works out to one. {e}"
+        )
+    };
+    let (mut scalar, constant) = match input {
+        Input::Number(n) | Input::Base(n) => (peet_model::Scalar::new(*n), true),
+        Input::Expr(text) => {
+            let text = text.trim();
+            let constant =
+                peet_sketch::expr::Expr::parse(text).is_ok_and(|e| e.names().is_empty());
+            (
+                peet_model::Scalar {
+                    value: 0.0,
+                    expression: Some(text.to_owned()),
+                },
+                constant,
+            )
+        }
+    };
+    let n = peet_model::evaluate_pattern_count(&scalar, &doc.model.parameters).map_err(wrong)?;
+    scalar.value = f64::from(n);
+    if constant {
+        scalar.expression = None;
     }
+    Ok(scalar)
 }
 
 /// What a new pattern is.
@@ -233,7 +255,7 @@ pub enum PatternSpec {
         axis: PatternLineSel,
         /// 360 if absent: evenly spaced all the way round.
         angle: Option<Input>,
-        count: u32,
+        count: Input,
         flip: bool,
     },
     /// As the model has it: what the application passes.
@@ -264,7 +286,7 @@ impl PatternSpec {
                         .map_err(|e| format!("angle: {e}"))?,
                     None => peet_model::Scalar::new(360.0),
                 },
-                count: count(*n)?,
+                count: count(n, doc)?,
                 flip: *flip,
             },
         })
@@ -277,7 +299,7 @@ pub struct PatternEdit {
     /// A linear pattern's direction, or a circular one's axis.
     pub direction: Option<PatternLineSel>,
     pub spacing: Option<Input>,
-    pub count: Option<u32>,
+    pub count: Option<Input>,
     pub angle: Option<Input>,
     pub flip: Option<bool>,
     /// A linear pattern's second direction: `Some(None)` takes it away.
@@ -354,7 +376,7 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
                 "circular" => PatternSpec::Circular {
                     axis: a.required("axis", PatternLineSel::parse)?,
                     angle: a.parsed("angle", Input::parse)?,
-                    count: a.required("count", integer)?,
+                    count: a.required("count", Input::parse)?,
                     flip: a.flag("flip", false)?,
                 },
                 other => {
@@ -388,7 +410,7 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
                 let edit = PatternEdit {
                     direction: direction.or(axis),
                     spacing: a.parsed("spacing", Input::parse)?,
-                    count: a.parsed("count", integer)?,
+                    count: a.parsed("count", Input::parse)?,
                     angle: a.parsed("angle", Input::parse)?,
                     flip: a.parsed("flip", boolean)?,
                     second,
@@ -430,6 +452,16 @@ fn line_out(doc: &Document, assembly: &Assembly, line: &PatternLine, axis: bool)
     }
 }
 
+/// A count: the number the copies are made for, or with an expression
+/// `{"value": 3, "expression": "..."}`.
+fn count_out(count: &peet_model::Scalar) -> Value {
+    let n = peet_model::pattern_count(count);
+    match &count.expression {
+        None => json!(n),
+        Some(e) => json!({ "value": n, "expression": e }),
+    }
+}
+
 /// A pattern in a few fields: what replies and `components` give.
 pub(crate) fn pattern_out(doc: &Document, id: PatternId) -> Value {
     let Some((assembly, pattern)) = doc.model.assembly().and_then(|a| Some((a, a.pattern(id)?)))
@@ -460,7 +492,7 @@ pub(crate) fn pattern_out(doc: &Document, id: PatternId) -> Value {
             "spacing".to_owned(),
             scalar_out(&s.spacing, ScalarKind::Length, doc),
         );
-        m.insert("count".to_owned(), json!(s.count));
+        m.insert("count".to_owned(), count_out(&s.count));
         if s.flip {
             m.insert("flip".to_owned(), json!(true));
         }
@@ -485,7 +517,7 @@ pub(crate) fn pattern_out(doc: &Document, id: PatternId) -> Value {
                 "angle".to_owned(),
                 scalar_out(angle, ScalarKind::Angle, doc),
             );
-            m.insert("count".to_owned(), json!(count));
+            m.insert("count".to_owned(), count_out(count));
             if *flip {
                 m.insert("flip".to_owned(), json!(true));
             }
@@ -648,8 +680,8 @@ pub(crate) fn change(
                             .scalar(ScalarKind::Length, doc)
                             .map_err(|e| format!("spacing: {e}"))?;
                     }
-                    if let Some(n) = edit.count {
-                        first.count = count(n)?;
+                    if let Some(n) = &edit.count {
+                        first.count = count(n, doc)?;
                     }
                     if let Some(flip) = edit.flip {
                         first.flip = flip;
@@ -680,8 +712,8 @@ pub(crate) fn change(
                             .scalar(ScalarKind::Angle, doc)
                             .map_err(|e| format!("angle: {e}"))?;
                     }
-                    if let Some(new) = edit.count {
-                        *n = count(new)?;
+                    if let Some(new) = &edit.count {
+                        *n = count(new, doc)?;
                     }
                     if let Some(new) = edit.flip {
                         *flip = new;
@@ -714,4 +746,69 @@ pub(crate) fn change(
             format!("Delete {was}")
         }
     })
+}
+
+/// The pattern and the value of it an address names, as SolidWorks names a component
+/// pattern's dimensions: `D1@LocalLPattern1` (the count), `D3@LocalLPattern1` (the
+/// spacing; see [`PatternKind::values`]). The case of the name doesn't matter where only
+/// one pattern has it in any case. `None` if no pattern has the name.
+pub(crate) fn value_address(doc: &Document, address: &str) -> Option<(PatternId, String)> {
+    let assembly = doc.model.assembly()?;
+    let (value, name) = address.trim().trim_matches('"').split_once('@')?;
+    let name = name.trim();
+    if name.contains('@') || !value.trim().to_ascii_uppercase().starts_with('D') {
+        return None;
+    }
+    let exact = assembly.patterns().find(|p| p.name == name);
+    let mut alike = assembly
+        .patterns()
+        .filter(|p| p.name.eq_ignore_ascii_case(name));
+    let p = match (exact, alike.next(), alike.next()) {
+        (Some(p), ..) | (None, Some(p), None) => p,
+        _ => return None,
+    };
+    Some((p.id, value.trim().to_ascii_uppercase()))
+}
+
+/// Sets a pattern's value by its SolidWorks name (`D1`: the count, `D3`: the spacing, ...)
+/// to a number or an expression, which is worked out again at every rebuild: a count from
+/// an expression makes or removes copies as it changes. Returns the undo label.
+pub(crate) fn set_value(
+    doc: &Document,
+    model: &mut Model,
+    id: PatternId,
+    value_name: &str,
+    value: &Input,
+) -> Result<String, String> {
+    let pattern = the_assembly(doc)?
+        .pattern(id)
+        .ok_or_else(|| "The pattern no longer exists.".to_owned())?;
+    let was = pattern.name.clone();
+    let mut kind = pattern.kind.clone();
+    let names: Vec<String> = pattern
+        .kind
+        .values()
+        .iter()
+        .map(|(n, ..)| format!("{n}@{was}"))
+        .collect();
+    let (slot, scalar_kind) = kind.value_mut(value_name).ok_or_else(|| {
+        format!(
+            "{was} has no value {value_name}: its values are {} (a linear pattern's counts are D1 and D2 and its spacings D3 and D4; a circular pattern's count is D1 and its angle D3).",
+            names.join(", ")
+        )
+    })?;
+    *slot = match scalar_kind {
+        ScalarKind::Number => count(value, doc)?,
+        kind => value
+            .scalar(kind, doc)
+            .map_err(|e| format!("{value_name}@{was}: {e}"))?,
+    };
+    makes_copies(&kind)?;
+    let assembly = model
+        .assembly_mut()
+        .ok_or_else(|| "The document is not an assembly.".to_owned())?;
+    if !assembly.set_pattern_kind(id, kind) {
+        return Err("The pattern no longer exists.".to_owned());
+    }
+    Ok(format!("Edit {was}"))
 }

@@ -25,6 +25,7 @@
 //! The crate has no UI or GPU dependency: everything here runs headless.
 
 mod asm_config;
+pub mod asm_cut;
 mod assembly;
 mod bodies;
 pub mod config;
@@ -56,9 +57,11 @@ mod units;
 mod weldment;
 
 pub use asm_config::{ComponentState, MateState};
+pub use asm_cut::{AssemblyCut, CutConversion, CutId, CutPlane};
 pub use assembly::{
     Assembly, CompId, Component, ComponentPattern, DefId, Definition, ExplodeId, ExplodeStep, Link,
     MAX_PATTERN, PatternId, PatternInstance, PatternKind, PatternLine, PatternStep, Pose,
+    evaluate_pattern_count, pattern_count,
     relative_to,
 };
 pub use bodies::{InsertPartFeature, MoveBodyFeature, PartSource, body_motion};

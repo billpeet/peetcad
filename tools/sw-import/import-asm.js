@@ -629,6 +629,7 @@ function importEquations(peet, cfg, report, byPath, want, name, base = null) {
     if (e.disabled) {
       row.result = "disabled";
       if (globals.has(target)) row.note = "a parameter with SolidWorks' value";
+      else if (target.includes("@")) row.ifEnabled = ifEnabled(target, m[2]);
       continue;
     }
     // Another configuration: an equation as the active one has it is there already
@@ -674,11 +675,295 @@ function importEquations(peet, cfg, report, byPath, want, name, base = null) {
       report.equations.push({ equation: t, result: reply.ok ? "removed" : "failed", ...(reply.ok ? {} : { why: reply.error }) });
     }
   }
+  // What a disabled equation would do if it were enabled: tried, then undone. SolidWorks has the value it would
+  // set (`e.value`); the others it reads are as they are now.
+  function ifEnabled(target, expression) {
+    const e = cfg.equations.find(x => parse(x) && parse(x)[1].trim() === target);
+    const mark = peet.backup();
+    try {
+      const last = target.split("@").pop();
+      const component = isComponentRef(last) ? componentName(last) : null;
+      if (component && !want.has(component)) return `would not work: it sets something of ${component}, which was not imported`;
+      const t = translate(expression, component);
+      if (t.failed) return `would not work: ${t.failed}`;
+      const reply = peet.run({ op: "set", name: target, value: t.value }, true);
+      if (!reply.ok) return `would not work: ${reply.error}`;
+      const now = peet.ask({ op: "dimensions", name: target });
+      const v = now.ok && now.dimensions && now.dimensions[0] && now.dimensions[0].value;
+      if (typeof v !== "number") return "would not work: PeetCAD has no value at its target";
+      if (Math.abs(v - e.value) > 1e-4 * Math.max(1, Math.abs(e.value))) return `would give ${tidy(v)} where SolidWorks has ${tidy(e.value)}`;
+      return `would work: PeetCAD gives ${tidy(v)}, as SolidWorks`;
+    } finally { peet.restore(mark); }
+  }
+
   const live = report.equations.filter(r => r.result !== "disabled" && r.result !== "removed");
   const left = live.filter(r => r.result !== "imported").length;
   if (left) report.notes.push(`${left} of ${live.length} live equations not imported`);
   // What later configurations compare with
   if (!base) cfg.importedLive = new Set(report.equations.filter(r => r.result === "imported").map(r => (/^\s*"([^"]+)"/.exec(r.equation) || [])[1]).filter(Boolean).map(t => t.trim()));
+}
+
+// ---- Component patterns ----
+
+/** The copies SolidWorks' component patterns make in a configuration: copy name -> pattern name. */
+function patternCopies(cfg) {
+  const out = new Map();
+  if (!cfg) return out;
+  const patterns = new Set();
+  walkFeatures(cfg.features, f => { if (/^Local.*Pattern$/.test(f.type)) patterns.add(f.name); });
+  walkFeatures(cfg.features, f => {
+    if (f.type !== "ReferencePattern") return;
+    const by = (f.parents || []).find(p => patterns.has(p));
+    if (by) out.set(f.name, by);
+  });
+  return out;
+}
+
+/**
+ * One direction of SolidWorks' linear component pattern as PeetCAD's: along the edge (or face) of a component
+ * SolidWorks takes it from, where that is found, else along the assembly's own direction the copies are in;
+ * flipped where the copies go the other way along it. `axis` is SolidWorks' entity, `along` the way from the
+ * original to its first copy (unit, in the assembly), `parents` the components it may be on.
+ */
+function patternDirection(axis, along, parents, byPath, seeds) {
+  const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partOf(comp).view || null : null;
+  const fixed = { direction: along.map(tidy), note: "along the assembly's own direction the copies are in (the edge it is taken from was not found)" };
+  if (!axis) return fixed;
+  // On a component other than the originals first
+  const order = [...parents.filter(p => !seeds.includes(p)), ...parents.filter(p => seeds.includes(p))];
+  for (const path of order) {
+    const comp = byPath.get(path);
+    const file = comp && partFile(comp);
+    if (!file) continue;
+    const shape = shapeOf({ entity: axis }, comp);
+    const found = shape && findIn(file, shape);
+    if (!found || !found.dir || (!found.edge && !found.face)) continue;
+    const R = matrixOf(comp.transform);
+    const dir = norm3(toWorld({ R: R.R, t: [0, 0, 0] }, found.dir));
+    const d = dot3(dir, along);
+    if (Math.abs(Math.abs(d) - 1) > 1e-6) continue;
+    const { dir: _, ...where } = found;
+    return { direction: { component: path.split("/"), ...where }, flip: d < 0 };
+  }
+  return fixed;
+}
+
+/**
+ * SolidWorks' component patterns (LocalLPattern) as PeetCAD's (`component_pattern`): the originals, each direction
+ * along the edge SolidWorks takes it from, the spacing and the count. The copies the pattern makes are renamed as
+ * SolidWorks names them and checked against SolidWorks' placements like any component. A pattern that can't be
+ * made leaves its copies inserted by themselves, where SolidWorks has them, as before.
+ */
+function importPatterns(peet, cfg, report, byPath, want, placeOf, insertPlain) {
+  const copies = patternCopies(cfg);
+  const patterns = [];
+  walkFeatures(cfg.features, f => { if (/^Local.*Pattern$/.test(f.type)) patterns.push(f); });
+  report.patterns = [];
+  for (const f of patterns) {
+    const row = { pattern: f.name, type: f.type };
+    report.patterns.push(row);
+    const mine = [...copies].filter(([, by]) => by === f.name).map(([copy]) => copy);
+    const fallBack = why => {
+      row.result = "failed"; row.why = why;
+      for (const copy of mine) {
+        const crow = report.components.find(r => r.component === copy);
+        const seed = ((cfg.features.find(x => x.name === copy) || {}).parents || []).find(p => p !== f.name);
+        if (crow && insertPlain(copy, seed)) { crow.result = "inserted"; crow.why = `inserted by itself: its pattern ${f.name} could not be made (${why})`; }
+        else if (crow) { crow.result = "left out"; crow.why = `its pattern ${f.name} could not be made (${why})`; report.left.push(`${copy}: ${crow.why}`); }
+      }
+    };
+    const v = (f.definition || {}).values;
+    if (f.type !== "LocalLPattern" || !v) { fallBack(f.type === "LocalLPattern" ? "the export has no definition" : `PeetCAD imports linear component patterns only (${f.type})`); continue; }
+    if ((v.SkippedItemArray || []).length) { fallBack("it skips instances, which PeetCAD's patterns don't"); continue; }
+    const seeds = (v.SeedComponentArray || []).map(x => x.name).filter(n => want.has(n));
+    if (!seeds.length) { fallBack("its originals were not imported"); continue; }
+    const seed = byPath.get(seeds[0]);
+    // Where SolidWorks has each copy of the first original, from it, in mm
+    const seedAt = placeOf(seed).t;
+    const offsets = mine.filter(c => ((cfg.features.find(x => x.name === c) || {}).parents || []).includes(seeds[0]))
+      .map(c => ({ copy: c, d: sub3(placeOf(byPath.get(c)).t, seedAt).map(x => x * MM) }));
+    const step = (axis, spacing, count, other) => {
+      // The way to the nearest copy along this direction (not along the other)
+      const along = offsets.map(o => o.d).filter(d => !other || Math.abs(dot3(d, other)) < 1e-6 * len3(d) + 1e-6)
+        .sort((a, b) => len3(a) - len3(b))[0];
+      if (!along || len3(along) < 1e-9) return null;
+      const u = norm3(along);
+      const dir = patternDirection(axis, u, f.parents || [], byPath, seeds);
+      if (dir.note) row.notes = [...(row.notes || []), dir.note];
+      return { direction: dir.direction, spacing: tidy(spacing * MM), count, ...(dir.flip ? { flip: true } : {}), u };
+    };
+    const first = step(v.D1Axis, v.D1Spacing, v.D1TotalInstances, null);
+    if (!first) { fallBack("its copies are not where SolidWorks' spacing puts them"); continue; }
+    const second = v.D2TotalInstances > 1 ? step(v.D2Axis, v.D2Spacing, v.D2TotalInstances, first.u) : null;
+    if (v.D2TotalInstances > 1 && !second) { fallBack("its second direction's copies were not found"); continue; }
+    const strip = ({ u, ...x }) => x;
+    const op = { op: "component_pattern", components: seeds, type: "linear", ...strip(first), ...(second ? { second: strip(second) } : {}), name: f.name };
+    const mark = peet.backup();
+    const reply = peet.apply(op);
+    if (!reply.ok) { peet.restore(mark); fallBack(reply.error); continue; }
+    // Each copy named as SolidWorks names it: the one where SolidWorks has that copy
+    const made = (peet.ask({ op: "components" }).components || []).filter(c => c.pattern === f.name);
+    const names = [];
+    let worst = 0;
+    for (const c of made) {
+      const m = matrixFromPeet(c);
+      const best = mine.map(copy => [copy, apart(m, placeOf(byPath.get(copy)))]).sort((a, b) => a[1] - b[1])[0];
+      if (!best || names.includes(best[0])) continue;
+      worst = Math.max(worst, best[1]);
+      if (c.name !== best[0]) {
+        const r = peet.apply({ op: "rename", component: c.name, name: best[0] });
+        if (!r.ok) continue;
+      }
+      names.push(best[0]);
+    }
+    if (names.length !== mine.length) { peet.restore(mark); fallBack(`it made ${made.length} copies where SolidWorks has ${mine.length}`); continue; }
+    for (const copy of mine) {
+      const c = byPath.get(copy);
+      const crow = report.components.find(r => r.component === copy);
+      want.set(copy, placeOf(c));
+      if (crow) { crow.result = "inserted"; crow.byPattern = f.name; }
+      if (c.suppression === 0) peet.apply({ op: "suppress", component: copy });
+    }
+    row.result = "imported";
+    row.copies = mine.length;
+    row.off_mm = tidy(worst);
+  }
+  if (!report.patterns.length) delete report.patterns;
+}
+
+// ---- Assembly features ----
+
+/**
+ * SolidWorks' assembly cut (`Cut` at assembly level, with its sketch) as PeetCAD's `assembly_cut`: the sketch on the
+ * face of a component it lies on (else on SolidWorks' plane, fixed), its entities converted from the components'
+ * edges SolidWorks converts them from, so they follow those components, its end condition, depth and direction;
+ * the scope every component it reaches unless SolidWorks lists some. The other assembly-level features are
+ * reported: layout sketches, composite curves and in-context feature holders (which PeetCAD's parts don't have).
+ */
+function importAssemblyFeatures(peet, cfg, report, byPath, want, local) {
+  const rows = [];
+  const all = [];
+  walkFeatures(cfg.features, f => all.push(f));
+  const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partOf(comp).view || null : null;
+  const parts = [...byPath.values()].filter(c => partFile(c) && want.has(c.path.split("/")[0]) && c.suppression !== 0);
+  const asm = c => matrixOf(c.transform);
+  const vec = (m, v) => toWorld({ R: m.R, t: [0, 0, 0] }, v);
+  for (const f of all) {
+    if (f.type === "LayoutProfileFeature") {
+      const n = f.sketch ? f.sketch.segments.length + f.sketch.points.length : 0;
+      rows.push({ feature: f.name, type: f.type, result: n ? "not imported" : "nothing to import", why: n ? "a layout sketch with entities: PeetCAD's assemblies have no sketches of their own" : `an empty ${f.sketch && f.sketch.is3D ? "3D " : ""}layout sketch that nothing references (${(f.children || []).length} children)` });
+    } else if (f.type === "CompositeCurve") {
+      rows.push({ feature: f.name, type: f.type, result: "nothing to import", why: `no definition in the export (${(f.definition || {}).error ? "SolidWorks failed to give it" : "none"}); nothing references it` });
+    } else if (f.type === "InContextFeatHolder") {
+      rows.push({ feature: f.name, type: f.type, result: "not imported", why: `a feature of ${(f.parents || []).filter(Boolean).filter(p => p !== "Mates").join(", ")} made in the context of this assembly: the part is imported as SolidWorks last built it; PeetCAD's parts don't follow other components (see the in-context design)` });
+    }
+  }
+  for (const f of all.filter(x => x.type === "Cut" && x.subFeatures && x.definition)) {
+    const row = { feature: f.name, type: f.type };
+    rows.push(row);
+    const sketch = all.find(x => x.type === "ProfileFeature" && f.subFeatures.includes(x.name));
+    const v = f.definition.values || {};
+    if (!sketch || !sketch.sketch) { row.result = "failed"; row.why = "its sketch is not in the export"; continue; }
+    row.sketch = sketch.name;
+    if (local) { row.result = "failed"; row.why = "an assembly cut in a sub-assembly without its own export"; continue; }
+    // SolidWorks' sketch plane, in the assembly (mm): model to sketch is p·R + t
+    const M = matrixOf(sketch.sketch.modelToSketch);
+    const col = k => [M.R[0][k], M.R[1][k], M.R[2][k]];
+    const [X, Y, Z] = [col(0), col(1), col(2)];
+    const O = [0, 1, 2].map(i => -(M.t[0] * M.R[i][0] + M.t[1] * M.R[i][1] + M.t[2] * M.R[i][2]) * MM);
+    const at = (x, y) => [0, 1, 2].map(i => O[i] + (x * X[i] + y * Y[i]) * MM);
+    // The face the sketch is on: a flat face of a component under the one SolidWorks names, in that plane
+    const near = (() => {
+      const pts = sketch.sketch.segments.map(sg => sg.center || sg.start).filter(Boolean).map(p => at(p.x, p.y));
+      return pts.length ? [0, 1, 2].map(i => pts.reduce((a, p) => a + p[i], 0) / pts.length) : O;
+    })();
+    const owners = (sketch.parents || []).filter(p => p && byPath.has(p));
+    let on = null, normal = null;
+    let best = null;
+    for (const c of parts.filter(c => owners.some(o => c.path === o || c.path.startsWith(o + "/")))) {
+      const m = asm(c);
+      for (const face of geometryOf(partFile(c)).faces.filter(x => x.surface === "plane" && x.normal)) {
+        const n = norm3(vec(m, face.normal));
+        const p = toWorld(m, face.center.map(x => x / MM)).map(x => x * MM);
+        if (Math.abs(Math.abs(dot3(n, Z)) - 1) > 1e-6 || Math.abs(dot3(sub3(p, O), Z)) > TOL) continue;
+        const d = len3(sub3(p, near));
+        if (!best || d < best.d) best = { d, c, face, n };
+      }
+    }
+    if (best) {
+      on = { component: best.c.path.split("/"), face: { body: best.face.body, index: best.face.index } };
+      normal = best.n;
+      row.on = `a face of ${best.c.path}`;
+    } else {
+      on = { origin: O.map(tidy), normal: Z.map(tidy), x: X.map(tidy) };
+      normal = Z;
+      row.on = "SolidWorks' plane, fixed in the assembly (the face it is on was not found)";
+    }
+    // The entities, each converted from the component edge SolidWorks converts it from
+    const convert = [];
+    const covered = new Set();
+    for (const r of sketch.sketch.relations || []) {
+      if (r.type !== "useedge" || !r.defined || !r.defined[0]) continue;
+      const e = r.defined[0];
+      const shape = e.kind === "edge" ? shapeOf({ entity: e }) : null;
+      const target = (r.entities || []).find(x => x && x.kind === "sketchSegment");
+      if (!shape || !target) continue;
+      // Where the sketch has it: a circle's centre, a line's start
+      const pt = target.center ? at(target.center.x, target.center.y) : target.start ? at(target.start.x, target.start.y) : null;
+      if (!pt) continue;
+      let hit = null;
+      for (const c of parts) {
+        const found = findIn(partFile(c), shape);
+        if (!found || !found.edge) continue;
+        const m = asm(c);
+        const w = toWorld(m, (shape.c || shape.a).map(x => x / MM)).map(x => x * MM);
+        // Seen on the sketch's plane
+        const off = sub3(w, pt);
+        const inPlane = sub3(off, Z.map(z => z * dot3(off, Z)));
+        if (len3(inPlane) < 0.01) { hit = { component: c.path.split("/"), edge: found.edge }; break; }
+      }
+      if (hit) {
+        for (const x of r.entities || []) if (x && x.kind === "sketchSegment") covered.add(JSON.stringify(x.id));
+        if (!convert.some(c => JSON.stringify(c) === JSON.stringify(hit))) convert.push(hit);
+      }
+    }
+    const left = sketch.sketch.segments.filter(sg => !sg.construction && !covered.has(JSON.stringify(sg.id)));
+    if (!convert.length || left.length) {
+      row.result = "failed";
+      row.why = !convert.length ? "no entity of its sketch is converted from an edge PeetCAD's parts have" : `${left.length} entities of its sketch are not converted from an edge PeetCAD found`;
+      continue;
+    }
+    const ends = { 0: "blind", 1: "through_all", 6: "mid_plane" };
+    const endCode = v["GetEndCondition(true)"];
+    if (!(endCode in ends) || v.BothDirections || v.IsThinFeature) { row.result = "failed"; row.why = `an end condition PeetCAD's assembly cut doesn't take (${endCode}${v.BothDirections ? ", both directions" : ""}${v.IsThinFeature ? ", thin" : ""})`; continue; }
+    // Which way: SolidWorks' dimension's direction where it has one, else against the sketch's normal
+    const dim = (f.dimensions || [])[0];
+    let sw = dim && dim.lineDirection && len3(dim.lineDirection) > 0.5 ? norm3(dim.lineDirection) : Z.map(z => -z);
+    if (!dim && v.ReverseDirection) sw = sw.map(x => -x);
+    const flip = dot3(normal.map(x => -x), sw) < 0;
+    const scope = v.AssemblyFeatureScope && (v.FeatureScopeBodies || []).length
+      ? { components: v.FeatureScopeBodies.map(b => b.component || b.name).filter(Boolean) } : {};
+    const op = {
+      op: "assembly_cut", on, convert, end: ends[endCode],
+      ...(endCode !== 1 ? { depth: tidy(v["GetDepth(true)"] * MM) } : {}),
+      ...(flip ? { flip: true } : {}), ...(v.FlipSideToCut ? { flip_side: true } : {}), ...scope,
+      name: f.name, sketch_name: sketch.name,
+    };
+    const before = peet.ask({ op: "mass" });
+    const mark = peet.backup();
+    const reply = peet.apply(op);
+    if (!reply.ok || (reply.cut && reply.cut.status === "failed")) { peet.restore(mark); row.result = "failed"; row.why = reply.error || reply.cut.message; row.op = op; continue; }
+    row.result = "imported";
+    row.converted = convert.length;
+    if (reply.cut && reply.cut.message) row.message = reply.cut.message;
+    // What it cut, by the components' volumes before and after
+    const after = peet.ask({ op: "mass" });
+    const vol = r => new Map(((r && r.components) || []).map(c => [c.component, c.volume_mm3]));
+    const [b, a] = [vol(before), vol(after)];
+    row.cuts = [...a].filter(([n, x]) => b.has(n) && Math.abs(b.get(n) - x) > 1e-6).map(([n, x]) => ({ component: n, removed_mm3: tidy(b.get(n) - x) }));
+    if (f.suppressed) peet.apply({ op: "edit_assembly_cut", cut: f.name, suppressed: true });
+  }
+  if (rows.length) report.features = rows;
 }
 
 // ---- Import ----
@@ -929,10 +1214,29 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
   const top = all.filter(c => !c.path.includes("/"));
   const byPath = new Map(all.map(c => [c.path, c]));
   const want = new Map();
+  // How each component was inserted, so a pattern's copy can be inserted like its original if the pattern can't
+  // be made
+  const insertOps = new Map();
+  const insertPlain = (copy, seed) => {
+    const op = insertOps.get(seed);
+    const c = byPath.get(copy);
+    if (!op || !c) return false;
+    const m = placeOf(c);
+    const rot = axisAngle(m);
+    const { rotate, ...rest } = op;
+    const reply = peet.apply({ ...rest, name: copy, at: m.t.map(v => tidy(v * MM)), ...(rot ? { rotate: rot } : {}), fixed: !!c.fixed });
+    if (!reply.ok) return false;
+    want.set(copy, m);
+    if (c.suppression === 0) peet.apply({ op: "suppress", component: copy });
+    return true;
+  };
 
+  // The copies SolidWorks' component patterns make: the pattern makes them, after the components
+  const copies = patternCopies(cfg);
   for (const c of top) {
     const row = { component: c.path, file: path.basename(c.file || ""), configuration: c.configuration, suppressed: c.suppression === 0, fixed: !!c.fixed };
     report.components.push(row);
+    if (copies.has(c.path)) { row.result = "left for its pattern"; row.pattern = copies.get(c.path); continue; }
     let source;
     let configuration = null;
     if (/\.sldasm$/i.test(c.file || "")) {
@@ -958,6 +1262,7 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
     if (!reply.ok) { row.result = "failed"; row.why = reply.error; report.left.push(`${c.path}: ${reply.error}`); continue; }
     row.result = "inserted";
     want.set(c.path, m);
+    insertOps.set(c.path, op);
     // A sub-assembly SolidWorks solves as flexible: its own mates are solved here, and what moves in it starts
     // where SolidWorks has it
     // (Whether a sub-assembly is flexible is the same in every configuration: one opened otherwise than its file
@@ -978,6 +1283,9 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
     }
     if (c.suppression === 0) peet.apply({ op: "suppress", component: c.path });
   }
+
+  // Component patterns, before the equations, which may drive their counts and spacings
+  if (cfg) importPatterns(peet, cfg, report, byPath, want, placeOf, insertPlain);
 
   // Equations, before the mates: a part an equation sizes (Plinth Folded's pipes) is mated at its size
   if (cfg && (cfg.equations || []).length) importEquations(peet, cfg, report, byPath, want, name);
@@ -1005,6 +1313,10 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
     const back = peet.apply({ op: "configuration", configuration: cfg.name });
     if (!back.ok) report.notes.push(`could not make ${cfg.name} active again: ${back.error}`);
   }
+
+  // Assembly features: cuts with their sketches, after the mates (SolidWorks works them out after the mates);
+  // what else the tree has at assembly level is reported
+  if (cfg) importAssemblyFeatures(peet, cfg, report, byPath, want, local);
 
   // Where the mates left each component, against SolidWorks
   const { worst, freedom } = checkPlacements(peet, want, report.components);
@@ -1057,6 +1369,16 @@ function importConfiguration(peet, report, { name, cfg, o, all, top, placeOf, lo
     if (!oc) { row.notes.push(`${c.path} is not in this configuration's export`); continue; }
     const ops = [];
     const differs = [];
+    if (crow.byPattern) {
+      // Placed by its pattern: only whether it is suppressed is its own
+      if ((oc.suppression === 0) !== (c.suppression === 0)) {
+        const r = peet.apply({ op: "suppress", component: c.path, on: oc.suppression === 0 });
+        if (!r.ok) row.notes.push(`${c.path}: suppress failed: ${r.error}`);
+        row.changed.push({ component: c.path, differs: [oc.suppression === 0 ? "suppressed" : "unsuppressed"] });
+      }
+      owant.set(c.path, placeOf(oc));
+      continue;
+    }
     if ((oc.suppression === 0) !== (c.suppression === 0)) { ops.push({ op: "suppress", component: c.path, on: oc.suppression === 0 }); differs.push(oc.suppression === 0 ? "suppressed" : "unsuppressed"); }
     if (oc.configuration !== c.configuration) {
       const sub = /\.sldasm$/i.test(oc.file || "");

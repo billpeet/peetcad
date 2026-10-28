@@ -3393,14 +3393,14 @@ fn the_applications_patterns_are_made_by_operations() {
         assert_eq!(through.bodies.len(), direct.bodies.len(), "{label}");
         done.ops
     };
-    let row = |count| PatternKind::Linear {
+    let row = |count: u32| PatternKind::Linear {
         first: PatternStep {
             direction: PatternLine::Fixed {
                 origin: DVec3::ZERO,
                 direction: DVec3::X,
             },
             spacing: Scalar::new(150.0),
-            count,
+            count: Scalar::new(f64::from(count)),
             flip: false,
         },
         second: None,

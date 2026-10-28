@@ -612,6 +612,15 @@ pub enum Op {
         pattern: crate::pattern::PatternSel,
         change: crate::pattern::PatternChange,
     },
+    /// Cut components in an assembly with an extruded sketch (SolidWorks' assembly cut).
+    AssemblyCut {
+        spec: crate::cut::CutSpec,
+    },
+    /// Change an assembly cut.
+    EditAssemblyCut {
+        cut: crate::cut::CutSel,
+        change: crate::cut::CutChange,
+    },
     /// Add a step to an assembly's exploded view: components shown moved by a distance.
     ExplodeStep {
         components: Vec<CompSel>,
@@ -750,6 +759,8 @@ impl Op {
             Self::EditMate { change, .. } => change.word(),
             Self::ComponentPattern { .. } => "component_pattern",
             Self::EditComponentPattern { change, .. } => change.word(),
+            Self::AssemblyCut { .. } => "assembly_cut",
+            Self::EditAssemblyCut { change, .. } => change.word(),
             Self::ExplodeStep { .. } => "explode_step",
             Self::EditExplodeStep { change, .. } => change.word(),
             Self::Explode { .. } => "explode",
@@ -1130,6 +1141,9 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
     if let Some(found) = crate::pattern::parse(op, a) {
         return found;
     }
+    if let Some(found) = crate::cut::parse(op, a) {
+        return found;
+    }
     if let Some(found) = crate::explode::parse(op, a) {
         return found;
     }
@@ -1491,6 +1505,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             all.extend(crate::links::LINK_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::explode::EXPLODE_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::pattern::PATTERN_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::cut::CUT_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::equations::EQUATION_OPS.iter().map(|(_, n, ..)| *n));
             all.sort_unstable();
             all.dedup();

@@ -299,7 +299,7 @@ impl PeetApp {
                         direction: DVec3::X,
                     },
                     spacing: Input::Base(spacing),
-                    count: 3,
+                    count: 3.into(),
                     flip: false,
                 },
                 second: None,
@@ -327,7 +327,7 @@ impl PeetApp {
             kind: PatternSpec::Circular {
                 axis: PatternLineSel::Geom(MateEndSel::Ref(b)),
                 angle: None,
-                count: 4,
+                count: 4.into(),
                 flip: false,
             },
             name: None,
@@ -430,8 +430,19 @@ impl PeetApp {
             }
             *done |= r.drag_stopped() || r.lost_focus();
         };
-        let count_ui = |ui: &mut Ui, count: &mut u32| {
-            ui.add(egui::DragValue::new(count).range(1..=200).speed(0.1));
+        let count_ui = |ui: &mut Ui, count: &mut Scalar| {
+            // A count from an expression is set by the expression (`set` D1@PATTERN).
+            if let Some(e) = &count.expression {
+                ui.label(format!("{} = {e}", peet_model::pattern_count(count)));
+                return;
+            }
+            let mut n = peet_model::pattern_count(count);
+            if ui
+                .add(egui::DragValue::new(&mut n).range(1..=200).speed(0.1))
+                .changed()
+            {
+                count.value = f64::from(n);
+            }
         };
         let step_ui = |ui: &mut Ui, s: &mut PatternStep, salt: &str, done: &mut bool| {
             ui.label("Direction");
@@ -472,7 +483,7 @@ impl PeetApp {
                                     direction: DVec3::Y,
                                 },
                                 spacing: first.spacing.clone(),
-                                count: 2,
+                                count: Scalar::new(2.0),
                                 flip: false,
                             });
                         }
@@ -2562,7 +2573,7 @@ mod tests {
                 PatternKind::Circular {
                     axis,
                     angle,
-                    count: 8,
+                    count: Scalar::new(8.0),
                     flip: false,
                 },
             );

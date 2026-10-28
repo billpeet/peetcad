@@ -508,6 +508,8 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
             | Op::EditMate { .. }
             | Op::ComponentPattern { .. }
             | Op::EditComponentPattern { .. }
+            | Op::AssemblyCut { .. }
+            | Op::EditAssemblyCut { .. }
             | Op::ExplodeStep { .. }
             | Op::EditExplodeStep { .. }
             | Op::Explode { .. }
@@ -690,6 +692,7 @@ pub(crate) fn problems(doc: &Document) -> Vec<Value> {
         .map(|c| component_out(doc, c.id))
         .chain(crate::mate::failures(doc))
         .chain(crate::pattern::failures(doc))
+        .chain(crate::cut::failures(doc))
         .collect()
 }
 
@@ -746,6 +749,13 @@ pub(crate) fn components(doc: &Document) -> Result<Map<String, Value>, String> {
             .map(|p| crate::pattern::pattern_out(doc, p.id))
             .collect();
         out.insert("patterns".to_owned(), json!(patterns));
+    }
+    if assembly.cuts().len() > 0 {
+        let cuts: Vec<Value> = assembly
+            .cuts()
+            .map(|c| crate::cut::cut_out(doc, c.id))
+            .collect();
+        out.insert("cuts".to_owned(), json!(cuts));
     }
     out.insert("mates".to_owned(), json!(assembly.mates().count()));
     out.insert("freedom".to_owned(), json!(doc.evaluation().freedom));
@@ -1281,7 +1291,9 @@ pub(crate) fn step_products(doc: &Document) -> (Vec<peet_io::step::StepProduct>,
         products: Vec<StepProduct>,
         /// The product of each part and sub-assembly. None: nothing in it. Two parts
         /// that are the same in everything are one product, as in the bill of materials.
-        of_model: Vec<(Arc<Model>, Option<usize>)>,
+        /// Each model's product, with the bodies it was made of (by their stamps): a part instance an
+        /// assembly cut has cut is a product of its own.
+        of_model: Vec<(Arc<Model>, Option<usize>, Vec<u64>)>,
     }
 
     impl Walk<'_> {
@@ -1331,11 +1343,20 @@ pub(crate) fn step_products(doc: &Document) -> (Vec<peet_io::step::StepProduct>,
         /// product of its own: its instances can each be posed differently.
         fn product(&mut self, model: &Arc<Model>, path: &[CompId], posed: bool) -> Option<usize> {
             let shared = !(posed && model.is_assembly());
-            let known = self
-                .of_model
-                .iter()
-                .find(|(m, _)| shared && (Arc::ptr_eq(m, model) || **m == **model));
-            if let Some((_, known)) = known {
+            let own: Vec<u64> = if model.is_assembly() {
+                Vec::new()
+            } else {
+                self.instances
+                    .iter()
+                    .filter(|i| i.path == path)
+                    .map(|i| i.body.stamp)
+                    .collect()
+            };
+            let same_bodies = |b: &[u64]| b == own.as_slice();
+            let known = self.of_model.iter().find(|(m, _, b)| {
+                shared && (Arc::ptr_eq(m, model) || **m == **model) && same_bodies(b)
+            });
+            if let Some((_, known, _)) = known {
                 return *known;
             }
             let (bodies, children) = if model.is_assembly() {
@@ -1370,7 +1391,7 @@ pub(crate) fn step_products(doc: &Document) -> (Vec<peet_io::step::StepProduct>,
                 self.products.len() - 1
             });
             if shared {
-                self.of_model.push((model.clone(), index));
+                self.of_model.push((model.clone(), index, own));
             }
             index
         }

@@ -45,6 +45,7 @@
 mod analysis;
 mod args;
 mod assembly;
+mod cut;
 mod diff;
 mod equations;
 mod explode;
@@ -144,6 +145,8 @@ struct Done {
     explode_step: Option<peet_model::ExplodeId>,
     /// A component pattern the operation was about, reported with its copies.
     pattern: Option<peet_model::PatternId>,
+    /// An assembly cut the operation was about, reported with its status.
+    cut: Option<peet_model::CutId>,
     /// A pull on a component to solve the assembly with, and its undo label.
     drag: Option<(peet_model::Drag, String)>,
     /// A reference dimension the operation was about, reported with what it measures.
@@ -411,6 +414,7 @@ fn help() -> Map<String, Value> {
         .chain(links::LINK_OPS.iter().map(|o| ("part", o)))
         .chain(explode::EXPLODE_OPS.iter().map(|o| ("explode_step", o)))
         .chain(pattern::PATTERN_OPS.iter().map(|o| ("pattern", o)))
+        .chain(cut::CUT_OPS.iter().map(|o| ("cut", o)))
     {
         // Words a feature has too (rename, delete): the component's and the mate's
         // forms beside it.
@@ -682,6 +686,24 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 );
             } else {
                 done.pattern = Some(id);
+            }
+            label
+        }
+        Op::AssemblyCut { spec } => {
+            let (id, label) = cut::add(doc, &mut model, spec)?;
+            done.cut = Some(id);
+            label
+        }
+        Op::EditAssemblyCut { cut: sel, change } => {
+            let id = sel.resolve(doc)?;
+            let label = cut::change(doc, &mut model, id, change)?;
+            if *change == cut::CutChange::Delete {
+                done.data.insert(
+                    "deleted".to_owned(),
+                    json!([label.trim_start_matches("Delete ")]),
+                );
+            } else {
+                done.cut = Some(id);
             }
             label
         }
@@ -1188,6 +1210,24 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                     value.as_ref(),
                     configurations.as_ref(),
                 )?
+            } else if let Some((id, value_name)) = (doc.is_assembly() && !parameter())
+                .then(|| pattern::value_address(doc, target))
+                .flatten()
+            {
+                if configurations.is_some() {
+                    return Err(
+                        "A component pattern is the same in every configuration: leave 'configurations' out."
+                            .to_owned(),
+                    );
+                }
+                let Some(value) = value.as_ref() else {
+                    return Err(format!(
+                        "'value' null clears an equation of an assembly: '{target}' is a component pattern's value. Give a value."
+                    ));
+                };
+                let label = pattern::set_value(doc, &mut model, id, &value_name, value)?;
+                done.pattern = Some(id);
+                label
             } else if value.is_none() {
                 return Err(format!(
                     "'value' null clears an equation of an assembly that sets a component's value: '{target}' is not one. Give a value."
@@ -1591,6 +1631,9 @@ pub(crate) fn apply_with(
     }
     if let Some(id) = done.explode_step {
         out.insert("explode_step".to_owned(), explode::step_out(doc, id));
+    }
+    if let Some(id) = done.cut {
+        out.insert("cut".to_owned(), cut::cut_out(doc, id));
     }
     if let Some(name) = &done.reference {
         out.insert("reference".to_owned(), equations::reference_out(doc, name));

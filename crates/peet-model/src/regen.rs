@@ -167,6 +167,7 @@ pub struct Evaluation {
     components: HashMap<CompId, Status>,
     mates: HashMap<MateId, Status>,
     patterns: HashMap<crate::PatternId, Status>,
+    cuts: HashMap<crate::CutId, Status>,
     /// For an assembly: how many ways its components can still move (six for each that
     /// is not fixed, less what the mates hold).
     pub freedom: usize,
@@ -229,6 +230,11 @@ impl Evaluation {
         self.patterns.get(&id)
     }
 
+    /// How an assembly cut came out.
+    pub fn cut_status(&self, id: crate::CutId) -> Option<&Status> {
+        self.cuts.get(&id)
+    }
+
     /// The component patterns that can't be worked out, with why.
     pub fn pattern_failures(&self) -> impl Iterator<Item = (crate::PatternId, &str)> {
         self.patterns.iter().filter_map(|(id, s)| match s {
@@ -281,6 +287,7 @@ struct Assembled {
     components: HashMap<CompId, Status>,
     mates: HashMap<MateId, Status>,
     patterns: HashMap<crate::PatternId, Status>,
+    cuts: HashMap<crate::CutId, Status>,
     freedom: usize,
     component_freedom: HashMap<CompId, usize>,
     component_frames: HashMap<Vec<CompId>, Frame>,
@@ -318,6 +325,8 @@ pub struct Engine {
     mates: mate::Memo,
     /// A pull on a component, for the next rebuild only.
     drag: Option<mate::Drag>,
+    /// For an assembly: the bodies its cuts left of its component instances.
+    cut_cache: HashMap<u64, Vec<Arc<Body>>>,
     evaluation: Evaluation,
 }
 
@@ -374,6 +383,8 @@ impl Engine {
         model.refresh_dimension_values();
         // An assembly's equations set its components' parts and suppression first.
         let mut equation_failures = model.apply_equations();
+        // Patterns whose counts are expressions make or remove copies to match.
+        model.sync_pattern_counts();
         let params_key = hash::of(&model.parameters);
         // The values of dimensions read by address are not part of the table's own hash:
         // only the sketches whose expressions might read them depend on them (the other
@@ -467,6 +478,7 @@ impl Engine {
                 break;
             }
             equation_failures = model.apply_equations();
+            model.sync_pattern_counts();
             assembled = self.assemble(model, &mut run.stats);
         }
         run.stats.ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -477,6 +489,7 @@ impl Engine {
             components: assembled.components,
             mates: assembled.mates,
             patterns: assembled.patterns,
+            cuts: assembled.cuts,
             freedom: assembled.freedom,
             component_freedom: assembled.component_freedom,
             component_frames: assembled.component_frames,
@@ -801,6 +814,14 @@ impl Engine {
             let length = |s: &crate::Scalar, kind| s.evaluate(kind, &model.parameters);
             // How each place moves a component from where the original is.
             let moves = (|| -> Result<Vec<([u32; 2], Frame)>, String> {
+                // A count that is an expression must still work out (the copies are
+                // those of the last count that did).
+                for count in pattern.kind.counts().into_iter().flatten() {
+                    if count.expression.is_some() {
+                        crate::assembly::evaluate_pattern_count(count, &model.parameters)
+                            .map_err(|e| format!("Count: {e}"))?;
+                    }
+                }
                 let places = pattern.kind.places();
                 Ok(match &pattern.kind {
                     crate::PatternKind::Linear { first, second } => {
@@ -839,8 +860,9 @@ impl Engine {
                         let angle = length(angle, crate::ScalarKind::Angle)?;
                         // All the way round: evenly spaced. Else from the first to the
                         // last over the angle.
+                        let count = crate::assembly::pattern_count(count);
                         let step = if (angle.abs() - 360.0).abs() < 1e-9 {
-                            angle / f64::from((*count).max(1))
+                            angle / f64::from(count.max(1))
                         } else {
                             angle / f64::from(count.saturating_sub(1).max(1))
                         }
@@ -999,6 +1021,27 @@ impl Engine {
             };
             components.insert(c.id, status);
         }
+        // ---- The cuts ----
+        // On the instances, as the mates and patterns placed them: the parts are not
+        // changed (see `asm_cut`).
+        let mut cut_writes = Vec::new();
+        let cuts = if assembly.cuts().len() == 0 {
+            self.cut_cache.clear();
+            HashMap::new()
+        } else {
+            let locate = |id: CompId| {
+                let c = assembly.component(id).filter(|c| !c.suppressed)?;
+                place(c, frames.get(&id).copied().unwrap_or(c.placement))
+            };
+            crate::asm_cut::apply(
+                assembly,
+                &model.parameters,
+                &mut instances,
+                &locate,
+                &mut self.cut_cache,
+                &mut cut_writes,
+            )
+        };
         // Where a component is belongs to the active configuration: the others keep
         // theirs (see `asm_config`).
         let several = model.configurations().len() > 1;
@@ -1012,6 +1055,17 @@ impl Engine {
         } else {
             Vec::new()
         };
+        if !cut_writes.is_empty()
+            && let Some(assembly) = model.assembly_mut()
+        {
+            for (id, plane, sketch, conversions) in cut_writes {
+                if let Some(cut) = assembly.cut_mut(id) {
+                    cut.placement = plane;
+                    cut.sketch = sketch;
+                    cut.conversions = conversions;
+                }
+            }
+        }
         if (!written.is_empty() || !moved.is_empty() || !reposed.is_empty())
             && let Some(assembly) = model.assembly_mut()
         {
@@ -1037,6 +1091,7 @@ impl Engine {
             components,
             mates: statuses,
             patterns,
+            cuts,
             freedom: solved.freedom,
             component_freedom,
             component_frames,

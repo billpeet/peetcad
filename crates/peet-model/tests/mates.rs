@@ -988,13 +988,13 @@ fn components_are_patterned_in_rows_and_round_an_axis() {
             a.insert(pin, at(10.0, 0.0, 5.0)).unwrap(),
         )
     };
-    let along = |direction: DVec3, spacing: f64, count| PatternStep {
+    let along = |direction: DVec3, spacing: f64, count: u32| PatternStep {
         direction: PatternLine::Fixed {
             origin: DVec3::ZERO,
             direction,
         },
         spacing: Scalar::new(spacing),
-        count,
+        count: Scalar::new(f64::from(count)),
         flip: false,
     };
     // Three along x, two along y: five copies, each a component of the pin's part.
@@ -1108,7 +1108,7 @@ fn components_are_patterned_in_rows_and_round_an_axis() {
     let round = |component, angle: f64| PatternKind::Circular {
         axis: PatternLine::Geom(end(component, face(&plate, DVec3::ZERO))),
         angle: Scalar::new(angle),
-        count: 4,
+        count: Scalar::new(4.0),
         flip: false,
     };
     let ring = a.add_pattern(&[screw], round(base, 360.0)).unwrap();
