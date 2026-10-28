@@ -33,6 +33,8 @@ use peet_model::{
     FoldFeature, MoveBodyFeature, PartSource, UnfoldFeature,
     RevolveAxisRef, RevolveFeature, ShellFeature, StructuralMemberFeature, SweepFeature,
 };
+use peet_model::Sketch3dFeature;
+use peet_model::sketch3d::{Axis3, Line3, Ref3, Relation3};
 use peet_sheetmetal::corner::{CornerKind, CornerRelief};
 use peet_sheetmetal::{
     BendLinePosition, BreakKind, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
@@ -426,6 +428,19 @@ fn a_sketch(sel: &FeatureSel, doc: &Document) -> Result<FeatureId, String> {
     }
 }
 
+/// A sketch or a 3D sketch, whose lines a structural member follows.
+fn a_path(sel: &FeatureSel, doc: &Document) -> Result<FeatureId, String> {
+    let id = sel.resolve(doc)?;
+    let is_3d = doc
+        .feature(id)
+        .is_some_and(|f| matches!(f.kind, FeatureKind::Sketch3d(_)));
+    if is_3d || doc.model.sketch(id).is_some() {
+        Ok(id)
+    } else {
+        Err(format!("{} is not a sketch or a 3D sketch", doc.model.name_of(id)))
+    }
+}
+
 /// A field described by four functions: how its value is read from JSON, turned into what
 /// the feature stores, written as JSON, and recovered from what the feature stores.
 macro_rules! reference_field {
@@ -566,6 +581,12 @@ reference_field!(Sketches, Vec<FeatureSel>, Vec<FeatureId>, required: true, null
     "list of sketches (names or ids), in order (more may be picked afterwards)",
     parse: |v| each(list(v)?, FeatureSel::parse),
     assign: |a, doc| each(a, |s| a_sketch(s, doc)),
+    read: |ids, doc| ids.iter().map(|id| doc.model.name_of(*id)).collect(),
+    arg: |ids, _| ids.iter().copied().map(FeatureSel::Id).collect());
+reference_field!(PathSketches, Vec<FeatureSel>, Vec<FeatureId>, required: true, nullable: false,
+    "list of sketches or 3D sketches (names or ids), in order (more may be picked afterwards)",
+    parse: |v| each(list(v)?, FeatureSel::parse),
+    assign: |a, doc| each(a, |s| a_path(s, doc)),
     read: |ids, doc| ids.iter().map(|id| doc.model.name_of(*id)).collect(),
     arg: |ids, _| ids.iter().copied().map(FeatureSel::Id).collect());
 reference_field!(OptFace, Option<FaceSel>, Option<FaceRef>, required: false, nullable: true,
@@ -1904,14 +1925,254 @@ feature_args! {
     }
 }
 
+
+// ---- 3D sketches ----
+
+/// A 3D sketch's points.
+pub(crate) struct Points3;
+
+impl Field for Points3 {
+    type Arg = Vec<[f64; 3]>;
+    type Target = Vec<[f64; 3]>;
+    fn describe() -> String {
+        "list of points [x, y, z] in the model, in document units; a point is named by its place in the list (0 first)".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        each(list(v)?, crate::args::coordinates::<3>)
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        let units = &doc.model.parameters.units;
+        *target = arg
+            .iter()
+            .map(|p| crate::args::mm3(*p, units).to_array())
+            .collect();
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        let units = &doc.model.parameters.units;
+        target
+            .iter()
+            .map(|p| point3_out(peet_math::DVec3::from_array(*p), units))
+            .collect()
+    }
+    fn arg(target: &Self::Target, doc: &Document) -> Option<Self::Arg> {
+        let units = &doc.model.parameters.units;
+        Some(
+            target
+                .iter()
+                .map(|p| p.map(|v| units.from_mm(v)))
+                .collect(),
+        )
+    }
+}
+
+/// A 3D sketch's lines.
+pub(crate) struct Lines3;
+
+impl Field for Lines3 {
+    type Arg = Vec<Line3>;
+    type Target = Vec<Line3>;
+    fn describe() -> String {
+        "list of lines, each [from, to] (two points' places in the list of points) or {\"from\", \"to\", \"construction\": true for one a structural member doesn't follow}; a line is named by its place in this list".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        each(list(v)?, |item| {
+            if let Some(pair) = item.as_array() {
+                if pair.len() != 2 {
+                    return Err(format!("a line is two points, not {item}"));
+                }
+                return Ok(Line3 {
+                    start: integer(&pair[0])?,
+                    end: integer(&pair[1])?,
+                    construction: false,
+                });
+            }
+            let point = |k: &str| {
+                item.get(k)
+                    .ok_or_else(|| format!("a line needs '{k}': {item}"))
+                    .and_then(integer)
+            };
+            Ok(Line3 {
+                start: point("from")?,
+                end: point("to")?,
+                construction: item.get("construction").map(boolean).transpose()?.unwrap_or(false),
+            })
+        })
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, _: &Document) -> Result<(), String> {
+        target.clone_from(arg);
+        Ok(())
+    }
+    fn read(target: &Self::Target, _: &Document) -> Value {
+        target
+            .iter()
+            .map(|l| {
+                if l.construction {
+                    json!({"from": l.start, "to": l.end, "construction": true})
+                } else {
+                    json!([l.start, l.end])
+                }
+            })
+            .collect()
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.clone())
+    }
+}
+
+/// A 3D sketch's relations.
+pub(crate) struct Relations3;
+
+fn ref3(v: &Value) -> Result<Ref3, String> {
+    if let Some(p) = v.get("point") {
+        return Ok(Ref3::Point(integer(p)?));
+    }
+    if let Some(l) = v.get("line") {
+        return Ok(Ref3::Line(integer(l)?));
+    }
+    Err(format!("expected {{\"point\": n}} or {{\"line\": n}}, not {v}"))
+}
+
+fn ref3_out(r: Ref3) -> Value {
+    match r {
+        Ref3::Point(p) => json!({ "point": p }),
+        Ref3::Line(l) => json!({ "line": l }),
+    }
+}
+
+impl Field for Relations3 {
+    type Arg = Vec<Relation3>;
+    type Target = Vec<Relation3>;
+    fn describe() -> String {
+        "list of relations, each {\"type\", \"of\"}: coincident [point, point], on_line [point, line], midpoint [point, line], along_x | along_y | along_z [line] (along an axis of the model), parallel | perpendicular | equal [line, line], fix [point] (kept where it is), distance [{\"point\": n} or {\"line\": n}, the same] with \"dimension\": its place in the list of dimensions (between two points, a point and a line, or two parallel lines)".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        each(list(v)?, |item| {
+            let kind = item
+                .get("type")
+                .ok_or_else(|| format!("a relation needs a 'type': {item}"))
+                .and_then(text)?;
+            let of = item
+                .get("of")
+                .ok_or_else(|| format!("a relation needs 'of': {item}"))
+                .and_then(list)?;
+            let n = |k: usize| -> Result<u32, String> {
+                of.get(k)
+                    .ok_or_else(|| format!("{kind} needs more in 'of': {item}"))
+                    .and_then(integer)
+            };
+            Ok(match kind {
+                "coincident" => Relation3::Coincident(n(0)?, n(1)?),
+                "on_line" => Relation3::OnLine(n(0)?, n(1)?),
+                "midpoint" => Relation3::Midpoint(n(0)?, n(1)?),
+                "along_x" => Relation3::Along(Axis3::X, n(0)?),
+                "along_y" => Relation3::Along(Axis3::Y, n(0)?),
+                "along_z" => Relation3::Along(Axis3::Z, n(0)?),
+                "parallel" => Relation3::Parallel(n(0)?, n(1)?),
+                "perpendicular" => Relation3::Perpendicular(n(0)?, n(1)?),
+                "equal" => Relation3::Equal(n(0)?, n(1)?),
+                "fix" => Relation3::Fixed(n(0)?),
+                "distance" => {
+                    if of.len() != 2 {
+                        return Err(format!("a distance is between two things: {item}"));
+                    }
+                    Relation3::Distance {
+                        a: ref3(&of[0])?,
+                        b: ref3(&of[1])?,
+                        dimension: item
+                            .get("dimension")
+                            .ok_or_else(|| format!("a distance needs its 'dimension': {item}"))
+                            .and_then(integer)?,
+                    }
+                }
+                other => return Err(format!("a 3D sketch has no relation '{other}'")),
+            })
+        })
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, _: &Document) -> Result<(), String> {
+        target.clone_from(arg);
+        Ok(())
+    }
+    fn read(target: &Self::Target, _: &Document) -> Value {
+        target
+            .iter()
+            .map(|r| match r {
+                Relation3::Coincident(a, b) => json!({"type": "coincident", "of": [a, b]}),
+                Relation3::OnLine(a, b) => json!({"type": "on_line", "of": [a, b]}),
+                Relation3::Midpoint(a, b) => json!({"type": "midpoint", "of": [a, b]}),
+                Relation3::Along(axis, l) => json!({"type": match axis {
+                    Axis3::X => "along_x",
+                    Axis3::Y => "along_y",
+                    Axis3::Z => "along_z",
+                }, "of": [l]}),
+                Relation3::Parallel(a, b) => json!({"type": "parallel", "of": [a, b]}),
+                Relation3::Perpendicular(a, b) => json!({"type": "perpendicular", "of": [a, b]}),
+                Relation3::Equal(a, b) => json!({"type": "equal", "of": [a, b]}),
+                Relation3::Fixed(p) => json!({"type": "fix", "of": [p]}),
+                Relation3::Distance { a, b, dimension } => {
+                    json!({"type": "distance", "of": [ref3_out(*a), ref3_out(*b)], "dimension": dimension})
+                }
+            })
+            .collect()
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.clone())
+    }
+}
+
+/// A 3D sketch's dimensions' values.
+pub(crate) struct Dimensions3;
+
+impl Field for Dimensions3 {
+    type Arg = Vec<Input>;
+    type Target = Vec<Scalar>;
+    fn describe() -> String {
+        "list of lengths (numbers or expressions), the values of the distances that name them; each is a dimension d1, d2, … that 'name_dimension' can call D1 (an address D1@3DSketch1)".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        each(list(v)?, Input::parse)
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        if arg.len() > peet_model::sketch3d::MAX_DIMENSIONS {
+            return Err(format!(
+                "a 3D sketch has at most {} dimensions",
+                peet_model::sketch3d::MAX_DIMENSIONS
+            ));
+        }
+        *target = each(arg, |i| i.scalar(ScalarKind::Length, doc))?;
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target
+            .iter()
+            .map(|s| scalar_out(s, ScalarKind::Length, doc))
+            .collect()
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.iter().map(input_of).collect())
+    }
+}
+
+feature_args! {
+    /// A sketch in space (SolidWorks' 3D sketch): points and lines held by relations and
+    /// dimensions. A structural member can follow its lines.
+    Sketch3d: FeatureKind::Sketch3d(f) => &mut **f,
+        Sketch3dFeature { points, lines, relations, dimensions } => {
+    points: Vec<[f64; 3]> as Points3 = points,
+    lines: Vec<Line3> as Lines3 = lines,
+    relations: Vec<Relation3> as Relations3 = relations,
+    dimensions: Vec<Input> as Dimensions3 = dimensions,
+    }
+}
+
 feature_args! {
     /// A profile swept along the lines of path sketches, a body for each line.
     StructuralMember: FeatureKind::StructuralMember(f) => &mut **f,
         StructuralMemberFeature { profile, paths, corner, trim, rotate } => {
     /// The section, drawn with its origin where each line goes through it.
     profile: FeatureSel as SketchF = profile,
-    /// Sketches whose lines (not construction lines) the members follow.
-    paths: Vec<FeatureSel> as Sketches = paths,
+    /// Sketches or 3D sketches whose lines (not construction lines) the members follow.
+    paths: Vec<FeatureSel> as PathSketches = paths,
     /// How two members end where their lines meet at an angle.
     corner: MemberCorner as Choice<MemberCorner> = corner,
     /// Trim members that end on earlier structural members to their outside.
@@ -2254,6 +2515,9 @@ feature_ops! {
     MoveBody(MoveBody) "move_body"
         "Move and turn bodies, or make moved copies of them (SolidWorks' move/copy body)."
         => Some(FeatureKind::MoveBody(Box::new(MoveBodyFeature::new(Vec::new())))),
+    Sketch3d(Sketch3d) "sketch3d"
+        "A sketch in space (SolidWorks' 3D sketch): points and lines, held by relations and dimensions solved in space. A structural member can follow its lines."
+        => Some(FeatureKind::Sketch3d(Box::new(Sketch3dFeature::new()))),
     StructuralMember(StructuralMember) "structural_member"
         "Sweep a profile along every line of path sketches, a body for each (SolidWorks' weldment structural member): mitred where lines of it meet, trimmed to earlier members."
         => Some(FeatureKind::StructuralMember(Box::new(StructuralMemberFeature::new(NO_SKETCH, Vec::new())))),
@@ -2308,6 +2572,7 @@ fn word_of(kind: &FeatureKind) -> Option<&'static str> {
         FeatureKind::MoveBody(_) => "move_body",
         FeatureKind::InsertPart(_) => "insert_part",
         FeatureKind::StructuralMember(_) => "structural_member",
+        FeatureKind::Sketch3d(_) => "sketch3d",
         // An imported body is what its file says: it has nothing to set.
         FeatureKind::Import(_) => return None,
     })

@@ -126,12 +126,38 @@ pub fn configurations(doc: &Document) -> Value {
             .or_insert_with(|| Value::Object(Map::new()));
         of[name] = Value::Object(each);
     }
+    // Yes-or-no settings ("reverse") and sketches' planes ("on") that differ
+    let mut settings: Map<String, Value> = Map::new();
+    for (id, slot) in model.settings_that_differ() {
+        let name = match &slot {
+            peet_model::Slot::Flag(n) => n.clone(),
+            _ => "on".to_owned(),
+        };
+        let each: Map<String, Value> = model
+            .configurations()
+            .iter()
+            .filter_map(|c| {
+                let held = model.held_in(id, &slot, c.id)?;
+                let v = match held {
+                    peet_model::Held::Flag(b) => json!(b),
+                    peet_model::Held::Plane(p) => json!(p),
+                    peet_model::Held::Scalar(s) => json!(s.value),
+                };
+                Some((c.name.clone(), v))
+            })
+            .collect();
+        let of = settings
+            .entry(model.name_of(id).to_owned())
+            .or_insert_with(|| Value::Object(Map::new()));
+        of[name] = Value::Object(each);
+    }
     let mut out = json!({
         "active": model.active_configuration().name,
         "configurations": list,
         "suppressed_in": suppressed,
         "parameters": parameters,
         "values": values,
+        "settings": settings,
     });
     if model.is_assembly() {
         let (components, mates) = assembly_differences(doc);

@@ -804,7 +804,8 @@ pub fn reference_panel(
             | FeatureKind::ConvertToSheet(_)
             | FeatureKind::MoveBody(_)
             | FeatureKind::InsertPart(_)
-            | FeatureKind::StructuralMember(_) => {}
+            | FeatureKind::StructuralMember(_)
+            | FeatureKind::Sketch3d(_) => {}
         });
     out
 }

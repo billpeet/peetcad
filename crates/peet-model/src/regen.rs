@@ -1966,6 +1966,26 @@ impl Engine {
                     }
                 }
             }
+            // A 3D sketch is solved each time: a few points
+            FeatureKind::Sketch3d(s) => {
+                let values: Result<Vec<f64>, String> = s
+                    .dimensions
+                    .iter()
+                    .map(|d| ctx.scalar(d, ScalarKind::Length, "A dimension"))
+                    .collect();
+                match values.and_then(|v| s.solve(&v)) {
+                    Err(e) => fail(e, Output::None),
+                    Ok(points) => {
+                        let out_key = hash::of(&(31u8, id, &points));
+                        run.out_keys.insert(id, out_key);
+                        FeatureState {
+                            status: Status::Ok,
+                            output: Output::None,
+                            rebuilt: true,
+                        }
+                    }
+                }
+            }
             // Reference geometry is a few vector operations: always recomputed.
             FeatureKind::Plane(def) => reference(ctx.plane_def(def).map(Output::Plane)),
             FeatureKind::Axis(def) => reference(ctx.axis_def(def).map(Output::Axis)),
@@ -2169,12 +2189,25 @@ impl<'m> Ctx<'m, '_> {
         let (plane, profile) = self
             .sketch_input(def.profile)
             .map_err(|m| m.replace("Its sketch", "Its profile"))?;
-        let mut paths = Vec::new();
+        // Each path's lines in the model, with their ids: a sketch's, or a 3D sketch's
+        let mut paths: Vec<Vec<(u32, DVec3, DVec3)>> = Vec::new();
         for &p in &def.paths {
-            paths.push(
-                self.sketch_input(p)
-                    .map_err(|m| m.replace("Its sketch", "A path"))?,
-            );
+            if let Some(FeatureKind::Sketch3d(s)) = self.model.feature(p).map(|f| &f.kind) {
+                // Solved again: a few points
+                self.state_of(p, "A path")?;
+                let values = s
+                    .dimensions
+                    .iter()
+                    .map(|d| self.scalar(d, ScalarKind::Length, "A dimension"))
+                    .collect::<Result<Vec<f64>, String>>()?;
+                let points = s.solve(&values)?;
+                paths.push(s.path_lines(&points));
+                continue;
+            }
+            let (plane, sketch) = self
+                .sketch_input(p)
+                .map_err(|m| m.replace("Its sketch", "A path"))?;
+            paths.push(crate::weldment::sketch_lines(&plane, sketch));
         }
         if paths.is_empty() {
             return Err("Pick the path sketches: the lines the members follow.".to_owned());

@@ -1016,9 +1016,36 @@ pub enum FeatureKind {
     StructuralMember(Box<crate::weldment::StructuralMemberFeature>),
     Unfold(Box<UnfoldFeature>),
     Fold(Box<FoldFeature>),
+    /// A sketch in space: points and lines held by relations and dimensions.
+    Sketch3d(Box<crate::sketch3d::Sketch3dFeature>),
 }
 
 impl FeatureKind {
+    /// The yes-or-no settings that can differ between configurations, by the name their
+    /// operations give them (SolidWorks lets a cut's direction differ).
+    pub fn flags(&self) -> Vec<(&'static str, bool)> {
+        match self {
+            Self::SheetCut(c) => vec![("reverse", c.reverse), ("both", c.both)],
+            Self::Extrude(e) => vec![
+                ("reverse", e.params.reverse),
+                ("flip_side", e.params.flip_side),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    /// [`FeatureKind::flags`], to set.
+    pub fn flags_mut(&mut self) -> Vec<(&'static str, &mut bool)> {
+        match self {
+            Self::SheetCut(c) => vec![("reverse", &mut c.reverse), ("both", &mut c.both)],
+            Self::Extrude(e) => vec![
+                ("reverse", &mut e.params.reverse),
+                ("flip_side", &mut e.params.flip_side),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Sketch(_) => "Sketch",
@@ -1069,6 +1096,7 @@ impl FeatureKind {
             Self::InsertPart(p) if p.mirror.is_some() => "Mirrored part",
             Self::InsertPart(_) => "Inserted part",
             Self::StructuralMember(_) => "Structural member",
+            Self::Sketch3d(_) => "3D sketch",
         }
     }
 
@@ -1121,6 +1149,7 @@ impl FeatureKind {
             Self::MoveBody(_) => "Body-Move",
             Self::InsertPart(_) => "Part",
             Self::StructuralMember(_) => "Structural-Member",
+            Self::Sketch3d(_) => "3DSketch",
         }
     }
 
@@ -1412,6 +1441,7 @@ impl FeatureKind {
                     out.extend(b.name.features());
                 }
             }
+            Self::Sketch3d(_) => {}
         }
         out.sort_unstable();
         out.dedup();
@@ -1521,6 +1551,7 @@ impl FeatureKind {
                 v
             }
             Self::StructuralMember(m) => vec![&m.rotate],
+            Self::Sketch3d(s) => s.dimensions.iter().collect(),
         }
     }
 }
@@ -1701,6 +1732,12 @@ macro_rules! slots {
                     v
                 }
                 Self::StructuralMember(m) => vec![("rotate", Angle, & $($m)? m.rotate)],
+                // A 3D sketch's dimensions: d1, d2, … (named D1, D2, … as SolidWorks has them)
+                Self::Sketch3d(s) => crate::sketch3d::DIMENSION_FIELDS
+                    .iter()
+                    .zip(& $($m)? s.dimensions)
+                    .map(|(n, d)| (*n, Length, d))
+                    .collect(),
                 Self::Unfold(_) | Self::Fold(_) => Vec::new(),
                 Self::Sketch(_)
                 | Self::Axis(_)
@@ -1958,7 +1995,8 @@ impl From<FeatureKind> for FeatureKindV9 {
             | FeatureKind::InsertPart(_)
             | FeatureKind::StructuralMember(_)
             | FeatureKind::Unfold(_)
-            | FeatureKind::Fold(_) => {
+            | FeatureKind::Fold(_)
+            | FeatureKind::Sketch3d(_) => {
                 panic!("schemas before 12 have bodies moved or parts inserted")
             }
         }
@@ -2225,7 +2263,8 @@ impl From<FeatureKind> for FeatureKindV11 {
             | FeatureKind::InsertPart(_)
             | FeatureKind::StructuralMember(_)
             | FeatureKind::Unfold(_)
-            | FeatureKind::Fold(_) => {
+            | FeatureKind::Fold(_)
+            | FeatureKind::Sketch3d(_) => {
                 panic!("schemas before 12 have bodies moved or parts inserted")
             }
         }
@@ -2488,7 +2527,8 @@ impl From<&FeatureKind> for FeatureKindV8 {
             | FeatureKind::InsertPart(_)
             | FeatureKind::StructuralMember(_)
             | FeatureKind::Unfold(_)
-            | FeatureKind::Fold(_) => {
+            | FeatureKind::Fold(_)
+            | FeatureKind::Sketch3d(_) => {
                 panic!("schemas before 12 have no {}", kind.type_name())
             }
         }

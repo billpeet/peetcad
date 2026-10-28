@@ -394,7 +394,9 @@ body of its own. Build a frame from lines, not from extrusions.
   draw it on a plane square to the first line and that member has it as drawn; lines that
   run the same way get it the same way round. `rotate` turns it about every line.
 - Draw the **paths** as lines (construction lines are left out) in as many sketches as the
-  frame's planes need. Lines in other planes need a `plane` to sketch on.
+  frame's planes need. Lines in other planes need a `plane` to sketch on. A frame in space
+  is one 3D sketch (`sketch3d`, see `peet skills sketching`), which `paths` takes as it
+  takes a sketch: its dimensions then drive every member.
 - Where two lines of one feature meet end to end at an angle, the members are mitred
   (`corner`: `miter`, the default, or `plain` for square ends at the lines' ends).
 - Make each **group** a feature of its own: a ring, then the legs. A line that ends on a

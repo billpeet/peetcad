@@ -31,10 +31,12 @@ the active one.
 - `add_configuration` makes a copy of the active configuration (or of `copy`) **and
   makes it active**, so the operations after it change the new one.
 - What can differ: whether a feature is suppressed, a parameter's value, a feature's
-  numeric values, and a sketch's dimensions.
+  numeric values, a sketch's dimensions, a cut's or extrusion's direction (`reverse`,
+  `both`, `flip_side`) and the plane or face a sketch is on (`on`). See "Directions and
+  sketch planes that differ".
 - Everything else is the part's, in every configuration: a new feature, what is drawn in
-  a sketch, a new parameter, and the fields of a feature that aren't numbers (a
-  direction, an end condition, the edges of a fillet).
+  a sketch, a new parameter, and the other fields of a feature that aren't numbers (an
+  end condition, the edges of a fillet).
 
 ## Which configurations a change applies to
 
@@ -104,6 +106,35 @@ changing the long size changes both.
   each mate and each equation.
 - `configurations` gives a derived one's `parent`.
 - **Deleting a parent deletes the configurations derived from it**, as in SolidWorks.
+
+## Directions and sketch planes that differ
+
+SolidWorks lets a cut go the other way in one configuration, and a sketch sit on another
+face (a door's hinge holes on the left-hand return in one configuration and the
+right-hand one in the other). `edit` with `configurations` takes a sheet metal cut's
+`reverse` and `both`, an extrusion's or cut's `reverse` and `flip_side`, and a sketch's
+`on`:
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 10}
+{"op": "plane", "from": "top", "distance": 10, "name": "Over"}
+{"op": "sketch", "on": "Over", "name": "Holes", "draw": [{"type": "circle", "center": [20, 20], "radius": 3}]}
+{"op": "cut", "sketch": "Holes", "depth": 5}
+{"op": "add_configuration", "name": "Under"}
+{"op": "edit", "feature": "Holes", "on": "top", "configurations": "this"}
+{"op": "edit", "feature": "Cut-Extrude1", "reverse": true, "configurations": "this"}
+{"op": "configurations"}
+{"op": "faces"}
+```
+
+- The drawing is the same in every configuration: it keeps its coordinates on the other
+  plane. Pick a plane whose axes put it where it should be (a face facing the other way
+  mirrors it); a reference plane turned 180° about an axis faces the other way.
+- A cut's direction is the sketch plane's: a sketch moved to a plane facing the other
+  way usually needs its cut turned too, in the same configurations.
+- `configurations` lists these under `settings`, by feature, then `reverse` (and the
+  others) or `on`, with each configuration's value.
 
 ## What is suppressed with a feature
 

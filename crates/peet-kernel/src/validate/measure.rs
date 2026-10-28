@@ -372,6 +372,10 @@ pub(crate) fn bulge_bounds(solid: &Solid, face: FaceId) -> Aabb {
     let (around, along) = match &f.surface {
         Surface::Sphere(s) => (s.radius, s.radius),
         Surface::Torus(t) => (t.major + t.minor, t.minor),
+        // A ruled surface (straight across one way: an extrusion's or a slanted sweep's
+        // side) holds only straight lines between points of its face's edges, so its face
+        // stays within their bounds.
+        Surface::Nurbs(s) if s.degrees().0 == 1 || s.degrees().1 == 1 => return b,
         Surface::Nurbs(s) => {
             // Sampled over the face's part of the parameter rectangle; between samples
             // the surface leaves their chords by at most |S''| h² / 8.

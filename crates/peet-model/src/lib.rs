@@ -52,6 +52,7 @@ mod regen;
 mod revolve;
 pub mod samples;
 pub mod sheet;
+pub mod sketch3d;
 mod sweep;
 mod units;
 mod weldment;
@@ -65,7 +66,7 @@ pub use assembly::{
     relative_to,
 };
 pub use bodies::{InsertPartFeature, MoveBodyFeature, PartSource, body_motion};
-pub use config::{ConfigId, Configuration, Scope, Slot, SlotValue};
+pub use config::{ConfigId, Configuration, Held, Scope, Slot, SlotValue};
 pub use convert::ConvertToSheetFeature;
 pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
 pub use equations::{Equation, EquationTarget, ReferenceDimension};
@@ -100,6 +101,7 @@ pub use revolve::{
     RevolveAxisRef, RevolveFeature, RevolveInput, apply_revolve, default_axis, sketch_axis,
 };
 pub use sweep::{SweepFeature, SweepInput, apply_sweep};
+pub use sketch3d::Sketch3dFeature;
 pub use weldment::{MemberCorner, StructuralMemberFeature};
 
 /// Why a feature failed to rebuild. The message is shown next to the feature.

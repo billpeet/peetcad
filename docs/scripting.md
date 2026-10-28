@@ -502,8 +502,16 @@ with their defaults' types):
   `{"plane": plane}`. A mate that can't hold is left out with a warning. A distance or angle
   mate's value is the move's dimension `D1@NAME` (`D1@Distance2`), field `mate1`, `mate2`, …
   by the mate's place: `set` changes it, per configuration as any feature's value.
+- `sketch3d` (SolidWorks' 3D sketch) holds `points` (`[x, y, z]`), `lines` (`[from, to]` by
+  the points' places, or `{"from", "to", "construction"}`), `relations` (`coincident`,
+  `on_line`, `midpoint`, `along_x`/`along_y`/`along_z`, `parallel`, `perpendicular`, `equal`,
+  `fix`, and `distance` between points, a point and a line or two parallel lines, with the
+  place of its value in `dimensions`) and `dimensions` (lengths or expressions, the values
+  `d1`, `d2`, …, which `name_dimension` can call `D1`: `D1@3DSketch1`). It is solved in space
+  at every rebuild, lines along the model's axes keeping their directions where they can. A structural member can follow
+  its lines.
 - `structural_member` (SolidWorks' weldment structural member) sweeps `profile` (a
-  sketch, drawn with its origin on the line) along every line of the `paths` sketches, a
+  sketch, drawn with its origin on the line) along every line of the `paths` sketches (or 3D sketches), a
   body per line, the profile turned square to each line by the smallest turn from its
   sketch plane and then by `rotate` degrees about it. Lines of the feature meeting end to
   end are mitred (`corner`: `miter` or `plain`); a line ending on a member of an earlier
@@ -515,7 +523,7 @@ with their defaults' types):
 
 | Operation | Fields |
 |---|---|
-| `edit` | `feature`, then any of its fields; `configurations` for its numeric fields |
+| `edit` | `feature`, then any of its fields; `configurations` for its numeric fields, a cut's or extrusion's direction (`reverse`, `both`, `flip_side`) and a sketch's plane (`on`), which SolidWorks lets differ too |
 | `rename` | `feature`, `name` |
 | `set_suppression_expression` | `feature`, `value`: expression text, or `null` to clear. A part-wide rule evaluated with the active configuration's parameters; zero builds, finite nonzero suppresses |
 | `suppress` | `feature`, `on` (default true), `configurations`. What is built on a suppressed feature is suppressed with it |
@@ -571,7 +579,9 @@ and exports. An assembly has configurations too, made with the same operations: 
 `suppress` and `set_parameter` mean `"this"`; `edit`, `set_dimension` and `set` change a value
 that already differs between configurations in the active one, and a value that doesn't
 in all of them. Only the numeric fields of a feature can differ: an `edit` with
-`configurations` other than `"all"` that changes another field is refused.
+`configurations` other than `"all"` that changes another field is refused, but for a cut's or
+extrusion's direction (`reverse`, `both`, `flip_side`) and a sketch's plane (`on`), which can
+differ as in SolidWorks (a door's hinge holes on one return or the other).
 
 A **derived configuration** (`add_configuration` with `parent`, SolidWorks' derived
 configuration) starts as a copy of its parent and follows it: a change made to the parent
@@ -598,7 +608,7 @@ is derived from it. `configurations` gives each derived one's `parent`.
 | `feature` (`feature`) | its fields; a sketch's plane, definition, entities, relations and dimensions |
 | `parameters` | named values and units; a parameter that differs between configurations lists its expression in each |
 | `dimensions` (`feature`, `name`) | every dimension's address `NAME@FEATURE` and value: see [Dimensions by name](#dimensions-by-name) |
-| `configurations` | the configurations (a derived one with its `parent`), the active one, and what differs: the configurations each feature is suppressed in, each parameter's expression in every configuration, and under `values` each feature value and sketch dimension in every configuration. In an assembly also `components` (for each component that differs, in every configuration, the fields that differ: `suppressed`, `configuration`, `fixed`, `placement`), `mates` (for each mate that differs: `suppressed`, and its values) and `equations` (for each equation that differs, by what it sets, its expression in every configuration; null where there is none) |
+| `configurations` | the configurations (a derived one with its `parent`), the active one, and what differs: the configurations each feature is suppressed in, each parameter's expression in every configuration, under `values` each feature value and sketch dimension in every configuration, and under `settings` each direction (`reverse`, `both`, `flip_side`) and sketch plane (`on`) that differs. In an assembly also `components` (for each component that differs, in every configuration, the fields that differ: `suppressed`, `configuration`, `fixed`, `placement`) `mates` (for each mate that differs: `suppressed`, and its values) and `equations` (for each equation that differs, by what it sets, its expression in every configuration; null where there is none) |
 | `bodies` | bounds, volume, counts; flat size and thickness for sheet metal |
 | `faces`, `edges` (`body`) | what made each face, normals, centres, a round face's `radius`, `axis` and a point on it (`axis_point`); edge ends and the faces they join, a straight edge's `direction` (the one mates take) |
 | `bend_table` (`body`) | flat size, area, and each bend |

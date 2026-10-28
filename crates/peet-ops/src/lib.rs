@@ -183,7 +183,9 @@ fn rename(model: &mut Model, id: FeatureId, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether nothing but numeric values differs between two definitions of a feature.
+/// Whether nothing differs between two definitions of a feature but what can differ
+/// between configurations: numeric values, yes-or-no settings ([`FeatureKind::flags`]) and
+/// a sketch's plane.
 fn only_values_differ(before: &FeatureKind, after: &FeatureKind) -> bool {
     let mut probe = after.clone();
     let old = before.slots();
@@ -191,6 +193,16 @@ fn only_values_differ(before: &FeatureKind, after: &FeatureKind) -> bool {
         if let Some((_, _, was)) = old.iter().find(|(n, ..)| *n == name) {
             *value = (*was).clone();
         }
+    }
+    let flags = before.flags();
+    for (name, value) in probe.flags_mut() {
+        if let Some((_, was)) = flags.iter().find(|(n, _)| *n == name) {
+            *value = *was;
+        }
+    }
+    if let (FeatureKind::Sketch(p), FeatureKind::Sketch(b)) = (&mut probe, before) {
+        p.plane = b.plane.clone();
+        p.placement = b.placement;
     }
     probe == *before
 }
@@ -220,6 +232,15 @@ fn rescope(
             model.rescope_value(id, &v.slot, before, &scope)?;
         }
     }
+    // Yes-or-no settings and a sketch's plane: those that changed, or were given
+    let active = doc.model.active_configuration().id;
+    for (slot, now) in model.settings(id) {
+        if let Some(before) = doc.model.held_in(id, &slot, active)
+            && (before != now || given.contains(&slot))
+        {
+            model.rescope_held(id, &slot, before, &scope)?;
+        }
+    }
     Ok(())
 }
 
@@ -235,12 +256,28 @@ fn values_given(kind: &FeatureKind, fields: &FeatureArgs, doc: &Document) -> Vec
         *value = mark.clone();
     }
     let _ = fields.set(&mut probe, doc, false);
-    probe
+    let mut given: Vec<peet_model::Slot> = probe
         .slots()
         .into_iter()
         .filter(|(_, _, value)| **value != mark)
         .map(|(name, ..)| peet_model::Slot::Field(name.to_owned()))
-        .collect()
+        .collect();
+    // A yes-or-no setting given is one that comes out the same whatever it was before
+    let flags_after = |start: bool| {
+        let mut probe = kind.clone();
+        for (_, v) in probe.flags_mut() {
+            *v = start;
+        }
+        let _ = fields.set(&mut probe, doc, false);
+        probe.flags()
+    };
+    let (from_no, from_yes) = (flags_after(false), flags_after(true));
+    for ((name, a), (_, b)) in from_no.iter().zip(&from_yes) {
+        if a == b {
+            given.push(peet_model::Slot::Flag((*name).to_owned()));
+        }
+    }
+    given
 }
 
 fn check_copies(doc: &Document, kind: &FeatureKind) -> Result<(), String> {
@@ -1122,7 +1159,8 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                     f.kind = other;
                 }
             }
-            // Only numeric values can differ between configurations.
+            // Only numeric values, yes-or-no settings and a sketch's plane can differ
+            // between configurations.
             let several = doc.model.configurations().len() > 1;
             if let (Some(c), Some(before)) = (configurations, doc.feature(id))
                 && several
@@ -1130,7 +1168,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 && !only_values_differ(&before.kind, &f.kind)
             {
                 return Err(format!(
-                    "Only the numeric values of {} can differ between configurations: change its other fields in an 'edit' without 'configurations' (they are the same in every configuration).",
+                    "Only the numeric values, the yes-or-no settings (such as 'reverse') and a sketch's plane ('on') of {} can differ between configurations: change its other fields in an 'edit' without 'configurations' (they are the same in every configuration).",
                     f.name
                 ));
             }

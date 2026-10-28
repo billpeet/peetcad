@@ -27,7 +27,7 @@ use std::sync::Arc;
 
 use peet_kernel::Solid;
 use peet_kernel::boolean::{BooleanOp, boolean_traced};
-use peet_kernel::extrude::{ExtrudeFace, extrude_traced};
+use peet_kernel::extrude::{ExtrudeFace, extrude_along_traced, extrude_traced};
 use peet_kernel::geom::{Circle3, Curve3};
 use peet_kernel::nurbs::NurbsCurve;
 use peet_kernel::revolve::{RevolveAxis, RevolveFace, revolve_traced};
@@ -517,6 +517,9 @@ fn tool(input: &SweepInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> 
     let regions: Vec<Region> = selected_regions(input.profile, &input.def.regions, false)?;
     let path = path_pieces(input.path, input.path_plane, input.profile_plane)?;
     if path.freeform {
+        if let Some(swept) = straight_tool(input, &regions, &path)? {
+            return Ok(swept);
+        }
         return freeform_tool(input, &regions, &path.chains[0], path.splines);
     }
     // Each run of the path from the profile on; two runs share the profile's section,
@@ -536,6 +539,65 @@ fn tool(input: &SweepInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> 
         });
     }
     swept.ok_or_else(|| FeatureError("The path is empty.".to_owned()))
+}
+
+/// The sweep along a straight path that leaves the profile's plane at a slant: the
+/// profile carried along the line keeping its attitude, as SolidWorks sweeps it. That is
+/// an extrusion along the line, exact: the ends are the profile itself (a circle stays one
+/// circle) and the sides are planes and elliptic cylinders. `None` if the path is not one
+/// straight run.
+fn straight_tool(
+    input: &SweepInput<'_>,
+    regions: &[Region],
+    path: &Path,
+) -> Result<Option<(Solid, Vec<FaceName>)>, FeatureError> {
+    let [chain] = path.chains.as_slice() else {
+        return Ok(None);
+    };
+    if !path.splines.is_empty() || chain.iter().any(|p| !matches!(p, Piece::Line { .. })) {
+        return Ok(None);
+    }
+    let (start, end) = (chain[0].start(), chain[chain.len() - 1].end());
+    let dir = (end - start).normalize_or_zero();
+    if chain.iter().any(|p| p.start_dir().dot(dir) < 1.0 - SMOOTH) {
+        return Ok(None);
+    }
+    let length = start.distance(end);
+    let plane = input.profile_plane;
+    // The kernel carries the profile along a direction that leaves its plane forwards
+    let forward = dir.dot(plane.normal()) > 0.0;
+    let (rise, lo, hi) = if forward {
+        (dir, 0.0, length)
+    } else {
+        (-dir, -length, 0.0)
+    };
+    let (solid, faces) = extrude_along_traced(plane, regions, lo, hi, rise)?;
+    let names = faces
+        .iter()
+        .map(|f| {
+            let role = match *f {
+                ExtrudeFace::Start { .. } if forward => FaceRole::NearCap,
+                ExtrudeFace::Start { .. } => FaceRole::FarCap,
+                ExtrudeFace::End { .. } if forward => FaceRole::FarCap,
+                ExtrudeFace::End { .. } => FaceRole::NearCap,
+                ExtrudeFace::Side {
+                    region,
+                    loop_index,
+                    edge,
+                } => {
+                    let r = &regions[region];
+                    let l = if loop_index == 0 {
+                        &r.outer
+                    } else {
+                        &r.holes[loop_index - 1]
+                    };
+                    FaceRole::Side(l.edges[edge].entity)
+                }
+            };
+            FaceName::new(input.feature, role)
+        })
+        .collect();
+    Ok(Some((solid, names)))
 }
 
 /// The sweep along a path of lines and arcs, piece by piece. `before` pieces of the path
