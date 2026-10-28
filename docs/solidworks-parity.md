@@ -548,6 +548,24 @@ the library), display states, and the app's configuration list for assemblies.
   parts (all, or at least HingeMale, HingeFemale, Escutcheon, Battery Clamp, Limit switch base and
   the Esc Surround Horizontal, Horizontal Sealed, R Bottom and R Top).
 
+**The sixth export** (29 October, format 6, `exports\out-all-v6`, 93 minutes in `will`'s session;
+the same nine documents gone from the NAS; only Meter Surround changed since the fifth). Parts from it
+(`run-m12`) are as before: 198 of 201, nothing moved. Assemblies (`scratch\asm7\run`): 15 of 26 match and
+every configuration is placed as SolidWorks has it, as before; what format 6 adds:
+
+- **The assembled geometry is checked** for the first time: **32 of 34 configurations match SolidWorks'
+  volume and box.** The two that don't are ABB Flowmeter Assembly (its flow meter's main body, see above)
+  and Limit switch assy (its part outside Templates). The reference is SolidWorks' STEP of the
+  configuration: its mass properties of an assembly can be stale. Plinth Folded Assembly's are worked out
+  with its pipes 300 mm long, as the part has them, where its own equation makes them 308 mm; its STEP has
+  308 mm pipes and PeetCAD's volume to the last digit.
+- **`solving`** confirms the importer's inference: the four Meter Panel Movement hinges are flexible.
+- **A suppressed sub-assembly's components** are listed: the Escutcheon Door assemblies' mates on the
+  suppressed Hinge Assembly-3 resolve where its parts have the faces.
+- **The path mate's path**: the exporter reads the mate's selections (by editing it and cancelling), but
+  SolidWorks 2018 gives the path as an entity it can't describe. The importer's fallback (the sketch
+  curve SolidWorks' point lies on) matches Sliding Doorstay exactly.
+
 **More FabSys script bugs**, in `enclosure_script MASTER.boo`: lines 1999 and 2001 suppress Meter
 Panel features "NSW CTMetering" and "VIC CTMeterPanelCutout"; the part's are "NSW CT Metering" and
 "VIC CT Metering", so FabSys fails on them in SolidWorks too.

@@ -1519,7 +1519,7 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
   const missing = report.components.filter(c => c.result !== "inserted").length + live.filter(m => m.result !== "imported").length;
   const partsOff = report.components.some(c => c.partVerdict);
   report.verdict = verdictOf(worst, missing, partsOff);
-  report.mass = compareMass(peet, cfg);
+  report.mass = compareMass(peet, cfg, name);
   if (cfg) report.configurations.unshift({
     name: cfg.name, active: true, verdict: report.verdict, off_mm: report.off_mm, freedom,
     components: report.components.filter(c => c.result === "inserted" && !c.suppressed).length,
@@ -1681,7 +1681,7 @@ function importConfiguration(peet, report, { name, cfg, o, all, top, placeOf, lo
   row.componentsLive = top.filter(c => (obyPath.get(c.path) || {}).suppression !== 0 && (report.components.find(r => r.component === c.path) || {}).result === "inserted").length;
   row.matesLive = live.length;
   row.matesImported = live.filter(m => m.result === "imported").length;
-  row.mass = compareMass(peet, o);
+  row.mass = compareMass(peet, o, name);
 }
 
 /**
@@ -1691,14 +1691,19 @@ function importConfiguration(peet, report, { name, cfg, o, all, top, placeOf, lo
  * own (which can be loose); PeetCAD's is its components' boxes placed, which is loose round a turned part: so a box
  * is only said to differ where PeetCAD's doesn't hold SolidWorks'. Null without SolidWorks' numbers.
  */
-function compareMass(peet, swCfg) {
+function compareMass(peet, swCfg, assembly) {
   const sw = swCfg && swCfg.massProperties;
   if (!sw || typeof sw.volume !== "number") return null;
   const reply = peet.ask({ op: "mass" });
   const total = reply && reply.total;
   if (!total) return { error: (reply && reply.error) || "no mass" };
-  const volume = sw.volume * 1e9;
+  // SolidWorks' mass properties of an assembly can be stale (Plinth Folded's are worked out with its pipes as
+  // the part has them, before the assembly's equation makes them 308 mm, as its own STEP has them): its STEP
+  // of the configuration, measured by PeetCAD, is the reference where there is one
+  const step = assembly ? stepOf(assembly, swCfg.name) : null;
+  const volume = step ? step.volume : sw.volume * 1e9;
   const out = { volume_mm3: tidy(total.volume_mm3), sw_volume_mm3: tidy(volume), volume_ratio: tidy(total.volume_mm3 / volume) };
+  if (step) Object.assign(out, { reference: "SolidWorks' STEP", sw_mass_properties_mm3: tidy(sw.volume * 1e9) });
   const swBox = sw.tightBox || sw.box;
   if (Array.isArray(swBox) && swBox.length >= 6 && total.min && total.max) {
     const lo = swBox.slice(0, 3).map(v => v * MM), hi = swBox.slice(3, 6).map(v => v * MM);
@@ -1709,6 +1714,26 @@ function compareMass(peet, swCfg) {
   }
   out.matches = Math.abs(out.volume_ratio - 1) < 1e-4 && !(out.box_outside_mm > 1e-2);
   return out;
+}
+
+/** SolidWorks' STEP of an assembly configuration (`<Name>.SLDASM.<configuration>.step` beside its export), as PeetCAD measures it. */
+const stepCache = new Map();
+function stepOf(assembly, configuration) {
+  const want = `${assembly}.sldasm.${String(configuration).replace(/[<>:"/\\|?*]/g, "_")}.step`.toLowerCase();
+  if (stepCache.has(want)) return stepCache.get(want);
+  const file = fs.readdirSync(exportDir).find(x => x.toLowerCase() === want);
+  let got = null;
+  if (file) {
+    const r = spawnSync(peetExe, ["op", JSON.stringify({ op: "import_step", path: path.join(exportDir, file) }), JSON.stringify({ op: "mass" }), "--no-save", "-q"], { encoding: "utf8", maxBuffer: 1 << 28 });
+    const lines = (r.stdout || "").split("\n").filter(l => l.startsWith("{"));
+    try {
+      const imported = JSON.parse(lines[0]), mass = JSON.parse(lines[lines.length - 1]);
+      // Only a STEP every body of which PeetCAD takes: one with a body left out is no reference
+      if (imported.ok && !(imported.warnings || []).some(w => /left out/.test(w)) && mass.total && mass.total.volume_mm3 > 0) got = { volume: mass.total.volume_mm3 };
+    } catch {}
+  }
+  stepCache.set(want, got);
+  return got;
 }
 
 /** The components a `components` reply lists, and those that move in its flexible sub-assemblies, by path. */
