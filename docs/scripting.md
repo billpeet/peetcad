@@ -496,8 +496,16 @@ with their defaults' types):
   `{"plane": plane}`. A mate that can't hold is left out with a warning. A distance or angle
   mate's value is the move's dimension `D1@NAME` (`D1@Distance2`), field `mate1`, `mate2`, …
   by the mate's place: `set` changes it, per configuration as any feature's value.
+- `sketch3d` (SolidWorks' 3D sketch) holds `points` (`[x, y, z]`), `lines` (`[from, to]` by
+  the points' places, or `{"from", "to", "construction"}`), `relations` (`coincident`,
+  `on_line`, `midpoint`, `along_x`/`along_y`/`along_z`, `parallel`, `perpendicular`, `equal`,
+  `fix`, and `distance` between points, a point and a line or two parallel lines, with the
+  place of its value in `dimensions`) and `dimensions` (lengths or expressions, the values
+  `d1`, `d2`, …, which `name_dimension` can call `D1`: `D1@3DSketch1`). It is solved in space
+  at every rebuild, lines along the model's axes keeping their directions where they can. A structural member can follow
+  its lines.
 - `structural_member` (SolidWorks' weldment structural member) sweeps `profile` (a
-  sketch, drawn with its origin on the line) along every line of the `paths` sketches, a
+  sketch, drawn with its origin on the line) along every line of the `paths` sketches (or 3D sketches), a
   body per line, the profile turned square to each line by the smallest turn from its
   sketch plane and then by `rotate` degrees about it. Lines of the feature meeting end to
   end are mitred (`corner`: `miter` or `plain`); a line ending on a member of an earlier

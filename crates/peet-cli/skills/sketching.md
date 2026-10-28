@@ -194,6 +194,38 @@ the piece), `offset`, `mirror` (entities and an `axis` line), `construction`, `d
 (entities), `remove` (relations and dimensions). After an edit, ids of the pieces may be
 new: read them from the reply.
 
+## 3D sketches
+
+`sketch3d` is SolidWorks' 3D sketch: points and lines in space, held by relations and
+dimensions, for a structural member that runs in several planes (a frame). Draw it where
+it is, then relate and dimension it so that it is fully defined: what the relations leave
+free is solved by moving as little as can be, which turns what could turn.
+
+- `points` are `[x, y, z]` in the model; `lines` join two points by their place in the
+  list (`[0, 1]`), or `{"from", "to", "construction": true}` for a line a structural member
+  doesn't follow. Points and lines are named by their place, from 0.
+- `relations` (each `{"type", "of"}`): `coincident` (two points), `on_line` and
+  `midpoint` (a point, a line), `along_x`, `along_y`, `along_z` (a line along an axis of
+  the model), `parallel`, `perpendicular`, `equal` (two lines), `fix` (a point stays where
+  it is: fix one, or the sketch can move as a whole), and `distance` between two points, a
+  point and a line, or two parallel lines (`{"point": n}` or `{"line": n}`), with
+  `"dimension"`: its place in `dimensions`.
+- `dimensions` are the distances' values (numbers or expressions): `d1`, `d2`, … in order.
+  Name them with `name_dimension` (`"D1"`) and they are `D1@3DSketch1`, which `set` sets,
+  per configuration too. A new value moves what it must and leaves the rest: lines along
+  an axis of the model keep their directions where that can be (a slanting line turns).
+- An `edit` replaces a list as a whole. A sketch whose relations and values can't all be
+  met fails, saying how far out they are.
+
+```jsonl
+{"op": "sketch3d", "name": "Rail", "points": [[0, 0, 0], [400, 0, 0], [400, 0, 300], [400, 200, 300]], "lines": [[0, 1], [1, 2], [2, 3]], "relations": [{"type": "fix", "of": [0]}, {"type": "along_x", "of": [0]}, {"type": "along_z", "of": [1]}, {"type": "along_y", "of": [2]}, {"type": "distance", "of": [{"point": 0}, {"point": 1}], "dimension": 0}, {"type": "distance", "of": [{"point": 1}, {"point": 2}], "dimension": 1}, {"type": "distance", "of": [{"point": 2}, {"point": 3}], "dimension": 2}], "dimensions": [400, 300, 200]}
+{"op": "name_dimension", "feature": "Rail", "dimension": "d1", "name": "Run"}
+{"op": "sketch", "on": "right", "name": "SHS 30", "draw": [{"type": "rectangle", "from": [-15, -15], "to": [15, 15]}, {"type": "rectangle", "from": [-13, -13], "to": [13, 13]}]}
+{"op": "structural_member", "profile": "SHS 30", "paths": ["Rail"]}
+{"op": "set", "name": "Run@Rail", "value": 600}
+{"op": "bodies"}
+```
+
 ## Relations to the model
 
 Use `project` before relating or dimensioning sketch geometry to a model edge,

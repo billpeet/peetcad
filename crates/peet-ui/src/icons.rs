@@ -268,7 +268,7 @@ impl Icon {
     /// The icon for a feature in the tree.
     pub fn for_feature(kind: &FeatureKind) -> Self {
         match kind {
-            FeatureKind::Sketch(_) => Self::Sketch,
+            FeatureKind::Sketch(_) | FeatureKind::Sketch3d(_) => Self::Sketch,
             FeatureKind::Extrude(e) if e.params.operation == Operation::Cut => Self::Cut,
             FeatureKind::Extrude(_) => Self::Extrude,
             FeatureKind::Plane(_) => Self::RefPlane,

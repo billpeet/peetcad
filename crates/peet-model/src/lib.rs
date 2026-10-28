@@ -51,6 +51,7 @@ mod regen;
 mod revolve;
 pub mod samples;
 pub mod sheet;
+pub mod sketch3d;
 mod sweep;
 mod units;
 mod weldment;
@@ -95,6 +96,7 @@ pub use revolve::{
     RevolveAxisRef, RevolveFeature, RevolveInput, apply_revolve, default_axis, sketch_axis,
 };
 pub use sweep::{SweepFeature, SweepInput, apply_sweep};
+pub use sketch3d::Sketch3dFeature;
 pub use weldment::{MemberCorner, StructuralMemberFeature};
 
 /// Why a feature failed to rebuild. The message is shown next to the feature.

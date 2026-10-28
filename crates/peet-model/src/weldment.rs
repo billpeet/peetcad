@@ -102,11 +102,28 @@ pub(crate) struct Layout {
     pub reach: f64,
 }
 
-/// Lays out a structural member: the profile (its plane and sketch), the path sketches,
-/// and the turn about each line in degrees.
+/// The lines of a path sketch (not its construction lines), in the model, with their ids.
+pub(crate) fn sketch_lines(plane: &Plane, sketch: &Sketch) -> Vec<(u32, DVec3, DVec3)> {
+    sketch
+        .entities()
+        .filter(|(_, e)| !e.construction)
+        .filter_map(|(id, _)| match sketch.curve(id) {
+            Some(Curve::Line { a, b }) => Some((
+                id.0,
+                plane.frame.to_world(a.extend(0.0)),
+                plane.frame.to_world(b.extend(0.0)),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Lays out a structural member: the profile (its plane and sketch), the lines of each
+/// path (a sketch's or a 3D sketch's, with their ids), and the turn about each line in
+/// degrees.
 pub(crate) fn layout(
     profile: (&Plane, &Sketch),
-    paths: &[(Plane, &Sketch)],
+    paths: &[Vec<(u32, DVec3, DVec3)>],
     rotate: f64,
 ) -> Result<Layout, FeatureError> {
     let regions = crate::extrude::selected_regions(profile.1, &crate::RegionSelection::Auto, false)
@@ -120,16 +137,8 @@ pub(crate) fn layout(
     let normal = profile.0.normal();
     let (xs, ys) = (profile.0.frame.x_axis(), profile.0.frame.y_axis());
     let mut members = Vec::new();
-    for (pi, (plane, sketch)) in paths.iter().enumerate() {
-        for (id, entity) in sketch.entities() {
-            if entity.construction {
-                continue;
-            }
-            let Some(Curve::Line { a, b }) = sketch.curve(id) else {
-                continue;
-            };
-            let start = plane.frame.to_world(a.extend(0.0));
-            let end = plane.frame.to_world(b.extend(0.0));
+    for (pi, lines) in paths.iter().enumerate() {
+        for &(id, start, end) in lines {
             let Some(dir) = (end - start).try_normalize() else {
                 continue;
             };
@@ -148,7 +157,7 @@ pub(crate) fn layout(
                 start,
                 end,
                 frame,
-                number: ((pi as u32) << 20) | (id.0 & 0xfffff),
+                number: ((pi as u32) << 20) | (id & 0xfffff),
             });
         }
     }
