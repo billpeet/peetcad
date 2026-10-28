@@ -707,6 +707,10 @@ instead. The design is in [ADR 0009](adr/0009-assemblies.md).
 | `suppress` with a component's feature | `feature`: `FEATURE@COMPONENT` (`Vent@Door-1`), `on`: suppresses the feature in the component's part (every instance; a linked part's file is written) |
 | `reference_dimension` | `a`, `b` (ends as a mate's: flat faces, planes, edges, vertices), `name` (default `RD1`, `RD2`, …): the distance between them, measured after the mates are solved, which expressions read as `RD1@Annotations`. The reply's `reference` has its `value`. `delete` takes `reference_dimension` |
 | `make_independent` | `component`, `name`: the component gets a copy of its part, called `name`, and is renamed `name-1` (SolidWorks' Make Independent, FabSys's `ResolveComponent`). A linked part's copy is written beside its file as `name.peet` |
+| `in_context` | `component` (whose part's sketch follows), `sketch` (a sketch of that part, by name or id), `from` (what it follows on another component: an end as a mate's, `{"component": name or path, "edge"/"face"/"vertex"/"plane": selector}`, `{"component", "sketch", "entity"}` or `{"component", "origin": true}`, in that part's coordinates), `entity` (an entity of the sketch that becomes the followed geometry, of the kind it is seen as: a point, line, circle or arc; left out, one is added), `construction` (default true; false: a converted entity, part of the sketch's profiles). SolidWorks' in-context reference (a relation to, or a conversion of, another component's geometry). The reply's `entity`, and `in_context` (as `external_references` lists it). A linked part's file is written |
+| `external_references` | `component` (in an assembly; left out: every one): `references`, each with `component`, `sketch`, `entity`, `context` (the assembly's file it was made in), `made_in` (the instance), `follows` (the path of the component it follows), `what` (`face`, `edge`, `vertex`, `plane`, `origin`, `sketch_entity`), `geometry` (`point`, `line`, `circle`, `arc`, `plane`: how it is held), `at` (where, in the part's coordinates), `status` (`in_context`, `out_of_context`, `locked`, `dangling` with `why`). In a part: its own references, `out_of_context` or `locked` |
+| `lock_references` | `component` (in an assembly; left out: every part with references), `feature` (a sketch; left out: all of the part's), `on` (default true; `false` unlocks): SolidWorks' Lock: kept where they are in their context too. The reply's `changed` |
+| `break_references` | `component`, `feature` as for `lock_references`: SolidWorks' Break: each followed entity becomes plain fixed sketch geometry where it is. The reply's `changed` |
 | `dimensions` on an assembly | the assembly's own values (mates' `D1@MATE`, reference dimensions' `RD1@Annotations`), its `equations` (`target`, `expression`, `suppresses`, `status`, `message`; those of the active configuration, then those only others have with `expression` null; `configurations` with each one's expression in every configuration where it differs) and `references`; with `component`, that component's part's dimensions and parameters by their address from the assembly (`equation`: set by one); with `name`, the value at any address |
 | `rename`, `suppress`, `delete` | `mate` in place of `feature`. `suppress` takes `configurations` (of the assembly; default the active one) |
 | `mates` | every mate (`id`, `name`, `type`, `a`, `b`, `distance` or `angle`, `flip`, `align` if one was given, `flip_dimension`, `status`, `message`) and the `freedom` left |
@@ -801,6 +805,21 @@ the mates solved again until the values hold. An equation that can't be worked o
 not a failed operation: it is listed under `failures` (`equation`, `expression`,
 `message`). An assembly's equations live in the assembly: the part keeps the value they
 last set, and a linked part's file is not written by them.
+
+**In-context references** (SolidWorks' external references, "->" in its tree). A
+part's sketch can follow another component's geometry in an assembly it is used in:
+`in_context` names the assembly (its file name: the context), the component that is the
+part there (the instance it was made in) and what it follows, and holds a fixed entity of
+the sketch where that is, in the part's coordinates. The part is always built from where
+the entity last was. When the context assembly rebuilds, it solves its mates, then puts
+each such entity where what it follows now is and rebuilds the part, and solves the mates
+again, until nothing moves (as SolidWorks repeats mates and in-context parts); the part
+changes for every instance and every assembly that uses it, as a SolidWorks part does.
+Anywhere else (the part on its own, another assembly, another instance of the part) the
+reference is `out_of_context` and keeps its last values. A locked reference keeps them in
+its context too; a broken one is plain fixed geometry. A linked part changed this way is
+written when the context assembly is saved (the reply's `parts_written`); saving the
+assembly under another name keeps it the context.
 
 **Linked parts** (desktop only: they are files on disk, and are refused in the browser).
 A linked part is read from its file when the assembly is opened, by `update_links`, and

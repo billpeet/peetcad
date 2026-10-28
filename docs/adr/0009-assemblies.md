@@ -55,7 +55,9 @@ as SolidWorks does; see "Flexible sub-assemblies" below.*
 the part alone. A part's features can't refer to its neighbours in the assembly.
 In-context references are where most of the complexity of assemblies in other systems
 comes from (circular updates, references that dangle when a component is replaced), and
-nothing in the phase needs them.
+nothing in the phase needs them. *Superseded in part (October 2026): a part's sketch can
+follow another component in an assembly, as SolidWorks' in-context references; see
+"In-context references" below. Editing is still of the part alone.*
 
 **Mates refer to geometry by instance and persistent reference.** A mate's ends are a
 component plus the `FaceRef` / `EdgeRef` / `VertexRef` a pick or a selector gives
@@ -553,8 +555,53 @@ PeetCAD follows SolidWorks' assembly-level features (template library, October 2
   Bracket) are empty 3D sketches nothing references, and Laptop Shelf Assembly's 33
   composite curves have no definition (SolidWorks fails to give one), no parents and no
   children.
-- **In-context features are still not modelled** (the earlier decision stands for now, as
-  the evidence to do it as SolidWorks does is missing): the export gives each
-  `InContextFeatHolder` only the component it belongs to, and the part exports say
-  nothing of which features have external references or to what. The parts are imported
-  as SolidWorks last built them, which is what SolidWorks shows out of context.
+- **In-context features**: see the next section.
+
+## In-context references
+
+*Supersedes in part "A part is edited on its own, not in context".* PeetCAD follows
+SolidWorks' external references: 24 `InContextFeatHolder`s in 9 of the template library's
+assemblies (SolidWorks' update holders: one per part feature that refers to another
+component), the feature showing "->" in the part.
+
+- **A reference is a sketch projection** (`projection::Source::External`,
+  `peet-model/src/in_context.rs`, model schema 12): the *context* (the assembly it was
+  made in, by its file's name, as `context_key` compares them), the component that is the
+  part there (the instance it was made in, by path), what it follows (another component's
+  face, edge, vertex, plane, origin or sketch entity: a mate's `MateEnd`) and the geometry
+  it last had, in the part's coordinates (`Geom`: a point, line, circle, arc or plane).
+  The projected entity is fixed in the sketch, like any projection; relations and
+  dimensions tie the sketch to it, and it can be the profile's own edge (SolidWorks'
+  converted entity).
+- **The part is always built from the last geometry.** So the part alone, the part in
+  another assembly and another instance of the part keep their last values (SolidWorks'
+  out of context), and rebuilding a part never needs its assembly. The alternative, the
+  part's rebuild reaching into the assembly, would make a part's result depend on who
+  opened it.
+- **The context updates it.** In `Engine::assemble`, after the mates and patterns, each
+  top-level component's part's references whose context is this assembly (the engine's
+  `context`: the document's title, or a sub-assembly's link or name) and whose instance is
+  this component are worked out where the components now are (`in_context::update`), and
+  a part whose references moved gets the new values written into its definition. The
+  next round of `regenerate` rebuilds it and solves the mates again, up to six rounds:
+  SolidWorks solves mates, then in-context parts, and repeats as needed. A part is shared
+  by its instances, so the change reaches every instance and every assembly that uses it,
+  as a SolidWorks part document changes.
+- **Embedded or linked, per Definition.** An embedded part is the assembly's copy, changed
+  in place. A linked part's definition changes the same way, and its file is written when
+  the context assembly is saved (SolidWorks saves the parts an assembly changed with it).
+  `in_context`, `lock_references` and `break_references` write a linked file at once, as
+  `set` with a component's dimension does.
+- **Lock and break** as SolidWorks: locked keeps the last values in the context too
+  (`External::locked`); broken removes the reference and leaves the entity as plain fixed
+  geometry. Statuses (`Evaluation::external`): in context, out of context, locked,
+  dangling (what it follows is gone; the last values are kept).
+- **Save As** renames the context in the parts (`Model::rename_context`), as SolidWorks
+  keeps an assembly saved under a new name the context of its in-context parts.
+- Operations: `in_context` (`component`, `sketch`, `from`, `entity`, `construction`),
+  `external_references`, `lock_references`, `break_references`.
+- Not done: an in-context part inside a sub-assembly (only top-level components follow;
+  what they follow may be at any depth); in-context end conditions and reference planes
+  (SolidWorks' "up to surface" of another part, a plane on another part's face): a sketch
+  can follow the face or plane, but an extrude's end condition or a plane feature can't
+  name another component; editing a part in context in the application.

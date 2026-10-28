@@ -158,7 +158,7 @@ pub(crate) fn reaches_component(doc: &Document, address: &str) -> bool {
 
 /// Writes a linked part's file after it was changed from the assembly, as SolidWorks
 /// saves a part changed in an assembly with it. Returns the file written, if any.
-fn write_link(doc: &Document, model: &Model, def: DefId) -> Result<Option<PathBuf>, String> {
+pub(crate) fn write_link(doc: &Document, model: &Model, def: DefId) -> Result<Option<PathBuf>, String> {
     let Some(d) = model.assembly().and_then(|a| a.definition(def)) else {
         return Ok(None);
     };

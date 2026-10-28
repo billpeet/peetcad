@@ -615,6 +615,67 @@ The cover has a hole through it and a notch 2 deep in its top; the base is whole
   `depth`, `flip`, `flip_side`, `components` (`null`: every one), `suppressed`);
   `rename` and `delete` take `cut`. `components` lists the cuts under `cuts`.
 
+## In-context references
+
+A part's sketch can follow another component's geometry in the assembly: SolidWorks'
+in-context reference (a sketch related to, or converting, an edge of another part while
+the part is edited in the assembly). Use it when a part's size or holes come from where
+its neighbours are: a cover as wide as the plate it sits on, holes where a hinge's holes
+are. Where the size is a number both parts share, use an equation instead (`set` with a
+component's address): it doesn't tie the part to one assembly.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 20]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 2}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Plate", "fixed": true}
+{"op": "insert", "part": 2, "name": "Cover", "at": [0, 0, 5], "fixed": true}
+{"op": "in_context", "component": "Cover", "sketch": "Sketch1", "entity": 4, "from": {"component": "Plate", "edge": {"at": [100, 30, 5]}}}
+{"op": "place", "component": "Plate", "at": [20, 0, 0]}
+{"op": "external_references"}
+{"op": "lock_references", "component": "Cover"}
+{"op": "place", "component": "Plate", "at": [40, 0, 0]}
+{"op": "lock_references", "component": "Cover", "on": false}
+{"op": "break_references", "component": "Cover"}
+{"op": "components"}
+```
+
+The cover's right side (line 4 of its sketch) is the plate's right edge: the cover is
+100 wide, and 120 once the plate moves 20 along. Locked, it stays 120 while the plate
+moves on; unlocked, it catches up (140); broken, it stays 140 whatever the plate does.
+
+- **What it needs.** `component` is the part whose sketch follows (a component of this
+  assembly), `sketch` one of its part's sketches, and `from` what it follows: an end as
+  a mate's on *another* component, in that component's part's coordinates (`edge`,
+  `face`, `vertex`, `plane`, `{"sketch", "entity"}`, `origin`; a path for a part in a
+  sub-assembly). What it is seen as on the sketch's plane is held there: a point, a
+  line, a circle or arc parallel to the sketch, the line a circle square to it covers,
+  or the line a plane cuts it in. A tilted circle is refused.
+- **New or existing entity.** Left out, `entity` adds a fixed construction entity
+  (`construction: false` for a converted one that is part of the profile): relate the
+  sketch to it with `open_component` and the sketch operations. With `entity`, that
+  entity of the sketch is the one that follows (it must be of the kind it is seen as):
+  the quickest way to make an edge of a profile follow another part.
+- **What updates it.** The assembly it was made in (by its file name; saving the
+  assembly under a new name keeps it the context) and the component it was made for. At each rebuild the mates are solved, then the followed geometry is
+  put into the part and the part rebuilt, and the mates solved again until nothing
+  moves. The part changes for every instance of it and every assembly that uses it, as
+  a SolidWorks part does. A linked part is written when the assembly is saved
+  (`parts_written`).
+- **Anywhere else it keeps its last values**: the part opened on its own, in another
+  assembly, or another instance of the part. `external_references` says so:
+  `out_of_context`. In its context it is `in_context`; `dangling` (with `why`) when what
+  it follows is gone or suppressed: restore it, or `break_references`.
+- **`lock_references`** (`component`, `feature`, `on`) keeps them where they are in
+  their context too (SolidWorks' Lock); `"on": false` unlocks, and they catch up.
+  **`break_references`** turns them into plain fixed geometry for good (SolidWorks'
+  Break): use it when the part is to be used elsewhere on its own.
+- Only a part placed directly in the assembly can follow (not one inside a
+  sub-assembly); what it follows can be anywhere.
+
 ## Changing components
 
 `rename`, `suppress`, `show` and `delete` take `component` instead of `feature`.
