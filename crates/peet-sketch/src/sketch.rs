@@ -232,6 +232,134 @@ pub enum ConstraintKind {
     /// Entities keeps it. Two lines: parallel, the value apart. Two circles or arcs:
     /// concentric, their radii differing by the value (either way).
     Offset(EntityId, EntityId),
+    /// A dimension: a distance to the near or far side of a circle or arc, as SolidWorks'
+    /// arc conditions (Min and Max) measure it. `a` and `b` are points, circles or arcs,
+    /// or a line and a circle or arc; `sides` says where on each it is measured (a point's
+    /// or a line's is always `Center`). `along` is straight across, or along the sketch's
+    /// X or Y only (between points and circles).
+    SideDistance {
+        a: EntityId,
+        b: EntityId,
+        sides: [ArcSide; 2],
+        along: Along,
+    },
+}
+
+/// Where on a circle or arc a [`ConstraintKind::SideDistance`] is measured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ArcSide {
+    /// Its centre, as an ordinary distance is.
+    Center,
+    /// The side nearer the other end (SolidWorks' Min): of two circles one inside the
+    /// other, the points of the two nearest each other.
+    Near,
+    /// The side farther from the other end (SolidWorks' Max).
+    Far,
+}
+
+impl ArcSide {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Center => "center",
+            Self::Near => "near",
+            Self::Far => "far",
+        }
+    }
+
+    pub fn from_word(word: &str) -> Option<Self> {
+        match word {
+            "center" | "centre" => Some(Self::Center),
+            "near" | "min" => Some(Self::Near),
+            "far" | "max" => Some(Self::Far),
+            _ => None,
+        }
+    }
+
+    /// +1 near, -1 far, 0 centre: how much of the radius comes off the distance.
+    fn toward(self) -> f64 {
+        match self {
+            Self::Center => 0.0,
+            Self::Near => 1.0,
+            Self::Far => -1.0,
+        }
+    }
+}
+
+/// Which way a [`ConstraintKind::SideDistance`] is measured.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Along {
+    /// Straight across: between the centres, or square to a line.
+    Straight,
+    /// Along the sketch's X only.
+    Horizontal,
+    /// Along the sketch's Y only.
+    Vertical,
+}
+
+impl Along {
+    pub fn word(self) -> &'static str {
+        match self {
+            Self::Straight => "straight",
+            Self::Horizontal => "horizontal",
+            Self::Vertical => "vertical",
+        }
+    }
+}
+
+/// How a side distance is made up, where its ends are now: `D + ka·ra + kb·rb`, taken
+/// positive. `D` is between the centres (along the axis, or from the line for a line and
+/// a circle), positive as things are now. Apart, a near side takes its radius off and a
+/// far side adds it. One circle inside the other: their nearest points are on the same
+/// side, so the inner circle's near side adds its radius instead (SolidWorks' Min between
+/// a hole and a ring round it is the ring's width).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct SideTerms {
+    /// +1 or -1: which way along the axis (or from the line) the second end is now.
+    pub toward: f64,
+    pub coef: [f64; 2],
+    /// The sign of the whole now: the measured value is `sign · (D + Σ k·r)`.
+    pub sign: f64,
+}
+
+/// [`SideTerms`] from where the ends are, and the value they measure. `centers` and
+/// `radii` are the ends' centres (a point's own place) and radii (0 for a point);
+/// `line_offset` is, for a line and a circle, the circle's centre's signed distance from
+/// the line.
+pub fn side_terms(
+    centers: [DVec2; 2],
+    radii: [f64; 2],
+    circular: [bool; 2],
+    sides: [ArcSide; 2],
+    along: Along,
+    line_offset: Option<f64>,
+) -> (SideTerms, f64) {
+    let delta = match (line_offset, along) {
+        (Some(d), _) => d,
+        (None, Along::Straight) => centers[0].distance(centers[1]),
+        (None, Along::Horizontal) => centers[1].x - centers[0].x,
+        (None, Along::Vertical) => centers[1].y - centers[0].y,
+    };
+    let toward = if delta < 0.0 { -1.0 } else { 1.0 };
+    let d = delta * toward;
+    let nested = line_offset.is_none()
+        && circular[0]
+        && circular[1]
+        && centers[0].distance(centers[1]) < (radii[0] - radii[1]).abs();
+    let mut coef = [0.0; 2];
+    for k in 0..2 {
+        let inner = nested && radii[k] < radii[1 - k];
+        coef[k] = if inner { 1.0 } else { -1.0 } * sides[k].toward();
+    }
+    let total = d + coef[0] * radii[0] + coef[1] * radii[1];
+    let sign = if total < 0.0 { -1.0 } else { 1.0 };
+    (
+        SideTerms {
+            toward,
+            coef,
+            sign,
+        },
+        total * sign,
+    )
 }
 
 impl ConstraintKind {
@@ -254,7 +382,8 @@ impl ConstraintKind {
             | HorizontalDistance(a, b)
             | VerticalDistance(a, b)
             | Angle(a, b)
-            | Offset(a, b) => vec![a, b],
+            | Offset(a, b)
+            | SideDistance { a, b, .. } => vec![a, b],
             PointOnCurve { point, curve } => vec![point, curve],
             Midpoint { point, line } => vec![point, line],
             Symmetric { a, b, axis } => vec![a, b, axis],
@@ -277,6 +406,7 @@ impl ConstraintKind {
                 | Diameter(_)
                 | Angle(..)
                 | Offset(..)
+                | SideDistance { .. }
         )
     }
 
@@ -310,6 +440,7 @@ impl ConstraintKind {
             Angle(..) => "Angle",
             Patterned { .. } => "Patterned",
             Offset(..) => "Offset",
+            SideDistance { .. } => "Distance to a side",
         }
     }
 }
@@ -601,8 +732,51 @@ impl Sketch {
                 }
                 (ca, cb) => Some((ca.radius()? - cb.radius()?).abs()),
             },
+            SideDistance { a, b, sides, along } => {
+                let (centers, radii, circular, off) = self.side_parts(a, b)?;
+                Some(side_terms(centers, radii, circular, sides, along, off).1)
+            }
             _ => None,
         }
+    }
+
+    /// The centres, radii and which are circles of a side distance's ends, and for a
+    /// line and a circle the circle's centre's signed distance from the line (the line's
+    /// centre is its start). `None` if they are not what the distance takes.
+    #[allow(clippy::type_complexity)]
+    pub fn side_parts(
+        &self,
+        a: EntityId,
+        b: EntityId,
+    ) -> Option<([DVec2; 2], [f64; 2], [bool; 2], Option<f64>)> {
+        let end = |id| -> Option<(DVec2, f64, bool)> {
+            match self.kind(id)? {
+                EntityKind::Point => Some((self.try_point(id)?, 0.0, false)),
+                k if k.is_circular() => {
+                    let c = self.curve(id)?;
+                    Some((c.center()?, c.radius()?, true))
+                }
+                _ => None,
+            }
+        };
+        let line = |id| matches!(self.kind(id), Some(EntityKind::Line));
+        if line(a) || line(b) {
+            let (l, other) = if line(a) { (a, b) } else { (b, a) };
+            let (c, r, round) = end(other)?;
+            let Curve::Line { a: p, b: q } = self.curve(l)? else {
+                return None;
+            };
+            let off = (q - p).perp_dot(c - p) / (q - p).length().max(1e-12);
+            let (centers, radii, circular) = if line(a) {
+                ([p, c], [0.0, r], [false, round])
+            } else {
+                ([c, p], [r, 0.0], [round, false])
+            };
+            return Some((centers, radii, circular, Some(off)));
+        }
+        let (ca, ra, ka) = end(a)?;
+        let (cb, rb, kb) = end(b)?;
+        Some(([ca, cb], [ra, rb], [ka, kb], None))
     }
 
     // ---- Adding geometry ----
@@ -909,6 +1083,22 @@ impl Sketch {
                     && ((k(a) == K::Line && k(b) == K::Line)
                         || (k(a).is_circular() && k(b).is_circular()))
             }
+            SideDistance { a, b, sides, along } => {
+                let end = |id, side: ArcSide| match k(id) {
+                    K::Point => side == ArcSide::Center,
+                    kind => kind.is_circular(),
+                };
+                a != b
+                    && match (k(a), k(b)) {
+                        (K::Line, kb) => {
+                            kb.is_circular() && along == Along::Straight && sides[0] == ArcSide::Center
+                        }
+                        (ka, K::Line) => {
+                            ka.is_circular() && along == Along::Straight && sides[1] == ArcSide::Center
+                        }
+                        _ => end(a, sides[0]) && end(b, sides[1]),
+                    }
+            }
         };
         if ok {
             Ok(())
@@ -1120,6 +1310,9 @@ fn expected_kinds(kind: &ConstraintKind) -> &'static str {
             "a point, line or circle, a copy of it, and the pattern's first copy, all of one kind"
         }
         Offset(..) => "two lines, or two circles/arcs",
+        SideDistance { .. } => {
+            "two points or circles/arcs (a point measured to its centre), or a line and a circle/arc (straight only)"
+        }
     }
 }
 

@@ -247,6 +247,13 @@ assembly is opened again (there was no folder to watch).
   doesn't move). An equation reads up to four components (`peet-solve`'s `MAX_SLOTS` is
   24), for width mates whose pairs are on two components: a sum of the faces' places
   along the first width face's normal.
+- **Path mates** (model schema 12, `MateKind::Path`): a point of one component on a chain of
+  another's straight and round edges or sketch lines, arcs and circles, joined end to end,
+  as SolidWorks' path mate has it: anywhere on it, at a length (from either end) or a
+  percentage along it; an axis of the point's component along the path (pitch and yaw,
+  "follow path") and another along a direction (roll, "up vector"). The equations are set
+  up at each solve for the piece the point is on (or goes to): on its line, bounded by its
+  ends, or on its circle, bounded by its arc. So a drag stops at a joint between pieces.
 - **Conflicts.** If a group's mates can't all hold, they are added one at a time in
   their order; each that can't be satisfied with those before it is flagged and left
   out, and the rest hold. A mate that can't be set up (a face that is gone, two ends on

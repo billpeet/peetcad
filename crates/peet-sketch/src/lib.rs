@@ -29,7 +29,7 @@ pub mod triangulate;
 
 pub use curve::{Curve, Intersection};
 pub use sketch::{
-    Constraint, ConstraintId, ConstraintKind, Dimension, Entity, EntityId, EntityKind, Geometry,
+    Along, ArcSide, Constraint, SideTerms, side_terms, ConstraintId, ConstraintKind, Dimension, Entity, EntityId, EntityKind, Geometry,
     Sketch, SketchError,
 };
 pub use solver::{Analysis, Drag, SolveReport, Solver};

@@ -454,6 +454,10 @@ pub fn dimension_anchor(sketch: &Sketch, kind: &ConstraintKind) -> Option<DVec2>
             let (p, q) = offset_points(sketch, a, b)?;
             Some((p + q) * 0.5)
         }
+        SideDistance { a, b, sides, along } => {
+            let (p, q, _) = side_points(sketch, a, b, sides, along)?;
+            Some((p + q) * 0.5)
+        }
         HorizontalDistance(a, b) | VerticalDistance(a, b) => {
             Some((sketch.try_point(a)? + sketch.try_point(b)?) * 0.5)
         }
@@ -489,6 +493,48 @@ fn offset_points(sketch: &Sketch, a: EntityId, b: EntityId) -> Option<(DVec2, DV
             Some((p, cb.point_at(cb.project(p))))
         }
     }
+}
+
+/// The two points a distance to a circle's side measures between, and its direction.
+fn side_points(
+    sketch: &Sketch,
+    a: EntityId,
+    b: EntityId,
+    sides: [peet_sketch::ArcSide; 2],
+    along: peet_sketch::Along,
+) -> Option<(DVec2, DVec2, DVec2)> {
+    let (centers, radii, circular, off) = sketch.side_parts(a, b)?;
+    let (t, _) = peet_sketch::side_terms(centers, radii, circular, sides, along, off);
+    let line_first = sketch.kind(a)? == EntityKind::Line;
+    let (ca, cb, u) = match (off, along) {
+        (Some(_), _) => {
+            let (l, c) = if line_first { (a, b) } else { (b, a) };
+            let curve = sketch.curve(l)?;
+            let center = sketch
+                .curve(c)
+                .and_then(|k| k.center())
+                .or_else(|| sketch.try_point(c))?;
+            let foot = curve.point_at(curve.project(center));
+            let (from, to) = if line_first {
+                (foot, center)
+            } else {
+                (center, foot)
+            };
+            (from, to, (to - from).try_normalize().unwrap_or(DVec2::Y))
+        }
+        (None, peet_sketch::Along::Horizontal) => (centers[0], centers[1], DVec2::X * t.toward),
+        (None, peet_sketch::Along::Vertical) => (centers[0], centers[1], DVec2::Y * t.toward),
+        (None, peet_sketch::Along::Straight) => (
+            centers[0],
+            centers[1],
+            (centers[1] - centers[0]).try_normalize().unwrap_or(DVec2::X),
+        ),
+    };
+    Some((
+        ca - u * t.coef[0] * radii[0],
+        cb + u * t.coef[1] * radii[1],
+        u,
+    ))
 }
 
 /// The two points a distance dimension measures between (a point–line distance measures
@@ -541,10 +587,17 @@ fn draw_dimension(
         Distance(..)
         | DoubledDistance(..)
         | Offset(..)
+        | SideDistance { .. }
         | Length(_)
         | HorizontalDistance(..)
         | VerticalDistance(..) => {
+            let mut axis = None;
             let (p1, p2) = match *kind {
+                SideDistance { a, b, sides, along } => {
+                    let (p, q, u) = side_points(sketch, a, b, sides, along)?;
+                    axis = Some(u);
+                    (p, q)
+                }
                 Distance(a, b) | DoubledDistance(a, b) => distance_points(sketch, a, b)?,
                 Offset(a, b) => offset_points(sketch, a, b)?,
                 Length(l) => {
@@ -557,6 +610,7 @@ fn draw_dimension(
                 _ => unreachable!(),
             };
             let u = match *kind {
+                SideDistance { .. } => axis.unwrap_or(DVec2::X),
                 HorizontalDistance(..) => DVec2::X,
                 VerticalDistance(..) => DVec2::Y,
                 _ => (p2 - p1).try_normalize().unwrap_or(DVec2::X),

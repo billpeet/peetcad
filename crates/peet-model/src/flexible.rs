@@ -292,10 +292,37 @@ pub(crate) fn rewrite(m: &Mate, expanded: &HashMap<CompId, Expanded>) -> Option<
         MateKind::Symmetric { plane } => (end(plane), None),
         _ => (None, None),
     };
-    if a.is_none() && b.is_none() && a2.is_none() && b2.is_none() {
+    // A path mate's further pieces and its up vector
+    let path_ends: Vec<Option<MateEnd>> = match &m.kind {
+        MateKind::Path { more, roll, .. } => roll
+            .iter()
+            .map(|r| end(&r.up))
+            .chain(more.iter().map(end))
+            .collect(),
+        _ => Vec::new(),
+    };
+    if a.is_none()
+        && b.is_none()
+        && a2.is_none()
+        && b2.is_none()
+        && path_ends.iter().all(Option::is_none)
+    {
         return None;
     }
     let mut out = m.clone();
+    if let MateKind::Path { more, roll, .. } = &mut out.kind {
+        let mut new = path_ends.into_iter();
+        if let Some(r) = roll.as_mut()
+            && let Some(Some(up)) = new.next()
+        {
+            r.up = up;
+        }
+        for (slot, e) in more.iter_mut().zip(new) {
+            if let Some(e) = e {
+                *slot = e;
+            }
+        }
+    }
     out.a = a.unwrap_or_else(|| m.a.clone());
     out.b = b.unwrap_or_else(|| m.b.clone());
     if let MateKind::Width {

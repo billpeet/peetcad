@@ -723,6 +723,60 @@ impl Ctx<'_> {
                         .with_k0(t * value),
                 );
             }
+            K::SideDistance { a, b, sides, along } => {
+                // D + ka·ra + kb·rb, with the sides and signs where things are now
+                let ends = [a, b];
+                let at = |id| if self.is_point(id) { p(id) } else { self.center(id) };
+                let rad = |id| if self.is_point(id) { 0.0 } else { self.radius_value(id) };
+                let line = if self.is_line(a) { Some((a, b)) } else if self.is_line(b) { Some((b, a)) } else { None };
+                let (centers, radii, circular, off) = match line {
+                    Some((l, c)) => {
+                        let r = rad(c);
+                        let first = self.is_line(a);
+                        let off = self.signed_dist(at(c), l);
+                        let cc = self.pos(at(c));
+                        (
+                            [cc, cc],
+                            if first { [0.0, r] } else { [r, 0.0] },
+                            if first { [false, !self.is_point(c)] } else { [!self.is_point(c), false] },
+                            Some(off),
+                        )
+                    }
+                    None => (
+                        [self.pos(at(a)), self.pos(at(b))],
+                        [rad(a), rad(b)],
+                        [!self.is_point(a), !self.is_point(b)],
+                        None,
+                    ),
+                };
+                let (t, _) = crate::sketch::side_terms(centers, radii, circular, sides, along, off);
+                let core = if let Some((l, c)) = line {
+                    // The circle's centre from the line, on its side; the whole is turned
+                    // round with it (the same equation, negated).
+                    self.line_dist(at(c), l)
+                } else {
+                    let (pa, pb) = (at(a), at(b));
+                    match along {
+                        crate::Along::Straight => {
+                            Eq::new(EqKind::Dist, &[pa, pa + 1, pb, pb + 1], owner)
+                        }
+                        crate::Along::Horizontal | crate::Along::Vertical => {
+                            let k = u32::from(along == crate::Along::Vertical);
+                            Eq::linear(&[(pb + k, t.toward), (pa + k, -t.toward)], 0.0, owner)
+                        }
+                    }
+                };
+                // For a line, the residual is `toward ·` the measure: everything else is
+                // multiplied by it too.
+                let turn = if off.is_some() { t.toward } else { 1.0 };
+                let mut eq = core;
+                for k in 0..2 {
+                    if t.coef[k] != 0.0 && !self.is_point(ends[k]) && !self.is_line(ends[k]) {
+                        eq = eq.minus_radius(self.radius(ends[k]), -turn * t.coef[k]);
+                    }
+                }
+                out.push(eq.with_k0(turn * t.sign * value));
+            }
             K::Angle(l1, l2) => {
                 let (a1, b1) = self.line_pts(l1);
                 let (a2, b2) = self.line_pts(l2);

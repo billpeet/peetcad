@@ -379,6 +379,19 @@ pub fn diff_scoped(
                     MateKind::Symmetric { plane } => {
                         MateType::Symmetric(Box::new(MateEndSel::Ref(plane.clone())))
                     }
+                    MateKind::Path {
+                        more,
+                        along,
+                        follow,
+                        roll,
+                    } => MateType::Path {
+                        more: more.iter().map(|e| MateEndSel::Ref(e.clone())).collect(),
+                        along: width_mode(along),
+                        follow: *follow,
+                        roll: roll
+                            .as_ref()
+                            .map(|r| (r.axis, Box::new(MateEndSel::Ref(r.up.clone())))),
+                    },
                 },
                 a: MateEndSel::Ref(m.a.clone()),
                 b: MateEndSel::Ref(m.b.clone()),
@@ -419,6 +432,23 @@ pub fn diff_scoped(
                 }
                 (MateKind::Slot { .. }, MateKind::Slot { mode }) => {
                     ops.push(edit(m, MateChange::Width(width_mode(mode))));
+                    None
+                }
+                (
+                    MateKind::Path {
+                        more: old_more,
+                        follow: old_follow,
+                        roll: old_roll,
+                        ..
+                    },
+                    MateKind::Path {
+                        more,
+                        along,
+                        follow,
+                        roll,
+                    },
+                ) if old_more == more && old_follow == follow && old_roll == roll => {
+                    ops.push(edit(m, MateChange::Width(width_mode(along))));
                     None
                 }
                 (MateKind::LimitAngle { .. }, MateKind::LimitAngle { min, max })

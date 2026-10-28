@@ -13,7 +13,7 @@ use peet_document::Document;
 use peet_math::Frame;
 use peet_model::{
     Align, Assembly, CompId, Mate, MateEnd, MateGeom, MateId, MateKind, Model, ScalarKind, Status,
-    WidthMode,
+    WidthMode, PathAxis, PathRoll,
 };
 use serde_json::{Map, Value, json};
 
@@ -334,6 +334,13 @@ pub enum MateType {
     },
     /// The two ends mirror images in this plane.
     Symmetric(Box<MateEndSel>),
+    /// A point on a path: `b` is the path's first piece and `more` the rest.
+    Path {
+        more: Vec<MateEndSel>,
+        along: WidthModeSel,
+        follow: Option<PathAxis>,
+        roll: Option<(PathAxis, Box<MateEndSel>)>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -388,7 +395,14 @@ impl WidthModeSel {
     }
 }
 
-const TYPES: &str = "coincident, concentric, parallel, distance, angle, fasten, width, slot, limit_angle, limit_distance, symmetric";
+const TYPES: &str = "coincident, concentric, parallel, distance, angle, fasten, width, slot, limit_angle, limit_distance, symmetric, path";
+
+/// An axis of a component: "x", "y" or "z".
+fn path_axis(v: &Value) -> Result<PathAxis, String> {
+    let word = text(v)?;
+    PathAxis::from_word(word)
+        .ok_or_else(|| format!("'{word}' is not an axis of the component: use x, y or z."))
+}
 
 impl MateType {
     fn parse(a: &mut Args) -> Result<(Self, MateEndSel, MateEndSel), String> {
@@ -417,6 +431,41 @@ impl MateType {
                 },
                 first,
                 second,
+            ));
+        }
+        if word == "path" {
+            let point = a.required("a", MateEndSel::parse)?;
+            let (first, more) = a.required("b", |v| match v {
+                Value::Array(pieces) if !pieces.is_empty() => {
+                    let mut ends = pieces
+                        .iter()
+                        .map(MateEndSel::parse)
+                        .collect::<Result<Vec<_>, _>>()?;
+                    let first = ends.remove(0);
+                    Ok((first, ends))
+                }
+                Value::Array(_) => Err("A path mate's path needs at least one piece.".to_owned()),
+                other => MateEndSel::parse(other).map(|e| (e, Vec::new())),
+            })?;
+            let along = WidthModeSel::parse_for(a, true)?;
+            let follow = a.parsed("follow", path_axis)?;
+            let roll = a.parsed("roll", |v| {
+                let Value::Object(map) = v else {
+                    return Err("roll is {\"axis\": x, y or z, \"up\": an end giving a direction}".to_owned());
+                };
+                let axis = path_axis(map.get("axis").ok_or("roll needs an 'axis' (x, y or z)")?)?;
+                let up = MateEndSel::parse(map.get("up").ok_or("roll needs 'up': a flat face, a plane, a straight edge or an axis")?)?;
+                Ok((axis, Box::new(up)))
+            })?;
+            return Ok((
+                Self::Path {
+                    more,
+                    along,
+                    follow,
+                    roll,
+                },
+                point,
+                first,
             ));
         }
         let value = |a: &mut Args, key: &str| {
@@ -489,12 +538,12 @@ impl MateChange {
 pub(crate) const MATE_OPS: &[(&str, &str, &str)] = &[
     (
         "mate",
-        "type (coincident, concentric, parallel, distance, angle, fasten, width, slot, limit_angle, limit_distance, symmetric), a, b (each {component: name, id or nonempty path array, and face, edge, vertex, plane, origin: true, or sketch: name or id with entity: id (a point, line, circle or arc); geometry in the part's own coordinates}; plane: top, front, right or a reference plane's name or id; with no component: the assembly's own plane (top, front, right) or origin: true; for fasten the component alone). Width: a is a pair of planar ends, b is a pair of planar ends or one axis end; mode (centered, free, dimension, percent; default centered), distance for dimension, percent for percent (number or expression). Slot: a and b are a face of a straight slot and an axis, either way round; mode (free, centered, dimension, percent; default free), distance, percent; flip_dimension measures from the slot's other end. limit_angle: min, max (degrees); limit_distance: min, max. Symmetric: plane (an end: the plane of symmetry). Other mates: distance, angle, flip (true: aligned), align (aligned, anti_aligned, closest; default: planes anti_aligned, axes closest), flip_dimension (bool: the distance or angle measured the other way). All: name, suppressed (bool: added without being solved)",
+        "type (coincident, concentric, parallel, distance, angle, fasten, width, slot, limit_angle, limit_distance, symmetric, path), a, b (each {component: name, id or nonempty path array, and face, edge, vertex, plane, origin: true, or sketch: name or id with entity: id (a point, line, circle or arc); geometry in the part's own coordinates}; plane: top, front, right or a reference plane's name or id; with no component: the assembly's own plane (top, front, right) or origin: true; for fasten the component alone). Width: a is a pair of planar ends, b is a pair of planar ends or one axis end; mode (centered, free, dimension, percent; default centered), distance for dimension, percent for percent (number or expression). Slot: a and b are a face of a straight slot and an axis, either way round; mode (free, centered, dimension, percent; default free), distance, percent; flip_dimension measures from the slot's other end. limit_angle: min, max (degrees); limit_distance: min, max. Symmetric: plane (an end: the plane of symmetry). Path: a is a point (vertex, sketch point, origin), b is the path: one end or an array of ends joined end to end (straight or round edges, sketch lines, arcs, circles) on one component; mode (free, dimension, percent, centered; default free), distance (from the path's start; from its end with flip_dimension), percent; follow (x, y or z: that axis of a's component kept along the path); roll ({axis: x, y or z, up: an end giving a direction}). Other mates: distance, angle, flip (true: aligned), align (aligned, anti_aligned, closest; default: planes anti_aligned, axes closest), flip_dimension (bool: the distance or angle measured the other way). All: name, suppressed (bool: added without being solved)",
         "Hold two components together by geometry of their parts. The components move to where the mates hold, as little as they can.",
     ),
     (
         "edit_mate",
-        "mate, distance or angle, flip, align (aligned, anti_aligned, closest), flip_dimension; width and slot mates: mode (centered, free, dimension, percent), distance for dimension, percent for percent; limit mates: min, max; configurations (of the assembly, for the value, mode and limits: \"this\", \"all\", a name or a list of names; left out: this one if they already differ between configurations, else all)",
+        "mate, distance or angle, flip, align (aligned, anti_aligned, closest), flip_dimension; width, slot and path mates: mode (centered, free, dimension, percent), distance for dimension, percent for percent; limit mates: min, max; configurations (of the assembly, for the value, mode and limits: \"this\", \"all\", a name or a list of names; left out: this one if they already differ between configurations, else all)",
         "Change a mate's value, which way round its ends go or which way its value is measured, a width or slot mate's mode and position, or a limit mate's range.",
     ),
     ("rename", "mate, name", "Rename a mate."),
@@ -699,7 +748,20 @@ pub(crate) fn kind_values(kind: &MateKind, doc: &Document, m: &mut Map<String, V
             m.insert("min".to_owned(), scalar_out(min, ScalarKind::Length, doc));
             m.insert("max".to_owned(), scalar_out(max, ScalarKind::Length, doc));
         }
-        MateKind::Width { mode, .. } | MateKind::Slot { mode } => {
+        MateKind::Width { mode, .. }
+        | MateKind::Slot { mode }
+        | MateKind::Path { along: mode, .. } => {
+            if let MateKind::Path { follow, roll, .. } = kind {
+                if let Some(axis) = follow {
+                    m.insert("follow".to_owned(), json!(axis.word()));
+                }
+                if let (Some(r), Some(assembly)) = (roll, doc.model.assembly()) {
+                    m.insert(
+                        "roll".to_owned(),
+                        json!({ "axis": r.axis.word(), "up": end_out(assembly, &r.up) }),
+                    );
+                }
+            }
             m.insert("mode".to_owned(), json!(mode.word()));
             match mode {
                 WidthMode::Dimension(s) => {
@@ -746,6 +808,15 @@ pub(crate) fn mate_out(doc: &Document, id: MateId) -> Value {
             b2.as_ref().map_or_else(
                 || end_out(assembly, &mate.b),
                 |b2| json!([end_out(assembly, &mate.b), end_out(assembly, b2)]),
+            ),
+        ),
+        MateKind::Path { more, .. } if !more.is_empty() => (
+            end_out(assembly, &mate.a),
+            json!(
+                std::iter::once(&mate.b)
+                    .chain(more)
+                    .map(|e| end_out(assembly, e))
+                    .collect::<Vec<_>>()
             ),
         ),
         _ => (end_out(assembly, &mate.a), end_out(assembly, &mate.b)),
@@ -944,6 +1015,43 @@ pub(crate) fn add(
                 mode: mode.resolve(doc)?,
             }
         }
+        MateType::Path {
+            more,
+            along,
+            follow,
+            roll,
+        } => {
+            no_turn("path")?;
+            needs_geometry(&a, "a")?;
+            needs_geometry(&b, "b")?;
+            let more = more
+                .iter()
+                .map(|e| e.resolve(doc))
+                .collect::<Result<Vec<_>, _>>()?;
+            for end in &more {
+                needs_geometry(end, "b")?;
+                if end.component() != b.component() {
+                    return Err("A path mate's path must be all on one component: select edges or sketch curves of one.".to_owned());
+                }
+            }
+            let roll = match roll {
+                Some((axis, up)) => {
+                    let up = up.resolve(doc)?;
+                    needs_geometry(&up, "roll up")?;
+                    if let Some(c) = component(&up)? {
+                        crate::pattern::placed_by_pattern(assembly, c, "mated")?;
+                    }
+                    Some(PathRoll { axis: *axis, up })
+                }
+                None => None,
+            };
+            MateKind::Path {
+                more,
+                along: along.resolve(doc)?,
+                follow: *follow,
+                roll,
+            }
+        }
         MateType::Symmetric(plane) => {
             needs_geometry(&a, "a")?;
             needs_geometry(&b, "b")?;
@@ -985,6 +1093,7 @@ pub(crate) fn add(
                 MateType::Fasten(_)
                 | MateType::Width { .. }
                 | MateType::Slot(_)
+                | MateType::Path { .. }
                 | MateType::Symmetric(_) => unreachable!("handled above"),
             }
         }
@@ -1089,6 +1198,10 @@ pub(crate) fn change(
                     }
                     | MateKind::Slot {
                         mode: WidthMode::Dimension(_),
+                    }
+                    | MateKind::Path {
+                        along: WidthMode::Dimension(_),
+                        ..
                     },
                 ) => ScalarKind::Length,
                 Some(other) => {
@@ -1127,9 +1240,12 @@ pub(crate) fn change(
     })
     .transpose()?;
     if matches!(change, MateChange::Width(_))
-        && !matches!(kind, Some(MateKind::Width { .. } | MateKind::Slot { .. }))
+        && !matches!(
+            kind,
+            Some(MateKind::Width { .. } | MateKind::Slot { .. } | MateKind::Path { .. })
+        )
     {
-        return Err("Only a width or slot mate takes mode or percent.".to_owned());
+        return Err("Only a width, slot or path mate takes mode or percent.".to_owned());
     }
     if configurations.is_some() && matches!(change, MateChange::Rename(_) | MateChange::Delete) {
         return Err(format!(
@@ -1144,7 +1260,9 @@ pub(crate) fn change(
     let edit_kind = |kind: &mut MateKind| {
         match &value {
             Some((ScalarKind::Length, s)) => match &mut *kind {
-                MateKind::Width { mode, .. } | MateKind::Slot { mode } => {
+                MateKind::Width { mode, .. }
+                | MateKind::Slot { mode }
+                | MateKind::Path { along: mode, .. } => {
                     *mode = WidthMode::Dimension(s.clone());
                 }
                 other => *other = MateKind::Distance(s.clone()),
@@ -1152,8 +1270,12 @@ pub(crate) fn change(
             Some((_, s)) => *kind = MateKind::Angle(s.clone()),
             None => {}
         }
-        if let (Some(new), MateKind::Width { mode, .. } | MateKind::Slot { mode }) =
-            (&width_mode, &mut *kind)
+        if let (
+            Some(new),
+            MateKind::Width { mode, .. }
+            | MateKind::Slot { mode }
+            | MateKind::Path { along: mode, .. },
+        ) = (&width_mode, &mut *kind)
         {
             *mode = new.clone();
         }

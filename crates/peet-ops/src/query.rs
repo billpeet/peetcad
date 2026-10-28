@@ -401,6 +401,13 @@ fn sketch_detail(doc: &Document, sketch: &Sketch) -> (Vec<Value>, Vec<Value>, Ve
                 m.insert("type".to_owned(), json!(c.kind.label()));
                 m.insert("of".to_owned(), json!(of));
                 m.insert("value".to_owned(), value);
+                if let peet_sketch::ConstraintKind::SideDistance { sides, along, .. } = c.kind {
+                    m.insert(
+                        "sides".to_owned(),
+                        json!([sides[0].word(), sides[1].word()]),
+                    );
+                    m.insert("along".to_owned(), json!(along.word()));
+                }
                 if let Some(e) = &d.expression {
                     m.insert("expression".to_owned(), json!(e));
                 }

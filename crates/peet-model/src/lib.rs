@@ -85,7 +85,8 @@ pub use hole::{HoleEnd, HoleFeature, HoleFit, HoleKind, HoleSizes, METRIC, Metri
 pub use import::{ImportFeature, ImportedSolid};
 pub use loft::{LoftFeature, LoftInput, apply_loft};
 pub use mate::{
-    Align, BodyMate, Drag, Mate, MateEnd, MateGeom, MateId, MateKind, SketchRef, WidthMode,
+    Align, BodyMate, Drag, Mate, MateEnd, MateGeom, MateId, MateKind, PathAxis, PathRoll, SketchRef,
+    WidthMode,
 };
 pub use material::{Material, STEEL_DENSITY};
 pub use model::{

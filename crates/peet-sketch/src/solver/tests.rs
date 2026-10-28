@@ -1358,3 +1358,45 @@ fn analysis_is_independent_of_solver_state() {
 fn angle_wraps_correctly() {
     assert!((equations::wrap_angle(PI + 0.1) - (-PI + 0.1)).abs() < 1e-12);
 }
+
+#[test]
+fn distance_to_a_side_of_a_circle() {
+    use crate::{Along, ArcSide};
+    // A point 130 along X from a hole's far side (SolidWorks' Max), and a ring 3 from a
+    // hole inside it, near side to near side (SolidWorks' Min between nested circles)
+    let mut s = Sketch::new();
+    let p = s.add_point(v(0.0, 0.0));
+    add!(s, K::Fix { point: p, at: v(0.0, 0.0) });
+    let hole = s.add_circle(v(120.0, 5.0), 2.1);
+    dim!(s, K::Radius(hole), 2.1);
+    add!(s, K::HorizontalPoints(p, s.center(hole).unwrap()));
+    dim!(
+        s,
+        K::SideDistance { a: p, b: hole, sides: [ArcSide::Center, ArcSide::Far], along: Along::Horizontal },
+        130.0
+    );
+    let ring = s.add_circle(v(0.5, 40.0), 6.0);
+    let inner = s.add_circle(v(0.0, 40.0), 3.0);
+    dim!(s, K::Radius(ring), 6.0);
+    dim!(s, K::Radius(inner), 3.0);
+    add!(s, K::HorizontalPoints(s.center(ring).unwrap(), s.center(inner).unwrap()));
+    add!(s, K::Fix { point: s.center(inner).unwrap(), at: v(0.0, 40.0) });
+    dim!(
+        s,
+        K::SideDistance { a: ring, b: inner, sides: [ArcSide::Near, ArcSide::Near], along: Along::Straight },
+        2.0
+    );
+    assert_solved(&mut s);
+    let (c, _) = circ(&s, hole);
+    assert!((c.x + 2.1 - 130.0).abs() < 1e-8, "{c}");
+    let (cr, _) = circ(&s, ring);
+    // The ring's near side 6 - d out, the hole's 3: 2 apart puts the centres 1 apart
+    assert!((cr.x.abs() - 1.0).abs() < 1e-8, "{cr}");
+    // Apart, near to near takes both radii off
+    let a = s.add_circle(v(0.0, 100.0), 5.0);
+    let b = s.add_circle(v(30.0, 100.0), 4.0);
+    let k = K::SideDistance { a, b, sides: [ArcSide::Near, ArcSide::Near], along: Along::Straight };
+    assert!((s.measure(&k).unwrap() - 21.0).abs() < 1e-12);
+    let k = K::SideDistance { a, b, sides: [ArcSide::Far, ArcSide::Near], along: Along::Straight };
+    assert!((s.measure(&k).unwrap() - 31.0).abs() < 1e-12);
+}
