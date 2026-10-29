@@ -596,12 +596,33 @@ function importPart(doc, dir) {
       for (const labels of groups.values()) for (let i = 1; i < labels.length; i++) items.push({ type: "coincident", of: [labels[0], labels[i]] });
       // A hole wizard's sketch: a circle of the hole's size on each of its points, which keeps to the
       // point when the sketch's dimensions move it
+      // A hole wizard slot's: the slot, its arcs' centres (`holes.slots`, in SolidWorks' sketch) either side
+      // of the point, the point at its centreline's middle, its length and width as the hole wizard has them
+      // and its way as drawn (the sketch's line it is parallel to, or the sketch's x or y)
       if (holes) holes.points.forEach((p, k) => {
         const key = toPeet(p).map(v => v.toFixed(4)).join(",");
         const mine = s.points.findIndex(q => spot(q) === spot(p));
         const label = groups.has(key) ? groups.get(key)[0] : mine >= 0 && items.some(x => x.as === "p" + mine) ? "p" + mine : null;
-        items.push({ type: "circle", center: toPeet(p), radius: tidy(holes.radius), as: "h" + k });
-        if (label) items.push({ type: "coincident", of: ["h" + k + ".center", label] });
+        const slot = holes.slots && holes.slots[k];
+        if (!slot) {
+          items.push({ type: "circle", center: toPeet(p), radius: tidy(holes.radius), as: "h" + k });
+          if (label) items.push({ type: "coincident", of: ["h" + k + ".center", label] });
+          return;
+        }
+        const [a, b] = [toPeet(slot.from), toPeet(slot.to)];
+        const as = "h" + k, line = as + ".4";
+        items.push({ type: "slot", from: a, to: b, radius: tidy(holes.radius), as });
+        if (label) items.push({ type: "midpoint", of: [label, line] });
+        items.push({ type: "length", of: [line], value: tidy(Math.hypot(b[0] - a[0], b[1] - a[1])) });
+        items.push({ type: "radius", of: [as + ".1"], value: tidy(holes.radius) });
+        const d = [b[0] - a[0], b[1] - a[1]], l = Math.hypot(...d);
+        const along = s.segments.findIndex(g => g.type === "line" && g.start && g.end && (() => {
+          const [u, v] = [toPeet(g.start), toPeet(g.end)], e = [v[0] - u[0], v[1] - u[1]], m = Math.hypot(...e);
+          return m > 1e-6 && Math.abs(d[0] * e[1] - d[1] * e[0]) / (l * m) < 1e-6;
+        })());
+        if (along >= 0) items.push({ type: "parallel", of: [line, "e" + along] });
+        else if (Math.abs(d[1]) / l < 1e-9) items.push({ type: "horizontal", of: [line] });
+        else if (Math.abs(d[0]) / l < 1e-9) items.push({ type: "vertical", of: [line] });
       });
     }
     if (items.length === 0) return { error: left.size ? `only ${[...left].join(" and ")}, which PeetCAD sketches don't have` : "nothing in it" };
@@ -1894,13 +1915,31 @@ function importPart(doc, dir) {
       centres = points.map(p => drawn.find(through(p)) || { type: "line", start: { x: p.x - hx, y: p.y - hy }, end: { x: p.x + hx, y: p.y + hy } });
     }
     // The slots as the hole wizard's sketch has them: `keep` keeps them whatever they come to
+    const slotEnds = centres.map(g => {
+      const k = diameter / 2 / length;
+      const at = t => ({ x: g.start.x + (g.end.x - g.start.x) * t, y: g.start.y + (g.end.y - g.start.y) * t });
+      return { from: at(k), to: at(1 - k) };
+    });
+    // With the sketch's relations and dimensions (one a distance to another component's edge, in context:
+    // Esc Surround R L's and R R's to Esc Surround R Top's), the slots at its points, so that they go where
+    // those put them; failing that, the slots' shapes where SolidWorks has them
+    const withRelations = () => {
+      if (!relations || !(where.dimensions || []).length || !drawn.length) return { error: true };
+      const sk = importSketch(where, { name: f.name + " sketch", needFace: true, holes: { points, radius: diameter / 2, slots: slotEnds } });
+      if (sk.error) return sk;
+      // Kept if every slot is where SolidWorks has it: the relations may not hold them there
+      const arcs = (peet.ask({ op: "feature", feature: sk.name }).entities || []).filter(x => x.type === "arc" && !x.construction);
+      const want = slotEnds.flatMap(e => [e.from, e.to]).map(sk.toPeet);
+      const placed = want.every(q => arcs.some(x => x.at && Math.hypot(x.at[0] - q[0], x.at[1] - q[1]) < 1e-3));
+      if (placed) { sketches.set(where.name, sk); return sk; }
+      peet.apply({ op: "delete", feature: sk.name });
+      report.inContext = (report.inContext || []).filter(x => x.peetSketch !== sk.name);
+      return { error: true };
+    };
     const fromSketch = keep => {
       if (!(diameter > 0 && length > 0 && centres.length)) return false;
-      const sk = importSketch(where, { name: f.name + " sketch", needFace: true, draw: toPeet => centres.map(g => {
-        const k = diameter / 2 / length;
-        const at = t => ({ x: g.start.x + (g.end.x - g.start.x) * t, y: g.start.y + (g.end.y - g.start.y) * t });
-        return { type: "slot", from: toPeet(at(k)), to: toPeet(at(1 - k)), radius: tidy(diameter / 2) };
-      }) });
+      let sk = withRelations();
+      if (sk.error) sk = importSketch(where, { name: f.name + " sketch", needFace: true, draw: toPeet => slotEnds.map(e => ({ type: "slot", from: toPeet(e.from), to: toPeet(e.to), radius: tidy(diameter / 2) })) });
       if (sk.error) return false;
       const built = sheetCut(f, sk.name, reachOf(v.EndCondition, (v.HoleDepth || v.ThruHoleDepth || 0) * MM, false), sk.frame);
       // Kept only if its faces come to what SolidWorks' slots' do: a feature can have slots on several
@@ -1910,6 +1949,8 @@ function importPart(doc, dir) {
       if (built.ok && (keep || Math.abs(ours - theirs) <= 0.01 * theirs + 0.5)) { finish(f, built); return true; }
       if (built.ok) peet.apply({ op: "delete", features: built.names });
       peet.apply({ op: "delete", feature: sk.name });
+      sketches.delete(where.name);
+      if (report.inContext) report.inContext = report.inContext.filter(x => x.peetSketch !== sk.name);
       return false;
     };
     if (fromSketch(false)) return;
