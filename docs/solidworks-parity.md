@@ -3,7 +3,7 @@
 What PeetCAD can't yet do that the SolidWorks component library needs. The aim is for
 FabSys to drive PeetCAD in place of SolidWorks; parts come first, assemblies after.
 
-**Status, 28 October 2026 (parts 198 of 201, assemblies 15 of 26 match, every configuration placed):** first written on 9 October from names and counts; since then
+**Status, 29 October 2026 (parts 198 of 201, assemblies 15 of 26 match, every configuration placed; what is left is SolidWorks', the templates' or the FabSys scripts'):** first written on 9 October from names and counts; since then
 the whole library has been exported and imported, and the entries below say what that
 found. Update an entry when it is confirmed, fixed or decided against.
 
@@ -616,13 +616,31 @@ plane on one), in-context parts inside sub-assemblies, and editing in context in
 Parts, placements and assembled geometry are as before: 198 of 201 parts, 15 of 26 assemblies matching, 32
 of 34 configurations matching SolidWorks' volume and box.
 
+**The last fixable items** (29 October; parts `run-m16`, assemblies `scratch\asm12\run`):
+
+- **Esc Surround R L and R R's slots follow R Top's edge.** A hole wizard slot is drawn on its position
+  sketch with that sketch's relations and dimensions, so D4, an in-context dimension to Esc Surround R
+  Top's edge, is kept and follows it (R Top 20 mm taller moves the top slots 20 mm; the bottom ones,
+  dimensioned to their own part, stay). 27 parts' slot sketches keep their relations: 8,780 of 8,931
+  relations kept. **In-context references: 22 of 40 follow** (9 assemblies), 16 kept where SolidWorks
+  keeps them; only Limit switch assy's two, on its part outside Templates, are left.
+- **Sketching in the assembly view.** Editing a part in context, its sketches open in place (a new
+  one on the part's planes or faces, or on another component's face, which it then follows); another
+  component's edge, face or corner can be converted, or a selected entity made to follow it. Exit
+  Sketch is one undo step. `edit_sketch` takes `component`.
+- **The other components see-through while editing in context**, as SolidWorks does by default;
+  picking prefers the edited part. Settings → Assemblies: transparent (75%, PeetCAD's choice),
+  as the display state has them, or opaque.
+
+Parts 198 of 201, assemblies 15 of 26 matching and every configuration placed, 32 of 34 configurations
+matching SolidWorks' volume and box: as before.
+
 **More FabSys script bugs**, in `enclosure_script MASTER.boo`: lines 1999 and 2001 suppress Meter
 Panel features "NSW CTMetering" and "VIC CTMeterPanelCutout"; the part's are "NSW CT Metering" and
 "VIC CT Metering", so FabSys fails on them in SolidWorks too.
 
 What is left:
 
-- **In-context**: Esc Surround R L and R's slot distance to another part's edge (4 references); sketching inside the assembly view.
 - **The templates and the export**: 11 live mates SolidWorks names the assembly for with no entity
   (Escutcheon Assembly's are on the Escutcheon Surround that doesn't exist; the Escutcheon Doors'
   point at a suppressed hinge, whose parts the export doesn't list), the path mate's empty path,
