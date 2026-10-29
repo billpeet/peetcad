@@ -365,14 +365,15 @@ internal static class Program
                 if (inContext is { Count: > 0 })
                     result["inContext"] = inContext;
 
-                // Format 8: the configuration's display states, with each component's look in each
-                if (configuration != null)
-                    result["displayStates"] = TryList(() => DisplayStates(doc, configuration, listed));
-
                 // The whole assembly as SolidWorks has it in this configuration, to compare an import with
                 result["massProperties"] = TryJson(() => AssemblyMass(doc), "mass properties of " + name);
                 if (exportStep)
                     result["step"] = SaveCopy(doc, fileName + "." + SafeFileName(name) + ".step");
+
+                // Format 8: the configuration's display states, with each component's look in each. Last: the check
+                // applies each display state in turn, which must not change what is read above.
+                if (configuration != null)
+                    result["displayStates"] = TryList(() => DisplayStates(doc, configuration, listed), "display states of " + name);
             }
         }
         else {
@@ -384,7 +385,7 @@ internal static class Program
             result["sheetMetal"] = !flatPattern && bodies.Any(b => b.IsSheetMetal());
             // Format 8: the part's display states, with the appearances in each
             if (configuration != null && !flatPattern)
-                result["displayStates"] = TryList(() => DisplayStates(doc, configuration, null));
+                result["displayStates"] = TryList(() => DisplayStates(doc, configuration, null), "display states of " + name);
             if (exportStep && !flatPattern)
                 result["step"] = SaveCopy(doc, fileName + "." + SafeFileName(name) + ".step");
         }
@@ -1949,6 +1950,18 @@ internal static class Program
             return read();
         }
         catch (Exception) {
+            return null;
+        }
+    }
+
+    /// <summary>As <see cref="TryList(Func{List{Json}})"/>, and what failed is logged.</summary>
+    private static List<Json>? TryList(Func<List<Json>> read, string what)
+    {
+        try {
+            return read();
+        }
+        catch (Exception ex) {
+            Log($"  The {what} could not be read: {ex.Message}");
             return null;
         }
     }
