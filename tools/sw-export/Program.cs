@@ -25,7 +25,7 @@ using Json = Dictionary<string, object?>;
 internal static class Program
 {
     /// <summary>Raise this when the output changes shape, so the importer can tell exports apart.</summary>
-    private const int FormatVersion = 7;
+    private const int FormatVersion = 8;
     private const string FlatPatternSuffix = "SM-FLAT-PATTERN";
     private const int MaxRestarts = 5;
 
@@ -178,6 +178,10 @@ internal static class Program
 
             root["displayLengthUnit"] = doc.LengthUnit;
             root["activeConfiguration"] = doc.ConfigurationManager.ActiveConfiguration.Name;
+            // Format 8: whether each configuration has display states of its own (SolidWorks' "Link display states
+            // to configurations"), read both ways the API offers
+            root["linkDisplayStatesToConfigurations"] = Try(() => (object)doc.ConfigurationManager.LinkDisplayStatesToConfigurations);
+            root["linkedDisplayState"] = Try(() => (object)doc.Extension.LinkedDisplayState);
 
             foreach (var name in ArrayOf(doc.GetConfigurationNames()).Cast<string>()) {
                 Log("Configuration " + name);
@@ -274,11 +278,14 @@ internal static class Program
     private static Json DumpConfiguration(ModelDoc2 doc, string name, bool isAssembly, string fileName)
     {
         var result = new Json { ["name"] = name };
-        if (doc.GetConfigurationByName(name) is Configuration configuration) {
+        var configuration = doc.GetConfigurationByName(name) as Configuration;
+        if (configuration != null) {
             result["description"] = configuration.Description;
             result["derived"] = configuration.IsDerived();
             result["parent"] = configuration.GetParent()?.Name;
         }
+        // Format 8: the document's own colour in this configuration (swInConfigurationOpts_e 1: this one)
+        result["appearance"] = Try(() => doc.Extension.GetMaterialPropertyValues((int)swInConfigurationOpts_e.swThisConfiguration, null));
 
         // SolidWorks makes this configuration itself to hold the unfolded part. Its bodies give the flat size;
         // its features are those of the configuration it derives from.
@@ -332,7 +339,16 @@ internal static class Program
                         ? c.Solving switch { 0 => "rigid", 1 => "flexible", var other => (object)other }
                         : null),
                     // 16 numbers: a 3x3 rotation by rows, the translation, the scale, and three unused
-                    ["transform"] = Try(() => c.Transform2?.ArrayData)
+                    ["transform"] = Try(() => c.Transform2?.ArrayData),
+                    // Format 8, in the active display state: swComponentVisibilityState_e (0 hidden, 1 shown),
+                    // hidden counting a hidden parent, the component's colour (MaterialPropertyValues: red, green,
+                    // blue, ambient, diffuse, specular, shininess, transparency, emission), its part's own colour,
+                    // and the display state of its own document it shows
+                    ["visible"] = Try(() => (object)c.Visible),
+                    ["hidden"] = Try(() => (object)c.IsHidden(false)),
+                    ["appearance"] = Try(() => c.GetMaterialPropertyValues2((int)swInConfigurationOpts_e.swThisConfiguration, null)),
+                    ["modelAppearance"] = Try(() => c.GetModelMaterialPropertyValues(c.ReferencedConfiguration)),
+                    ["referencedDisplayState"] = Try(() => c.ReferencedDisplayState2)
                 }).ToList();
                 // A suppressed sub-assembly lists nothing under it, but mates can name its parts: they are read from
                 // its own document, in the configuration the component shows, placed by the component's transform
@@ -353,6 +369,11 @@ internal static class Program
                 result["massProperties"] = TryJson(() => AssemblyMass(doc), "mass properties of " + name);
                 if (exportStep)
                     result["step"] = SaveCopy(doc, fileName + "." + SafeFileName(name) + ".step");
+
+                // Format 8: the configuration's display states, with each component's look in each. Last: the check
+                // applies each display state in turn, which must not change what is read above.
+                if (configuration != null)
+                    result["displayStates"] = TryList(() => DisplayStates(doc, configuration, listed), "display states of " + name);
             }
         }
         else {
@@ -362,11 +383,178 @@ internal static class Program
             result["bodies"] = bodies.Select(b => DumpBody(doc, b)).ToList();
 
             result["sheetMetal"] = !flatPattern && bodies.Any(b => b.IsSheetMetal());
+            // Format 8: the part's display states, with the appearances in each
+            if (configuration != null && !flatPattern)
+                result["displayStates"] = TryList(() => DisplayStates(doc, configuration, null), "display states of " + name);
             if (exportStep && !flatPattern)
                 result["step"] = SaveCopy(doc, fileName + "." + SafeFileName(name) + ".step");
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Format 8. The display states of <paramref name="configuration"/> (the active one), in SolidWorks' order:
+    /// IConfiguration.GetDisplayStates gives the active one first. For each, the appearances (render materials) the
+    /// document has in it, with what each is on; in an assembly each component's visibility, display mode,
+    /// transparency, colour and referenced display state in it, read by name (swSpecifyDisplayState) so nothing
+    /// changes; then, as a check of those, what each component shows with the display state applied. Every read is
+    /// guarded: what fails is logged and left out.
+    /// </summary>
+    private static List<Json> DisplayStates(ModelDoc2 doc, Configuration configuration, List<Component2>? components)
+    {
+        var names = ArrayOf(configuration.GetDisplayStates()).OfType<string>().ToList();
+        var states = new List<Json>();
+        const int byName = (int)swDisplayStateOpts_e.swSpecifyDisplayState;
+        for (var index = 0; index < names.Count; index++) {
+            var name = names[index];
+            var only = new[] { name };
+            var state = new Json { ["name"] = name, ["active"] = index == 0 };
+            state["appearances"] = TryList(() => ArrayOf(doc.Extension.GetRenderMaterials2(byName, only))
+                .OfType<RenderMaterial>().Select(Appearance).ToList());
+            state["properties"] = Try(() => Describe(configuration.GetDisplayStateProperties(name)));
+            if (components != null) {
+                var settings = ComponentSettings(doc, components, name);
+                var list = new List<Json>();
+                for (var i = 0; i < components.Count; i++) {
+                    var c = components[i];
+                    var entry = new Json {
+                        ["path"] = c.Name2,
+                        // swComponentVisibilityState_e: 0 hidden, 1 shown
+                        ["visible"] = Try(() => FirstOf(c.GetVisibilityInAsmDisplayStates(byName, only))),
+                        ["referencedDisplayState"] = Try(() => FirstOf(c.GetReferencedDisplayStates(byName, only))),
+                        ["appearances"] = TryList(() => ArrayOf(c.GetRenderMaterials2(byName, only)).OfType<RenderMaterial>().Select(Appearance).ToList())
+                    };
+                    // swDisplayMode_e (0 wireframe, 1 hidden lines greyed, 2 hidden lines removed, 3 shaded, 7 shaded
+                    // with edges, 8 the default), swTransparencyState_e (0 transparent, 1 not), swVisibilityState_e
+                    // (1 hidden, 2 shown), and the display state's own colour of the component (9 numbers, as
+                    // MaterialPropertyValues)
+                    foreach (var (key, values) in settings)
+                        entry[key] = At(values, i, components.Count);
+                    list.Add(entry);
+                }
+                state["components"] = list;
+                state["componentVisibility"] = TryJson(() => EntityValues((out object entities) =>
+                    configuration.GetDisplayStateComponentVisibility(name, false, false, out entities)), "component visibility of display state " + name);
+                state["componentProperties"] = TryJson(() => EntityValues((out object entities) =>
+                    configuration.GetDisplayStateComponentProperties(name, out entities)), "component properties of display state " + name);
+            }
+            else {
+                state["bodies"] = TryJson(() => EntityValues((out object entities) =>
+                    configuration.GetDisplayStateBodyProperties(name, out entities)), "body properties of display state " + name);
+                state["features"] = TryJson(() => EntityValues((out object entities) =>
+                    configuration.GetDisplayStateFeatureProperties(name, out entities)), "feature properties of display state " + name);
+                state["faces"] = TryJson(() => EntityValues((out object entities) =>
+                    configuration.GetDisplayStateFaceProperties(name, out entities)), "face properties of display state " + name);
+            }
+            states.Add(state);
+        }
+
+        // A check of the reads by name: each display state applied in turn, and what each component shows then. The
+        // document is read-only and never saved; the active display state is applied again at the end.
+        if (components is { Count: > 0 } && names.Count > 1) {
+            for (var index = 0; index < names.Count; index++) {
+                var applied = Try(() => (object)configuration.ApplyDisplayState(names[index])) is true;
+                states[index]["applied"] = applied;
+                if (!applied) {
+                    Log("  Display state " + names[index] + " could not be applied");
+                    continue;
+                }
+                var shown = (List<Json>)states[index]["components"]!;
+                for (var i = 0; i < components.Count; i++) {
+                    var c = components[i];
+                    shown[i]["appliedVisible"] = Try(() => (object)c.Visible);
+                    shown[i]["appliedAppearance"] = Try(() => c.GetMaterialPropertyValues2((int)swInConfigurationOpts_e.swThisConfiguration, null));
+                }
+            }
+            if (Try(() => (object)configuration.ApplyDisplayState(names[0])) is not true)
+                Log("  The active display state " + names[0] + " could not be applied again");
+        }
+        return states;
+    }
+
+    /// <summary>
+    /// What IModelDocExtension's display state settings give for <paramref name="components"/> in display state
+    /// <paramref name="name"/>: display mode, transparency, visibility and colour, each an array over the components
+    /// (or left out where it can't be read).
+    /// </summary>
+    private static List<(string Key, object? Values)> ComponentSettings(ModelDoc2 doc, List<Component2> components, string name)
+    {
+        var result = new List<(string, object?)>();
+        if (Try(() => doc.Extension.GetDisplayStateSetting((int)swDisplayStateOpts_e.swSpecifyDisplayState)) is not DisplayStateSetting setting) {
+            Log("  No display state setting for " + name);
+            return result;
+        }
+        try {
+            setting.Names = new[] { name };
+            try {
+                setting.Entities = components.Cast<object>().ToArray();
+            }
+            catch (Exception) {
+                setting.Entities = components.Select(c => new DispatchWrapper(c)).ToArray();
+            }
+            setting.PartLevel = false;
+        }
+        catch (Exception ex) {
+            Log($"  The display state setting for {name} could not be made: {ex.Message}");
+            return result;
+        }
+        result.Add(("displayMode", Read(() => doc.Extension.get_DisplayMode(setting), "display modes")));
+        result.Add(("transparency", Read(() => doc.Extension.get_Transparency(setting), "transparency")));
+        result.Add(("visibility", Read(() => doc.Extension.get_Visibility(setting), "visibility")));
+        result.Add(("appearance", Read(() => doc.Extension.get_DisplayStateSpecMaterialPropertyValues(setting), "colours")));
+        return result;
+
+        object? Read(Func<object?> read, string what)
+        {
+            try {
+                return read();
+            }
+            catch (Exception ex) {
+                Log($"  The {what} of the components in display state {name} could not be read: {ex.Message}");
+                return null;
+            }
+        }
+    }
+
+    /// <summary>Component <paramref name="i"/>'s share of an array over <paramref name="count"/> components: one value, or a run of them.</summary>
+    private static object? At(object? values, int i, int count)
+    {
+        if (values is not Array array || count == 0)
+            return null;
+        if (array.Length == count)
+            return Describe(array.GetValue(i));
+        if (array.Length % count != 0)
+            return i == 0 ? Describe(array) : null;
+        var step = array.Length / count;
+        return Enumerable.Range(i * step, step).Select(k => Describe(array.GetValue(k))).ToList();
+    }
+
+    private static object? FirstOf(object? values) => values is Array { Length: > 0 } array ? Describe(array.GetValue(0)) : null;
+
+    private delegate object EntityRead(out object entities);
+
+    /// <summary>One of IConfiguration's display state reads (undocumented in 2018): what it is about and what it gives, as they come.</summary>
+    private static Json EntityValues(EntityRead read)
+    {
+        var values = read(out var entities);
+        return new Json { ["entities"] = Describe(entities), ["values"] = Describe(values) };
+    }
+
+    /// <summary>An appearance (a render material): its colour, its transparency, its file, and what it is on.</summary>
+    private static Json Appearance(RenderMaterial material)
+    {
+        var colour = Try(() => (object)material.PrimaryColor) as int?;
+        return new Json {
+            ["file"] = Try(() => material.FileName),
+            // A COLORREF (0x00BBGGRR), and the same as red, green and blue from 0 to 255
+            ["primaryColor"] = colour,
+            ["rgb"] = colour is int c ? new[] { c & 0xff, (c >> 8) & 0xff, (c >> 16) & 0xff } : null,
+            ["transparency"] = Try(() => (object)material.Transparency),
+            ["colorForm"] = Try(() => (object)material.ColorForm),
+            ["entities"] = Try(() => Describe(material.GetEntities())),
+            ["displayStates"] = Try(() => Describe(material.GetLinkedDisplayStates()))
+        };
     }
 
     /// <summary>
@@ -575,6 +763,10 @@ internal static class Program
             if (named.Count > 0)
                 result["namedDimensions"] = named;
         }
+
+        // Format 8: the feature's own colour, where it has one
+        if (Try(() => (object)feature.HasMaterialPropertyValues()) is true)
+            result["appearance"] = Try(() => feature.GetMaterialPropertyValues2((int)swInConfigurationOpts_e.swThisConfiguration, null));
 
         // A feature that refers to another document (an in-context feature: "->" in the tree): what it refers
         // to, in which assembly, and the reference's status
@@ -1544,6 +1736,8 @@ internal static class Program
             ["area"] = mass is { Length: > 4 } ? mass[4] : null,
             ["centreOfGravity"] = mass is { Length: > 2 } ? mass.Take(3).ToArray() : null,
             ["edgeCount"] = body.GetEdgeCount(),
+            // Format 8: the body's own colour, where it has one (MaterialPropertyValues, as a component's)
+            ["appearance"] = Try(() => body.HasMaterialPropertyValues() ? body.MaterialPropertyValues2 : null),
             ["faces"] = ArrayOf(body.GetFaces()).Cast<Face2>().Select(Face).ToList(),
             // Every face is listed, since they are what a rebuilt part is compared with. Of the edges, the named ones.
             ["namedEdges"] = ArrayOf(body.GetEdges()).Cast<Edge>().Where(e => !string.IsNullOrWhiteSpace(doc.GetEntityName(e))).Select(Edge).ToList()
@@ -1581,6 +1775,9 @@ internal static class Program
         // Read in an assembly: the component it is on (format 7)
         result["component"] = Try(() => ComponentOf(face)?.Name2);
         result["area"] = face.GetArea();
+        // Format 8: the face's own colour, where it has one
+        if (Try(() => (object)face.HasMaterialPropertyValues()) is true)
+            result["appearance"] = Try(() => face.GetMaterialPropertyValues2((int)swInConfigurationOpts_e.swThisConfiguration, null));
         var box = face.GetBox() as double[];
         result["box"] = box;
         // A point that is on the face (the middle of its box may be in a hole or off a bent face): for picking it
@@ -1753,6 +1950,18 @@ internal static class Program
             return read();
         }
         catch (Exception) {
+            return null;
+        }
+    }
+
+    /// <summary>As <see cref="TryList(Func{List{Json}})"/>, and what failed is logged.</summary>
+    private static List<Json>? TryList(Func<List<Json>> read, string what)
+    {
+        try {
+            return read();
+        }
+        catch (Exception ex) {
+            Log($"  The {what} could not be read: {ex.Message}");
             return null;
         }
     }

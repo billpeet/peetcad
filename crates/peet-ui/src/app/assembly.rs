@@ -28,6 +28,8 @@ use crate::features_ui::{ERROR, WARNING};
 const MOVE_KEY: u64 = 0x636f_6d70_6d6f_7665;
 /// The same for a component's colour and for an explode step's distance.
 const COLOR_KEY: u64 = 0x636f_6d70_636f_6c72;
+/// The steps of one drag of a component's transparency are one undo step.
+const TRANSPARENCY_KEY: u64 = 0x636f_6d70_7472_616e;
 const EXPLODE_KEY: u64 = 0x6578_706c_6f64_6562;
 const PATTERN_KEY: u64 = 0x636f_6d70_7061_7474;
 /// How long the assembly takes to come apart and go together again, in seconds.
@@ -1828,6 +1830,14 @@ impl PeetApp {
             .unwrap_or([150, 160, 175]);
         let mut own_color = c.color.is_some();
         let mut rgb = c.color.unwrap_or(part_color);
+        // In per cent, as SolidWorks' appearance shows it.
+        let mut transparency = f64::from(c.transparency) * 100.0;
+        let mut transparency_done = false;
+        let display_state = self
+            .doc
+            .model
+            .active_display_state()
+            .map(|s| s.name.clone());
         let mut moved = false;
         let mut move_done = false;
         let mut turn = None;
@@ -1943,6 +1953,23 @@ impl PeetApp {
                     }
                 });
                 ui.end_row();
+                ui.label("Transparency").on_hover_text(
+                    "How much of what is behind the component shows through it: 0% opaque, 100% not seen at all. A click on a see-through component picks what is behind it; Shift-click picks the component.",
+                );
+                let r = ui.add(
+                    egui::Slider::new(&mut transparency, 0.0..=100.0)
+                        .suffix("%")
+                        .max_decimals(0),
+                );
+                transparency_done = r.drag_stopped() || r.lost_focus();
+                ui.end_row();
+                if let Some(state) = &display_state {
+                    ui.label("Display state").on_hover_text(
+                        "Whether it is shown, its colour and its transparency are set in the display state shown (the Display States list).",
+                    );
+                    ui.label(state);
+                    ui.end_row();
+                }
                 if let Some(text) = &freedom {
                     ui.label("Freedom").on_hover_text(
                         "How many ways the component can still move, by itself or along with what it is mated to.",
@@ -2008,6 +2035,21 @@ impl PeetApp {
                     }
                 },
             );
+        }
+        let transparency = (transparency / 100.0).clamp(0.0, 1.0) as f32;
+        if (transparency - c.transparency).abs() > 1e-6 {
+            self.change_model(
+                &format!("Change Transparency of {}", c.name),
+                Some(TRANSPARENCY_KEY ^ u64::from(id.0)),
+                |m| {
+                    if let Some(c) = m.assembly_mut().and_then(|a| a.component_mut(id)) {
+                        c.transparency = transparency;
+                    }
+                },
+            );
+        }
+        if transparency_done {
+            self.doc.seal_history();
         }
         if open {
             self.open_component(id);
@@ -2782,6 +2824,57 @@ mod tests {
             1,
             "with what was derived from it"
         );
+        assert!(app.untranslated().is_empty(), "{:?}", app.untranslated());
+    }
+
+    #[test]
+    fn display_states_and_transparency_in_the_application() {
+        use crate::display_ui::DisplayAction;
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        for op in [
+            json!({"op": "new", "assembly": true, "discard": true}),
+            json!({"op": "insert", "sample": "chassis", "name": "Tray"}),
+            json!({"op": "insert", "sample": "cover", "name": "Lid", "at": [0, 0, 60]}),
+        ] {
+            ok(&mut app, &ctx, op);
+        }
+        let lid = CompId(2);
+        app.selected_component = Some(lid);
+        draw(&mut app, &ctx);
+        // The list: add two, rename one.
+        app.apply_display(vec![DisplayAction::Add]);
+        app.apply_display(vec![DisplayAction::Add]);
+        let names: Vec<String> = app
+            .doc
+            .model
+            .display_states()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(names, ["Display State-1", "Display State-2"]);
+        let second = app.doc.model.active_display_state().unwrap().id;
+        app.apply_display(vec![DisplayAction::Rename {
+            id: second,
+            to: "See inside".to_owned(),
+        }]);
+        // The lid made see-through in its properties, in the display state shown.
+        app.change_model("Change Transparency of Lid", None, |m| {
+            if let Some(c) = m.assembly_mut().and_then(|a| a.component_mut(lid)) {
+                c.transparency = 0.7;
+            }
+        });
+        draw(&mut app, &ctx);
+        let first = app.doc.model.display_states()[0].id;
+        app.apply_display(vec![DisplayAction::Activate(first)]);
+        assert_eq!(app.doc.placed[1].transparency, 0.0);
+        app.apply_display(vec![DisplayAction::Activate(second)]);
+        assert_eq!(app.doc.placed[1].transparency, 0.7);
+        app.apply_display(vec![DisplayAction::Link(true)]);
+        assert!(app.doc.model.display_states_linked());
+        app.apply_display(vec![DisplayAction::Delete(first)]);
+        assert_eq!(app.doc.model.display_states().len(), 1);
+        draw(&mut app, &ctx);
         assert!(app.untranslated().is_empty(), "{:?}", app.untranslated());
     }
 

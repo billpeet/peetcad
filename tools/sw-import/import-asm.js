@@ -16,6 +16,7 @@
 const fs = require("fs");
 const path = require("path");
 const { spawnSync } = require("child_process");
+const { displayPlan, applyDisplayPlan, componentLookOps } = require("./display-states");
 
 const args = process.argv.slice(2);
 const option = name => { const i = args.indexOf(name); if (i < 0) return null; const v = args[i + 1]; args.splice(i, 2); return v; };
@@ -1602,6 +1603,9 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
   // what else the tree has at assembly level is reported
   if (cfg) importAssemblyFeatures(peet, cfg, report, byPath, want, local);
 
+  // Display states and the components' looks (format 8): only how the assembly is drawn
+  if (cfg) importDisplayStates(peet, exp, cfg, report);
+
   // Where the mates left each component, against SolidWorks
   const { worst, freedom } = checkPlacements(peet, want, report.components);
   report.freedom = freedom;
@@ -1621,6 +1625,26 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
   fs.writeFileSync(outFile.replace(/\.peet$/, ".report.json"), JSON.stringify(report, null, 1));
   try { fs.unlinkSync(outFile + ".before"); } catch {}
   return report;
+}
+
+/**
+ * Display states (format 8), as SolidWorks has them: linked to configurations or not, each with the assembly's own
+ * components shown or hidden, coloured and see-through (see display-states.js). Without them, each component's look
+ * as the export has it. Nothing to do for an export before format 8.
+ */
+function importDisplayStates(peet, exp, cfg, report) {
+  if (!(exp.formatVersion >= 8)) return;
+  // The assembly's own components in PeetCAD: those inserted, and the copies patterns made
+  const own = report.components.filter(c => c.result === "inserted" || c.result === "left for its pattern").map(c => c.component);
+  const plan = displayPlan(exp, cfg, own);
+  if (plan) { applyDisplayPlan(peet, plan, report); return; }
+  const ops = componentLookOps(cfg, own);
+  const replies = peet.applyAll(ops);
+  report.displayStates = {
+    none: "the export has no display states", looks: ops.length,
+    failed: ops.map((op, i) => [op, replies[i]]).filter(([, r]) => !(r && r.ok))
+      .map(([op, r]) => `${op.op} ${op.component}: ${r ? r.error : "no reply"}`),
+  };
 }
 
 /**

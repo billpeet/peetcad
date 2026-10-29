@@ -17,6 +17,7 @@ use crate::bodies::GeomRef;
 use crate::commands::{CommandId, CommandState};
 use crate::config_table::{self, ConfigTable};
 use crate::configs_ui::{self, ConfigAction, ConfigList};
+use crate::display_ui::{self, DisplayAction, DisplayList};
 use crate::document::{Document, FileLocation, ItemId, Persistent, Session, SketchItem};
 use crate::features_ui::{self, ERROR, PICKING, Picked, Slot};
 use crate::files::{self, AfterDiscard, FileState};
@@ -113,6 +114,8 @@ pub struct PeetApp {
     param_error: Option<String>,
     /// The configurations list above the feature tree.
     config_list: ConfigList,
+    /// An assembly's display states list, under the configurations list.
+    display_list: DisplayList,
     /// The configurations table window.
     config_table: ConfigTable,
     /// Values changed in the panels (feature values, sketch dimensions) change in the
@@ -270,6 +273,7 @@ impl PeetApp {
             new_param: (String::new(), String::new()),
             param_error: None,
             config_list: ConfigList::default(),
+            display_list: DisplayList::default(),
             config_table: ConfigTable::default(),
             values_this_only: false,
             hovered_geom: None,
@@ -1640,6 +1644,34 @@ impl PeetApp {
         }
     }
 
+    /// Applies what the user did in the display states list.
+    fn apply_display(&mut self, actions: Vec<DisplayAction>) {
+        for action in actions {
+            let op = match action {
+                DisplayAction::Activate(id) => Op::DisplayState { state: id.into() },
+                DisplayAction::Add => Op::AddDisplayState {
+                    name: display_ui::new_name(&self.doc),
+                    configuration: None,
+                },
+                DisplayAction::Rename { id, to } => Op::EditDisplayState {
+                    state: id.into(),
+                    change: peet_ops::DisplayChange::Rename(to),
+                },
+                DisplayAction::Delete(id) => Op::EditDisplayState {
+                    state: id.into(),
+                    change: peet_ops::DisplayChange::Delete,
+                },
+                DisplayAction::Link(on) => Op::LinkDisplayStates { on },
+            };
+            let switched = matches!(op, Op::DisplayState { .. } | Op::AddDisplayState { .. });
+            if self.perform(op).ok && switched
+                && let Some(s) = self.doc.model.active_display_state()
+            {
+                self.info(format!("Display state {}", s.name));
+            }
+        }
+    }
+
     fn apply_tree(&mut self, actions: Vec<TreeAction>) {
         for action in actions {
             match action {
@@ -2526,6 +2558,10 @@ impl PeetApp {
                 self.close_sketch();
             }
             self.apply_configs(configs);
+        }
+        let display = display_ui::display_ui(ui, &self.doc, &mut self.display_list);
+        if !display.is_empty() {
+            self.apply_display(display);
         }
         ui.separator();
         if self.doc.is_assembly() {

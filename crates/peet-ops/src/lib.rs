@@ -47,6 +47,7 @@ mod args;
 mod assembly;
 mod cut;
 mod diff;
+mod display;
 mod equations;
 mod explode;
 mod export;
@@ -66,6 +67,7 @@ mod value;
 
 pub use assembly::{CompSel, ComponentChange, InsertSource, Placing, Point3};
 pub use diff::{Translation, apply_model, apply_model_scoped, diff, diff_scoped};
+pub use display::{DisplayChange, DisplayScope, DisplayStateSel, LookChange};
 pub use explode::{ExplodeChange, ExplodeSel};
 pub use export::export_bytes;
 pub use fields::{
@@ -144,6 +146,8 @@ struct Done {
     mate: Option<peet_model::MateId>,
     /// A step of the exploded view the operation was about.
     explode_step: Option<peet_model::ExplodeId>,
+    /// A display state the operation was about.
+    display_state: Option<peet_model::DisplayStateId>,
     /// A component pattern the operation was about, reported with its copies.
     pattern: Option<peet_model::PatternId>,
     /// An assembly cut the operation was about, reported with its status.
@@ -453,6 +457,7 @@ fn help() -> Map<String, Value> {
         .chain(mate::MATE_OPS.iter().map(|o| ("mate", o)))
         .chain(links::LINK_OPS.iter().map(|o| ("part", o)))
         .chain(explode::EXPLODE_OPS.iter().map(|o| ("explode_step", o)))
+        .chain(display::DISPLAY_OPS.iter().map(|o| ("display_state", o)))
         .chain(pattern::PATTERN_OPS.iter().map(|o| ("pattern", o)))
         .chain(cut::CUT_OPS.iter().map(|o| ("cut", o)))
     {
@@ -574,6 +579,7 @@ fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, V
         Query::Components => assembly::components(doc)?,
         Query::Mates => mate::mates(doc)?,
         Query::ExplodeSteps => explode::steps(doc)?,
+        Query::DisplayStates => display::states(doc)?,
     })
 }
 
@@ -790,6 +796,50 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             doc.set_explode(if on { 1.0 } else { 0.0 });
             done.data.insert("exploded".to_owned(), json!(on));
             return Ok(done);
+        }
+        Op::AddDisplayState {
+            name,
+            configuration,
+        } => {
+            let (id, label) = display::add(doc, &mut model, name, configuration.as_deref())?;
+            done.display_state = Some(id);
+            label
+        }
+        Op::EditDisplayState { state, change } => {
+            let id = state.resolve(doc)?;
+            let label = display::change(doc, &mut model, id, change)?;
+            if *change == display::DisplayChange::Delete {
+                done.data.insert(
+                    "deleted".to_owned(),
+                    json!([label.trim_start_matches("Delete ")]),
+                );
+            } else {
+                done.display_state = Some(id);
+            }
+            label
+        }
+        Op::DisplayState { state } => {
+            let id = state.resolve(doc)?;
+            done.changed = doc.activate_display_state(id);
+            done.display_state = Some(id);
+            return Ok(done);
+        }
+        Op::LinkDisplayStates { on } => {
+            if !model.link_display_states(*on) {
+                done.data.insert("linked".to_owned(), json!(*on));
+                return Ok(done);
+            }
+            done.data.insert("linked".to_owned(), json!(*on));
+            if *on { "Link Display States" } else { "Unlink Display States" }.to_owned()
+        }
+        Op::Look {
+            component,
+            change,
+            display_states,
+        } => {
+            let label = display::look(doc, &mut model, component, change, display_states)?;
+            done.component = Some(component.resolve(doc)?);
+            label
         }
         Op::ShowAll => {
             let (shown, label) = explode::show_all(doc, &mut model)?;
@@ -1738,6 +1788,9 @@ pub(crate) fn apply_with(
     }
     if let Some(id) = done.pattern {
         out.insert("pattern".to_owned(), pattern::pattern_out(doc, id));
+    }
+    if let Some(id) = done.display_state {
+        out.insert("display_state".to_owned(), display::state_out(doc, id));
     }
     if let Some(id) = done.explode_step {
         out.insert("explode_step".to_owned(), explode::step_out(doc, id));

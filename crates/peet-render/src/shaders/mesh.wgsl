@@ -12,6 +12,7 @@ struct MeshOut {
     @location(1) normal: vec3<f32>,
     @location(2) color: vec4<f32>,
     @location(3) tint: vec4<f32>,
+    @location(4) opacity: f32,
 };
 
 @vertex
@@ -25,6 +26,7 @@ fn vs_mesh(v: MeshIn, instance: InstanceIn) -> MeshOut {
     out.normal = (model * vec4<f32>(v.normal, 0.0)).xyz;
     out.color = v.color;
     out.tint = instance.tint;
+    out.opacity = instance_opacity(instance);
     return out;
 }
 
@@ -49,5 +51,6 @@ fn fs_mesh(in: MeshOut) -> @location(0) vec4<f32> {
     let specular = pow(max(dot(n, half_vec), 0.0), 48.0) * 0.18;
 
     let lit = base * (ambient + 0.68 * diffuse + 0.15 * fill) + vec3<f32>(specular);
-    return vec4<f32>(linear_to_srgb(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0))), 1.0);
+    // Opaque meshes are drawn unblended; a see-through one is blended by its opacity.
+    return vec4<f32>(linear_to_srgb(clamp(lit, vec3<f32>(0.0), vec3<f32>(1.0))), in.opacity);
 }

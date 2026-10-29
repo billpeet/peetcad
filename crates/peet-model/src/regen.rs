@@ -153,6 +153,12 @@ pub struct Instance {
     pub frame: Frame,
     /// The colour of the part the body belongs to.
     pub color: Option<[u8; 3]>,
+    /// How transparent it is drawn (0 opaque, 1 not seen): its component's, or, inside a
+    /// sub-assembly, the sub-assembly's component's if that has one.
+    pub transparency: f32,
+    /// Hidden inside a sub-assembly: a component below the first of `path` is hidden
+    /// there. (Whether the first is hidden is the assembly's own component's `visible`.)
+    pub hidden: bool,
 }
 
 /// The result of a rebuild.
@@ -1022,6 +1028,8 @@ impl Engine {
                     body: body.clone(),
                     frame: placement,
                     color: c.color.or(part.model.color),
+                    transparency: c.transparency,
+                    hidden: false,
                 });
             }
             // A sub-assembly's components: as one rigid thing, or for a flexible one
@@ -1036,6 +1044,17 @@ impl Engine {
                     body: inner.body.clone(),
                     frame: placement.compose(&posed.compose(&inner.frame)),
                     color: c.color.or(inner.color),
+                    transparency: if c.transparency > 0.0 {
+                        c.transparency
+                    } else {
+                        inner.transparency
+                    },
+                    hidden: inner.hidden
+                        || part
+                            .model
+                            .assembly()
+                            .and_then(|a| a.component(inner.path[0]))
+                            .is_some_and(|x| !x.visible),
                 });
             }
             let name = &part.model.name;

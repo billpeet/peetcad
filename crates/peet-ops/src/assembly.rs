@@ -264,6 +264,8 @@ pub enum ComponentChange {
     Replace(InsertSource),
     /// A colour of its own, or (`None`) its part's again.
     Color(Option<[u8; 3]>),
+    /// How see-through it is drawn: 0 opaque, 1 not seen at all.
+    Transparency(f32),
     /// Show its part in the configuration of the part called this (SolidWorks'
     /// referenced configuration), or (`None`) in whichever the part has active.
     Configuration(Option<String>),
@@ -281,6 +283,7 @@ impl ComponentChange {
             Self::Place(_) | Self::PlaceInner(..) => "place",
             Self::Replace(_) => "replace",
             Self::Color(_) => "set_color",
+            Self::Transparency(_) => "set_transparency",
             Self::Configuration(_) => "component_configuration",
             Self::Delete => "delete",
         }
@@ -332,13 +335,18 @@ pub(crate) const ASSEMBLY_OPS: &[(&str, &str, &str)] = &[
     ),
     (
         "show",
-        "component, on (default true)",
-        "Show or hide a component.",
+        "component, on (default true), display_states (left out: the one shown; \"all\", a name or a list of names)",
+        "Show or hide a component (in the display state shown, or in those named).",
     ),
     (
         "set_color",
-        "component, color (\"#rrggbb\" or [r, g, b]; null for its part's colour)",
-        "Give a component a colour of its own, in place of its part's.",
+        "component, color (\"#rrggbb\" or [r, g, b]; null for its part's colour), display_states (left out: the one shown; \"all\", a name or a list of names)",
+        "Give a component a colour of its own, in place of its part's (in the display state shown, or in those named).",
+    ),
+    (
+        "set_transparency",
+        "component, transparency (0 opaque to 1 not seen at all), display_states (left out: the one shown; \"all\", a name or a list of names)",
+        "Make a component see-through (in the display state shown, or in those named): what is behind it shows through, and clicking it picks what is behind (Shift-click picks it).",
     ),
     (
         "delete",
@@ -472,16 +480,12 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
             change(a, on)
         }
         "set_color" if a.has("component") => {
-            let color = match a.take_nullable("color") {
-                None => Err(
-                    "'set_color' needs a 'color' field (null for the part's colour).".to_owned(),
-                ),
-                Some(Value::Null) => Ok(None),
-                Some(v) => crate::library::color(&v)
-                    .map(Some)
-                    .map_err(|e| format!("color: {e}")),
-            };
+            let color = component_color(a);
             change(a, color.map(ComponentChange::Color))
+        }
+        "set_transparency" => {
+            let t = transparency(a);
+            change(a, t.map(ComponentChange::Transparency))
         }
         "show" if a.has("component") => {
             let on = a.flag("on", true).map(ComponentChange::Show);
@@ -489,6 +493,24 @@ pub(crate) fn parse(op: &str, a: &mut Args) -> Option<Result<Op, String>> {
         }
         "delete" if a.has("component") => change(a, Ok(ComponentChange::Delete)),
         _ => return None,
+    })
+}
+
+/// A component's `color` field: a colour, or (null) its part's.
+pub(crate) fn component_color(a: &mut Args) -> Result<Option<[u8; 3]>, String> {
+    match a.take_nullable("color") {
+        None => Err("'set_color' needs a 'color' field (null for the part's colour).".to_owned()),
+        Some(Value::Null) => Ok(None),
+        Some(v) => crate::library::color(&v)
+            .map(Some)
+            .map_err(|e| format!("color: {e}")),
+    }
+}
+
+/// A component's `transparency` field.
+pub(crate) fn transparency(a: &mut Args) -> Result<f32, String> {
+    a.required("transparency", |v| {
+        peet_model::transparency(crate::args::number(v)?)
     })
 }
 
@@ -515,6 +537,11 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
             | Op::Explode { .. }
             | Op::ShowAll
             | Op::Isolate { .. }
+            | Op::AddDisplayState { .. }
+            | Op::EditDisplayState { .. }
+            | Op::DisplayState { .. }
+            | Op::LinkDisplayStates { .. }
+            | Op::Look { .. }
             | Op::ComponentSuppression { .. }
             | Op::ReferenceDimension { .. }
             | Op::DeleteReference { .. }
@@ -523,6 +550,7 @@ pub(crate) fn wrong_kind(doc: &Document, op: &Op) -> Option<String> {
                 Query::Components
                     | Query::Mates
                     | Query::ExplodeSteps
+                    | Query::DisplayStates
                     | Query::Interference { .. }
                     | Query::Bom { .. }
             )
@@ -660,6 +688,12 @@ pub(crate) fn component_out(doc: &Document, id: CompId) -> Value {
     }
     if let Some(color) = c.color {
         m.insert("color".to_owned(), crate::library::color_out(color));
+    }
+    if c.transparency > 0.0 {
+        m.insert(
+            "transparency".to_owned(),
+            json!(crate::args::round(f64::from(c.transparency))),
+        );
     }
     // A copy made by a pattern, which places it.
     if let Some(pattern) = assembly.pattern_of(id) {
@@ -1089,6 +1123,7 @@ pub(crate) fn change(
             ComponentChange::Rename(_)
                 | ComponentChange::Show(_)
                 | ComponentChange::Color(_)
+                | ComponentChange::Transparency(_)
                 | ComponentChange::Flexible(_)
                 | ComponentChange::Replace(_)
                 | ComponentChange::Delete
@@ -1119,6 +1154,10 @@ pub(crate) fn change(
         ComponentChange::Color(color) => {
             assembly.component_mut(id).ok_or_else(gone)?.color = *color;
             format!("Colour {was}")
+        }
+        ComponentChange::Transparency(t) => {
+            assembly.component_mut(id).ok_or_else(gone)?.transparency = *t;
+            format!("Change Transparency of {was}")
         }
         ComponentChange::Flexible(on) => {
             let c = assembly.component_mut(id).ok_or_else(gone)?;

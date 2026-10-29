@@ -520,8 +520,46 @@ components and positions, and its own mate suppression and values.
   it back with the part's own active configuration. The application lists an assembly's
   configurations as a part's (with Add Derived Configuration), and a component's
   configuration is chosen in its properties.
-- Not done: display states (the export has none to import: see the parity document), a
-  configuration-specific colour.
+- A configuration-specific colour is a display state linked to configurations: see "Display
+  states".
+
+## Display states
+
+PeetCAD follows SolidWorks' display states: a named look of an assembly, each component
+shown or hidden, coloured and see-through (`peet-model/src/display_state.rs`, model
+schema 12).
+
+- **The components hold the display state shown**, as they hold the active configuration:
+  `Component::visible`, `color` and `transparency` are its look there, so drawing, picking
+  and every query see an ordinary assembly. Every other display state keeps the looks that
+  are not the default (shown, the part's colour, opaque); showing another swaps them.
+  `show`, `isolate`, `show_all`, `set_color` and the new `set_transparency` change the one
+  shown; with `display_states`, `show`, `set_color` and `set_transparency` change others.
+- **Linked or independent**, as SolidWorks' "Link display states to configurations":
+  linked, each display state belongs to a configuration and each configuration shows the one
+  it last showed (a configuration with none gets one when first shown); independent, every
+  configuration can show every one. Activating a configuration swaps the display state with
+  it (`Model::swap_display_states`); deleting a configuration deletes its display states.
+- **An assembly has none until one is added**, so assemblies made before keep their looks
+  as they are; after that a configuration (or, independent, the assembly) keeps at least
+  one, as SolidWorks does. Showing one is not an undo step, like showing a configuration.
+- Display states are an assembly's: SolidWorks' part display states hold body, feature and
+  face appearances, which PeetCAD's parts don't have (a part has one colour). The exporter
+  writes them (format 8) for a later look.
+- A display mode per component (wireframe, hidden lines) is not modelled: PeetCAD draws
+  every component shaded with edges.
+- A sub-assembly is drawn as its own document's display state shown has it (what is hidden
+  in it is hidden in the assembly too: `Instance::hidden`), where SolidWorks lets the
+  component choose the sub-assembly's display state (its referenced display state).
+- **Transparency is drawn blended**: the renderer draws see-through objects after the
+  opaque ones, farthest first (by the centre of their box), without writing depth, each
+  with its edges; within one object the triangles are not sorted. Picking looks through
+  them as SolidWorks does: in the pick pass the opaque objects' depths are put in the
+  nearer half of the depth range and the see-through ones' in the farther half, so what is
+  opaque behind a see-through component is picked, and a see-through one where nothing
+  opaque is; with Shift, whatever is nearest (`PickRequest::through_transparent`).
+- A file written by schema 12 before display states (no transparency, no display states)
+  is read as `ModelV12NoDisplayStates`.
 
 ## Assembly features
 

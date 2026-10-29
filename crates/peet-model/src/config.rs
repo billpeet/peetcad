@@ -817,6 +817,7 @@ impl Model {
             self.activate_configuration(next);
         }
         self.configurations.list.retain(|c| !gone.contains(&c.id));
+        self.forget_display_states();
         self.tidy_configurations();
         Ok(())
     }
@@ -864,6 +865,7 @@ impl Model {
         }
         self.configurations.values = values;
         self.swap_assembly(old, id);
+        self.swap_display_states(old, id);
         self.configurations.active = id;
         self.refresh_dimension_values();
         true

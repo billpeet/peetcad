@@ -283,6 +283,8 @@ impl Viewport {
                         0.0
                     },
                     pick_object: Some(i as u32),
+                    // A component's transparency, from the display state shown.
+                    opacity: 1.0 - placed.transparency.clamp(0.0, 1.0),
                 }
             })
             .collect();
@@ -309,9 +311,13 @@ impl Viewport {
             .hover_pos()
             .filter(|_| self.active_drag.is_none())
             .map(|p| [(p.x - rect.left()) * ppp, (p.y - rect.top()) * ppp]);
+        // As in SolidWorks, what is opaque is picked through a see-through component;
+        // with Shift held, the see-through component itself.
+        let through_transparent = !ui.input(|i| i.modifiers.shift);
         let pick = cursor_px.map(|c| peet_render::PickRequest {
             cursor_px: c,
             radius_px: 6.0 * ppp,
+            through_transparent,
         });
         if cursor_px.is_none() {
             self.hovered_geom = None;
@@ -813,9 +819,12 @@ impl Viewport {
                     &body.silhouettes().lines(local)[..]
                 }
             };
+            // A see-through component's silhouette is as see-through as it is.
+            let mut color = edge_color;
+            color[3] = ((1.0 - placed.transparency.clamp(0.0, 1.0)) * 255.0).round() as u8;
             for [a, b] in lines {
                 self.overlay
-                    .line(frame.to_world(*a), frame.to_world(*b), edge_color);
+                    .line(frame.to_world(*a), frame.to_world(*b), color);
             }
         }
         // Bend lines on both sides of flat patterns, dashed.

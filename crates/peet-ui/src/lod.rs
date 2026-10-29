@@ -73,7 +73,7 @@ pub fn body_infos(doc: &Document) -> Vec<BodyInfo> {
         .map(|(body, placed)| BodyInfo {
             key: body.stamp ^ crate::bodies::color_key(placed.color),
             bounds: body.bounds(),
-            hidden: placed.component().is_some_and(|c| hidden.contains(&c)),
+            hidden: placed.hidden || placed.component().is_some_and(|c| hidden.contains(&c)),
         })
         .collect()
 }

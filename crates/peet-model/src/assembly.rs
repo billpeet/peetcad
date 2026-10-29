@@ -198,6 +198,10 @@ pub struct Component {
     /// one of the definition's model's. `None`: the one that model has active. Two
     /// components of one part can show different configurations. Model schema 12.
     pub configuration: Option<crate::ConfigId>,
+    /// How much of what is behind it shows through: 0 opaque, 1 not seen at all. Like
+    /// `visible` and `color`, its value in the display state shown now (see
+    /// [`crate::DisplayState`]); a sub-assembly's goes for everything in it. Model schema 12.
+    pub transparency: f32,
 }
 
 /// Where a component inside a flexible sub-assembly is: its path below the
@@ -253,6 +257,7 @@ impl From<ComponentV11> for Arc<Component> {
             flexible: false,
             poses: Vec::new(),
             configuration: None,
+            transparency: 0.0,
         })
     }
 }
@@ -623,6 +628,9 @@ pub struct Assembly {
     cuts: Vec<Arc<crate::asm_cut::AssemblyCut>>,
     #[serde(default)]
     next_cut: u32,
+    /// The display states (model schema 12; see [`crate::DisplayState`]).
+    #[serde(default)]
+    pub(crate) display: crate::DisplayStates,
 }
 
 /// The assembly layout in schemas 8 through 10, with their feature layouts in definitions.
@@ -714,6 +722,151 @@ impl From<AssemblyV11> for Assembly {
             varying: Default::default(),
             cuts: Vec::new(),
             next_cut: 0,
+            display: Default::default(),
+        }
+    }
+}
+
+/// A component as model schema 12 held it before display states: no transparency.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct ComponentV12NoDisplayStates {
+    id: CompId,
+    name: String,
+    definition: DefId,
+    placement: Frame,
+    fixed: bool,
+    visible: bool,
+    suppressed: bool,
+    color: Option<[u8; 3]>,
+    pattern: Option<PatternId>,
+    flexible: bool,
+    poses: Vec<Pose>,
+    configuration: Option<crate::ConfigId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct DefinitionV12NoDisplayStates {
+    id: DefId,
+    model: crate::model::ModelV12NoDisplayStates,
+    link: Option<Link>,
+}
+
+/// The assembly layout of model schema 12 before display states: today's, without them,
+/// with components without transparency and parts (and sub-assemblies) of that layout.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct AssemblyV12NoDisplayStates {
+    definitions: Vec<DefinitionV12NoDisplayStates>,
+    components: Vec<ComponentV12NoDisplayStates>,
+    next_definition: u32,
+    next_component: u32,
+    mates: Vec<Arc<Mate>>,
+    next_mate: u32,
+    explode: Vec<Arc<ExplodeStep>>,
+    next_explode: u32,
+    patterns: Vec<Arc<ComponentPattern>>,
+    next_pattern: u32,
+    equations: Vec<crate::equations::Equation>,
+    references: Vec<Arc<crate::equations::ReferenceDimension>>,
+    varying: crate::asm_config::Varying,
+    cuts: Vec<Arc<crate::asm_cut::AssemblyCut>>,
+    next_cut: u32,
+}
+
+impl AssemblyV12NoDisplayStates {
+    pub(crate) fn of(a: &Assembly) -> Self {
+        Self {
+            definitions: a
+                .definitions()
+                .map(|d| DefinitionV12NoDisplayStates {
+                    id: d.id,
+                    model: crate::model::ModelV12NoDisplayStates::of(&d.model),
+                    link: d.link.clone(),
+                })
+                .collect(),
+            components: a
+                .components
+                .iter()
+                .map(|c| ComponentV12NoDisplayStates {
+                    id: c.id,
+                    name: c.name.clone(),
+                    definition: c.definition,
+                    placement: c.placement,
+                    fixed: c.fixed,
+                    visible: c.visible,
+                    suppressed: c.suppressed,
+                    color: c.color,
+                    pattern: c.pattern,
+                    flexible: c.flexible,
+                    poses: c.poses.clone(),
+                    configuration: c.configuration,
+                })
+                .collect(),
+            next_definition: a.next_definition,
+            next_component: a.next_component,
+            mates: a.mates.clone(),
+            next_mate: a.next_mate,
+            explode: a.explode.clone(),
+            next_explode: a.next_explode,
+            patterns: a.patterns.clone(),
+            next_pattern: a.next_pattern,
+            equations: a.equations.clone(),
+            references: a.references.clone(),
+            varying: a.varying.clone(),
+            cuts: a.cuts.clone(),
+            next_cut: a.next_cut,
+        }
+    }
+}
+
+impl From<AssemblyV12NoDisplayStates> for Assembly {
+    fn from(a: AssemblyV12NoDisplayStates) -> Self {
+        Self {
+            definitions: a
+                .definitions
+                .into_iter()
+                .map(|d| {
+                    Arc::new(Definition {
+                        id: d.id,
+                        model: Arc::new(d.model.into()),
+                        link: d.link,
+                    })
+                })
+                .collect(),
+            components: a
+                .components
+                .into_iter()
+                .map(|c| {
+                    Arc::new(Component {
+                        id: c.id,
+                        name: c.name,
+                        definition: c.definition,
+                        placement: c.placement,
+                        fixed: c.fixed,
+                        visible: c.visible,
+                        suppressed: c.suppressed,
+                        color: c.color,
+                        pattern: c.pattern,
+                        flexible: c.flexible,
+                        poses: c.poses,
+                        configuration: c.configuration,
+                        transparency: 0.0,
+                    })
+                })
+                .collect(),
+            next_definition: a.next_definition,
+            next_component: a.next_component,
+            mates: a.mates,
+            next_mate: a.next_mate,
+            explode: a.explode,
+            next_explode: a.next_explode,
+            patterns: a.patterns,
+            next_pattern: a.next_pattern,
+            equations: a.equations,
+            references: a.references,
+            varying: a.varying,
+            cuts: a.cuts,
+            next_cut: a.next_cut,
+            display: Default::default(),
         }
     }
 }
@@ -777,6 +930,7 @@ impl<F: Into<crate::Feature>> From<AssemblyLegacy<F>> for Assembly {
             varying: Default::default(),
             cuts: Vec::new(),
             next_cut: 0,
+            display: Default::default(),
         }
     }
 }
@@ -999,6 +1153,7 @@ impl Assembly {
             flexible: false,
             poses: Vec::new(),
             configuration: None,
+            transparency: 0.0,
         }));
         Some(id)
     }
@@ -1210,6 +1365,9 @@ impl Assembly {
         self.mates
             .retain(|m| !m.ends().any(|e| e.component() == Some(id)));
         self.varying.forget(&self.components, &self.mates);
+        let components = &self.components;
+        self.display
+            .forget(|c| components.iter().any(|x| x.id == c));
         self.equations.retain(|e| e.target.component() != id);
         self.references
             .retain(|r| r.a.component() != Some(id) && r.b.component() != Some(id));
