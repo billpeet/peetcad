@@ -655,6 +655,7 @@ impl Document {
                     .map(|first| first.to_uppercase().chain(c).collect())
                     .unwrap_or(d)
             }
+            peet_model::PlaneRef::External(x) => format!("-> {}", x.describe()),
         }
     }
 

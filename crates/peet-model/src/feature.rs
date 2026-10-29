@@ -199,6 +199,10 @@ pub enum PlaneRef {
     Feature(FeatureId),
     /// A planar face of a body.
     Face(FaceRef),
+    /// A flat face or plane of another component in an assembly the part is used in
+    /// (SolidWorks' in-context sketch plane, plane or "up to" end condition): where it last
+    /// was, which its context assembly updates (see [`crate::in_context`]). Model schema 12.
+    External(Box<crate::in_context::External>),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -872,7 +876,9 @@ impl FormFeature {
 
 /// Text dumps from older versions stored counts as integers. The binary layout uses
 /// the schema-specific migrations; current text also accepts the scalar representation.
-pub(crate) fn deserialize_pattern_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Scalar, D::Error> {
+pub(crate) fn deserialize_pattern_count<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Scalar, D::Error> {
     if !d.is_human_readable() {
         return Scalar::deserialize(d);
     }
@@ -941,7 +947,7 @@ impl PatternBound {
         match self {
             Self::Plane(PlaneRef::Feature(id)) => out.push(*id),
             Self::Plane(PlaneRef::Face(f)) => out.extend(f.name.features()),
-            Self::Plane(PlaneRef::Standard(_)) => {}
+            Self::Plane(PlaneRef::Standard(_) | PlaneRef::External(_)) => {}
             Self::Point(p) => point_deps(p, out),
         }
     }
@@ -1755,6 +1761,34 @@ macro_rules! slots {
     };
 }
 
+macro_rules! plane_refs {
+    ($(#[$doc:meta])* $name:ident $(, $m:tt)?) => {
+        $(#[$doc])*
+        pub fn $name(& $($m)? self) -> Vec<(&'static str, & $($m)? PlaneRef)> {
+            match self {
+                Self::Sketch(s) => vec![("sketch_plane", & $($m)? s.plane)],
+                Self::Extrude(e) => match & $($m)? e.params.end {
+                    crate::EndCondition::UpTo(p) => vec![("up_to", p)],
+                    _ => Vec::new(),
+                },
+                Self::Plane(PlaneDef::Offset { from, .. } | PlaneDef::Angled { from, .. }) => {
+                    vec![("plane", from)]
+                }
+                Self::Plane(PlaneDef::Midplane { a, b }) | Self::Axis(AxisDef::TwoPlanes(a, b)) => {
+                    vec![("plane", a), ("plane", b)]
+                }
+                Self::CoordSystem(def) => vec![("orientation", & $($m)? def.orientation)],
+                Self::Mirror(mirror) => vec![("mirror_plane", & $($m)? mirror.plane)],
+                Self::Draft(d) => match & $($m)? d.neutral {
+                    Some(p) => vec![("neutral_plane", p)],
+                    None => Vec::new(),
+                },
+                _ => Vec::new(),
+            }
+        }
+    };
+}
+
 impl FeatureKind {
     slots! {
         /// The feature's numeric values (those of [`FeatureKind::scalars`]), each with
@@ -1767,11 +1801,22 @@ impl FeatureKind {
         /// [`FeatureKind::slots`], for changing the values.
         slots_mut, mut
     }
+    plane_refs! {
+        /// The planes the feature is placed on or measured from, each with what it is to
+        /// the feature: `sketch_plane`, `plane` (what a reference plane or axis is made
+        /// from), `up_to` (an extrusion's end), `orientation` (a coordinate system's),
+        /// `mirror_plane` or `neutral_plane`. Where an in-context plane can be.
+        plane_refs
+    }
+    plane_refs! {
+        /// [`FeatureKind::plane_refs`], for changing them.
+        plane_refs_mut, mut
+    }
 }
 
 fn plane_deps(r: &PlaneRef, out: &mut Vec<FeatureId>) {
     match r {
-        PlaneRef::Standard(_) => {}
+        PlaneRef::Standard(_) | PlaneRef::External(_) => {}
         PlaneRef::Feature(id) => out.push(*id),
         PlaneRef::Face(f) => out.extend(f.name.features()),
     }

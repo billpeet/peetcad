@@ -1843,6 +1843,37 @@ function importPart(doc, dir) {
    * A slot from the hole wizard, which PeetCAD's hole does not make: a sheet metal cut of a slot shape, read
    * off the two round ends the slot has in SolidWorks' body.
    */
+  /**
+   * A hole wizard's positions made in an assembly (format 7): a point coincident with another component's round
+   * face (the hidden copy SolidWorks keeps is a point, where the face's axis meets the sketch). The positions are
+   * drawn without relations: the copy is drawn fixed where SolidWorks has it, with the hole's point on it, and the
+   * assembly's import makes the copy follow that face (`in_context`).
+   */
+  function holeInContext(where, sketchName, toPeet) {
+    const listed = context.relations.get(where.name);
+    if (!listed || !toPeet || !where.sketch.relations) return;
+    const own = new Set(where.sketch.points.map(p => (p.id || []).join(".")));
+    let drawn = null;
+    for (const index of listed) {
+      const r = where.sketch.relations[index];
+      if (!r || r.type !== "coincident") continue;
+      const points = (r.entities || []).filter(e => e && e.kind === "sketchPoint" && e.x !== undefined);
+      const mine = points.find(e => own.has((e.id || []).join("."))), hidden = points.find(e => !own.has((e.id || []).join(".")));
+      if (!mine || !hidden) continue;
+      drawn = drawn || (peet.ask({ op: "feature", feature: sketchName }).entities || []);
+      const at = toPeet(mine);
+      const point = drawn.find(x => x.type === "point" && x.at && Math.hypot(x.at[0] - at[0], x.at[1] - at[1]) < 1e-4);
+      if (!point) continue;
+      // The copy, fixed where SolidWorks has it, and the hole's point on it (the hole's points are its free points)
+      const as = "ic" + index;
+      const reply = peet.apply({ op: "draw", sketch: sketchName, draw: [{ type: "point", at: toPeet(hidden), construction: true, as }, { type: "fix", of: [as] }, { type: "coincident", of: [point.id, as] }] });
+      const made = reply.ok && (reply.drawn || [])[0];
+      if (!made || made.id === undefined) continue;
+      report.inContext = report.inContext || [];
+      report.inContext.push({ sketch: where.name, peetSketch: sketchName, relation: index, hidden: (hidden.id || []).join("."), entity: made.id, type: "point" });
+    }
+  }
+
   function slots(f) {
     if (!sheetBody()) return record(f, "not supported", "a slot from the hole wizard, in a part that is not sheet metal");
     // From the hole wizard's own sketch: a line from tip to tip for each slot, the slot's length long, drawn
@@ -3737,7 +3768,8 @@ function importPart(doc, dir) {
           if (!built.ok) peet.apply({ op: "delete", feature: sk.name });
           return finish(f, built);
         }
-        const sk = importSketch(where, { name: f.name + " sketch", draw: toPeet => points.map(p => ({ type: "point", at: toPeet(p) })) });
+        let seen = null;
+        const sk = importSketch(where, { name: f.name + " sketch", draw: toPeet => { seen = toPeet; return points.map(p => ({ type: "point", at: toPeet(p) })); } });
         if (sk.error) return record(f, "failed", sk.error);
         let built;
         for (const reverse of [false, true]) {
@@ -3745,6 +3777,7 @@ function importPart(doc, dir) {
           if (built.ok) break;
         }
         if (!built.ok) peet.apply({ op: "delete", feature: sk.name });
+        else holeInContext(where, sk.name, seen);
         return finish(f, built);
       }
 

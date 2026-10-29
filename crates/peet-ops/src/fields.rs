@@ -389,6 +389,7 @@ fn plane_out(r: &PlaneRef, doc: &Document) -> Value {
         PlaneRef::Standard(StdPlane::Right) => json!("right"),
         PlaneRef::Feature(id) => json!(doc.model.name_of(*id)),
         PlaneRef::Face(f) => face_out(f, doc),
+        PlaneRef::External(x) => json!({ "in_context": x.describe() }),
     }
 }
 

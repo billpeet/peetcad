@@ -32,6 +32,7 @@ use crate::viewport::{Viewport, ViewportParams};
 
 mod assembly;
 mod convert;
+mod in_context;
 #[cfg(not(target_arch = "wasm32"))]
 mod live;
 mod names;
@@ -151,6 +152,9 @@ pub struct PeetApp {
     /// In an assembly: the selected component, and the one under the cursor this frame.
     selected_component: Option<peet_model::CompId>,
     hovered_component: Option<peet_model::CompId>,
+    /// In an assembly: the component whose part is edited in context (SolidWorks' Edit
+    /// Part): it stays highlighted, and what is picked on the others can be followed.
+    in_context: Option<peet_model::CompId>,
     /// A component's name while it is being typed in its properties.
     component_name: Option<(peet_model::CompId, String)>,
     /// In an assembly: the selected mate.
@@ -244,6 +248,7 @@ impl PeetApp {
             doc: Session::default(),
             selected_component: None,
             hovered_component: None,
+            in_context: None,
             component_name: None,
             selected_mate: None,
             selected_explode: None,
@@ -358,6 +363,7 @@ impl PeetApp {
         self.initial_fit_done = false;
         self.selected_component = None;
         self.hovered_component = None;
+        self.in_context = None;
         self.component_name = None;
         self.geometry_name_editor = names::NameEditor::default();
         self.selected_mate = None;
@@ -1220,6 +1226,17 @@ impl PeetApp {
             CommandId::EditComponent | CommandId::IsolateComponent | CommandId::AddExplodeStep => {
                 enabled(self.selected_component().is_some())
             }
+            // A part's component (not a sub-assembly's), or again to stop.
+            CommandId::EditInContext => enabled(
+                self.in_context_component().is_some()
+                    || self.selected_component().is_some_and(|id| {
+                        self.doc
+                            .model
+                            .assembly()
+                            .and_then(|a| a.definition_of(id))
+                            .is_some_and(|d| !d.model.is_assembly())
+                    }),
+            ),
             // A copy a pattern made is not patterned itself.
             CommandId::LinearComponentPattern => {
                 enabled(self.selected_component().is_some_and(|id| {
@@ -1454,6 +1471,7 @@ impl PeetApp {
             CommandId::InsertLinkedComponent => self.start_insert_component(true),
             CommandId::UpdateLinks => self.update_links(),
             CommandId::EditComponent => self.open_selected_component(),
+            CommandId::EditInContext => self.edit_in_context(),
             CommandId::ShowAllComponents => {
                 self.perform(peet_ops::Op::ShowAll);
             }
@@ -1931,6 +1949,7 @@ impl PeetApp {
                                     Large,
                                 );
                                 tool(ui, pending, CommandId::EditComponent, "Edit Part", Large);
+                                tool(ui, pending, CommandId::EditInContext, "In Context", Large);
                                 ribbon::stack(ui, |ui| {
                                     tool(
                                         ui,
@@ -2601,6 +2620,10 @@ impl PeetApp {
         }
         ui.strong("Properties");
         ui.separator();
+        if let Some(id) = self.in_context_component() {
+            egui::ScrollArea::vertical().show(ui, |ui| self.in_context_properties(ui, id));
+            return;
+        }
         if let Some(id) = self.selected_mate() {
             egui::ScrollArea::vertical().show(ui, |ui| self.mate_properties(ui, id));
             return;
@@ -3849,6 +3872,8 @@ impl eframe::App for PeetApp {
         let mut component_drag = None;
         let mut flange_edit = None;
         let mut sketch_plane_click = None;
+        // Editing a part in context, its component stays highlighted.
+        let highlighted = self.in_context_component().or(self.selected_component);
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let (Some(viewport), Some(render_state)) = (&mut self.viewport, &self.render_state) else {
                 ui.centered_and_justified(|ui| {
@@ -3869,7 +3894,7 @@ impl eframe::App for PeetApp {
                     hovered_geom: if self.sketch.is_some() { None } else { self.hovered_geom },
                     selected_geom: &self.selected_geom,
                     show_std_planes: self.picking_sketch_plane,
-                    selected_component: self.selected_component,
+                    selected_component: highlighted,
                     hovered_component: self.hovered_component,
                 },
             );

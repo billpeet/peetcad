@@ -500,6 +500,9 @@ pub enum PlaneSel {
     Standard(StdPlane),
     Feature(FeatureSel),
     Face(FaceSel),
+    /// Another component's, in an assembly: an in-context plane as the feature has it
+    /// (made by `in_context`).
+    External(Box<peet_model::in_context::External>),
 }
 
 impl From<StdPlane> for PlaneSel {
@@ -520,6 +523,7 @@ impl From<PlaneRef> for PlaneSel {
             PlaneRef::Standard(p) => Self::Standard(p),
             PlaneRef::Feature(id) => Self::Feature(FeatureSel::Id(id)),
             PlaneRef::Face(f) => Self::Face(FaceSel::Ref(f)),
+            PlaneRef::External(x) => Self::External(x),
         }
     }
 }

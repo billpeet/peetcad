@@ -640,45 +640,194 @@ function contextEnd(entity, byPath, assembly, partFile) {
  * the relation's hidden copy as a fixed entity of the sketch where SolidWorks last had it (the part's report's
  * `inContext`); here it is made to follow what it refers to (`in_context`), which PeetCAD works out at every
  * rebuild of the assembly, after the mates, in the part's coordinates. The rows go in `report.inContext`.
+ *
+ * As SolidWorks has each reference (the feature's `references`: the assembly it was made in, the instance, its
+ * status): one made in another assembly is out of context here, a broken one stays where it is, one made in another
+ * instance of the part follows there, one made in the sub-assembly the part is in follows when that sub-assembly
+ * rebuilds (as its own import has it). What a relation refers to is another component's entity, or the assembly's
+ * own plane ("Front Plane of <the assembly>"). A copy is found by its hidden entity, which several relations can
+ * share.
  */
 function importInContext(peet, cfg, report, byPath, name) {
   const list = cfg.inContext || [];
   if (!list.length) return;
   const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partOf(comp).view || null : null;
+  const key = s => String(s || "").trim().toLowerCase();
+  const swName = s => String(s || "").replace(/<(\d+)>/g, "-$1");
+  const stem = f => path.win32.basename(String(f || "")).replace(/\.sldasm$/i, "");
+  // SolidWorks' external references of a feature: the assembly it was made in (its context), what it refers to
+  // ("Edge of Hinge Assembly<1>/HingeFemale<1>"), the instance it was made in and how it stands
+  const refsOf = ft => (ft.references || []).map(r => {
+    const m = /^(.*?) of (.*)$/.exec(String(r.entity || ""));
+    return { context: stem(r.model), type: String(r.dataType || "").trim(), what: m ? m[1] : "", on: swName(m ? m[2] : ""), made: swName(r.featureComponent || ""), status: r.statusName || "" };
+  });
   report.inContext = [];
+  // The entities already made to follow, by component, sketch and entity: a copy several relations share
+  const following = new Map();
   for (const ic of list) {
+    const pathOf = ic.component.split("/");
+    const top = byPath.get(pathOf[0]);
     const comp = byPath.get(ic.component);
     const pr = partReport(ic.file || (comp && comp.file) || "");
-    const inserted = (report.components.find(c => c.component === ic.component) || {}).result === "inserted";
+    const inserted = (report.components.find(c => c.component === pathOf[0]) || {}).result === "inserted";
     for (const ft of ic.features || []) {
+      const refs = refsOf(ft);
+      // The references the relations that name their other component's entity are: what is left is what the
+      // others (which name none) refer to
+      // (A reference names the component by its path in its context; a relation's entity by its path here)
+      const onIt = (ref, component) => key(ref.on) === key(component) || (!ref.on.includes("/") && key(ref.on) === key(component.split("/").pop()));
+      const named = ref => (ft.relations || []).some(r => [...(r.entities || []), ...(r.definitionEntities || [])].some(e => e && e.component && e.component !== ic.component && onIt(ref, e.component)));
+      const unclaimed = refs.filter(x => x.type !== "Sketch Plane" && !named(x));
+      if (inserted && pathOf.length === 1) sketchPlaneInContext(peet, ic, ft, refs, byPath, name, partFile, pr, report);
       for (const r of ft.relations || []) {
         const row = { component: ic.component, feature: ft.name, relation: r.index, type: r.type, ...(ic.handMade ? { handMade: true } : {}) };
         report.inContext.push(row);
-        if (ic.component.includes("/")) { row.result = "not supported"; row.why = "the in-context part is inside a sub-assembly: PeetCAD's in-context parts are the assembly's own components"; continue; }
-        if (!comp || !inserted) { row.result = "left out"; row.why = "its component was left out"; continue; }
-        // What it refers to: the entities on another component. SolidWorks lists every relation of an in-context
-        // sketch; one that ties only the part's own geometry is the part's, imported with it
-        const targets = [...(r.entities || []), ...(r.definitionEntities || [])].filter(e => e && e.component && e.component !== ic.component);
-        const anyEntity = [...(r.entities || []), ...(r.definitionEntities || [])].some(e => e);
-        const frozen = ((pr && pr.inContext) || []).filter(x => x.sketch === ft.name && x.relation === r.index);
-        if (!targets.length && !frozen.length && anyEntity) { row.result = "the part's own"; row.why = "it ties only the part's own geometry: imported with the part"; continue; }
+        const all = [...(r.entities || []), ...(r.definitionEntities || [])].filter(Boolean);
+        // What it refers to: the entities on another component, and the assembly's own planes (SolidWorks lists
+        // them as "Front Plane of <the assembly>")
+        const targets = all.filter(e => e.component && e.component !== ic.component);
+        const planes = all.filter(e => !e.component && e.kind === "feature" && e.type === "RefPlane" && refs.some(x => key(x.what) === key(e.name) && key(x.on) === key(x.context)));
+        // The part's import's fixed copies of what it refers to (SolidWorks' hidden entities of the sketch), by the
+        // hidden entity's id: one copy can serve several relations
+        // (SolidWorks numbers points, lines and arcs apart: a line and an arc can have one id)
+        const sort = t => t === "point" || t === "sketchPoint" ? "p" : t === "line" ? "l" : "a";
+        const ids = new Set(all.filter(e => e.sketch === ft.name && e.id).map(e => sort(e.kind === "sketchPoint" ? "point" : e.type) + e.id.join(".")));
+        const copies = (pr && pr.inContext) || [];
+        let frozen = copies.filter(x => x.sketch === ft.name && ids.has(sort(x.type) + x.hidden));
+        if (!frozen.length) frozen = copies.filter(x => x.sketch === ft.name && x.relation === r.index);
+        frozen = frozen.filter((x, i) => frozen.findIndex(y => y.entity === x.entity && y.peetSketch === x.peetSketch) === i);
+        if (!targets.length && !planes.length && !frozen.length) { row.result = "the part's own"; row.why = "it ties only the part's own geometry: imported with the part"; continue; }
+        // The external reference this relation is: the one on the component (or the assembly) it refers to
+
+        const same = list => list.length && list.every(x => key(x.context) === key(list[0].context) && x.status === list[0].status && key(x.made) === key(list[0].made));
+        const ref = refs.find(x => x.type !== "Sketch Plane" && targets.some(e => onIt(x, e.component)))
+          || (planes.length ? refs.find(x => key(x.on) === key(x.context)) : null)
+          || (!targets.length && same(unclaimed) ? unclaimed[0] : null)
+          || refs.find(x => x.type !== "Sketch Plane") || refs[0];
+        if (ref) Object.assign(row, { context: ref.context, status: ref.status });
+        if (!comp && !top) { row.result = "left out"; row.why = "its component is not in the assembly"; continue; }
+        if (!inserted) { row.result = "left out"; row.why = "its component was left out"; continue; }
+        const sub = pathOf.length > 1 && top && /\.sldasm$/i.test(top.file || "") ? stem(top.file) : null;
+        // Made in the sub-assembly the part is in: it follows when the sub-assembly rebuilds, as its own import has
+        // it (PeetCAD rebuilds a sub-assembly, and its in-context parts, before the assembly it is in)
+        if (sub && ref && key(ref.context) === key(sub)) {
+          const made = subs.get(String(top.file).toLowerCase());
+          const theirs = made && made.report && (made.report.inContext || []).find(x => x.component === pathOf.slice(1).join("/") && x.feature === ft.name && x.relation === r.index);
+          if (!theirs) { row.result = "left out"; row.why = `made in ${sub}, the sub-assembly it is in, whose import has no row for it`; continue; }
+          row.result = theirs.result; row.inSubAssembly = sub;
+          row.why = `made in ${sub}, the sub-assembly it is in: ${theirs.result} there${theirs.why ? " (" + theirs.why + ")" : ""}`;
+          if (theirs.follows) row.follows = theirs.follows;
+          if (theirs.result === "imported") {
+            const listed = peet.ask({ op: "external_references", component: pathOf });
+            const statuses = ((listed && listed.references) || []).filter(x => x.feature === (frozen[0] && frozen[0].peetSketch || ft.name) || x.sketch === ft.name).map(x => x.status);
+            if (statuses.length && !statuses.every(s => s === "in_context")) { row.result = "failed"; row.why = `made in ${sub}: here its status is ${[...new Set(statuses)].join(", ")}`; }
+          }
+          continue;
+        }
+        // Made in another assembly: SolidWorks keeps it out of context here, where it last was, as the part's
+        // import has it
+        if (ref && ref.context && key(ref.context) !== key(name)) {
+          row.result = "out of context"; row.why = `made in ${ref.context}${ref.status === "Broken" ? ", and broken" : ""}: SolidWorks keeps it where it last was here, as the part's import has it`;
+          continue;
+        }
+        if (ref && ref.status === "Broken") { row.result = "broken"; row.why = "SolidWorks has the reference broken: plain fixed geometry, as the part's import has it"; continue; }
+        // Made in another instance of the part: it follows that one
+        const leaf = key(pathOf[pathOf.length - 1]);
+        if (ref && ref.made && key(ref.made) !== leaf) {
+          row.result = "another instance's"; row.why = `made in ${ref.made}: it follows there, and this instance shows the part as that one leaves it`;
+          continue;
+        }
         if (!frozen.length) { row.result = "left out"; row.why = "the part's import has no fixed copy of what it refers to (the relation was imported to the part's own geometry, or dropped)"; continue; }
-        if (!targets.length) { row.result = "left out"; row.why = "the export names no entity of another component for it"; continue; }
-        if (targets.length !== frozen.length) { row.result = "left out"; row.why = `${targets.length} entities of other components for ${frozen.length} copies in the part`; continue; }
+        const ends = [];
+        for (const e of targets) ends.push(contextEnd(e, byPath, name, partFile));
+        for (const e of planes) ends.push(STANDARD_PLANES[e.name] ? { plane: STANDARD_PLANES[e.name] } : { error: `the assembly's own reference plane ${e.name}, which PeetCAD's assemblies don't have` });
+        if (!ends.length) { row.result = "left out"; row.why = "the export names no entity of another component for it"; continue; }
+        if (ends.length !== frozen.length) { row.result = "left out"; row.why = `${ends.length} entities of other components for ${frozen.length} copies in the part`; continue; }
         row.follows = [];
         for (let i = 0; i < frozen.length; i++) {
-          const end = contextEnd(targets[i], byPath, name, partFile);
+          const end = ends[i];
           if (end.error) { row.result = "failed"; row.why = end.error; break; }
           const { element, sign, guessed, note, ...from } = end;
-          const reply = peet.apply({ op: "in_context", component: ic.component, sketch: frozen[i].peetSketch || ft.name, entity: frozen[i].entity, from });
+          const sketch = frozen[i].peetSketch || ft.name;
+          const done = following.get([ic.component, sketch, frozen[i].entity].join("|"));
+          const who = (targets[i] && targets[i].component) || "the assembly";
+          if (done) { row.follows.push({ component: who, status: done.status, note: `the same copy as relation ${done.relation}` }); row.result = "imported"; continue; }
+          const reply = peet.apply({ op: "in_context", component: pathOf.length > 1 ? pathOf : ic.component, sketch, entity: frozen[i].entity, from });
           if (!reply.ok) { row.result = "failed"; row.why = reply.error; break; }
           const status = reply.in_context && reply.in_context.status;
-          row.follows.push({ component: targets[i].component, status, ...(note ? { note } : {}) });
+          row.follows.push({ component: who, status, ...(note ? { note } : {}) });
           if (status !== "in_context") { row.result = "failed"; row.why = (reply.in_context && reply.in_context.why) || status; break; }
+          following.set([ic.component, sketch, frozen[i].entity].join("|"), { status, relation: r.index });
           row.result = "imported";
+          if (ref && ref.status === "Locked") peet.apply({ op: "lock_references", component: pathOf.length > 1 ? pathOf : ic.component, feature: sketch });
         }
       }
     }
+  }
+}
+
+/**
+ * A sketch SolidWorks has on another component's face (its external reference "Sketch Plane: Component of …",
+ * which names the component but not the face): the face of that component's part in the sketch's plane, which the
+ * sketch's plane then follows (`in_context` with `feature`). Rows go in `report.inContextPlanes`.
+ */
+function sketchPlaneInContext(peet, ic, ft, refs, byPath, name, partFile, pr, report) {
+  const key = s => String(s || "").trim().toLowerCase();
+  const plane = refs.find(x => x.type === "Sketch Plane");
+  if (!plane || !ft.modelToSketch) return;
+  const row = { component: ic.component, feature: ft.name, use: "sketch_plane", on: plane.on, context: plane.context, status: plane.status };
+  (report.inContextPlanes = report.inContextPlanes || []).push(row);
+  if (key(plane.context) !== key(name)) { row.result = "out of context"; row.why = `made in ${plane.context}: SolidWorks keeps it where it last was here, as the part's import has it`; return; }
+  if (plane.status === "Broken") { row.result = "broken"; row.why = "SolidWorks has the reference broken: the sketch stays where the part's import has it"; return; }
+  const target = byPath.get(plane.on), own = byPath.get(ic.component);
+  const file = target && partFile(target);
+  if (!target || !own || !file) { row.result = "failed"; row.why = `${plane.on}, whose face it is on, is not in the assembly as a part`; return; }
+  // The sketch's plane in the part (SolidWorks' model to sketch is p·R + t, metres), then in the assembly, then
+  // in the other component's part (mm)
+  const M = matrixOf(ft.modelToSketch);
+  const O = [0, 1, 2].map(i => -(M.t[0] * M.R[i][0] + M.t[1] * M.R[i][1] + M.t[2] * M.R[i][2]));
+  const N = [M.R[0][2], M.R[1][2], M.R[2][2]];
+  const A = matrixOf(own.transform), B = inverse(matrixOf(target.transform));
+  const dir = (m, d) => toWorld({ R: m.R, t: [0, 0, 0] }, d);
+  const p = toWorld(B, toWorld(A, O)).map(v => v * MM), n = norm3(dir(B, dir(A, N)));
+  const found = findIn(file, { kind: "plane", n, p, near: null });
+  if (!found || !found.face) { row.result = "failed"; row.why = `no flat face of ${plane.on} lies in the sketch's plane`; return; }
+  const copy = ((pr && pr.inContext) || []).find(x => x.sketch === ft.name);
+  const sketch = (copy && copy.peetSketch) || ft.name;
+  const reply = peet.apply({ op: "in_context", component: ic.component, feature: sketch, from: { component: plane.on.split("/"), face: found.face } });
+  if (!reply.ok) { row.result = "failed"; row.why = reply.error; return; }
+  const status = reply.in_context && reply.in_context.status;
+  row.result = status === "in_context" ? "imported" : "failed";
+  if (status !== "in_context") row.why = (reply.in_context && reply.in_context.why) || status;
+}
+
+/**
+ * SolidWorks' in-context features that are not sketches (format 7 reads their definitions with their selections
+ * in the assembly): what each refers to in another component, by its external references and its end
+ * conditions. A cut's or a hole's references are its sketch's (which follow with the sketch's relations); an end
+ * condition up to another component's face or vertex, or offset from one, would name it (`GetFace`, `GetVertex`);
+ * an equation reads another component's dimension. Rows go in `report.inContextFeatures`.
+ */
+function inContextHolders(cfg, report) {
+  const END = ["blind", "through all", "up to next", "up to vertex", "up to surface", "offset from surface", "mid plane", "up to body"];
+  for (const ic of cfg.inContext || []) for (const ft of ic.features || []) {
+    if (ft.relations) continue;
+    const v = (ft.definition && ft.definition.values) || {};
+    const refs = (ft.references || []).map(r => `${String(r.feature || "").replace(/\s+/g, " ")}: ${String(r.dataType || "").trim()}, ${r.entity} [${r.statusName}]`);
+    const ends = [v["GetEndCondition(true)"], v.EndCondition].filter(x => typeof x === "number").map(x => END[x] || `end condition ${x}`);
+    const faces = [v["GetFace(true)"], v["GetFace(false)"], v["GetVertex(true)"], v["GetVertex(false)"]].filter(Boolean);
+    const row = { component: ic.component, feature: ft.name, type: ft.type, references: refs, ...(ends.length ? { end: ends[0] } : {}) };
+    // The part's equations that name another component (`"D1@LPattern1@Gear tray<1>.Part" = …`)
+    const exp = ft.type === "EqnFolder" && exportOf(ic.file || "");
+    const part = exp ? JSON.parse(fs.readFileSync(exp)) : null;
+    const eqs = part ? ((part.configurations || [])[0] || {}).equations || [] : [];
+    const theirs = eqs.filter(e => /<\d+>\.Part/i.test(e.expression || ""));
+    if (theirs.length && theirs.every(e => e.disabled)) { row.result = "nothing to import"; row.why = `equations of the part on another component's dimension, all disabled in SolidWorks: ${theirs.map(e => e.expression).join("; ")}`; }
+    else if (ft.type === "EqnFolder") { row.result = "not imported"; row.why = "an equation of the part reading another component's dimension (SolidWorks' link to an external dimension): PeetCAD's part equations read the part's own; an assembly equation setting the part's dimension does it"; }
+    else if (ft.type === "MBimport") { row.result = "nothing to import"; row.why = "an imported STEP file, which SolidWorks lists with the external references: not in context"; }
+    else if (faces.length) { row.result = "not imported"; row.why = "an end condition up to another component's face or vertex"; }
+    else { row.result = "through its sketch"; row.why = `its references are its sketch's (a hole's are its positions'); its end (${ends[0] || "none"}) names no other component`; }
+    (report.inContextFeatures = report.inContextFeatures || []).push(row);
   }
 }
 
@@ -1059,7 +1208,7 @@ function importAssemblyFeatures(peet, cfg, report, byPath, want, local) {
     } else if (f.type === "CompositeCurve") {
       rows.push({ feature: f.name, type: f.type, result: "nothing to import", why: `no definition in the export (${(f.definition || {}).error ? "SolidWorks failed to give it" : "none"}); nothing references it` });
     } else if (f.type === "InContextFeatHolder") {
-      rows.push({ feature: f.name, type: f.type, result: "not imported", why: `a feature of ${(f.parents || []).filter(Boolean).filter(p => p !== "Mates").join(", ")} made in the context of this assembly: the part is imported as SolidWorks last built it; PeetCAD's parts don't follow other components (see the in-context design)` });
+      rows.push({ feature: f.name, type: f.type, result: "imported", why: `the holder of the in-context features of ${(f.parents || []).filter(Boolean).filter(p => p !== "Mates").join(", ")} made in this assembly: imported as the in-context references (inContext, inContextFeatures)` });
     }
   }
   for (const f of all.filter(x => x.type === "Cut" && x.subFeatures && x.definition)) {
@@ -1584,6 +1733,7 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
   }
   // In-context features, after the mates (SolidWorks updates in-context parts once the mates are solved)
   if (cfg && (cfg.inContext || []).length) importInContext(peet, cfg, report, byPath, name);
+  if (cfg && (cfg.inContext || []).length) inContextHolders(cfg, report);
 
   if (others.length) {
     // The active configuration as imported, before the others are

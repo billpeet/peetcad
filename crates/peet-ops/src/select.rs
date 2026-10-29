@@ -528,6 +528,13 @@ pub(crate) fn plane(doc: &Document, sel: &PlaneSel) -> Result<(PlaneRef, Plane),
             })?;
             Ok((PlaneRef::Face(face_ref(doc, f)?), at))
         }
+        PlaneSel::External(x) => match x.last {
+            peet_model::in_context::Geom::Plane(p) => Ok((PlaneRef::External(x.clone()), p)),
+            _ => Err(format!(
+                "{} is not flat: a plane is needed here.",
+                x.describe()
+            )),
+        },
         PlaneSel::Feature(f) => {
             let id = f.resolve(doc)?;
             match doc.evaluation().output(id) {

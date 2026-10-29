@@ -32,9 +32,16 @@ for (const [v, n] of [...verdicts].sort((a, b) => b[1] - a[1])) console.log(Stri
 const contexts = reports.flatMap(r => (r.inContext || []).filter(x => x.result !== "the part's own").map(x => ({ ...x, assembly: r.name })));
 if (contexts.length) {
   const made = contexts.filter(x => x.result === "imported");
+  // Kept where SolidWorks keeps them: made in another assembly, broken, or made in another instance of the part
+  const AS_SW = ["out of context", "broken", "another instance's"];
+  const kept = contexts.filter(x => AS_SW.includes(x.result));
   const hand = contexts.filter(x => x.handMade).length;
-  console.log(`in-context references: ${made.length} of ${contexts.length} follow their components (${new Set(made.map(x => x.assembly)).size} assemblies)${hand ? `; ${hand} from hand-made format 7 data` : ""}`);
-  for (const x of contexts.filter(x => x.result !== "imported")) add(`in-context reference ${x.result}: ${general(x.why)}`, x.assembly);
+  console.log(`in-context references: ${made.length} of ${contexts.length} follow their components (${new Set(made.map(x => x.assembly)).size} assemblies), ${made.filter(x => x.inSubAssembly).length} of them in their sub-assembly; ${kept.length} kept where SolidWorks keeps them (${AS_SW.map(r => `${kept.filter(x => x.result === r).length} ${r}`).join(", ")})${hand ? `; ${hand} from hand-made format 7 data` : ""}`);
+  const planes = reports.flatMap(r => (r.inContextPlanes || []).map(x => ({ ...x, assembly: r.name })));
+  if (planes.length) console.log(`in-context sketch planes: ${planes.filter(x => x.result === "imported").length} of ${planes.length} follow their faces`);
+  const holders = reports.flatMap(r => r.inContextFeatures || []);
+  if (holders.length) console.log(`in-context features that are not sketches: ${holders.length} (${[...new Set(holders.map(x => x.result))].map(r => `${holders.filter(x => x.result === r).length} ${r}`).join(", ")})`);
+  for (const x of contexts.filter(x => x.result !== "imported" && !AS_SW.includes(x.result))) add(`in-context reference ${x.result}: ${general(x.why)}`, x.assembly);
 }
 // The configurations other than the active one, each checked against SolidWorks' placements for it
 const others = reports.flatMap(r => (r.configurations || []).filter(c => !c.active).map(c => ({ ...c, assembly: r.name })));
