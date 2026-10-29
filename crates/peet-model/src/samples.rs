@@ -270,12 +270,14 @@ pub fn chassis() -> (Model, Engine) {
             spacing: Scalar::new(x),
             count: Scalar::new(f64::from(nx)),
             flip: false,
+            up_to: None,
         },
         second: Some(LinearDirection {
             direction: AxisRef::Standard(StdAxis::Y),
             spacing: Scalar::new(y),
             count: Scalar::new(f64::from(ny)),
             flip: false,
+            up_to: None,
         }),
     };
     b.model
@@ -683,7 +685,7 @@ pub fn enclosure_assembly() -> (Model, Engine) {
     let mate = |a: &mut crate::Assembly, kind: MateKind, x: MateEnd, y: MateEnd, flip: bool| {
         let id = a.add_mate(kind, x, y);
         if let Some(m) = a.mate_mut(id) {
-            m.flip = flip;
+            m.align = flip.then_some(crate::Align::Aligned);
         }
     };
     let (x, y, z) = (DVec3::X, DVec3::Y, DVec3::Z);
@@ -808,14 +810,14 @@ pub fn enclosure_assembly() -> (Model, Engine) {
         PatternKind::Circular {
             axis: PatternLine::Geom(end(c_housing, f_housing.round(hs::BORE_R, DVec3::ZERO))),
             angle: Scalar::new(360.0),
-            count: hs::BOLTS,
+            count: Scalar::new(f64::from(hs::BOLTS)),
             flip: false,
         },
     );
     let along = |wall: &MateGeom, spacing: f64| PatternStep {
         direction: PatternLine::Geom(end(c_chassis, wall.clone())),
         spacing: Scalar::new(spacing),
-        count: 2,
+        count: Scalar::new(2.0),
         flip: false,
     };
     let screws = a.add_pattern(

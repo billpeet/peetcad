@@ -124,6 +124,7 @@ pub(crate) fn curve_points(g: &Geometry) -> CurvePoints<'_> {
         Geometry::Circle { center, .. } => CurvePoints::Inline([center, z, z], 1),
         Geometry::Arc { center, start, end } => CurvePoints::Inline([center, start, end], 3),
         Geometry::Spline { ref points, .. } => CurvePoints::Listed(points),
+        Geometry::Text { anchor, .. } => CurvePoints::Inline([anchor, z, z], 1),
     }
 }
 
@@ -154,6 +155,13 @@ pub(crate) fn constraint_refs(kind: &ConstraintKind) -> ([EntityId; 3], usize, u
         Radius(a) => ([a, z, z], 1, 18),
         Diameter(a) => ([a, z, z], 1, 19),
         Angle(a, b) => ([a, b, z], 2, 20),
+        Patterned { seed, copy, first } => ([seed, copy, first], 3, 22),
+        Offset(a, b) => ([a, b, z], 2, 23),
+        SideDistance { a, b, sides, along } => (
+            [a, b, z],
+            2,
+            24 + 9 * along as u8 + 3 * sides[0] as u8 + sides[1] as u8,
+        ),
     }
 }
 
@@ -173,6 +181,7 @@ pub(crate) fn fingerprint(sketch: &Sketch) -> u64 {
             Geometry::Circle { .. } => 3,
             Geometry::Arc { .. } => 4,
             Geometry::Spline { closed, .. } => 5 + u64::from(closed),
+            Geometry::Text { .. } => 7,
         };
         h = mix(h, (u64::from(id.0) << 8) | (tag << 1) | u64::from(e.locked));
         for p in curve_points(&e.geometry).iter() {
@@ -397,7 +406,7 @@ impl Structure {
                     st.map.point[start.0 as usize],
                 )),
                 // A spline has no size of its own: it is as big as its points are apart.
-                Geometry::Point { .. } | Geometry::Spline { .. } => {}
+                Geometry::Point { .. } | Geometry::Spline { .. } | Geometry::Text { .. } => {}
             }
         }
 

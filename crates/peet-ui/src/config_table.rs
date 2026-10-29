@@ -71,6 +71,11 @@ pub fn set_value_op(
                 }),
             )
         }
+        // Not numbers: the table doesn't list them
+        Slot::Flag(_) | Slot::Plane => Err(format!(
+            "{} is not a number: change it with 'edit' and 'configurations'.",
+            value.name
+        )),
     }
 }
 

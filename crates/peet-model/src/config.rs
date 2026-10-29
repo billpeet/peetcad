@@ -14,6 +14,12 @@
 //!
 //! **A change has a [`Scope`]**: this configuration, all of them, or the ones named. With
 //! a single configuration the scopes are the same thing.
+//!
+//! **A derived configuration** (SolidWorks' "Add Derived Configuration") has a parent, and
+//! follows it: a change made to the parent is made to the derived configuration too,
+//! unless the derived one has a value of its own there (one that differs from the
+//! parent's). A change made to the derived configuration is its own. Deleting a parent
+//! deletes the configurations derived from it.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -23,7 +29,7 @@ use serde::{Deserialize, Serialize};
 use peet_sketch::ConstraintId;
 
 use crate::Model;
-use crate::feature::{Feature, FeatureId, FeatureKind, Scalar, ScalarKind};
+use crate::feature::{Feature, FeatureId, FeatureKind, PlaneRef, Scalar, ScalarKind};
 
 /// Stable identifier of a configuration within its model. Never reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -37,6 +43,28 @@ pub struct Configuration {
     pub name: String,
     /// What the configuration is for, in the user's words.
     pub comment: String,
+    /// The configuration this one is derived from, which it follows where it has no value
+    /// of its own. Always earlier in the list. Model schema 12.
+    pub parent: Option<ConfigId>,
+}
+
+/// A configuration as model schemas 5 to 11 hold it: before derived configurations.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConfigurationV11 {
+    id: ConfigId,
+    name: String,
+    comment: String,
+}
+
+impl From<ConfigurationV11> for Configuration {
+    fn from(c: ConfigurationV11) -> Self {
+        Self {
+            id: c.id,
+            name: c.name,
+            comment: c.comment,
+            parent: None,
+        }
+    }
 }
 
 /// Which configurations a change applies to.
@@ -59,6 +87,13 @@ pub enum Slot {
     Field(String),
     /// A driving dimension of a sketch.
     Dimension(ConstraintId),
+    // New kinds go at the end: files store the variant's index.
+    /// A yes-or-no setting of the feature, by its operations' name (`reverse`): see
+    /// [`FeatureKind::flags`]. SolidWorks lets a cut's direction differ.
+    Flag(String),
+    /// What a sketch is drawn on. SolidWorks lets it differ (the Door's hinge holes are on
+    /// the right-hand return in one configuration and the left-hand one in the other).
+    Plane,
 }
 
 /// What a [`Slot`] holds in one configuration.
@@ -66,6 +101,8 @@ pub enum Slot {
 pub enum Held {
     Scalar(Scalar),
     // New kinds go at the end: files store the variant's index.
+    Flag(bool),
+    Plane(PlaneRef),
 }
 
 /// Whether two values are the same as entered. An expression's last evaluated value is
@@ -79,8 +116,53 @@ fn same_scalar(a: &Scalar, b: &Scalar) -> bool {
 }
 
 fn same_held(a: &Held, b: &Held) -> bool {
-    let (Held::Scalar(a), Held::Scalar(b)) = (a, b);
-    same_scalar(a, b)
+    match (a, b) {
+        (Held::Scalar(a), Held::Scalar(b)) => same_scalar(a, b),
+        _ => a == b,
+    }
+}
+
+/// What a slot holds in a feature now, of any kind.
+fn read_held(feature: &Feature, slot: &Slot) -> Option<Held> {
+    match (slot, &feature.kind) {
+        (Slot::Flag(name), kind) => kind
+            .flags()
+            .into_iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| Held::Flag(v)),
+        (Slot::Plane, FeatureKind::Sketch(s)) => Some(Held::Plane(s.plane.clone())),
+        (Slot::Plane, _) => None,
+        _ => read_slot(feature, slot).map(|(_, s)| Held::Scalar(s)),
+    }
+}
+
+/// Sets what a slot holds in a feature. Returns whether the feature has the slot.
+fn write_held(feature: &mut Feature, slot: &Slot, held: Held) -> bool {
+    match (slot, held) {
+        (Slot::Flag(name), Held::Flag(v)) => {
+            match feature
+                .kind
+                .flags_mut()
+                .into_iter()
+                .find(|(n, _)| n == name)
+            {
+                Some((_, f)) => {
+                    *f = v;
+                    true
+                }
+                None => false,
+            }
+        }
+        (Slot::Plane, Held::Plane(plane)) => match &mut feature.kind {
+            FeatureKind::Sketch(s) => {
+                s.plane = plane;
+                true
+            }
+            _ => false,
+        },
+        (Slot::Field(_) | Slot::Dimension(_), Held::Scalar(v)) => write_slot(feature, slot, v),
+        _ => false,
+    }
 }
 
 /// A slot's value in a feature, with what it measures.
@@ -108,7 +190,7 @@ fn read_slot(feature: &Feature, slot: &Slot) -> Option<(ScalarKind, Scalar)> {
                 },
             ))
         }
-        (Slot::Dimension(_), _) => None,
+        (Slot::Dimension(_), _) | (Slot::Flag(_) | Slot::Plane, _) => None,
     }
 }
 
@@ -136,7 +218,7 @@ fn write_slot(feature: &mut Feature, slot: &Slot, value: Scalar) -> bool {
                 None => false,
             }
         }
-        (Slot::Dimension(_), _) => false,
+        (Slot::Dimension(_), _) | (Slot::Flag(_) | Slot::Plane, _) => false,
     }
 }
 
@@ -175,7 +257,7 @@ pub struct Configurations {
 /// sketch dimensions could differ.
 #[derive(Deserialize)]
 pub struct ConfigurationsV5 {
-    list: Vec<Configuration>,
+    list: Vec<ConfigurationV11>,
     active: ConfigId,
     next_id: u32,
     suppressed: BTreeMap<FeatureId, BTreeMap<ConfigId, bool>>,
@@ -185,12 +267,59 @@ pub struct ConfigurationsV5 {
 impl From<ConfigurationsV5> for Configurations {
     fn from(c: ConfigurationsV5) -> Self {
         Self {
-            list: c.list,
+            list: c.list.into_iter().map(Configuration::from).collect(),
             active: c.active,
             next_id: c.next_id,
             suppressed: c.suppressed,
             parameters: c.parameters,
             values: BTreeMap::new(),
+        }
+    }
+}
+
+/// The configurations as files of model schemas 6 to 11 hold them: before derived
+/// configurations.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ConfigurationsV11 {
+    list: Vec<ConfigurationV11>,
+    active: ConfigId,
+    next_id: u32,
+    suppressed: BTreeMap<FeatureId, BTreeMap<ConfigId, bool>>,
+    parameters: BTreeMap<String, BTreeMap<ConfigId, String>>,
+    values: BTreeMap<(FeatureId, Slot), BTreeMap<ConfigId, Held>>,
+}
+
+impl From<ConfigurationsV11> for Configurations {
+    fn from(c: ConfigurationsV11) -> Self {
+        Self {
+            list: c.list.into_iter().map(Configuration::from).collect(),
+            active: c.active,
+            next_id: c.next_id,
+            suppressed: c.suppressed,
+            parameters: c.parameters,
+            values: c.values,
+        }
+    }
+}
+
+impl ConfigurationsV11 {
+    /// `c` as the older schemas held it: every configuration on its own.
+    pub fn of(c: &Configurations) -> Self {
+        Self {
+            list: c
+                .list
+                .iter()
+                .map(|x| ConfigurationV11 {
+                    id: x.id,
+                    name: x.name.clone(),
+                    comment: x.comment.clone(),
+                })
+                .collect(),
+            active: c.active,
+            next_id: c.next_id,
+            suppressed: c.suppressed.clone(),
+            parameters: c.parameters.clone(),
+            values: c.values.clone(),
         }
     }
 }
@@ -202,6 +331,7 @@ impl Default for Configurations {
                 id: ConfigId(1),
                 name: DEFAULT_NAME.to_owned(),
                 comment: String::new(),
+                parent: None,
             }],
             active: ConfigId(1),
             next_id: 2,
@@ -229,7 +359,7 @@ impl Configurations {
 /// Drops the entries of `table` that say nothing: for things that no longer exist, and
 /// those whose value is the same in every configuration. Entries are completed first, so
 /// every one has a value for each of `others`.
-fn tidy<K: Ord + Clone, V: Clone>(
+pub(crate) fn tidy<K: Ord + Clone, V: Clone>(
     table: &mut BTreeMap<K, BTreeMap<ConfigId, V>>,
     others: &[ConfigId],
     current: impl Fn(&K) -> Option<V>,
@@ -401,7 +531,7 @@ impl Model {
                 .and_then(|v| v.get(&config))
             {
                 Some(Held::Scalar(s)) => s.clone(),
-                None => now,
+                _ => now,
             },
         )
     }
@@ -410,6 +540,91 @@ impl Model {
     pub fn values_that_differ(&self) -> Vec<(FeatureId, Slot)> {
         let mut out: Vec<(FeatureId, Slot)> = self.configurations.values.keys().cloned().collect();
         out.sort_by_key(|(f, _)| self.index_of(*f));
+        out
+    }
+
+    /// What a slot holds in a configuration, of any kind: a numeric value, a yes-or-no
+    /// setting ([`Slot::Flag`]) or a sketch's plane ([`Slot::Plane`]).
+    pub fn held_in(&self, feature: FeatureId, slot: &Slot, config: ConfigId) -> Option<Held> {
+        let now = read_held(self.feature(feature)?, slot)?;
+        if config == self.configurations.active {
+            return Some(now);
+        }
+        Some(
+            self.configurations
+                .values
+                .get(&(feature, slot.clone()))
+                .and_then(|v| v.get(&config))
+                .cloned()
+                .unwrap_or(now),
+        )
+    }
+
+    /// The yes-or-no settings and sketch planes that differ between configurations, in
+    /// tree order (the numeric values are [`Model::values_that_differ`]).
+    pub fn settings_that_differ(&self) -> Vec<(FeatureId, Slot)> {
+        self.values_that_differ()
+            .into_iter()
+            .filter(|(_, s)| matches!(s, Slot::Flag(_) | Slot::Plane))
+            .collect()
+    }
+
+    /// Says which configurations a change made in the model to a yes-or-no setting or a
+    /// sketch's plane applies to, as [`Model::rescope_value`] does for a number: `before`
+    /// is what it was.
+    pub fn rescope_held(
+        &mut self,
+        feature: FeatureId,
+        slot: &Slot,
+        before: Held,
+        scope: &Scope,
+    ) -> Result<(), String> {
+        let Some(now) = self.feature(feature).and_then(|f| read_held(f, slot)) else {
+            return Err("The feature has no such setting.".to_owned());
+        };
+        let active = self.configurations.active;
+        let others = self.configurations.others();
+        let key = (feature, slot.clone());
+        match self.targets(scope)? {
+            None => {
+                self.configurations.values.remove(&key);
+            }
+            Some(targets) => {
+                if !others.is_empty() {
+                    let held =
+                        self.configurations.values.entry(key).or_insert_with(|| {
+                            others.iter().map(|c| (*c, before.clone())).collect()
+                        });
+                    for t in targets.iter().filter(|t| **t != active) {
+                        held.insert(*t, now.clone());
+                    }
+                    if !targets.contains(&active)
+                        && let Some(f) = self.feature_mut(feature)
+                    {
+                        write_held(f, slot, before);
+                    }
+                }
+            }
+        }
+        self.tidy_configurations();
+        Ok(())
+    }
+
+    /// The yes-or-no settings and the plane of a feature that can differ between
+    /// configurations, as they are now.
+    pub fn settings(&self, feature: FeatureId) -> Vec<(Slot, Held)> {
+        let Some(f) = self.feature(feature) else {
+            return Vec::new();
+        };
+        let mut out: Vec<(Slot, Held)> = f
+            .kind
+            .flags()
+            .into_iter()
+            .map(|(n, v)| (Slot::Flag(n.to_owned()), Held::Flag(v)))
+            .collect();
+        if let FeatureKind::Sketch(s) = &f.kind {
+            out.push((Slot::Plane, Held::Plane(s.plane.clone())));
+        }
         out
     }
 
@@ -466,15 +681,15 @@ impl Model {
             .keys()
             .filter_map(|n| Some((n.clone(), self.parameter_in(n, source)?.to_owned())))
             .collect();
-        let values: Vec<((FeatureId, Slot), Scalar)> = self
+        let values: Vec<((FeatureId, Slot), Held)> = self
             .configurations
             .values
             .keys()
-            .filter_map(|k| Some((k.clone(), self.value_in(k.0, &k.1, source)?)))
+            .filter_map(|k| Some((k.clone(), self.held_in(k.0, &k.1, source)?)))
             .collect();
         let c = &mut self.configurations;
         for (k, v) in values {
-            c.values.entry(k).or_default().insert(id, Held::Scalar(v));
+            c.values.entry(k).or_default().insert(id, v);
         }
         for (f, v) in flags {
             c.suppressed.entry(f).or_default().insert(id, v);
@@ -483,12 +698,78 @@ impl Model {
             c.parameters.entry(n).or_default().insert(id, v);
         }
         c.next_id += 1;
+        self.copy_assembly(source, id);
+        let c = &mut self.configurations;
         c.list.push(Configuration {
             id,
             name: name.to_owned(),
             comment: String::new(),
+            parent: None,
         });
         Ok(id)
+    }
+
+    /// Adds a configuration derived from `parent` (SolidWorks' derived configuration): it
+    /// starts as a copy of the parent, and follows it where it has no value of its own. It
+    /// is not made active.
+    pub fn add_derived_configuration(
+        &mut self,
+        name: &str,
+        parent: ConfigId,
+    ) -> Result<ConfigId, String> {
+        let id = self.add_configuration(name, Some(parent))?;
+        if let Some(c) = self.configurations.list.iter_mut().find(|c| c.id == id) {
+            c.parent = Some(parent);
+        }
+        Ok(id)
+    }
+
+    /// The configuration `id` is derived from, if it is derived.
+    pub fn parent_configuration(&self, id: ConfigId) -> Option<ConfigId> {
+        self.configuration(id)?.parent
+    }
+
+    /// The configurations derived from `id`, at any depth, in list order.
+    pub fn derived_configurations(&self, id: ConfigId) -> Vec<ConfigId> {
+        let mut out = vec![id];
+        for c in &self.configurations.list {
+            if c.parent.is_some_and(|p| out.contains(&p)) && !out.contains(&c.id) {
+                out.push(c.id);
+            }
+        }
+        out.remove(0);
+        out
+    }
+
+    /// `targets`, with the configurations derived from them that follow them in a change:
+    /// those `follows(child, parent)` says have the parent's value (before the change), at
+    /// any depth.
+    pub(crate) fn following(
+        &self,
+        mut targets: Vec<ConfigId>,
+        follows: impl Fn(ConfigId, ConfigId) -> bool,
+    ) -> Vec<ConfigId> {
+        // A parent is always earlier in the list than what is derived from it.
+        for c in &self.configurations.list {
+            if let Some(p) = c.parent
+                && !targets.contains(&c.id)
+                && targets.contains(&p)
+                && follows(c.id, p)
+            {
+                targets.push(c.id);
+            }
+        }
+        targets
+    }
+
+    /// The configurations a scope means (`None`: all of them), with those derived from them
+    /// that follow them (see `following`).
+    pub(crate) fn scope_following(
+        &self,
+        scope: &Scope,
+        follows: impl Fn(ConfigId, ConfigId) -> bool,
+    ) -> Result<Option<Vec<ConfigId>>, String> {
+        Ok(self.targets(scope)?.map(|t| self.following(t, follows)))
     }
 
     pub fn rename_configuration(&mut self, id: ConfigId, name: &str) -> Result<(), String> {
@@ -509,24 +790,34 @@ impl Model {
         }
     }
 
-    /// Removes a configuration. A part keeps at least one; removing the active one makes
-    /// its neighbour in the list active.
+    /// Removes a configuration, with the configurations derived from it. A part keeps at
+    /// least one; removing the active one makes its neighbour in the list active.
     pub fn remove_configuration(&mut self, id: ConfigId) -> Result<(), String> {
         let Some(index) = self.configurations.list.iter().position(|c| c.id == id) else {
             return Err("The configuration no longer exists.".to_owned());
         };
-        if self.configurations.list.len() == 1 {
+        let mut gone = self.derived_configurations(id);
+        gone.push(id);
+        if self.configurations.list.len() <= gone.len() {
             return Err(
-                "A part has at least one configuration: this is the only one, so it stays."
+                "A part has at least one configuration: this is the only one (with those derived from it), so it stays."
                     .to_owned(),
             );
         }
-        if self.configurations.active == id {
-            let next = if index > 0 { index - 1 } else { 1 };
-            let next = self.configurations.list[next].id;
+        if gone.contains(&self.configurations.active) {
+            // The nearest one before it that stays, else the first after it.
+            let list = &self.configurations.list;
+            let next = list[..index]
+                .iter()
+                .rev()
+                .chain(list[index..].iter())
+                .find(|c| !gone.contains(&c.id))
+                .map(|c| c.id)
+                .expect("one stays");
             self.activate_configuration(next);
         }
-        self.configurations.list.remove(index);
+        self.configurations.list.retain(|c| !gone.contains(&c.id));
+        self.forget_display_states();
         self.tidy_configurations();
         Ok(())
     }
@@ -563,21 +854,20 @@ impl Model {
             let Some(index) = self.index_of(*feature) else {
                 continue;
             };
-            let Some((_, now)) = read_slot(&self.features[index], slot) else {
+            let Some(now) = read_held(&self.features[index], slot) else {
                 continue;
             };
-            let next = match held.remove(&id) {
-                Some(Held::Scalar(s)) => s,
-                None => now.clone(),
-            };
-            held.insert(old, Held::Scalar(now.clone()));
+            let next = held.remove(&id).unwrap_or_else(|| now.clone());
+            held.insert(old, now.clone());
             if next != now {
-                write_slot(Arc::make_mut(&mut self.features[index]), slot, next);
+                write_held(Arc::make_mut(&mut self.features[index]), slot, next);
             }
         }
         self.configurations.values = values;
+        self.swap_assembly(old, id);
+        self.swap_display_states(old, id);
         self.configurations.active = id;
-        self.parameters.evaluate();
+        self.refresh_dimension_values();
         true
     }
 
@@ -616,7 +906,19 @@ impl Model {
         let active = self.configurations.active;
         let others = self.configurations.others();
         let key = (feature, slot.clone());
-        match self.targets(scope)? {
+        // What it was in each configuration, before the change.
+        let was = |c: ConfigId| {
+            if c == active {
+                Some(before.clone())
+            } else {
+                self.value_in(feature, slot, c)
+            }
+        };
+        let follows = |c, p| match (was(c), was(p)) {
+            (Some(a), Some(b)) => same_scalar(&a, &b),
+            (a, b) => a.is_none() && b.is_none(),
+        };
+        match self.scope_following(scope, follows)? {
             None => {
                 self.configurations.values.remove(&key);
             }
@@ -641,6 +943,11 @@ impl Model {
         }
         self.tidy_configurations();
         Ok(())
+    }
+
+    /// The configurations other than the active one.
+    pub(crate) fn other_configurations(&self) -> Vec<ConfigId> {
+        self.configurations.others()
     }
 
     /// The configurations a scope means, or `None` for all of them.
@@ -673,7 +980,8 @@ impl Model {
         let now = self.features[index].suppressed;
         let active = self.configurations.active;
         let others = self.configurations.others();
-        let here = match self.targets(scope)? {
+        let was = |c| self.suppressed_in(feature, c);
+        let here = match self.scope_following(scope, |c, p| was(c) == was(p))? {
             None => {
                 self.configurations.suppressed.remove(&feature);
                 true
@@ -717,7 +1025,11 @@ impl Model {
             .iter()
             .find(|p| p.name == name)
             .map(|p| p.expression.clone());
-        let targets = match (&existing, self.targets(scope)?) {
+        let was = |c| self.parameter_in(name, c).map(str::to_owned);
+        let targets = match (
+            &existing,
+            self.scope_following(scope, |c, p| was(c) == was(p))?,
+        ) {
             (Some(_), Some(t)) if !others.is_empty() => t,
             // New, in every configuration, or the only configuration there is.
             (_, all) => {
@@ -824,13 +1136,11 @@ impl Model {
         tidy(
             &mut values,
             &others,
-            |(feature, slot)| {
-                self.value(*feature, slot)
-                    .map(|(_, value)| Held::Scalar(value))
-            },
+            |(feature, slot)| self.feature(*feature).and_then(|f| read_held(f, slot)),
             same_held,
         );
         self.configurations.values = values;
+        self.tidy_assembly(&others);
     }
 
     /// Restores the invariants of the configurations after loading a model from a file.
@@ -854,6 +1164,14 @@ impl Model {
         if !c.contains(c.active) {
             c.active = c.list[0].id;
         }
+        // A parent is earlier in the list.
+        let mut seen = std::collections::HashSet::new();
+        for x in &mut c.list {
+            if x.parent.is_some_and(|p| !seen.contains(&p)) {
+                x.parent = None;
+            }
+            seen.insert(x.id);
+        }
         let max = c.list.iter().map(|x| x.id.0).max().unwrap_or(0);
         c.next_id = c.next_id.max(max.saturating_add(1));
         self.tidy_configurations();
@@ -864,7 +1182,7 @@ impl Model {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::feature::{PlaneRef, StdPlane};
+    use crate::feature::StdPlane;
     use peet_math::Plane;
 
     fn model() -> (Model, FeatureId, FeatureId) {
@@ -878,6 +1196,49 @@ mod tests {
 
     fn expr<'a>(m: &'a Model, name: &str) -> &'a str {
         m.parameter_in(name, m.active_configuration().id).unwrap()
+    }
+
+    #[test]
+    fn a_derived_configuration_follows_its_parent_where_it_has_no_value_of_its_own() {
+        let (mut m, a, b) = model();
+        let base = m.active_configuration().id;
+        let long = m.add_configuration("Long", None).unwrap();
+        let painted = m.add_derived_configuration("Long painted", long).unwrap();
+        let primed = m.add_derived_configuration("Long primed", painted).unwrap();
+        assert_eq!(m.parent_configuration(painted), Some(long));
+        assert_eq!(m.parent_configuration(long), None);
+        assert_eq!(m.derived_configurations(long), vec![painted, primed]);
+        // A change to the parent reaches what is derived from it, at any depth.
+        m.set_parameter("t", "3", &Scope::Only(vec![long])).unwrap();
+        m.set_suppressed(a, true, &Scope::Only(vec![long])).unwrap();
+        for c in [long, painted, primed] {
+            assert_eq!(m.parameter_in("t", c), Some("3"));
+            assert_eq!(m.suppressed_in(a, c), Some(true));
+        }
+        assert_eq!(m.parameter_in("t", base), Some("2"));
+        // A value of the derived one's own stays its own...
+        m.set_parameter("t", "4", &Scope::Only(vec![painted]))
+            .unwrap();
+        m.set_parameter("t", "5", &Scope::Only(vec![long])).unwrap();
+        assert_eq!(m.parameter_in("t", painted), Some("4"));
+        // ... and so does what is derived from it, which follows it now.
+        assert_eq!(m.parameter_in("t", primed), Some("4"));
+        // A change to the derived one doesn't reach the parent.
+        m.set_suppressed(b, true, &Scope::Only(vec![primed]))
+            .unwrap();
+        assert_eq!(m.suppressed_in(b, painted), Some(false));
+        // From the active configuration, as from any other.
+        m.activate_configuration(long);
+        m.set_suppressed(a, false, &Scope::This).unwrap();
+        assert_eq!(m.suppressed_in(a, primed), Some(false));
+        assert_eq!(m.suppressed_in(a, base), Some(false));
+        // Deleting the parent deletes what is derived from it; the active one moves to one
+        // that stays.
+        m.activate_configuration(primed);
+        m.remove_configuration(long).unwrap();
+        assert_eq!(m.configurations().len(), 1);
+        assert_eq!(m.active_configuration().id, base);
+        assert!(m.remove_configuration(base).is_err());
     }
 
     #[test]
@@ -897,6 +1258,43 @@ mod tests {
             assert_eq!(m.parameters.get("w"), Some(30.0));
             assert_eq!(m.configurations, Configurations::default());
         }
+    }
+
+    #[test]
+    fn a_direction_and_a_sketch_plane_differ_per_configuration() {
+        // As SolidWorks lets them: the Door's hinge holes are on one return or the other.
+        let (mut m, a, _) = model();
+        let cut = m.add_sheet_cut(a);
+        let default = m.active_configuration().id;
+        let other = m.add_configuration("Other", None).unwrap();
+        let flag = Slot::Flag("reverse".to_owned());
+        assert!(m.activate_configuration(other));
+        let before = m.held_in(cut, &flag, other).unwrap();
+        if let Some(FeatureKind::SheetCut(c)) = m.feature_mut(cut).map(|f| &mut f.kind) {
+            c.reverse = true;
+        }
+        m.rescope_held(cut, &flag, before, &Scope::This).unwrap();
+        let plane = Held::Plane(PlaneRef::Standard(StdPlane::Right));
+        let was = m.held_in(a, &Slot::Plane, other).unwrap();
+        if let Some(FeatureKind::Sketch(s)) = m.feature_mut(a).map(|f| &mut f.kind) {
+            s.plane = PlaneRef::Standard(StdPlane::Right);
+        }
+        m.rescope_held(a, &Slot::Plane, was, &Scope::This).unwrap();
+        assert_eq!(m.settings_that_differ().len(), 2);
+        assert_eq!(m.held_in(cut, &flag, default), Some(Held::Flag(false)));
+        assert_eq!(m.held_in(a, &Slot::Plane, other), Some(plane.clone()));
+        assert!(m.activate_configuration(default));
+        assert!(matches!(&m.feature(cut).unwrap().kind, FeatureKind::SheetCut(c) if !c.reverse));
+        assert!(
+            matches!(&m.feature(a).unwrap().kind, FeatureKind::Sketch(s) if s.plane == PlaneRef::Standard(StdPlane::Top))
+        );
+        assert_eq!(m.held_in(cut, &flag, other), Some(Held::Flag(true)));
+        // A copy of Other has its settings; all the same again, nothing differs.
+        let copy = m.add_configuration("Copy", Some(other)).unwrap();
+        assert_eq!(m.held_in(a, &Slot::Plane, copy), Some(plane));
+        let now = m.held_in(cut, &flag, default).unwrap();
+        m.rescope_held(cut, &flag, now, &Scope::All).unwrap();
+        assert_eq!(m.settings_that_differ().len(), 1);
     }
 
     #[test]
@@ -1051,10 +1449,14 @@ mod tests {
     fn a_features_values_and_a_sketchs_dimensions_are_listed() {
         let (m, sketch, extrude, width) = plate();
         let values = m.values(extrude);
-        assert_eq!(values.len(), 1);
+        assert_eq!(values.len(), 2);
         assert_eq!(
             (values[0].name.as_str(), values[0].kind),
             ("depth", ScalarKind::Length)
+        );
+        assert_eq!(
+            (values[1].name.as_str(), values[1].kind),
+            ("draft", ScalarKind::Angle)
         );
         let dims = m.values(sketch);
         assert_eq!(dims.len(), 1);

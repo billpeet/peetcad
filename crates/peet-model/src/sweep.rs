@@ -5,7 +5,9 @@
 //! the profile's plane, square to it. Along a line the profile is extruded; round an arc
 //! it is revolved about the arc's axis; the pieces are joined. Every face is then a plane,
 //! a cylinder, a cone, a sphere or a torus, exact like the rest of the kernel. A path that
-//! is one full circle makes a ring.
+//! is one full circle makes a ring. A profile part way along the path, where a straight
+//! piece crosses its plane squarely or two pieces meet on it, is swept both ways from
+//! there, as SolidWorks sweeps the whole path.
 //!
 //! A corner between two straight pieces is mitred: each piece runs on past the corner
 //! and is cut back with the plane that halves the angle, as a picture frame or a welded
@@ -17,13 +19,15 @@
 //! The profile's plane has to cross the start of the path, but needn't be square to it
 //! (a spline's end direction can't be set exactly); the profile keeps the attitude to the
 //! path that it starts with. Such a path has no corners: every piece carries on the way
-//! the last one ended.
+//! the last one ended. A path of lines and arcs that leaves the profile's plane at a
+//! slant is followed the same way, the profile carried along it as drawn (SolidWorks'
+//! "follow path").
 
 use std::sync::Arc;
 
 use peet_kernel::Solid;
 use peet_kernel::boolean::{BooleanOp, boolean_traced};
-use peet_kernel::extrude::{ExtrudeFace, extrude_traced};
+use peet_kernel::extrude::{ExtrudeFace, extrude_along_traced, extrude_traced};
 use peet_kernel::geom::{Circle3, Curve3};
 use peet_kernel::nurbs::NurbsCurve;
 use peet_kernel::revolve::{RevolveAxis, RevolveFace, revolve_traced};
@@ -187,13 +191,21 @@ impl Piece {
     }
 }
 
+/// A sweep's path, ready to follow.
+struct Path {
+    /// The pieces in order, each run starting on the profile's plane: one, or two where
+    /// the profile is part way along the path and it is followed both ways.
+    chains: Vec<Vec<Piece>>,
+    /// The splines the pieces refer to.
+    splines: Vec<NurbsCurve>,
+    /// Whether the path is followed by the kernel's general sweep: it has a spline, or it
+    /// leaves the profile's plane at a slant.
+    freeform: bool,
+}
+
 /// The path's pieces in order, starting on `start` (the profile's plane), and the
 /// splines among them.
-fn path_pieces(
-    path: &Sketch,
-    plane: &Plane,
-    start: &Plane,
-) -> Result<(Vec<Piece>, Vec<NurbsCurve>), FeatureError> {
+fn path_pieces(path: &Sketch, plane: &Plane, start: &Plane) -> Result<Path, FeatureError> {
     let err = |m: &str| Err(FeatureError(m.to_owned()));
     let at = |p| plane.from_plane_coords(p);
     let mut loose: Vec<Piece> = Vec::new();
@@ -277,25 +289,52 @@ fn path_pieces(
     }
     // The piece that starts on the profile's plane, heading square out of it.
     // A spline's end can't be set square exactly, and the general sweep doesn't need it
-    // to be: it only has to leave the plane.
-    let freeform = !splines.is_empty();
+    // to be: it only has to leave the plane. Nor does a path that leaves the plane at a
+    // slant: the profile keeps the attitude to it that it starts with, as SolidWorks'
+    // does, which takes the general sweep.
+    let mut freeform = !splines.is_empty();
     let on_plane = |p: DVec3| start.signed_distance(p).abs() <= JOIN;
-    let square = |d: DVec3| {
-        if freeform {
-            d.dot(start.normal()).abs() >= LEAVES
-        } else {
-            d.cross(start.normal()).length() <= 1e-6
-        }
+    let leaves = |d: DVec3| d.dot(start.normal()).abs() >= LEAVES;
+    let square = |d: DVec3| d.cross(start.normal()).length() <= 1e-6;
+    let starting = |loose: &[Piece], fits: &dyn Fn(DVec3) -> bool| {
+        loose.iter().enumerate().find_map(|(i, piece)| {
+            if on_plane(piece.start()) && fits(piece.start_dir()) {
+                Some((i, *piece))
+            } else if on_plane(piece.end()) && fits(piece.end_dir()) {
+                Some((i, piece.reversed()))
+            } else {
+                None
+            }
+        })
     };
-    let first = loose.iter().enumerate().find_map(|(i, piece)| {
-        if on_plane(piece.start()) && square(piece.start_dir()) {
-            Some((i, *piece))
-        } else if on_plane(piece.end()) && square(piece.end_dir()) {
-            Some((i, piece.reversed()))
-        } else {
-            None
+    let mut first = starting(&loose, if freeform { &leaves } else { &square });
+    if first.is_none() && !freeform {
+        first = starting(&loose, &leaves);
+        freeform = first.is_some();
+    }
+    // A profile part way along a straight piece of the path, square to it: the path is
+    // followed both ways from it, as SolidWorks sweeps the whole path.
+    let mut back = None;
+    if first.is_none() && !freeform {
+        back = loose.iter().enumerate().find_map(|(i, piece)| {
+            let Piece::Line { from, to } = *piece else {
+                return None;
+            };
+            let (a, b) = (start.signed_distance(from), start.signed_distance(to));
+            if a * b >= 0.0 || a.abs() <= JOIN || b.abs() <= JOIN || !square(piece.start_dir()) {
+                return None;
+            }
+            let at = from + (to - from) * (a / (a - b));
+            Some((
+                i,
+                Piece::Line { from: at, to },
+                Piece::Line { from: at, to: from },
+            ))
+        });
+        if let Some((i, ahead, _)) = back {
+            first = Some((i, ahead));
         }
-    });
+    }
     let Some((i, first)) = first else {
         if freeform {
             return err(
@@ -312,6 +351,42 @@ fn path_pieces(
         );
     };
     loose.swap_remove(i);
+    let from = first.start();
+    let mut chains = vec![follow(first, &mut loose, freeform)?];
+    // The path may go on the other way from the profile: from the far end of the piece it
+    // crosses the profile in, or from the profile where two pieces meet.
+    let behind = back.map(|(_, _, behind)| behind).or_else(|| {
+        (!freeform)
+            .then(|| starting(&loose, &square))
+            .flatten()
+            .filter(|(_, piece)| piece.start().distance(from) <= JOIN)
+            .map(|(i, piece)| {
+                loose.swap_remove(i);
+                piece
+            })
+    });
+    if let Some(behind) = behind {
+        chains.push(follow(behind, &mut loose, freeform)?);
+    }
+    if !loose.is_empty() {
+        return err(
+            "The path sketch has curves that aren't connected to the path. Remove them,              join them to it, or make them construction geometry.",
+        );
+    }
+    Ok(Path {
+        chains,
+        splines,
+        freeform,
+    })
+}
+
+/// The pieces joined end to end from `first` on, taken out of `loose`.
+fn follow(
+    first: Piece,
+    loose: &mut Vec<Piece>,
+    freeform: bool,
+) -> Result<Vec<Piece>, FeatureError> {
+    let err = |m: &str| Err(FeatureError(m.to_owned()));
     let mut pieces = vec![first];
     loop {
         let last = pieces[pieces.len() - 1];
@@ -330,9 +405,7 @@ fn path_pieces(
         };
         if freeform && next.start_dir().dot(dir) < 1.0 - FREEFORM_SMOOTH {
             return err(
-                "The path has a corner. A path with a spline in it can't have one: every \
-                 piece has to carry on the way the last one ended. Draw the whole path as \
-                 one spline, or round the corner with more of its points.",
+                "The path has a corner. A path with a spline in it, or one that leaves the                  profile's plane at a slant, can't have one: every piece has to carry on the                  way the last one ended. Draw the whole path as one spline, or round the                  corner.",
             );
         }
         if !freeform && next.start_dir().dot(dir) < 1.0 - SMOOTH {
@@ -340,28 +413,19 @@ fn path_pieces(
             let straight = matches!(last, Piece::Line { .. }) && matches!(next, Piece::Line { .. });
             if !straight {
                 return err(
-                    "The path has a corner where an arc meets it at an angle. A sweep can \
-                     mitre a corner between two straight pieces; where an arc is involved, \
-                     make the pieces tangent.",
+                    "The path has a corner where an arc meets it at an angle. A sweep can                      mitre a corner between two straight pieces; where an arc is involved,                      make the pieces tangent.",
                 );
             }
             if next.start_dir().dot(dir) < SHARPEST {
                 return err(
-                    "The path doubles back on itself at a corner too sharp to mitre. Open \
-                     the corner up, or round it with an arc.",
+                    "The path doubles back on itself at a corner too sharp to mitre. Open                      the corner up, or round it with an arc.",
                 );
             }
         }
         loose.swap_remove(i);
         pieces.push(next);
     }
-    if !loose.is_empty() {
-        return err(
-            "The path sketch has curves that aren't connected to the path. Remove them, \
-             join them to it, or make them construction geometry.",
-        );
-    }
-    Ok((pieces, splines))
+    Ok(pieces)
 }
 
 /// The sweep along a path with a spline in it: the kernel's general sweep, one region
@@ -451,10 +515,101 @@ fn freeform_tool(
 /// The swept tool solid with its face names.
 fn tool(input: &SweepInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> {
     let regions: Vec<Region> = selected_regions(input.profile, &input.def.regions, false)?;
-    let (pieces, splines) = path_pieces(input.path, input.path_plane, input.profile_plane)?;
-    if !splines.is_empty() {
-        return freeform_tool(input, &regions, &pieces, splines);
+    let path = path_pieces(input.path, input.path_plane, input.profile_plane)?;
+    if path.freeform {
+        if let Some(swept) = straight_tool(input, &regions, &path)? {
+            return Ok(swept);
+        }
+        return freeform_tool(input, &regions, &path.chains[0], path.splines);
     }
+    // Each run of the path from the profile on; two runs share the profile's section,
+    // which vanishes between them.
+    let mut swept: Option<(Solid, Vec<FaceName>)> = None;
+    let mut done = 0;
+    for chain in &path.chains {
+        let (solid, names) = analytic_tool(input, &regions, chain, done)?;
+        done += chain.len();
+        swept = Some(match swept {
+            None => (solid, names),
+            Some((so_far, so_far_names)) => {
+                let traced = boolean_traced(&so_far, &solid, BooleanOp::Union)?;
+                let names = result_names(&traced.sources, &so_far_names, &names);
+                (traced.solid, names)
+            }
+        });
+    }
+    swept.ok_or_else(|| FeatureError("The path is empty.".to_owned()))
+}
+
+/// The sweep along a straight path that leaves the profile's plane at a slant: the
+/// profile carried along the line keeping its attitude, as SolidWorks sweeps it. That is
+/// an extrusion along the line, exact: the ends are the profile itself (a circle stays one
+/// circle) and the sides are planes and elliptic cylinders. `None` if the path is not one
+/// straight run.
+fn straight_tool(
+    input: &SweepInput<'_>,
+    regions: &[Region],
+    path: &Path,
+) -> Result<Option<(Solid, Vec<FaceName>)>, FeatureError> {
+    let [chain] = path.chains.as_slice() else {
+        return Ok(None);
+    };
+    if !path.splines.is_empty() || chain.iter().any(|p| !matches!(p, Piece::Line { .. })) {
+        return Ok(None);
+    }
+    let (start, end) = (chain[0].start(), chain[chain.len() - 1].end());
+    let dir = (end - start).normalize_or_zero();
+    if chain.iter().any(|p| p.start_dir().dot(dir) < 1.0 - SMOOTH) {
+        return Ok(None);
+    }
+    let length = start.distance(end);
+    let plane = input.profile_plane;
+    // The kernel carries the profile along a direction that leaves its plane forwards
+    let forward = dir.dot(plane.normal()) > 0.0;
+    let (rise, lo, hi) = if forward {
+        (dir, 0.0, length)
+    } else {
+        (-dir, -length, 0.0)
+    };
+    let (solid, faces) = extrude_along_traced(plane, regions, lo, hi, rise)?;
+    let names = faces
+        .iter()
+        .map(|f| {
+            let role = match *f {
+                ExtrudeFace::Start { .. } if forward => FaceRole::NearCap,
+                ExtrudeFace::Start { .. } => FaceRole::FarCap,
+                ExtrudeFace::End { .. } if forward => FaceRole::FarCap,
+                ExtrudeFace::End { .. } => FaceRole::NearCap,
+                ExtrudeFace::Side {
+                    region,
+                    loop_index,
+                    edge,
+                } => {
+                    let r = &regions[region];
+                    let l = if loop_index == 0 {
+                        &r.outer
+                    } else {
+                        &r.holes[loop_index - 1]
+                    };
+                    FaceRole::Side(l.edges[edge].entity)
+                }
+            };
+            FaceName::new(input.feature, role)
+        })
+        .collect();
+    Ok(Some((solid, names)))
+}
+
+/// The sweep along a path of lines and arcs, piece by piece. `before` pieces of the path
+/// have been swept already: the faces of the first piece are named plainly, the others say
+/// which they are.
+fn analytic_tool(
+    input: &SweepInput<'_>,
+    regions: &[Region],
+    pieces: &[Piece],
+    before: usize,
+) -> Result<(Solid, Vec<FaceName>), FeatureError> {
+    let regions = regions.to_vec();
     let side = |region: usize, loop_index: usize, edge: usize| {
         let r = &regions[region];
         let l = if loop_index == 0 {
@@ -481,14 +636,15 @@ fn tool(input: &SweepInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> 
     let mut swept: Option<(Solid, Vec<FaceName>)> = None;
     for (k, piece) in pieces.iter().enumerate() {
         // Faces of the first piece are named plainly; later pieces say which they are.
+        let instance = k + before;
         let name = |role: FaceRole| {
             let name = FaceName::new(input.feature, role);
-            if k == 0 {
+            if instance == 0 {
                 name
             } else {
                 FaceName::merged([
                     &name,
-                    &FaceName::new(input.feature, FaceRole::Instance(k as u32)),
+                    &FaceName::new(input.feature, FaceRole::Instance(instance as u32)),
                 ])
             }
         };

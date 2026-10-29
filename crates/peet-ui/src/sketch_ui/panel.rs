@@ -583,6 +583,18 @@ fn geometry_details(ui: &mut Ui, sketch: &Sketch, e: peet_sketch::EntityId) {
                         row(ui, "Length", super::length_with_unit(c.length()));
                     }
                 }
+                EntityKind::Text => {
+                    if let Some(t) = sketch.text(e) {
+                        row(ui, "Text", t.string.clone());
+                        row(ui, "Font", t.font.clone());
+                        row(ui, "Height", super::length_with_unit(t.height));
+                        row(
+                            ui,
+                            "Angle",
+                            format!("{}°", format_value(t.angle.to_degrees())),
+                        );
+                    }
+                }
             }
         });
 }

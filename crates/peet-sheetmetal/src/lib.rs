@@ -38,16 +38,18 @@ pub mod split;
 #[cfg(test)]
 mod tests;
 
-pub use build::{BendLine, FaceTag, FlatLoop, SPLINE_REFUSAL, SheetBody, SheetError, build};
+pub use build::{
+    BendLine, BreakKind, FaceTag, FlatLoop, SPLINE_REFUSAL, SheetBody, SheetError, build,
+};
 pub use checks::{CheckKind, CheckRules, Finding, Rule, Severity, check, error_finding};
 pub use corner::{Corner, CornerKind, CornerRelief, CornerSpec};
-pub use flange::{Attachment, EdgeFlangeSpec, HemKind, HemSpec, Segment};
+pub use flange::{Attachment, EdgeFlangeSpec, FlangeOwn, HemKind, HemSpec, Segment};
 pub use form::{Form, FormKind, FormMark, FormShape};
 pub use gauge::{CsvError, GaugeEntry, GaugeTable, MaterialLibrary};
 pub use layout::{
     Area, Bend, ChainLine, CurveTag, Cut, Edge2, EdgeSite, Layout, Origin, Piece, PieceKind,
 };
-pub use recognize::{Recognized, recognize, recognize_layout};
+pub use recognize::{Recognized, recognize, recognize_at, recognize_layout};
 pub use report::{BendRow, Report};
 pub use settings::{BendModel, BendValues, FlangePosition, ReliefType, SheetSettings};
 pub use split::{BendLinePosition, JogDimension, JogSpec, SketchedBendSpec, Split};

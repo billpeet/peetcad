@@ -89,8 +89,8 @@ pub(super) fn violation(s: &Sketch, c: &Constraint) -> f64 {
         }
         K::Concentric(a, b) => circ(s, a).0.distance(circ(s, b).0),
         K::Midpoint { point, line } => {
-            let (a, b) = line_ab(s, line);
-            s.point(point).distance((a + b) * 0.5)
+            let middle = s.curve(line).unwrap().point_at(0.5);
+            s.point(point).distance(middle)
         }
         K::Symmetric { a, b, axis } => {
             let (pa, pb) = (s.point(a), s.point(b));
@@ -98,6 +98,40 @@ pub(super) fn violation(s: &Sketch, c: &Constraint) -> f64 {
             axis_curve.distance_to_line((pa + pb) * 0.5) + dir(axis).dot(pb - pa).abs()
         }
         K::Fix { point, at } => s.point(point).distance(at),
+        K::Patterned { seed, copy, first } => {
+            // Where each point of the copy should be: the seed's, moved n steps
+            let places = |id| match s.kind(id).unwrap() {
+                EntityKind::Point => vec![s.point(id)],
+                EntityKind::Circle => vec![circ(s, id).0],
+                _ => {
+                    let (a, b) = line_ab(s, id);
+                    vec![a, b]
+                }
+            };
+            let (sp, fp, cp) = (places(seed), places(first), places(copy));
+            let step = fp[0] - sp[0];
+            let n = ((cp[0] - sp[0]).dot(step) / step.length_squared()).round();
+            let size = if kind(seed) == EntityKind::Circle {
+                (circ(s, seed).1 - circ(s, copy).1).abs()
+            } else {
+                0.0
+            };
+            let off = |o: &[DVec2], n: f64| {
+                (0..sp.len())
+                    .map(|i| (o[i] - sp[i] - step * n).length())
+                    .fold(0.0, f64::max)
+            };
+            off(&cp, n).max(off(&fp, 1.0)).max(size)
+        }
+        K::Offset(a, b) if kind(a) == EntityKind::Line => {
+            let (start, _) = line_ab(s, a);
+            dir(a).perp_dot(dir(b)).abs()
+                + (s.curve(b).unwrap().distance_to_line(start) - val.unwrap()).abs()
+        }
+        K::Offset(a, b) => {
+            let ((c1, r1), (c2, r2)) = (circ(s, a), circ(s, b));
+            c1.distance(c2) + ((r1 - r2).abs() - val.unwrap()).abs()
+        }
         K::Angle(l1, l2) => {
             // atan2 rather than `Sketch::measure` (acos based, only ~1e-8 accurate near
             // 0° and 180°).
@@ -336,6 +370,119 @@ fn midpoint_symmetric_fix() {
 }
 
 #[test]
+fn midpoint_of_an_arc() {
+    // A quarter arc counter-clockwise from (10, 0) to (0, 10) round the origin: its middle
+    // is at 45°, not at the opposite point the same equations allow.
+    let mut s = Sketch::new();
+    let a = s.add_arc(v(0.0, 0.0), v(10.0, 0.0), v(0.0, 10.0));
+    let m = s.add_point(v(6.0, 8.0));
+    add!(s, K::Midpoint { point: m, line: a });
+    assert_solved(&mut s);
+    let middle = s.curve(a).unwrap().point_at(0.5);
+    assert!(s.point(m).distance(middle) < 1e-8);
+    // It follows the arc when the arc changes
+    dim!(s, K::Radius(a), 20.0);
+    assert_solved(&mut s);
+    let (c, r) = circ(&s, a);
+    assert!((r - 20.0).abs() < 1e-8);
+    assert!((s.point(m).distance(c) - 20.0).abs() < 1e-8);
+}
+
+#[test]
+fn offset_follows_what_it_is_offset_from() {
+    // A line and a circle offset from a line and a circle, a little out of place to start with
+    let mut s = Sketch::new();
+    let source = s.add_line(v(0.0, 0.0), v(40.0, 0.0));
+    let line = s.add_line(v(5.0, 9.8), v(35.0, 10.3));
+    let hole = s.add_circle(v(60.0, 0.0), 4.0);
+    let ring = s.add_circle(v(60.2, 0.1), 6.1);
+    dim!(s, K::Offset(line, source), 10.0);
+    let gap = dim!(s, K::Offset(ring, hole), 2.0);
+    assert_solved(&mut s);
+    // The source moves and grows: the offsets follow, on the same side, the same way out
+    add!(s, K::Horizontal(source));
+    dim!(s, K::Radius(hole), 5.0);
+    s.constraint_mut(gap)
+        .unwrap()
+        .dimension
+        .as_mut()
+        .unwrap()
+        .value = 3.0;
+    assert_solved(&mut s);
+    let ((a, b), (from, _)) = (line_ab(&s, line), line_ab(&s, source));
+    assert!(
+        (a.y - from.y - 10.0).abs() < 1e-8 && (b.y - a.y).abs() < 1e-8,
+        "{a} {b}"
+    );
+    let ((c1, r1), (c2, r2)) = (circ(&s, ring), circ(&s, hole));
+    assert!(
+        c1.distance(c2) < 1e-8 && (r1 - r2 - 3.0).abs() < 1e-8,
+        "{r1} {r2}"
+    );
+}
+
+#[test]
+fn linear_pattern_follows_its_seed() {
+    // Three circles 10 apart and a line copied twice, a little out of place to start with
+    let mut s = Sketch::new();
+    let seed = s.add_circle(v(0.0, 0.0), 2.0);
+    let first = s.add_circle(v(10.0, 0.1), 2.1);
+    let third = s.add_circle(v(19.8, 0.0), 1.9);
+    add!(
+        s,
+        K::Patterned {
+            seed,
+            copy: first,
+            first
+        }
+    );
+    add!(
+        s,
+        K::Patterned {
+            seed,
+            copy: third,
+            first
+        }
+    );
+    let l0 = s.add_line(v(0.0, 10.0), v(4.0, 12.0));
+    let l1 = s.add_line(v(5.0, 10.0), v(9.0, 12.1));
+    let l2 = s.add_line(v(10.0, 10.0), v(14.0, 12.0));
+    add!(
+        s,
+        K::Patterned {
+            seed: l0,
+            copy: l1,
+            first: l1
+        }
+    );
+    add!(
+        s,
+        K::Patterned {
+            seed: l0,
+            copy: l2,
+            first: l1
+        }
+    );
+    assert_solved(&mut s);
+    // The seed's size and the step drive the copies
+    dim!(s, K::Radius(seed), 3.0);
+    let (c0, c1) = (circ(&s, seed).0, circ(&s, first).0);
+    dim!(
+        s,
+        K::Distance(s.center(seed).unwrap(), s.center(first).unwrap()),
+        12.0
+    );
+    assert_solved(&mut s);
+    let (c0n, c1n, c2n) = (circ(&s, seed).0, circ(&s, first).0, circ(&s, third).0);
+    assert!((circ(&s, third).1 - 3.0).abs() < 1e-8);
+    assert!(c2n.distance(c0n + (c1n - c0n) * 2.0) < 1e-8);
+    assert!((c1n.distance(c0n) - 12.0).abs() < 1e-8, "{c0} {c1}");
+    let (a0, b0) = line_ab(&s, l0);
+    let (a2, b2) = line_ab(&s, l2);
+    assert!(((b2 - a2) - (b0 - a0)).length() < 1e-8);
+}
+
+#[test]
 fn dimensions() {
     let mut s = Sketch::new();
     let l = s.add_line(v(0.0, 0.0), v(10.0, 1.0));
@@ -353,6 +500,87 @@ fn dimensions() {
     dim!(s, K::Angle(l, l2), 30.0);
     assert_solved(&mut s);
     assert!((circ(&s, a).1 - 6.0).abs() < 1e-9);
+}
+
+/// A rectangle whose width and height are both measured from its top right corner, and
+/// nothing else: a new width moves the left side, as SolidWorks does, and the corner the
+/// dimensions share stays put. The same for a new height and the bottom.
+#[test]
+fn a_changed_dimension_moves_what_less_holds() {
+    let mut s = Sketch::new();
+    let shape = shapes::rectangle(&mut s, v(0.0, 0.0), v(30.0, 20.0));
+    let [bottom, right, top, _] = [
+        shape.curves[0],
+        shape.curves[1],
+        shape.curves[2],
+        shape.curves[3],
+    ];
+    let (top_right, top_left) = pts(&s, top);
+    let (bottom_right, _) = pts(&s, right);
+    let bottom_left = pts(&s, bottom).0;
+    let width = dim!(s, K::HorizontalDistance(top_left, top_right), 30.0);
+    let height = dim!(s, K::VerticalDistance(top_right, bottom_right), 20.0);
+    assert_solved(&mut s);
+    s.constraint_mut(width)
+        .unwrap()
+        .dimension
+        .as_mut()
+        .unwrap()
+        .value = 40.0;
+    assert_solved(&mut s);
+    assert!(
+        s.point(top_right).distance(v(30.0, 20.0)) < 1e-9,
+        "{:?}",
+        s.point(top_right)
+    );
+    assert!(s.point(bottom_right).distance(v(30.0, 0.0)) < 1e-9);
+    assert!(
+        s.point(top_left).distance(v(-10.0, 20.0)) < 1e-9,
+        "{:?}",
+        s.point(top_left)
+    );
+    s.constraint_mut(height)
+        .unwrap()
+        .dimension
+        .as_mut()
+        .unwrap()
+        .value = 50.0;
+    assert_solved(&mut s);
+    assert!(s.point(top_right).distance(v(30.0, 20.0)) < 1e-9);
+    assert!(
+        s.point(bottom_left).distance(v(-10.0, -30.0)) < 1e-9,
+        "{:?}",
+        s.point(bottom_left)
+    );
+}
+
+/// A profile placed by a dimension to the origin moves as a whole when it changes, as
+/// SolidWorks moves it: its shape is not stretched to meet the new value.
+#[test]
+fn a_changed_placement_moves_the_whole_profile() {
+    let mut s = Sketch::new();
+    let shape = shapes::rectangle(&mut s, v(100.0, 10.0), v(130.0, 30.0));
+    let [bottom, right, ..] = [
+        shape.curves[0],
+        shape.curves[1],
+        shape.curves[2],
+        shape.curves[3],
+    ];
+    let corner = pts(&s, bottom).0;
+    dim!(s, K::Length(bottom), 30.0);
+    dim!(s, K::Length(right), 20.0);
+    let place = dim!(s, K::HorizontalDistance(Sketch::ORIGIN, corner), 100.0);
+    assert_solved(&mut s);
+    s.constraint_mut(place)
+        .unwrap()
+        .dimension
+        .as_mut()
+        .unwrap()
+        .value = 40.0;
+    assert_solved(&mut s);
+    let (a, b) = line_ab(&s, bottom);
+    assert!(a.distance(v(40.0, 10.0)) < 1e-9, "{a:?}");
+    assert!(b.distance(v(70.0, 10.0)) < 1e-9, "{b:?}");
 }
 
 #[test]
@@ -909,7 +1137,9 @@ fn coincident_cycle_is_redundant() {
     assert_eq!(d.constraint, ac);
     assert_eq!(d.status, ConstraintStatus::Redundant);
     assert_eq!(d.involved, vec![ab, bc]);
-    assert_eq!(an.entity_status(a), DofStatus::Over);
+    // Redundant, not conflicting: the sketch is not over-defined (as in SolidWorks).
+    assert_eq!(an.entity_status(a), DofStatus::Under);
+    assert!(!an.is_over_defined());
 }
 
 #[test]
@@ -931,8 +1161,48 @@ fn identical_horizontals_are_redundant() {
     );
     assert_eq!(an.constraint_status(h1), ConstraintStatus::Ok);
     assert_eq!(an.constraint_status(h2), ConstraintStatus::Redundant);
-    assert_eq!(an.entity_status(l), DofStatus::Over);
+    assert_eq!(an.entity_status(l), DofStatus::Under);
+    assert!(!an.is_over_defined());
+}
+
+#[test]
+fn a_redundant_relation_leaves_a_fully_defined_sketch_fully_defined() {
+    // A fixed square, then an equal relation its horizontals and verticals already
+    // imply. SolidWorks accepts it and calls the sketch fully defined; so does PeetCAD.
+    let mut s = Sketch::new();
+    let shape = crate::shapes::rectangle(&mut s, v(0.0, 0.0), v(20.0, 10.0));
+    let [bottom, right, top, left] = [
+        shape.curves[0],
+        shape.curves[1],
+        shape.curves[2],
+        shape.curves[3],
+    ];
+    let corner = pts(&s, bottom).0;
+    add!(s, K::Coincident(corner, Sketch::ORIGIN));
+    dim!(s, K::Length(bottom), 20.0);
+    dim!(s, K::Length(left), 10.0);
+    assert_solved(&mut s);
+    assert!(dof_of(&s).is_fully_defined());
+    let eq = add!(s, K::Equal(bottom, top));
+    assert_solved(&mut s);
+    let an = dof_of(&s);
+    assert_eq!(an.dof, 0);
+    assert!(an.is_fully_defined(), "{:?}", an.diagnoses);
+    assert_eq!(an.constraint_status(eq), ConstraintStatus::Redundant);
+    assert_eq!(an.conflicts(), 0);
+    for e in [bottom, right, top, left] {
+        assert_eq!(an.entity_status(e), DofStatus::Fully);
+    }
+
+    // A length on the top that disagrees with the bottom's conflicts.
+    let mut s2 = s.clone();
+    let wrong = dim!(s2, K::Length(top), 25.0);
+    let mut solver = Solver::new();
+    assert!(!solver.solve(&mut s2).converged);
+    let an = solver.analyze(&s2);
     assert!(an.is_over_defined());
+    assert_eq!(an.constraint_status(wrong), ConstraintStatus::Conflicting);
+    assert_eq!(an.entity_status(top), DofStatus::Over);
 }
 
 #[test]
@@ -1119,4 +1389,81 @@ fn analysis_is_independent_of_solver_state() {
 #[test]
 fn angle_wraps_correctly() {
     assert!((equations::wrap_angle(PI + 0.1) - (-PI + 0.1)).abs() < 1e-12);
+}
+
+#[test]
+fn distance_to_a_side_of_a_circle() {
+    use crate::{Along, ArcSide};
+    // A point 130 along X from a hole's far side (SolidWorks' Max), and a ring 3 from a
+    // hole inside it, near side to near side (SolidWorks' Min between nested circles)
+    let mut s = Sketch::new();
+    let p = s.add_point(v(0.0, 0.0));
+    add!(
+        s,
+        K::Fix {
+            point: p,
+            at: v(0.0, 0.0)
+        }
+    );
+    let hole = s.add_circle(v(120.0, 5.0), 2.1);
+    dim!(s, K::Radius(hole), 2.1);
+    add!(s, K::HorizontalPoints(p, s.center(hole).unwrap()));
+    dim!(
+        s,
+        K::SideDistance {
+            a: p,
+            b: hole,
+            sides: [ArcSide::Center, ArcSide::Far],
+            along: Along::Horizontal
+        },
+        130.0
+    );
+    let ring = s.add_circle(v(0.5, 40.0), 6.0);
+    let inner = s.add_circle(v(0.0, 40.0), 3.0);
+    dim!(s, K::Radius(ring), 6.0);
+    dim!(s, K::Radius(inner), 3.0);
+    add!(
+        s,
+        K::HorizontalPoints(s.center(ring).unwrap(), s.center(inner).unwrap())
+    );
+    add!(
+        s,
+        K::Fix {
+            point: s.center(inner).unwrap(),
+            at: v(0.0, 40.0)
+        }
+    );
+    dim!(
+        s,
+        K::SideDistance {
+            a: ring,
+            b: inner,
+            sides: [ArcSide::Near, ArcSide::Near],
+            along: Along::Straight
+        },
+        2.0
+    );
+    assert_solved(&mut s);
+    let (c, _) = circ(&s, hole);
+    assert!((c.x + 2.1 - 130.0).abs() < 1e-8, "{c}");
+    let (cr, _) = circ(&s, ring);
+    // The ring's near side 6 - d out, the hole's 3: 2 apart puts the centres 1 apart
+    assert!((cr.x.abs() - 1.0).abs() < 1e-8, "{cr}");
+    // Apart, near to near takes both radii off
+    let a = s.add_circle(v(0.0, 100.0), 5.0);
+    let b = s.add_circle(v(30.0, 100.0), 4.0);
+    let k = K::SideDistance {
+        a,
+        b,
+        sides: [ArcSide::Near, ArcSide::Near],
+        along: Along::Straight,
+    };
+    assert!((s.measure(&k).unwrap() - 21.0).abs() < 1e-12);
+    let k = K::SideDistance {
+        a,
+        b,
+        sides: [ArcSide::Far, ArcSide::Near],
+        along: Along::Straight,
+    };
+    assert!((s.measure(&k).unwrap() - 31.0).abs() < 1e-12);
 }

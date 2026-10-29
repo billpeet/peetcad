@@ -84,6 +84,9 @@ pub fn configurations(doc: &Document) -> Value {
             if !c.comment.is_empty() {
                 m.insert("comment".to_owned(), json!(c.comment));
             }
+            if let Some(parent) = c.parent.and_then(|p| model.configuration(p)) {
+                m.insert("parent".to_owned(), json!(parent.name));
+            }
             Value::Object(m)
         })
         .collect();
@@ -123,13 +126,127 @@ pub fn configurations(doc: &Document) -> Value {
             .or_insert_with(|| Value::Object(Map::new()));
         of[name] = Value::Object(each);
     }
-    json!({
+    // Yes-or-no settings ("reverse") and sketches' planes ("on") that differ
+    let mut settings: Map<String, Value> = Map::new();
+    for (id, slot) in model.settings_that_differ() {
+        let name = match &slot {
+            peet_model::Slot::Flag(n) => n.clone(),
+            _ => "on".to_owned(),
+        };
+        let each: Map<String, Value> = model
+            .configurations()
+            .iter()
+            .filter_map(|c| {
+                let held = model.held_in(id, &slot, c.id)?;
+                let v = match held {
+                    peet_model::Held::Flag(b) => json!(b),
+                    peet_model::Held::Plane(p) => json!(p),
+                    peet_model::Held::Scalar(s) => json!(s.value),
+                };
+                Some((c.name.clone(), v))
+            })
+            .collect();
+        let of = settings
+            .entry(model.name_of(id).to_owned())
+            .or_insert_with(|| Value::Object(Map::new()));
+        of[name] = Value::Object(each);
+    }
+    let mut out = json!({
         "active": model.active_configuration().name,
         "configurations": list,
         "suppressed_in": suppressed,
         "parameters": parameters,
         "values": values,
-    })
+        "settings": settings,
+    });
+    if model.is_assembly() {
+        let (components, mates) = assembly_differences(doc);
+        out["components"] = Value::Object(components);
+        out["mates"] = Value::Object(mates);
+        out["equations"] = Value::Object(crate::equations::equations_that_differ(doc));
+    }
+    out
+}
+
+/// What differs between an assembly's configurations: for each component and mate that
+/// differs, the fields that differ, in every configuration.
+fn assembly_differences(doc: &Document) -> (Map<String, Value>, Map<String, Value>) {
+    let model = &doc.model;
+    let mut components = Map::new();
+    let mut mates = Map::new();
+    let Some(assembly) = model.assembly() else {
+        return (components, mates);
+    };
+    let configs = model.configurations();
+    for c in assembly
+        .components()
+        .filter(|c| model.component_differs(c.id))
+    {
+        let states: Vec<_> = configs
+            .iter()
+            .filter_map(|x| Some((x, model.component_in(c.id, x.id)?)))
+            .collect();
+        let differs = |f: &dyn Fn(&peet_model::ComponentState) -> Value| {
+            states.windows(2).any(|w| f(&w[0].1) != f(&w[1].1))
+        };
+        let part = assembly.definition(c.definition).map(|d| d.model.clone());
+        let shown = |s: &peet_model::ComponentState| -> Value {
+            let Some(part) = &part else {
+                return Value::Null;
+            };
+            let id = s.configuration.unwrap_or(part.active_configuration().id);
+            part.configuration(id)
+                .map_or(Value::Null, |x| json!(x.name))
+        };
+        let suppressed = |s: &peet_model::ComponentState| json!(s.suppressed);
+        let fixed = |s: &peet_model::ComponentState| json!(s.fixed);
+        let placed = |s: &peet_model::ComponentState| {
+            let mut m = Map::new();
+            crate::assembly::placement_out(&mut m, &s.placement, &model.parameters.units);
+            Value::Object(m)
+        };
+        type Field<'f> = &'f dyn Fn(&peet_model::ComponentState) -> Value;
+        let fields: Vec<(&str, Field)> = vec![
+            ("suppressed", &suppressed),
+            ("configuration", &shown),
+            ("fixed", &fixed),
+            ("placement", &placed),
+        ];
+        let mut each = Map::new();
+        for (x, state) in &states {
+            let mut m = Map::new();
+            for (name, f) in &fields {
+                if differs(*f) {
+                    m.insert((*name).to_owned(), f(state));
+                }
+            }
+            each.insert(x.name.clone(), Value::Object(m));
+        }
+        components.insert(c.name.clone(), Value::Object(each));
+    }
+    for m in assembly.mates().filter(|m| model.mate_differs(m.id)) {
+        let states: Vec<_> = configs
+            .iter()
+            .filter_map(|x| Some((x, model.mate_in(m.id, x.id)?)))
+            .collect();
+        let kinds_differ = states.windows(2).any(|w| w[0].1.kind != w[1].1.kind);
+        let suppression_differs = states
+            .windows(2)
+            .any(|w| w[0].1.suppressed != w[1].1.suppressed);
+        let mut each = Map::new();
+        for (x, state) in &states {
+            let mut o = Map::new();
+            if suppression_differs {
+                o.insert("suppressed".to_owned(), json!(state.suppressed));
+            }
+            if kinds_differ {
+                crate::mate::kind_values(&state.kind, doc, &mut o);
+            }
+            each.insert(x.name.clone(), Value::Object(o));
+        }
+        mates.insert(m.name.clone(), Value::Object(each));
+    }
+    (components, mates)
 }
 
 /// A parameter's expression in every configuration.
@@ -147,7 +264,9 @@ fn expressions(doc: &Document, name: &str) -> Map<String, Value> {
 /// Every feature that failed to build, in tree order.
 pub fn failures(doc: &Document) -> Vec<Value> {
     if doc.is_assembly() {
-        return crate::assembly::problems(doc);
+        let mut out = crate::assembly::problems(doc);
+        out.extend(crate::equations::failures(doc));
+        return out;
     }
     doc.model
         .features()
@@ -260,6 +379,7 @@ fn sketch_detail(doc: &Document, sketch: &Sketch) -> (Vec<Value>, Vec<Value>, Ve
                 "points": points.iter().map(|p| p.0).collect::<Vec<u32>>(),
                 "through": points.iter().map(|p| at(*p)).collect::<Vec<Value>>(),
             }),
+            Geometry::Text { .. } => crate::sketch::text_out(sketch, id, units),
         };
         if let Value::Object(m) = &mut v {
             m.insert("id".to_owned(), json!(id.0));
@@ -279,8 +399,23 @@ fn sketch_detail(doc: &Document, sketch: &Sketch) -> (Vec<Value>, Vec<Value>, Ve
     let mut dimensions = Vec::new();
     for (id, c) in sketch.constraints() {
         let of: Vec<u32> = c.kind.entities().iter().map(|e| e.0).collect();
+        // Implied by the others (accepted, adds nothing), or contradicting them.
+        let status = match analysis.constraint_status(id) {
+            peet_sketch::solver::ConstraintStatus::Ok => None,
+            peet_sketch::solver::ConstraintStatus::Redundant => Some("redundant"),
+            peet_sketch::solver::ConstraintStatus::Conflicting => Some("conflicting"),
+        };
         match &c.dimension {
-            None => relations.push(json!({ "id": id.0, "type": c.kind.label(), "of": of })),
+            None => {
+                let mut m = Map::new();
+                m.insert("id".to_owned(), json!(id.0));
+                m.insert("type".to_owned(), json!(c.kind.label()));
+                m.insert("of".to_owned(), json!(of));
+                if let Some(status) = status {
+                    m.insert(status.to_owned(), json!(true));
+                }
+                relations.push(Value::Object(m));
+            }
             Some(d) => {
                 let value = if c.kind.is_angular() {
                     json!(round(d.value))
@@ -292,11 +427,21 @@ fn sketch_detail(doc: &Document, sketch: &Sketch) -> (Vec<Value>, Vec<Value>, Ve
                 m.insert("type".to_owned(), json!(c.kind.label()));
                 m.insert("of".to_owned(), json!(of));
                 m.insert("value".to_owned(), value);
+                if let peet_sketch::ConstraintKind::SideDistance { sides, along, .. } = c.kind {
+                    m.insert(
+                        "sides".to_owned(),
+                        json!([sides[0].word(), sides[1].word()]),
+                    );
+                    m.insert("along".to_owned(), json!(along.word()));
+                }
                 if let Some(e) = &d.expression {
                     m.insert("expression".to_owned(), json!(e));
                 }
                 if !d.driving {
                     m.insert("driven".to_owned(), json!(true));
+                }
+                if let Some(status) = status {
+                    m.insert(status.to_owned(), json!(true));
                 }
                 dimensions.push(Value::Object(m));
             }
@@ -382,6 +527,57 @@ pub fn parameters(doc: &Document) -> Value {
         })
         .collect();
     json!({ "units": params.units.length.suffix(), "parameters": list })
+}
+
+/// The part's dimensions by address (`Width@Sketch1`), of one feature or all; with `name`,
+/// the one dimension at that address.
+pub fn dimensions(
+    doc: &Document,
+    feature: Option<FeatureId>,
+    name: Option<&str>,
+) -> Result<Value, String> {
+    let model = &doc.model;
+    let list = match (name, feature) {
+        (Some(name), _) => vec![model.find_dimension(name).ok_or_else(|| {
+            format!(
+                "No dimension of the part is called '{name}'. The 'dimensions' query lists them."
+            )
+        })?],
+        (None, Some(id)) => model.dimensions_of(id),
+        (None, None) => model.dimensions(),
+    };
+    let several = model.configurations().len() > 1;
+    let list: Vec<Value> = list
+        .iter()
+        .filter(|d| feature.is_none_or(|f| d.feature == f))
+        .map(|d| {
+            let mut v = json!({
+                "address": d.address,
+                "name": d.name,
+                "feature": model.name_of(d.feature),
+                "value": crate::fields::scalar_out(&d.value, d.kind, doc),
+            });
+            if let Some(field) = d.field {
+                v["field"] = json!(field);
+            }
+            if !d.driving {
+                v["driven"] = json!(true);
+            }
+            if several && model.value_differs(d.feature, &d.slot) {
+                let values: serde_json::Map<String, Value> = model
+                    .configurations()
+                    .iter()
+                    .filter_map(|c| {
+                        let s = model.value_in(d.feature, &d.slot, c.id)?;
+                        Some((c.name.clone(), crate::fields::scalar_out(&s, d.kind, doc)))
+                    })
+                    .collect();
+                v["configurations"] = Value::Object(values);
+            }
+            v
+        })
+        .collect();
+    Ok(json!({ "dimensions": list }))
 }
 
 pub fn bodies(doc: &Document) -> Value {
@@ -481,6 +677,7 @@ pub fn faces(doc: &Document, body: Option<usize>) -> Result<Value, String> {
                     m.insert("surface".to_owned(), json!("cylinder"));
                     m.insert("radius".to_owned(), length_out(c.radius, units));
                     m.insert("axis".to_owned(), direction_out(c.axis()));
+                    m.insert("axis_point".to_owned(), point3_out(c.frame.origin, units));
                 }
                 Surface::Cone(_) => {
                     m.insert("surface".to_owned(), json!("cone"));
@@ -526,6 +723,16 @@ pub fn edges(doc: &Document, body: Option<usize>) -> Result<Value, String> {
                     Curve3::Nurbs(_) => "freeform",
                 }),
             );
+            // A straight edge's direction, as mates take it (its alignment refers to
+            // this), which need not run from `from` to `to`.
+            if let Curve3::Line(l) = &edge.curve {
+                m.insert("direction".to_owned(), direction_out(l.dir));
+            }
+            if let Curve3::Circle(c) = &edge.curve {
+                m.insert("center".to_owned(), point3_out(c.frame.origin, units));
+                m.insert("axis".to_owned(), direction_out(c.frame.z_axis()));
+                m.insert("radius".to_owned(), length_out(c.radius, units));
+            }
             m.insert(
                 "from".to_owned(),
                 point3_out(b.solid.vertex(edge.start).point, units),

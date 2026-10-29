@@ -245,6 +245,41 @@ fn conversion_follows_the_solid() {
 }
 
 #[test]
+fn a_flat_body_can_be_given_a_thickness_of_its_own() {
+    // A 3 mm plate converted at 2 mm, as SolidWorks converts with the thickness it is
+    // given: the sheet hangs from the fixed face (the top) into the plate.
+    let mut p = Part::default();
+    p.model.add_import(
+        "plate.step".to_owned(),
+        vec![ImportedSolid {
+            name: "plate".to_owned(),
+            solid: peet_kernel::primitive::cuboid(DVec3::ZERO, DVec3::new(70.0, 210.0, 3.0)),
+        }],
+    );
+    p.rebuild();
+    let top = p.face_ref(DVec3::Z, DVec3::new(10.0, 10.0, 3.0));
+    let convert = p.model.add_convert_to_sheet(Some(top));
+    convert_mut(&mut p, convert).thickness = Some(Scalar::new(2.0));
+    p.rebuild();
+    p.assert_ok();
+    assert_close(p.volume(), 70.0 * 210.0 * 2.0);
+    let b = p.bodies()[0].solid.bounds();
+    assert_close(b.min.z, 1.0);
+    assert_close(b.max.z, 3.0);
+    assert_close(
+        p.bodies()[0].sheet.as_ref().unwrap().report().thickness,
+        2.0,
+    );
+
+    // A body with bends keeps its own.
+    let mut p = extruded_l(true);
+    let convert = p.model.add_convert_to_sheet(None);
+    convert_mut(&mut p, convert).thickness = Some(Scalar::new(1.0));
+    p.rebuild();
+    assert!(failure(&p, convert).contains("has bends"));
+}
+
+#[test]
 fn conversion_failures_say_what_to_do() {
     // Sharp corners: not a sheet with bends.
     let mut p = extruded_l(false);

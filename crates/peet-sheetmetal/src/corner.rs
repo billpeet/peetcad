@@ -10,16 +10,27 @@
 //!
 //! **Relief.** A region around the corner is cut from the face and from both bends (not
 //! from the flanges). Its two edges are square to each bend line, so the bends end
-//! cleanly and fold exactly: a line across a bend must be square or parallel to it. The
+//! cleanly, in arcs (a slanted line across a bend folds too, but to a freeform curve). The
 //! region reaches past both bend zones and the strips the face gave up to them, plus a
-//! margin (`relief_size`, none for a tear relief).
+//! margin (`relief_size`, none for a tear relief). A *flush* relief reaches to where the
+//! two flanges end instead, so the bends end in line with their flanges and the corner
+//! of the flat pattern is one notch with one inside corner. A *slanted* relief leaves the
+//! face its corner and ends each bend on the line from that corner to the end of its
+//! flange, which folds to a freeform end. A *circular* or *square* relief is SolidWorks'
+//! corner relief of that shape: `relief_size` across, centred where the two flanges'
+//! ends meet in the flat pattern, and cut from the face, both bends and both flanges;
+//! outside it the face and the bends are cut back as a flush relief cuts them.
 //!
 //! **Flange ends.** Each flange's end at the corner is extended a little and then cut
 //! back against a plane of the other flange, in the folded part:
 //! - *butt*: the earlier flange runs to the later one's outer face, and the later one
 //!   stops `gap` short of the earlier one's inner face;
 //! - *overlap*: the other way round;
-//! - *open*: both stop `gap` short of the other's inner face, leaving the corner open.
+//! - *open*: both stop `gap` short of the other's inner face, leaving the corner open;
+//! - *plain*: nothing is made longer to close the corner. The earlier flange ends where
+//!   its own edge does, at the corner of the face, and the later one stops `gap` short of
+//!   the earlier one's inner face. With the later flange inside the edge that is a butt
+//!   corner; with it outside, the earlier flange is not run on to meet it.
 //!
 //! Walls through the sheet are square to it, so a cut is the line where the plane meets
 //! the flange, at whichever face of the sheet is the stricter. For the usual square
@@ -30,6 +41,9 @@ use peet_math::{DVec2, DVec3};
 
 use crate::layout::{Area, CurveTag, Cut, Edge2, Layout, MIN_LENGTH, PieceKind, wall};
 
+/// A bend mitred with its flats: the bend, which of its ends, and the flats' half-planes (a point and an offset).
+type BendMitre = (usize, bool, Vec<(DVec2, f64)>);
+
 /// How the flanges at a corner meet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CornerKind {
@@ -39,16 +53,20 @@ pub enum CornerKind {
     Overlap,
     /// Neither reaches the corner: both stop short of the other's inner face.
     Open,
+    /// The earlier flange ends where its own edge does and the later one stops short of
+    /// its inner face: nothing is run on to close the corner.
+    Plain,
 }
 
 impl CornerKind {
-    pub const ALL: [Self; 3] = [Self::Butt, Self::Overlap, Self::Open];
+    pub const ALL: [Self; 4] = [Self::Butt, Self::Overlap, Self::Open, Self::Plain];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Butt => "Butt",
             Self::Overlap => "Overlap",
             Self::Open => "Open",
+            Self::Plain => "Plain",
         }
     }
 }
@@ -60,15 +78,40 @@ pub enum CornerRelief {
     Rectangular,
     /// Only what the bends would otherwise share: the corner tears there.
     Tear,
+    /// Back to where the two flanges end (and never less than a tear), so each bend ends
+    /// in line with its flange.
+    Flush,
+    /// Nothing is cut from the face: each bend ends on the line from the face's corner
+    /// (where the two bends start) to where its flange ends.
+    Slanted,
+    /// A circle `relief_size` across, centred where the two flanges' ends meet in the
+    /// flat pattern, cut from the face, both bends and both flanges (SolidWorks' circular
+    /// corner relief).
+    Circular,
+    /// A square `relief_size` across, its sides along the two edges, centred where the
+    /// two flanges' ends meet in the flat pattern, cut from the face, both bends and both
+    /// flanges (SolidWorks' rectangular corner relief).
+    Square,
 }
 
 impl CornerRelief {
-    pub const ALL: [Self; 2] = [Self::Rectangular, Self::Tear];
+    pub const ALL: [Self; 6] = [
+        Self::Rectangular,
+        Self::Tear,
+        Self::Flush,
+        Self::Slanted,
+        Self::Circular,
+        Self::Square,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             Self::Rectangular => "Rectangular",
             Self::Tear => "Tear",
+            Self::Flush => "Flush",
+            Self::Slanted => "Slanted",
+            Self::Circular => "Circular",
+            Self::Square => "Square",
         }
     }
 }
@@ -80,7 +123,8 @@ pub struct CornerSpec {
     /// The gap left between the flanges.
     pub gap: f64,
     pub relief: CornerRelief,
-    /// How far a rectangular relief reaches past the bends.
+    /// How far a rectangular relief reaches past the bends; how big a circular or square
+    /// one is across.
     pub relief_size: f64,
 }
 
@@ -94,9 +138,14 @@ pub struct Corner {
     /// start of its span, 1: the end).
     pub attachments: [usize; 2],
     pub ends: [usize; 2],
-    /// The face's corner point.
+    /// The face's corner point (for flanges on two faces, the middle of the bend between
+    /// their ends).
     pub at: DVec2,
     pub spec: CornerSpec,
+    /// For flanges on the edges of two faces that a bend joins, which meet across that
+    /// bend in one plane (the lips round the side of a channel): the bend. They are
+    /// mitred, whatever the corner's kind, and nothing is relieved.
+    pub across: Option<usize>,
 }
 
 /// Name numbers for the walls of corner reliefs: `part` is this plus the end of the
@@ -149,6 +198,56 @@ impl Layout {
                             ends: [eo, en],
                             at: *po,
                             spec,
+                            across: None,
+                        });
+                    }
+                }
+            }
+        }
+        // Flanges on in-line edges of two faces joined by a bend, each ending at the bend
+        // (one at either side of it), whose flats lie in one plane: SolidWorks mitres them
+        for (i, old) in self.attachments[..new].iter().enumerate() {
+            if old.parent == n.parent || !self.makes_corners(old) {
+                continue;
+            }
+            let Some((bend, b)) = self.bends().find(|(_, b)| {
+                (b.parent == old.parent && b.child == Some(n.parent))
+                    || (b.parent == n.parent && b.child == Some(old.parent))
+            }) else {
+                continue;
+            };
+            if old.along().perp_dot(n.along()).abs() > 1e-6
+                || b.along.dot(old.along()).abs() > 1e-6
+                || !self.coplanar(old.pieces[1], n.pieces[1])
+            {
+                continue;
+            }
+            // The ends on the parent's side and the child's, each near its side of the bend
+            // (an edge of the parent can run on under the bend, to the outline it was cut from)
+            let reach = 2.0 * (b.values.radius + b.values.thickness);
+            let old_is_parent = b.parent == old.parent;
+            let old_ends = ends(old);
+            for (eo, po) in old_ends.iter().enumerate() {
+                for (en, pn) in new_ends.iter().enumerate() {
+                    let (pp, pc) = if old_is_parent {
+                        (*po, *pn)
+                    } else {
+                        (*pn, *po)
+                    };
+                    let ((sp, wp), (sc, wc)) = (b.strip_coords(pp), b.strip_coords(pc));
+                    let on_bend = |w: f64| (-MIN_LENGTH..=b.length + MIN_LENGTH).contains(&w);
+                    if (pc - pp).perp_dot(old.along()).abs() <= MIN_LENGTH
+                        && sp.abs() <= reach
+                        && (sc - b.width()).abs() <= reach
+                        && on_bend(wp)
+                        && on_bend(wc)
+                    {
+                        found.push(Corner {
+                            attachments: [i, new],
+                            ends: [eo, en],
+                            at: (pp + pc) / 2.0,
+                            spec,
+                            across: Some(bend),
                         });
                     }
                 }
@@ -190,9 +289,14 @@ impl Layout {
         struct EndCut {
             end: usize,
             planes: Vec<(DVec2, f64)>,
+            /// A mitre across a bend: its wall is told apart from a square end's.
+            across: bool,
         }
         let mut per_flat: Vec<(usize, Vec<EndCut>)> = Vec::new();
         let mut bend_ends: Vec<(usize, usize, f64)> = Vec::new();
+        // First bends mitred with their flats (across a bend): the bend, its end, the
+        // flat's half-planes
+        let mut bend_mitres: Vec<BendMitre> = Vec::new();
         let mut push =
             |flat: usize, cut: EndCut| match per_flat.iter_mut().find(|(f, _)| *f == flat) {
                 Some(s) => s.1.push(cut),
@@ -206,22 +310,41 @@ impl Layout {
             let mut planes_of: Vec<[Vec<(DVec2, f64)>; 2]> = Vec::new();
             for k in 0..flats {
                 let (fa, fb) = (a.pieces[2 * k + 1], b.pieces[2 * k + 1]);
-                let planes = if k > 0 && self.coplanar(fa, fb) {
+                if c.across.is_some() && !self.coplanar(fa, fb) {
+                    break;
+                }
+                let planes = if (k > 0 || c.across.is_some()) && self.coplanar(fa, fb) {
                     // Lips in one plane: mitred along the line that halves the corner.
                     match self.miter(c, k) {
                         Some(p) => p,
                         None => break,
                     }
+                } else if k == 0 && c.spec.kind == CornerKind::Plain {
+                    // The earlier flange keeps to its own edge: it ends square at the face's
+                    // corner, wherever the later flange stands.
+                    let away = if c.ends[0] == 0 {
+                        a.along()
+                    } else {
+                        -a.along()
+                    };
+                    [
+                        vec![(away, away.dot(c.at))],
+                        self.keep_clear(fb, fa, false, gap, false),
+                    ]
                 } else {
                     // (keep beyond the other's outer face (true) or inner face, gap)
                     let rules = match c.spec.kind {
-                        CornerKind::Butt => [(true, 0.0), (false, gap)],
+                        CornerKind::Butt | CornerKind::Plain => [(true, 0.0), (false, gap)],
                         CornerKind::Overlap => [(false, gap), (true, 0.0)],
                         CornerKind::Open => [(false, gap), (false, gap)],
                     };
+                    // An open corner's gap is measured from each flange's inner face, as
+                    // SolidWorks measures it: where the corner is not square, the outer face
+                    // comes nearer the other flange or stays further off.
+                    let inner_only = c.spec.kind == CornerKind::Open;
                     [
-                        self.keep_clear(fa, fb, rules[0].0, rules[0].1),
-                        self.keep_clear(fb, fa, rules[1].0, rules[1].1),
+                        self.keep_clear(fa, fb, rules[0].0, rules[0].1, inner_only),
+                        self.keep_clear(fb, fa, rules[1].0, rules[1].1, inner_only),
                     ]
                 };
                 push(
@@ -229,6 +352,7 @@ impl Layout {
                     EndCut {
                         end: c.ends[0],
                         planes: planes[0].clone(),
+                        across: c.across.is_some(),
                     },
                 );
                 push(
@@ -236,8 +360,23 @@ impl Layout {
                     EndCut {
                         end: c.ends[1],
                         planes: planes[1].clone(),
+                        across: c.across.is_some(),
                     },
                 );
+                if k == 0 && c.across.is_some() {
+                    // The mitre runs on across each flange's bend, straight in the flat
+                    // pattern, as SolidWorks cuts it (the bend's end folds to a freeform face)
+                    for (att, end, planes) in
+                        [(a, c.ends[0], &planes[0]), (b, c.ends[1], &planes[1])]
+                    {
+                        let bend = att.pieces[0];
+                        // Whether the end is at the start of the bend's own line
+                        let at_start = self.pieces[bend]
+                            .bend()
+                            .is_some_and(|bv| (end == 0) == (bv.along.dot(att.along()) > 0.0));
+                        bend_mitres.push((bend, at_start, planes.clone()));
+                    }
+                }
                 planes_of.push(planes);
             }
             // Later bends end square, where the tighter of the flats on either side of
@@ -272,13 +411,45 @@ impl Layout {
                 }
             }
 
+            if c.across.is_some() {
+                continue;
+            }
             // The relief, cut from the face and both first bends.
             let (sa, sb) = (a.pieces[0], b.pieces[0]);
-            if let Some(area) = self.corner_relief(c, ci, size) {
-                out.cuts.push(Cut {
-                    area,
-                    pieces: vec![a.parent, sa, sb],
-                });
+            let flush = match (c.spec.relief, planes_of.first()) {
+                (
+                    CornerRelief::Flush
+                    | CornerRelief::Slanted
+                    | CornerRelief::Circular
+                    | CornerRelief::Square,
+                    Some(planes),
+                ) => Some([
+                    self.end_reach(a, c.ends[0], &planes[0], c.at),
+                    self.end_reach(b, c.ends[1], &planes[1], c.at),
+                ]),
+                _ => None,
+            };
+            if matches!(c.spec.relief, CornerRelief::Circular | CornerRelief::Square) {
+                // The shape, from everything at the corner; and the face and the bends cut back
+                // to where the flanges end, as a flush relief does (a bend is no longer than its
+                // flange), never less than a tear.
+                if let Some(area) = self.shaped_relief(c, ci, flush.unwrap_or([None, None])) {
+                    let mut pieces = vec![a.parent, sa, sb];
+                    pieces.extend(a.pieces.get(1).copied());
+                    pieces.extend(b.pieces.get(1).copied());
+                    out.cuts.push(Cut::new(area, pieces));
+                }
+                if let Some(area) = self.corner_relief(c, ci, size, flush) {
+                    out.cuts.push(Cut::new(area, vec![a.parent, sa, sb]));
+                }
+            } else if let Some(area) = self.corner_relief(c, ci, size, flush) {
+                // A slanted relief only touches the face at its corner.
+                let pieces = if c.spec.relief == CornerRelief::Slanted {
+                    vec![sa, sb]
+                } else {
+                    vec![a.parent, sa, sb]
+                };
+                out.cuts.push(Cut::new(area, pieces));
             }
         }
         let grow = 2.0 * (self.max_radius() + t) + 4.0 * t + 1.0;
@@ -313,10 +484,11 @@ impl Layout {
                 (p(u[1], lo.y), tag(wall::FLANGE_FOLD)),
             ];
             for c in &cuts {
-                let end_tag = tag(if c.end == 0 {
-                    wall::FLANGE_START
-                } else {
-                    wall::FLANGE_END
+                let end_tag = tag(match (c.end, c.across) {
+                    (0, false) => wall::FLANGE_START,
+                    (_, false) => wall::FLANGE_END,
+                    (0, true) => wall::MITRE_START,
+                    (_, true) => wall::MITRE_END,
                 });
                 for &(n, k) in &c.planes {
                     poly = clip(&poly, n, k, end_tag);
@@ -324,6 +496,58 @@ impl Layout {
             }
             if poly.len() >= 3 {
                 out.pieces[flat].outline = polygon_area(&poly);
+            }
+        }
+        // Each bend once, with the mitres at either end
+        let mut mitred: Vec<usize> = bend_mitres.iter().map(|m| m.0).collect();
+        mitred.dedup();
+        for bend in mitred {
+            let piece = &out.pieces[bend];
+            let Some(bv) = piece.bend().copied() else {
+                continue;
+            };
+            let ends: Vec<_> = bend_mitres.iter().filter(|m| m.0 == bend).collect();
+            let (mut lo, mut hi) = rect_extent(&piece.outline, bv.origin, bv.along, bv.across);
+            // Run on past the end first: the mitre can be beyond it (where the flat's fold
+            // line meets the mitre further out than the edge's end)
+            let more = bv.width() + t;
+            for &&(_, at_start, _) in &ends {
+                if at_start {
+                    lo.x -= more;
+                } else {
+                    hi.x += more;
+                }
+            }
+            let tag = |index: u8| CurveTag::Generated {
+                owner: piece.origin.owner,
+                part: piece.origin.part,
+                index,
+            };
+            let far = if bv.child.is_some() {
+                wall::BEND_CHILD
+            } else {
+                wall::TIP
+            };
+            let p = |x: f64, y: f64| bv.origin + bv.along * x + bv.across * y;
+            // As `rect` makes it: each point with the tag of the edge that starts there
+            let mut poly: Vec<(DVec2, CurveTag)> = vec![
+                (p(lo.x, lo.y), tag(wall::BEND_PARENT)),
+                (p(hi.x, lo.y), tag(wall::BEND_END)),
+                (p(hi.x, hi.y), tag(far)),
+                (p(lo.x, hi.y), tag(wall::BEND_START)),
+            ];
+            for (_, at_start, planes) in ends {
+                let end_tag = tag(if *at_start {
+                    wall::BEND_START
+                } else {
+                    wall::BEND_END
+                });
+                for &(n, k) in planes {
+                    poly = clip(&poly, n, k, end_tag);
+                }
+            }
+            if poly.len() >= 3 {
+                out.pieces[bend].outline = polygon_area(&poly);
             }
         }
         for (bend, end, reach) in bend_ends {
@@ -443,8 +667,16 @@ impl Layout {
     }
 
     /// Half-planes `n·p ≥ k` (flat coordinates) that keep flange `flange` on the far side
-    /// of flange `other`'s outer (or inner) face, `gap` clear, at both faces of the sheet.
-    fn keep_clear(&self, flange: usize, other: usize, outer: bool, gap: f64) -> Vec<(DVec2, f64)> {
+    /// of flange `other`'s outer (or inner) face, `gap` clear, at both faces of the sheet
+    /// (or, `inner_only`, at the flange's own inner face).
+    fn keep_clear(
+        &self,
+        flange: usize,
+        other: usize,
+        outer: bool,
+        gap: f64,
+        inner_only: bool,
+    ) -> Vec<(DVec2, f64)> {
         let t = self.settings.thickness;
         let (fp, op) = (&self.pieces[flange], &self.pieces[other]);
         let up_of = |piece: usize| {
@@ -462,7 +694,12 @@ impl Layout {
         };
         let face_point = op.frame.to_world(DVec3::new(0.0, 0.0, z));
         let mut out = Vec::new();
-        for level in [0.0, t] {
+        let levels: &[f64] = match (inner_only, up_of(flange)) {
+            (false, _) => &[0.0, t],
+            (true, true) => &[t],
+            (true, false) => &[0.0],
+        };
+        for &level in levels {
             // Signed distance from the face of a flat point p at this level:
             // inside · (R·(p, level) + origin − face_point).
             let g = fp.frame.vector_to_local(inside);
@@ -476,13 +713,61 @@ impl Layout {
         out
     }
 
-    /// The relief region of corner `c`, or `None` if it has no area.
-    fn corner_relief(&self, c: &Corner, index: usize, size: f64) -> Option<Area> {
+    /// How far from the corner, along its edge, a flange's first flat ends once it is cut
+    /// to the half-planes `planes` at its end `end`: the stricter of its fold line and its
+    /// tip line. `None` if nothing cuts it.
+    fn end_reach(
+        &self,
+        att: &crate::flange::Attachment,
+        end: usize,
+        planes: &[(DVec2, f64)],
+        at: DVec2,
+    ) -> Option<f64> {
+        let piece = &self.pieces[*att.pieces.get(1)?];
+        let (d, o) = (att.along(), att.out());
+        let (lo, hi) = rect_extent(&piece.outline, att.a, d, o);
+        let mut u = if end == 0 {
+            f64::NEG_INFINITY
+        } else {
+            f64::INFINITY
+        };
+        for y in [lo.y, hi.y] {
+            let line = att.a + o * y;
+            for &(n, k) in planes {
+                // n·(line + d·x) ≥ k.
+                let slope = n.dot(d);
+                if slope.abs() < 1e-12 {
+                    continue;
+                }
+                let x = (k - n.dot(line)) / slope;
+                u = if end == 0 { u.max(x) } else { u.min(x) };
+            }
+        }
+        if !u.is_finite() {
+            return None;
+        }
+        let away = if end == 0 { d } else { -d };
+        Some((att.a + d * u - at).dot(away))
+    }
+
+    /// The relief region of corner `c`, or `None` if it has no area. `flush` is how far
+    /// from the corner each flange ends, for a relief that reaches there.
+    fn corner_relief(
+        &self,
+        c: &Corner,
+        index: usize,
+        size: f64,
+        flush: Option<[Option<f64>; 2]>,
+    ) -> Option<Area> {
         let [ia, ib] = c.attachments;
         let (a, b) = (&self.attachments[ia], &self.attachments[ib]);
         let margin = match c.spec.relief {
             CornerRelief::Rectangular => c.spec.relief_size.max(0.0),
-            CornerRelief::Tear => 0.0,
+            CornerRelief::Tear
+            | CornerRelief::Flush
+            | CornerRelief::Slanted
+            | CornerRelief::Circular
+            | CornerRelief::Square => 0.0,
         };
         // Each edge's band: the trim and the bend strip, as distances into the face.
         let band = |att: &crate::flange::Attachment| -> [f64; 2] {
@@ -524,7 +809,55 @@ impl Layout {
                 reach_b = reach_b.max((p - c.at).dot(db));
             }
         }
-        let (ea, eb) = (reach_a + margin, reach_b + margin);
+        if c.spec.relief == CornerRelief::Slanted {
+            // The wedge between the two lines from the face's corner, each to the end of a
+            // flange on the far line of its bend. A flange that ends nearer the corner
+            // than the face does gets a square end there.
+            let far = |att: &crate::flange::Attachment| match self.pieces[att.pieces[0]].kind {
+                PieceKind::Bend(b) => att.trim - b.width(),
+                PieceKind::Flange => att.trim,
+            };
+            let apex = solve(a.trim, b.trim)?;
+            let outer = solve(far(a), far(b))?;
+            let ends = flush.unwrap_or([None, None]);
+            let fa = ends[0].unwrap_or(reach_a).max((apex - c.at).dot(da));
+            let fb = ends[1].unwrap_or(reach_b).max((apex - c.at).dot(db));
+            let pa = c.at + da * fa + ina * far(a);
+            let pb = c.at + db * fb + inb * far(b);
+            let tag = |i: u8| CurveTag::Generated {
+                owner: b.owner,
+                part: CORNER_PART + c.ends[1] as u32,
+                index: i + 4 * (index % 32) as u8,
+            };
+            let s = size;
+            let mut poly: Vec<(DVec2, CurveTag)> = vec![
+                (c.at + DVec2::new(-s, -s), tag(0)),
+                (c.at + DVec2::new(s, -s), tag(0)),
+                (c.at + DVec2::new(s, s), tag(0)),
+                (c.at + DVec2::new(-s, s), tag(0)),
+            ];
+            for (p, i) in [(pa, 1), (pb, 2)] {
+                let dir = p - apex;
+                if dir.length() <= MIN_LENGTH {
+                    return None;
+                }
+                let mut n = dir.perp().normalize();
+                if n.dot(outer - apex) < 0.0 {
+                    n = -n;
+                }
+                poly = clip(&poly, n, n.dot(apex), tag(i));
+            }
+            if poly.len() < 3 {
+                return None;
+            }
+            return Some(polygon_area(&poly));
+        }
+        let (mut ea, mut eb) = (reach_a + margin, reach_b + margin);
+        if let Some([fa, fb]) = flush {
+            // Never less than a tear: the bends must not share any of the corner.
+            ea = ea.max(fa.unwrap_or(ea));
+            eb = eb.max(fb.unwrap_or(eb));
+        }
         if ea <= MIN_LENGTH && eb <= MIN_LENGTH {
             return None;
         }
@@ -546,6 +879,78 @@ impl Layout {
         poly = clip(&poly, -db, -(eb + c.at.dot(db)), tag(2));
         if poly.len() < 3 {
             return None;
+        }
+        Some(polygon_area(&poly))
+    }
+
+    /// A circular or square relief at corner `c`: `relief_size` across, centred where the
+    /// two flanges' ends meet in the flat pattern. `ends` is how far from the corner each
+    /// flange ends once its end is cut (`None`: where its own flat ends).
+    fn shaped_relief(&self, c: &Corner, index: usize, ends: [Option<f64>; 2]) -> Option<Area> {
+        let size = c.spec.relief_size;
+        if size <= MIN_LENGTH {
+            return None;
+        }
+        let atts = c.attachments.map(|i| &self.attachments[i]);
+        let away = |k: usize| {
+            if c.ends[k] == 0 {
+                atts[k].along()
+            } else {
+                -atts[k].along()
+            }
+        };
+        let (da, db) = (away(0), away(1));
+        // Where a flange's first flat ends, from the corner, if nothing cuts it.
+        let own = |k: usize| -> Option<f64> {
+            let att = atts[k];
+            let piece = &self.pieces[*att.pieces.get(1)?];
+            let (lo, hi) = rect_extent(&piece.outline, att.a, att.along(), att.out());
+            let u = if c.ends[k] == 0 { lo.x } else { hi.x };
+            Some((att.a + att.along() * u - c.at).dot(away(k)))
+        };
+        let fa = ends[0].or_else(|| own(0))?;
+        let fb = ends[1].or_else(|| own(1))?;
+        // The point x from the corner with x·da = fa and x·db = fb.
+        let det = da.perp_dot(db);
+        if det.abs() < 1e-9 {
+            return None;
+        }
+        let x = DVec2::new((fa * db.y - fb * da.y) / det, (da.x * fb - db.x * fa) / det);
+        let centre = c.at + x;
+        let tag = |i: u8| CurveTag::Generated {
+            owner: atts[1].owner,
+            part: CORNER_PART + 2 + c.ends[1] as u32,
+            index: i + 4 * (index % 32) as u8,
+        };
+        if c.spec.relief == CornerRelief::Circular {
+            return Some(Area {
+                loops: vec![vec![Edge2 {
+                    curve: peet_sketch::Curve::Circle {
+                        center: centre,
+                        radius: size / 2.0,
+                    },
+                    reversed: false,
+                    tag: tag(0),
+                }]],
+            });
+        }
+        let h = size / 2.0;
+        let mut poly: Vec<(DVec2, CurveTag)> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+            .into_iter()
+            .enumerate()
+            .map(|(i, (s, t))| (centre + da * (s * h) + db * (t * h), tag(i as u8)))
+            .collect();
+        // Counter-clockwise, as every outline is.
+        let turn: f64 = (0..4)
+            .map(|i| poly[i].0.perp_dot(poly[(i + 1) % 4].0))
+            .sum();
+        if turn < 0.0 {
+            poly.reverse();
+            // Each point tags the edge from it to the next: shift the tags back one.
+            let tags: Vec<CurveTag> = poly.iter().map(|p| p.1).collect();
+            for i in 0..4 {
+                poly[i].1 = tags[(i + 1) % 4];
+            }
         }
         Some(polygon_area(&poly))
     }

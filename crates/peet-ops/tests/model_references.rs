@@ -191,8 +191,11 @@ fn bad_projection_is_atomic_and_can_be_deleted() {
     assert!(sketch(&doc, "Ref").projections.is_empty());
 }
 
+/// What a sketch projects from something suppressed or gone stays where it was, with a
+/// warning, as SolidWorks leaves a sketch's relations to it dangling: the sketch, and
+/// what is made from it, are not suppressed with it.
 #[test]
-fn suppression_and_missing_sources_do_not_use_stale_geometry() {
+fn suppressed_and_missing_sources_leave_the_projection_where_it_was() {
     let mut doc = Document::default();
     base(&mut doc);
     ok(
@@ -201,16 +204,27 @@ fn suppression_and_missing_sources_do_not_use_stale_geometry() {
     );
     let id = doc.model.features().find(|f| f.name == "Ref").unwrap().id;
     let stock = doc.model.features().find(|f| f.name == "Stock").unwrap().id;
+    let before = sketch(&doc, "Ref").sketch.clone();
     ok(
         &mut doc,
         json!({"op":"suppress","feature":"Stock","on":true}),
     );
-    assert!(doc.evaluation().state(id).unwrap().status.is_suppressed());
+    let status = &doc.evaluation().state(id).unwrap().status;
+    assert!(status.is_built(), "{status:?}");
+    assert!(
+        status.message().unwrap().contains("no longer there"),
+        "{status:?}"
+    );
+    assert_eq!(sketch(&doc, "Ref").sketch, before);
     ok(
         &mut doc,
         json!({"op":"suppress","feature":"Stock","on":false}),
     );
-    assert!(doc.evaluation().state(id).unwrap().status.is_built());
+    let status = &doc.evaluation().state(id).unwrap().status;
+    assert!(
+        status.is_built() && status.message().is_none(),
+        "{status:?}"
+    );
     let mut model = doc.model.clone();
     model.feature_mut(stock).unwrap().kind =
         peet_model::FeatureKind::Point(peet_model::PointDef::Coordinates {
@@ -221,9 +235,13 @@ fn suppression_and_missing_sources_do_not_use_stale_geometry() {
     let mut engine = peet_model::Engine::new();
     engine.regenerate(&mut model);
     let status = &engine.evaluation().state(id).unwrap().status;
-    assert!(status.is_failed(), "{status:?}");
-    assert!(status.message().unwrap().contains("projected edge"));
+    assert!(status.is_built(), "{status:?}");
+    assert!(
+        status.message().unwrap().contains("no longer there"),
+        "{status:?}"
+    );
 }
+
 #[test]
 fn collinear_and_midpoint_against_projected_edge() {
     let mut doc = Document::default();
@@ -288,4 +306,83 @@ fn projected_references_refresh_when_switching_configurations() {
                 .abs_diff_eq(peet_math::DVec2::new(width, 30.), 1e-6)
         );
     }
+}
+#[test]
+fn another_sketchs_entities_are_projected_and_followed() {
+    let mut doc = Document::default();
+    let reply = ok(
+        &mut doc,
+        json!({"op":"sketch","on":"top","name":"Base","draw":[
+            {"type":"rectangle","from":[0,0],"to":[40,30],"as":"r"},
+            {"type":"circle","center":[20,15],"radius":4,"as":"hole"},
+            {"type":"coincident","of":["r.bottom.start","origin"]},
+            {"type":"length","of":["r.bottom"],"value":40,"name":"width"},
+            {"type":"length","of":["r.right"],"value":30}
+        ]}),
+    );
+    let hole = reply["drawn"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["as"] == "hole")
+        .unwrap()["id"]
+        .as_u64()
+        .unwrap();
+    // The rectangle's right side: the vertical line at x = 40
+    let base = &sketch(&doc, "Base").sketch;
+    let right = base
+        .entities()
+        .find(|(_, x)| match x.geometry {
+            Geometry::Line { start, end } => base.point(start).x > 39.0 && base.point(end).x > 39.0,
+            _ => false,
+        })
+        .unwrap()
+        .0
+        .0;
+    ok(
+        &mut doc,
+        json!({"op":"plane","from":"top","distance":10,"name":"Above"}),
+    );
+    let made = ok(
+        &mut doc,
+        json!({"op":"sketch","on":"Above","name":"Over","draw":[
+            {"type":"project","sketch":"Base","entity":right,"as":"side"},
+            {"type":"project","sketch":"Base","entity":hole,"convert":true,"as":"ring"},
+            {"type":"point","at":[45,10],"as":"p"},
+            {"type":"distance","of":["p","side"],"value":5}
+        ]}),
+    );
+    assert!(made.get("failures").is_none(), "{made}");
+    let p = EntityId(made["drawn"][2]["id"].as_u64().unwrap() as u32);
+    let s = sketch(&doc, "Over");
+    assert_eq!(s.projections.len(), 2);
+    assert!(matches!(
+        s.sketch.entity(s.projections[1].entity).unwrap().geometry,
+        Geometry::Circle { radius, .. } if (radius - 4.0).abs() < 1e-9
+    ));
+    ok(
+        &mut doc,
+        json!({"op":"set_dimension","sketch":"Base","name":"width","value":60}),
+    );
+    assert!(
+        sketch(&doc, "Over")
+            .sketch
+            .point(p)
+            .abs_diff_eq(peet_math::DVec2::new(65., 10.), 1e-6),
+        "the point follows the other sketch's line"
+    );
+    // A sketch square to it takes its points and lines, not its circles
+    let refused = apply_json(
+        &mut doc,
+        &json!({"op":"sketch","on":"front","draw":[{"type":"project","sketch":"Base","entity":hole}]}),
+        Undo::Step,
+    );
+    assert!(!refused.ok);
+    let bytes = peet_io::document::save(&doc.model, &Default::default(), None).unwrap();
+    let mut model = peet_io::document::open(&bytes).unwrap().model;
+    assert_eq!(model, doc.model);
+    let mut engine = peet_model::Engine::new();
+    engine.regenerate(&mut model);
+    assert_eq!(model, doc.model);
+    assert!(engine.evaluation().failures().next().is_none());
 }

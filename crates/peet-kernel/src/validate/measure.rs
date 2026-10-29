@@ -290,6 +290,77 @@ fn integrand(
     }
 }
 
+/// The points of a sphere or a ring torus (its frame, the distance of its tube's centre
+/// from the axis, the tube's radius) over a rectangle of its parameters that may be the
+/// furthest along each axis of the model: where neither parameter can go further, the
+/// best `u` turning towards the axis, or a bound of the rectangle, and likewise `v`.
+fn ring_extremes(
+    (frame, c, r): (peet_math::Frame, f64, f64),
+    (u0, u1): (f64, f64),
+    (v0, v1): (f64, f64),
+) -> Vec<DVec3> {
+    let mut out = Vec::new();
+    let within = |t: f64, lo: f64, hi: f64| {
+        let t = t + std::f64::consts::TAU * ((lo - t) / std::f64::consts::TAU).ceil();
+        (t <= hi).then_some(t)
+    };
+    let local = |u: f64, v: f64| {
+        let rho = c + r * v.cos();
+        frame.to_world(DVec3::new(rho * u.cos(), rho * u.sin(), r * v.sin()))
+    };
+    for axis in [DVec3::X, DVec3::Y, DVec3::Z] {
+        for d in [axis, -axis] {
+            let (a, bb, e) = (
+                d.dot(frame.x_axis()),
+                d.dot(frame.y_axis()),
+                d.dot(frame.z_axis()),
+            );
+            let us = [within(bb.atan2(a), u0, u1), Some(u0), Some(u1)];
+            for u in us.into_iter().flatten() {
+                let k = a * u.cos() + bb * u.sin();
+                for v in [within(e.atan2(k), v0, v1), Some(v0), Some(v1)]
+                    .into_iter()
+                    .flatten()
+                {
+                    out.push(local(u, v));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// How far a sphere's or a ring torus's face reaches beyond the bounds `known` of its
+/// edges: the points of [`ring_extremes`] that are on the face itself. (The rectangle of
+/// parameters its outer loop spans can hold points that are not: in a hole of the face,
+/// the top of a dome a recess is cut in.) `None` for any other face.
+pub(crate) fn ring_face_reach(solid: &Solid, face: FaceId, known: &Aabb) -> Option<Aabb> {
+    let f = solid.face(face);
+    let ring = match &f.surface {
+        Surface::Sphere(s) => (s.frame, 0.0, s.radius),
+        Surface::Torus(t) if t.minor < t.major => (t.frame, t.major, t.minor),
+        _ => return None,
+    };
+    let mut b = Aabb::EMPTY;
+    let &outer = f.loops.first()?;
+    let m = loop_integrals(solid, outer, DVec3::ZERO);
+    let ((u0, u1), (v0, v1)) = (m.theta_range, m.v_range);
+    if !(u0 <= u1 && v0 <= v1) {
+        return Some(b);
+    }
+    let mut geom = None;
+    for p in ring_extremes(ring, (u0, u1), (v0, v1)) {
+        if known.contains(p) {
+            continue;
+        }
+        let g = geom.get_or_insert_with(|| crate::boolean::domain::FaceGeom::new(solid, face));
+        if g.locate(p) != crate::boolean::domain::Where::Outside {
+            b.extend(p);
+        }
+    }
+    Some(b)
+}
+
 /// Bounds of the part of a sphere or torus a face covers, beyond what its edges reach: a
 /// doubly curved face bulges out between its edges. Empty for other surfaces, whose faces
 /// stay within the bounds of their edges.
@@ -301,6 +372,10 @@ pub(crate) fn bulge_bounds(solid: &Solid, face: FaceId) -> Aabb {
     let (around, along) = match &f.surface {
         Surface::Sphere(s) => (s.radius, s.radius),
         Surface::Torus(t) => (t.major + t.minor, t.minor),
+        // A ruled surface (straight across one way: an extrusion's or a slanted sweep's
+        // side) holds only straight lines between points of its face's edges, so its face
+        // stays within their bounds.
+        Surface::Nurbs(s) if s.degrees().0 == 1 || s.degrees().1 == 1 => return b,
         Surface::Nurbs(s) => {
             // Sampled over the face's part of the parameter rectangle; between samples
             // the surface leaves their chords by at most |S''| h² / 8.
@@ -337,6 +412,21 @@ pub(crate) fn bulge_bounds(solid: &Solid, face: FaceId) -> Aabb {
     let m = loop_integrals(solid, outer, DVec3::ZERO);
     let ((u0, u1), (v0, v1)) = (m.theta_range, m.v_range);
     if !(u0 <= u1 && v0 <= v1) {
+        return b;
+    }
+    // A sphere and a ring torus are both (c + r cos v)(cos u, sin u) + r sin v along the
+    // axis. How far one reaches along each axis over the parameter rectangle is found
+    // exactly, among the places where neither parameter can go further: the best `u`
+    // turning towards the axis, or a bound of the rectangle, and likewise `v`.
+    let ring = match &f.surface {
+        Surface::Sphere(s) => Some((s.frame, 0.0, s.radius)),
+        Surface::Torus(t) if t.minor < t.major => Some((t.frame, t.major, t.minor)),
+        _ => None,
+    };
+    if let Some(ring) = ring {
+        for p in ring_extremes(ring, (u0, u1), (v0, v1)) {
+            b.extend(p);
+        }
         return b;
     }
     for i in 0..=GRID {
@@ -416,5 +506,27 @@ mod tests {
             (total - 2.0 * (12.0 + 15.0 + 20.0)).abs() < 1e-9,
             "{areas:?}"
         );
+    }
+
+    #[test]
+    fn a_dome_with_its_top_cut_away_reaches_no_higher_than_what_is_left() {
+        // A ball of radius 10 drilled through along its poles' axis (Y) with a hole of
+        // radius 6: the sphere's face has the hole's rims for its boundary, at y = ±8, and
+        // its poles are gone.
+        let ball = crate::primitive::ball(&peet_math::Frame::default(), 10.0).unwrap();
+        let mut sketch = peet_sketch::Sketch::new();
+        sketch.add_circle(DVec2::ZERO, 6.0);
+        let regions = peet_sketch::region::find_regions(&sketch).regions;
+        let across =
+            peet_math::Plane::from_origin_normal_x(DVec3::ZERO, DVec3::Y, DVec3::X).unwrap();
+        let drill = crate::extrude::extrude(&across, &regions, -20.0, 20.0).unwrap();
+        let ring =
+            crate::boolean::boolean(&ball, &drill, crate::boolean::BooleanOp::Subtract).unwrap();
+        let b = ring.bounds();
+        assert!(
+            (b.max.y - 8.0).abs() < 1e-6 && (b.min.y + 8.0).abs() < 1e-6,
+            "{b:?}"
+        );
+        assert!((b.max.x - 10.0).abs() < 1e-6, "{b:?}");
     }
 }

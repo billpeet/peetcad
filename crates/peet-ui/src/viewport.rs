@@ -50,6 +50,26 @@ pub struct ViewportParams<'a> {
     /// In an assembly: the component that is selected, and the one under the cursor.
     pub selected_component: Option<peet_model::CompId>,
     pub hovered_component: Option<peet_model::CompId>,
+    /// In an assembly: the component whose part is edited in context. The others are
+    /// drawn as the settings say ([`crate::settings::InContextLook`]).
+    pub in_context: Option<peet_model::CompId>,
+}
+
+/// How transparent a shown body is drawn (0 opaque, 1 not seen): as the display state has
+/// its component, or, while a part is edited in context, as the settings have the other
+/// components. The edited part itself is drawn as the display state has it.
+pub fn shown_transparency(
+    placed: &peet_document::Placed,
+    in_context: Option<peet_model::CompId>,
+    settings: &Settings,
+) -> f32 {
+    let own = placed.transparency.clamp(0.0, 1.0);
+    match (in_context, placed.component()) {
+        (Some(edited), Some(component)) if component != edited => settings
+            .in_context_look
+            .others(own, settings.in_context_transparency),
+        _ => own,
+    }
 }
 
 pub struct Viewport {
@@ -283,6 +303,9 @@ impl Viewport {
                         0.0
                     },
                     pick_object: Some(i as u32),
+                    // A component's transparency, from the display state shown (and
+                    // the others' while a part is edited in context).
+                    opacity: 1.0 - shown_transparency(placed, params.in_context, params.settings),
                 }
             })
             .collect();
@@ -309,9 +332,13 @@ impl Viewport {
             .hover_pos()
             .filter(|_| self.active_drag.is_none())
             .map(|p| [(p.x - rect.left()) * ppp, (p.y - rect.top()) * ppp]);
+        // As in SolidWorks, what is opaque is picked through a see-through component;
+        // with Shift held, the see-through component itself.
+        let through_transparent = !ui.input(|i| i.modifiers.shift);
         let pick = cursor_px.map(|c| peet_render::PickRequest {
             cursor_px: c,
             radius_px: 6.0 * ppp,
+            through_transparent,
         });
         if cursor_px.is_none() {
             self.hovered_geom = None;
@@ -375,8 +402,15 @@ impl Viewport {
                     params.document.bodies.get(body).and_then(|b| {
                         let e = b.solid.edges.get(edge.index())?;
                         let view_proj = self.camera.view_projection(self.aspect(), &scene_bounds);
+                        // A component's corner is where its component is shown.
+                        let frame = params
+                            .document
+                            .placed
+                            .get(body)
+                            .map_or(peet_math::Frame::WORLD, |p| p.shown);
                         [e.start, e.end].into_iter().find_map(|v| {
-                            let clip = view_proj * b.solid.vertex(v).point.extend(1.0);
+                            let at = frame.to_world(b.solid.vertex(v).point);
+                            let clip = view_proj * at.extend(1.0);
                             if clip.w <= 0.0 {
                                 return None;
                             }
@@ -654,16 +688,15 @@ impl Viewport {
                         if e.construction {
                             continue;
                         }
-                        let Some(curve) = s.sketch.curve(id) else {
-                            continue;
-                        };
-                        let pts = curve.tessellate(wpp * 0.5);
-                        for w in pts.windows(2) {
-                            lines.push((
-                                plane.from_plane_coords(w[0]),
-                                plane.from_plane_coords(w[1]),
-                                color,
-                            ));
+                        for curve in s.sketch.drawn_curves(id) {
+                            let pts = curve.tessellate(wpp * 0.5);
+                            for w in pts.windows(2) {
+                                lines.push((
+                                    plane.from_plane_coords(w[0]),
+                                    plane.from_plane_coords(w[1]),
+                                    color,
+                                ));
+                            }
                         }
                     }
                 }
@@ -814,9 +847,13 @@ impl Viewport {
                     &body.silhouettes().lines(local)[..]
                 }
             };
+            // A see-through component's silhouette is as see-through as it is.
+            let mut color = edge_color;
+            let transparency = shown_transparency(placed, params.in_context, params.settings);
+            color[3] = ((1.0 - transparency) * 255.0).round() as u8;
             for [a, b] in lines {
                 self.overlay
-                    .line(frame.to_world(*a), frame.to_world(*b), edge_color);
+                    .line(frame.to_world(*a), frame.to_world(*b), color);
             }
         }
         // Bend lines on both sides of flat patterns, dashed.

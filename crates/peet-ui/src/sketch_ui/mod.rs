@@ -203,6 +203,10 @@ pub struct SketchEditor {
     /// Triangulated closed regions, shaded so the user can see which profiles are closed.
     fills: Vec<peet_sketch::triangulate::Triangles>,
     profile_dirty: bool,
+    /// Set for the frame in which the Select tool was clicked where the sketch has
+    /// nothing: what is behind it in the view (another component's edge, in context) can
+    /// be picked instead.
+    pub clicked_empty: bool,
 }
 
 impl SketchEditor {
@@ -233,6 +237,7 @@ impl SketchEditor {
             profile: Profile::default(),
             fills: Vec::new(),
             profile_dirty: true,
+            clicked_empty: false,
         };
         editor.resolve(sketch_item);
         editor
@@ -409,7 +414,7 @@ impl SketchEditor {
         }
     }
 
-    /// Applies an edit, then solves. If the result is over defined or can't be solved,
+    /// Applies an edit, then solves. If the result conflicts or can't be solved,
     /// the edit is rolled back and the user is told which constraints clash.
     ///
     /// `what` names the change for messages ("Horizontal", "Trim").
@@ -420,7 +425,9 @@ impl SketchEditor {
         edit: impl FnOnce(&mut Sketch) -> Result<T, String>,
     ) -> Option<T> {
         let before = item.sketch.clone();
-        let previous_diagnoses = self.analysis.diagnoses.len();
+        // A relation the others already imply is accepted, as SolidWorks does; one that
+        // conflicts is not.
+        let previous_conflicts = self.analysis.conflicts();
         let degenerate_before = degenerate_curves(&before);
         let result = match edit(&mut item.sketch) {
             Ok(r) => r,
@@ -434,7 +441,7 @@ impl SketchEditor {
         let report = self.solver.solve(&mut item.sketch);
         let analysis = self.solver.analyze(&item.sketch);
         let ms = peet_platform::elapsed_ms(start);
-        if !report.converged || analysis.diagnoses.len() > previous_diagnoses {
+        if !report.converged || analysis.conflicts() > previous_conflicts {
             let explanation = self.explain_problem(&item.sketch, &analysis, &report);
             item.sketch = before;
             self.resolve(item);

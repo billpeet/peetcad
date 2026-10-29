@@ -27,6 +27,10 @@ pub enum EndCondition {
     ThroughAll,
     /// Up to a plane or planar face parallel to the sketch.
     UpTo(PlaneRef),
+    /// Up to the next surface in its way, as SolidWorks' "up to next": a cut goes on
+    /// until it has come out of the first material it meets, an extrusion until it meets
+    /// material.
+    ThroughNext,
 }
 
 impl EndCondition {
@@ -36,6 +40,7 @@ impl EndCondition {
             Self::Symmetric => "Mid-plane",
             Self::ThroughAll => "Through all",
             Self::UpTo(_) => "Up to face",
+            Self::ThroughNext => "Up to next",
         }
     }
 
@@ -87,6 +92,15 @@ pub struct Extrude {
     pub reverse: bool,
     pub operation: Operation,
     pub regions: RegionSelection,
+    /// Take the other side of the regions: a cut removes everything outside them, within
+    /// the extrusion's reach (SolidWorks' "flip side to cut").
+    pub flip_side: bool,
+    /// The walls' draft, in degrees from the direction of extrusion, taken from the sketch
+    /// plane (0: straight walls).
+    pub draft: Scalar,
+    /// The material added or removed grows away from the sketch with the draft, where it
+    /// otherwise narrows.
+    pub draft_outward: bool,
 }
 
 impl Extrude {
@@ -97,6 +111,9 @@ impl Extrude {
             reverse: false,
             operation,
             regions: RegionSelection::Auto,
+            flip_side: false,
+            draft: Scalar::new(0.0),
+            draft_outward: false,
         }
     }
 
@@ -131,7 +148,7 @@ pub fn default_regions(profile: &Profile) -> Vec<usize> {
 }
 
 /// A point strictly inside a region (the centroid of its largest triangle).
-fn interior_point(region: &Region) -> Option<DVec2> {
+pub(crate) fn interior_point(region: &Region) -> Option<DVec2> {
     let (lo, hi) = region.outer.bounds();
     let tris = triangulate_region(region, (lo.distance(hi) * 1e-3).max(1e-6));
     tris.triangles
@@ -168,6 +185,8 @@ pub struct ExtrudeInput<'a> {
     pub params: &'a Extrude,
     /// The evaluated depth in mm.
     pub depth: f64,
+    /// The evaluated draft in degrees.
+    pub draft: f64,
     /// The resolved "up to" plane, for [`EndCondition::UpTo`].
     pub up_to: Option<Plane>,
     /// Seed for the stamps of the bodies this feature creates or changes.
@@ -216,6 +235,7 @@ fn range(input: &ExtrudeInput<'_>) -> Result<(f64, f64), FeatureError> {
             }
             (0.0, (target.origin() - plane.origin()).dot(plane.normal()))
         }
+        EndCondition::ThroughNext => (0.0, s * up_to_next(input, s)?),
     };
     if !near.is_finite() || !far.is_finite() {
         return Err(FeatureError("The depth is not a finite number.".to_owned()));
@@ -226,6 +246,102 @@ fn range(input: &ExtrudeInput<'_>) -> Result<(f64, f64), FeatureError> {
         ));
     }
     Ok((near, far))
+}
+
+/// How far an extrusion with [`EndCondition::ThroughNext`] goes along the way it goes
+/// (`s` along the sketch normal). Rays from points spread over the regions find the
+/// material in the way: a cut goes to where the first material each ray meets ends, the
+/// furthest of them, so that the whole profile is through it; an extrusion goes to where
+/// the nearest ray meets material.
+fn up_to_next(input: &ExtrudeInput<'_>, s: f64) -> Result<f64, FeatureError> {
+    let regions = selected_regions(input.sketch, &input.params.regions, input.mirror)?;
+    let plane = input.plane;
+    let dir = plane.normal() * s;
+    // Points spread over the regions: the centres of their triangles
+    let mut starts = Vec::new();
+    for r in &regions {
+        let (lo, hi) = r.outer.bounds();
+        let t = triangulate_region(r, (lo.distance(hi) * 1e-3).max(1e-6));
+        for tri in &t.triangles {
+            let [a, b, c] = tri.map(|i| t.points[i as usize]);
+            starts.push(plane.from_plane_coords((a + b + c) / 3.0));
+        }
+    }
+    let step = (starts.len() / 400).max(1);
+    let starts: Vec<DVec3> = starts.into_iter().step_by(step).collect();
+    let meshes: Vec<Vec<[DVec3; 3]>> = input
+        .bodies
+        .iter()
+        .filter_map(|b| peet_kernel::tessellate::tessellate(&b.solid, 0.01).ok())
+        .map(|m| m.triangles())
+        .collect();
+    let cut = input.params.operation == Operation::Cut;
+    let eps = tolerance::LINEAR;
+    let mut reach: Option<f64> = None;
+    for o in starts {
+        // The first material along this ray, of any body: where it starts and ends
+        let mut first: Option<(f64, f64)> = None;
+        for tris in &meshes {
+            let mut hits: Vec<f64> = tris
+                .iter()
+                .filter_map(|t| ray_triangle(o, dir, t))
+                .collect();
+            hits.sort_by(f64::total_cmp);
+            hits.dedup_by(|a, b| (*a - *b).abs() < 1e-7);
+            // Inside at the start if an odd number of crossings lie behind it (a crossing
+            // where it starts counts as behind: the sketch is on that face)
+            let behind = hits.iter().filter(|&&t| t <= eps).count();
+            let mut inside = behind % 2 == 1;
+            let mut from = if inside { Some(0.0) } else { None };
+            for &t in hits.iter().filter(|&&t| t > eps) {
+                if inside {
+                    let span = (from.unwrap_or(0.0), t);
+                    if first.is_none_or(|f| span.0 < f.0) {
+                        first = Some(span);
+                    }
+                    break;
+                }
+                inside = true;
+                from = Some(t);
+            }
+        }
+        if let Some((enter, exit)) = first {
+            let to = if cut { exit } else { enter };
+            reach = Some(match reach {
+                None => to,
+                Some(r) if cut => r.max(to),
+                Some(r) => r.min(to),
+            });
+        }
+    }
+    match reach {
+        Some(r) if r > tolerance::LINEAR => Ok(r),
+        _ => Err(FeatureError(
+            "Up to next: there is nothing in its way. Try reversing the direction.".to_owned(),
+        )),
+    }
+}
+
+/// Where the ray `o + t d` meets a triangle, if it does: `t`.
+fn ray_triangle(o: DVec3, d: DVec3, [a, b, c]: &[DVec3; 3]) -> Option<f64> {
+    let (e1, e2) = (*b - *a, *c - *a);
+    let p = d.cross(e2);
+    let det = e1.dot(p);
+    if det.abs() < 1e-14 {
+        return None;
+    }
+    let inv = 1.0 / det;
+    let q = o - *a;
+    let u = q.dot(p) * inv;
+    if !(-1e-12..=1.0 + 1e-12).contains(&u) {
+        return None;
+    }
+    let r = q.cross(e1);
+    let v = d.dot(r) * inv;
+    if v < -1e-12 || u + v > 1.0 + 1e-12 {
+        return None;
+    }
+    Some(e2.dot(r) * inv)
 }
 
 /// The regions of `sketch` a feature is made from.
@@ -267,12 +383,89 @@ pub(crate) fn selected_regions(
         .collect())
 }
 
+/// Whether two of the regions share a piece of an edge: regions picked side by side, as a
+/// slot and the bulge of an arc drawn across its end.
+pub(crate) fn regions_adjoin(regions: &[Region]) -> bool {
+    let pieces = |r: &Region| -> Vec<(peet_sketch::EntityId, DVec2, DVec2)> {
+        std::iter::once(&r.outer)
+            .chain(&r.holes)
+            .flat_map(|l| &l.edges)
+            .map(|e| (e.entity, e.curve.start(), e.curve.end()))
+            .collect()
+    };
+    let all: Vec<_> = regions.iter().map(pieces).collect();
+    let same = |a: DVec2, b: DVec2| a.distance(b) <= tolerance::LINEAR;
+    all.iter().enumerate().any(|(i, a)| {
+        all[i + 1..].iter().any(|b| {
+            a.iter().any(|&(ea, a0, a1)| {
+                b.iter().any(|&(eb, b0, b1)| {
+                    ea == eb && ((same(a0, b0) && same(a1, b1)) || (same(a0, b1) && same(a1, b0)))
+                })
+            })
+        })
+    })
+}
+
+/// The regions extruded from `from` to `to`, as one solid, and what each face is. Regions
+/// that share an edge are extruded one by one and joined, as SolidWorks extrudes the
+/// contours picked side by side as one shape: extruded together they would touch along
+/// a wall, which is no solid.
+fn extrude_joined(
+    plane: &Plane,
+    regions: &[Region],
+    from: f64,
+    to: f64,
+) -> Result<(Solid, Vec<ExtrudeFace>), FeatureError> {
+    if regions.len() < 2 || !regions_adjoin(regions) {
+        return Ok(extrude_traced(plane, regions, from, to)?);
+    }
+    let mut joined: Option<(Solid, Vec<ExtrudeFace>)> = None;
+    for (i, region) in regions.iter().enumerate() {
+        let (solid, faces) = extrude_traced(plane, std::slice::from_ref(region), from, to)?;
+        let faces: Vec<ExtrudeFace> = faces
+            .into_iter()
+            .map(|f| match f {
+                ExtrudeFace::Start { .. } => ExtrudeFace::Start { region: i },
+                ExtrudeFace::End { .. } => ExtrudeFace::End { region: i },
+                ExtrudeFace::Side {
+                    loop_index, edge, ..
+                } => ExtrudeFace::Side {
+                    region: i,
+                    loop_index,
+                    edge,
+                },
+            })
+            .collect();
+        joined = Some(match joined {
+            None => (solid, faces),
+            Some((so_far, so_far_faces)) => {
+                let traced = boolean_traced(&so_far, &solid, BooleanOp::Union)?;
+                // A face of the union is what the first of the faces it is made of was.
+                let faces = traced
+                    .sources
+                    .iter()
+                    .map(|list| {
+                        let s = list.first().expect("a face comes from a face");
+                        if s.solid == 0 {
+                            so_far_faces[s.face.index()]
+                        } else {
+                            faces[s.face.index()]
+                        }
+                    })
+                    .collect();
+                (traced.solid, faces)
+            }
+        });
+    }
+    Ok(joined.expect("there are regions"))
+}
+
 /// The extruded tool solid with its face names.
-fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> {
+pub(crate) fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError> {
     let regions = selected_regions(input.sketch, &input.params.regions, input.mirror)?;
     let (near, far) = range(input)?;
     let (from, to) = (near.min(far), near.max(far));
-    let (solid, faces) = extrude_traced(input.plane, &regions, from, to)?;
+    let (solid, faces) = extrude_joined(input.plane, &regions, from, to)?;
     let names = faces
         .iter()
         .map(|f| {
@@ -299,7 +492,128 @@ fn tool(input: &ExtrudeInput<'_>) -> Result<(Solid, Vec<FaceName>), FeatureError
             FaceName::new(input.feature, role)
         })
         .collect();
-    Ok((solid, names))
+    let params = input.params;
+    let solid = if input.draft.abs() > 1e-12 {
+        drafted(input, &solid, &faces, near, far)?
+    } else {
+        solid
+    };
+    if !params.flip_side {
+        return Ok((solid, names));
+    }
+    outside(input, &solid, &names, near, far)
+}
+
+/// The extruded regions with their walls drafted about the sketch plane. The draft takes
+/// the material added or removed narrower away from the sketch, or wider if it leans
+/// outwards. With the side flipped, that material is outside the regions: they grow
+/// where it narrows.
+fn drafted(
+    input: &ExtrudeInput<'_>,
+    solid: &Solid,
+    faces: &[ExtrudeFace],
+    near: f64,
+    far: f64,
+) -> Result<Solid, FeatureError> {
+    let params = input.params;
+    if params.end == EndCondition::Symmetric {
+        return Err(FeatureError(
+            "A draft leans the walls away from the sketch one way: it can't go to both sides of \
+             it. Use a blind depth, or two extrusions."
+                .to_owned(),
+        ));
+    }
+    let plane = input.plane;
+    let pull = if far >= near {
+        plane.normal()
+    } else {
+        -plane.normal()
+    };
+    let neutral = Plane::from_origin_normal_x(plane.origin(), pull, plane.frame.x_axis())
+        .ok_or_else(|| FeatureError("The sketch plane is degenerate.".to_owned()))?;
+    let walls: Vec<peet_kernel::FaceId> = faces
+        .iter()
+        .enumerate()
+        .filter(|(_, f)| matches!(f, ExtrudeFace::Side { .. }))
+        .map(|(i, _)| peet_kernel::FaceId(i as u32))
+        .collect();
+    // A positive angle narrows the solid along the pull.
+    let narrows = params.draft_outward == params.flip_side;
+    let angle = input.draft.to_radians() * if narrows { 1.0 } else { -1.0 };
+    peet_kernel::reshape::draft(solid, &walls, &neutral, angle).map_err(|e| {
+        let FeatureError(m) = FeatureError::from(e);
+        FeatureError(format!("The draft can't be made: {m} Try a smaller angle."))
+    })
+}
+
+/// Everything outside the extruded regions, across the bodies and within the extrusion's
+/// reach: what a cut with its side flipped removes.
+fn outside(
+    input: &ExtrudeInput<'_>,
+    solid: &Solid,
+    names: &[FaceName],
+    near: f64,
+    far: f64,
+) -> Result<(Solid, Vec<FaceName>), FeatureError> {
+    if input.params.operation != Operation::Cut {
+        return Err(FeatureError(
+            "Only a cut can take the other side of its sketch: it removes everything outside \
+             the regions."
+                .to_owned(),
+        ));
+    }
+    let frame = &input.plane.frame;
+    // Across the plane: past every body and the tool, with room to spare.
+    let mut lo = DVec2::splat(f64::INFINITY);
+    let mut hi = DVec2::splat(f64::NEG_INFINITY);
+    for bb in input
+        .bodies
+        .iter()
+        .map(|b| b.solid.bounds())
+        .chain(std::iter::once(solid.bounds()))
+    {
+        for i in 0..8 {
+            let corner = DVec3::new(
+                if i & 1 == 0 { bb.min.x } else { bb.max.x },
+                if i & 2 == 0 { bb.min.y } else { bb.max.y },
+                if i & 4 == 0 { bb.min.z } else { bb.max.z },
+            );
+            let local = frame.to_local(corner);
+            lo = lo.min(local.truncate());
+            hi = hi.max(local.truncate());
+        }
+    }
+    let margin = 1.0 + 0.1 * (hi - lo).length();
+    let (from, to) = (near.min(far), near.max(far));
+    let block = peet_kernel::transform::solid(
+        &peet_kernel::primitive::cuboid(
+            DVec3::new(lo.x - margin, lo.y - margin, from),
+            DVec3::new(hi.x + margin, hi.y + margin, to),
+        ),
+        frame,
+    );
+    // The block's caps are the extrusion's; its sides are past everything.
+    let block_names: Vec<FaceName> = block
+        .face_ids()
+        .map(|f| {
+            let n = match &block.face(f).surface {
+                peet_kernel::Surface::Plane(p) => block.face_normal_at(f, p.origin()),
+                _ => DVec3::ZERO,
+            };
+            let towards_far = n.dot(input.plane.normal()) * (far - near) > 0.0;
+            FaceName::new(
+                input.feature,
+                if towards_far {
+                    FaceRole::FarCap
+                } else {
+                    FaceRole::NearCap
+                },
+            )
+        })
+        .collect();
+    let traced = boolean_traced(&block, solid, BooleanOp::Subtract)?;
+    let names = result_names(&traced.sources, &block_names, names);
+    Ok((traced.solid, names))
 }
 
 /// A region mirrored in the sketch's x axis (y to −y), its loops still running the

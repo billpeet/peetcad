@@ -42,6 +42,7 @@ pub fn coverage(cmd: CommandId) -> Coverage {
         C::InterferenceCheck => Op("interference"),
         C::BillOfMaterials => Op("bom"),
         C::EditComponent => Op("open_component"),
+        C::EditInContext => Op("in_context"),
         C::MateCoincident
         | C::MateConcentric
         | C::MateParallel
@@ -202,7 +203,7 @@ pub fn command_for(command: &AppCommand) -> CommandId {
             Window::Interference => C::InterferenceCheck,
             Window::Bom => C::BillOfMaterials,
         },
-        AppCommand::EditSketch(_) => C::EditSketch,
+        AppCommand::EditSketch { .. } => C::EditSketch,
         AppCommand::ExitSketch => C::ExitSketch,
         AppCommand::Tool(tool) => match tool {
             SketchTool::Select => C::SketchSelect,
@@ -343,9 +344,7 @@ impl PeetApp {
                 op.word(),
                 format!(
                     "{} is open for editing in PeetCAD, so the part can't be changed or left from outside: finish the sketch first (exit_sketch).",
-                    self.sketch
-                        .as_ref()
-                        .map_or_else(String::new, |e| self.doc.item_name(e.item))
+                    self.open_sketch_name()
                 ),
             ),
             _ => self.apply_to_document(op, undo),
@@ -474,16 +473,29 @@ impl PeetApp {
         command: &AppCommand,
     ) -> Result<Map<String, Value>, String> {
         let mut out = Map::new();
-        if let AppCommand::EditSketch(sketch) = command {
+        if let AppCommand::EditSketch { sketch, component } = command {
+            if self.sketch.is_some() {
+                return Err(format!(
+                    "{} is already open for editing: finish it first (exit_sketch).",
+                    self.open_sketch_name()
+                ));
+            }
+            if let Some(component) = component {
+                let own = component.resolve(&self.doc)?;
+                let name = self.edit_sketch_in_context(own, sketch)?;
+                out.insert("editing".to_owned(), json!(name));
+                out.insert(
+                    "in_context".to_owned(),
+                    json!(self.doc.model.assembly().map(|a| a.name_of(own))),
+                );
+                return Ok(out);
+            }
+            if self.doc.is_assembly() {
+                return Err("This is an assembly: say whose sketch with 'component' (it is edited in context).".to_owned());
+            }
             let id = sketch.resolve(&self.doc)?;
             if self.doc.model.sketch(id).is_none() {
                 return Err(format!("{} is not a sketch.", self.doc.model.name_of(id)));
-            }
-            if let Some(editor) = &self.sketch {
-                return Err(format!(
-                    "{} is already open for editing: finish it first (exit_sketch).",
-                    self.doc.item_name(editor.item)
-                ));
             }
             self.open_sketch(id);
             out.insert("editing".to_owned(), json!(self.doc.model.name_of(id)));
@@ -530,7 +542,10 @@ mod tests {
             AppCommand::ZoomToFit,
             AppCommand::ExitSketch,
             AppCommand::Quit,
-            AppCommand::EditSketch(FeatureSel::Name("Sketch1".to_owned())),
+            AppCommand::EditSketch {
+                sketch: FeatureSel::Name("Sketch1".to_owned()),
+                component: None,
+            },
         ];
         all.extend(View::ALL.iter().map(|v| AppCommand::View(*v)));
         all.extend(Window::ALL.iter().map(|w| AppCommand::Window(*w)));

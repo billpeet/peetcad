@@ -169,6 +169,16 @@ pub(crate) fn apply_base_flange(
     input: &BaseFlangeInput<'_>,
     bodies: &[Arc<Body>],
 ) -> Result<Applied, FeatureError> {
+    if input.def.tab {
+        return apply_tab(
+            input.feature,
+            input.model,
+            bodies,
+            &input.plane,
+            input.sketch,
+            input.stamp,
+        );
+    }
     let owner = input.feature.0;
     refuse_splines(input.sketch)?;
     let profile = find_regions(input.sketch);
@@ -199,13 +209,25 @@ pub(crate) fn apply_base_flange(
         } else {
             [0.0, d]
         };
-        Layout::open_profile(
+        // Each bend's own model, where it has one
+        let models = input
+            .def
+            .bends
+            .iter()
+            .enumerate()
+            .map(|(k, b)| {
+                bend_model(b.as_ref(), &input.model.parameters)
+                    .map_err(|m| FeatureError(format!("Bend {}: {m}", k + 1)))
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Layout::open_profile_with(
             input.settings,
             owner,
             &input.plane,
             &chain,
             depth,
             input.def.reverse,
+            &models,
         )
     }
     .map_err(FeatureError)?;
@@ -213,6 +235,103 @@ pub(crate) fn apply_base_flange(
     let mut out = bodies.to_vec();
     out.push(Arc::new(body));
     Ok((out, warning))
+}
+
+/// The closed regions of a tab's sketch.
+pub(crate) fn tab_regions(
+    sketch: &Sketch,
+) -> Result<Vec<peet_sketch::region::Region>, FeatureError> {
+    refuse_splines(sketch)?;
+    let profile = find_regions(sketch);
+    let regions: Vec<_> = default_regions(&profile)
+        .into_iter()
+        .map(|i| profile.regions[i].clone())
+        .collect();
+    if regions.is_empty() {
+        return Err(FeatureError(
+            "A tab is a closed sketch: close its outline.".to_owned(),
+        ));
+    }
+    Ok(regions)
+}
+
+/// A tab: the regions of a closed sketch on a flat face of a sheet metal body (or in its
+/// plane) added to that face's flange, with the body's thickness.
+pub(crate) fn apply_tab(
+    feature: FeatureId,
+    model: &Model,
+    bodies: &[Arc<Body>],
+    plane: &Plane,
+    sketch: &Sketch,
+    seed: u64,
+) -> Result<Applied, FeatureError> {
+    let regions = tab_regions(sketch)?;
+    for (index, body) in bodies.iter().enumerate() {
+        let Some(sheet) = &body.sheet else {
+            continue;
+        };
+        let t = sheet.layout.settings.thickness;
+        let area = |frame: &Frame| {
+            Area::from_regions(&regions, feature.0)
+                .mapped(&|p| frame.to_local(plane.from_plane_coords(p)).truncate())
+        };
+        if let Some((piece, area)) = flange_beside(
+            &sheet.layout,
+            plane.origin(),
+            plane.normal(),
+            &[0.0, t],
+            &area,
+        ) {
+            let mut layout = sheet.layout.clone();
+            layout.add_sheet(piece, area);
+            return rebuild_sheet(model, bodies, index, layout, seed);
+        }
+    }
+    Err(FeatureError(
+        "A tab adds to a sheet metal body: draw its sketch on a flat face of one (or in the face's plane), touching the sheet."
+            .to_owned(),
+    ))
+}
+
+/// The flange with a face in the plane through `origin` square to `normal` (model
+/// coordinates), `levels` above its bottom side, that has sheet next to an area. `area`
+/// gives the area in a flange's flat coordinates from the flange's placement; it comes
+/// back in the flange's found.
+pub(crate) fn flange_beside(
+    layout: &Layout,
+    origin: DVec3,
+    normal: DVec3,
+    levels: &[f64],
+    area: &dyn Fn(&Frame) -> Area,
+) -> Option<(usize, Area)> {
+    const NEAR: f64 = 1e-3;
+    let dirs = [
+        DVec2::X,
+        DVec2::Y,
+        -DVec2::X,
+        -DVec2::Y,
+        DVec2::new(1.0, 1.0).normalize(),
+        DVec2::new(1.0, -1.0).normalize(),
+        DVec2::new(-1.0, 1.0).normalize(),
+        DVec2::new(-1.0, -1.0).normalize(),
+    ];
+    layout.pieces.iter().enumerate().find_map(|(i, p)| {
+        if !p.is_flange() || p.frame.z_axis().cross(normal).length() > 1e-9 {
+            return None;
+        }
+        let level = p.frame.to_local(origin).z;
+        if !levels.iter().any(|l| (level - l).abs() <= 1e-6) {
+            return None;
+        }
+        let a = area(&p.frame);
+        let touches = a.edges().any(|e| {
+            (0..=4).any(|k| {
+                let q = e.curve.point_at(f64::from(k) / 4.0);
+                dirs.iter().any(|d| p.covers(q + *d * NEAR))
+            })
+        });
+        touches.then_some((i, a))
+    })
 }
 
 /// The lines of an open sketch as one chain, in order. The chain starts at the free end of
@@ -327,13 +446,73 @@ pub(crate) fn edge_flange_spec(
     })
 }
 
+/// An edge flange's own relief, evaluated: its type and its size as a multiple of the
+/// thickness, each the body's (`settings`) unless the flange has its own. `None` if it
+/// has neither.
+pub(crate) fn edge_flange_relief(
+    def: &EdgeFlangeFeature,
+    settings: &peet_sheetmetal::SheetSettings,
+    params: &Parameters,
+) -> Result<Option<(peet_sheetmetal::ReliefType, f64)>, String> {
+    if def.relief.is_none() && def.relief_ratio.is_none() {
+        return Ok(None);
+    }
+    let ratio = match &def.relief_ratio {
+        Some(r) => r
+            .evaluate(ScalarKind::Number, params)
+            .map_err(|m| format!("Relief ratio: {m}."))?,
+        None => settings.relief_ratio,
+    };
+    Ok(Some((def.relief.unwrap_or(settings.relief), ratio)))
+}
+
+/// An edge flange's own bend model, evaluated. `None` if it uses the body's.
+pub(crate) fn edge_flange_bend(
+    def: &EdgeFlangeFeature,
+    params: &Parameters,
+) -> Result<Option<BendModel>, String> {
+    bend_model(def.bend.as_ref(), params)
+}
+
+/// A bend model of a feature's own, evaluated. `None` for the body's.
+pub(crate) fn bend_model(
+    def: Option<&BendModelDef>,
+    params: &Parameters,
+) -> Result<Option<BendModel>, String> {
+    let value = |s: &crate::Scalar, kind, label: &str| {
+        s.evaluate(kind, params)
+            .map_err(|m| format!("{label}: {m}."))
+    };
+    Ok(match def {
+        None => None,
+        Some(BendModelDef::KFactor(k)) => Some(BendModel::KFactor(value(
+            k,
+            ScalarKind::Number,
+            "K-factor",
+        )?)),
+        Some(BendModelDef::Allowance(v)) => Some(BendModel::Allowance(value(
+            v,
+            ScalarKind::Length,
+            "Bend allowance",
+        )?)),
+        Some(BendModelDef::Deduction(v)) => Some(BendModel::Deduction(value(
+            v,
+            ScalarKind::Length,
+            "Bend deduction",
+        )?)),
+    })
+}
+
 /// An edge flange: adds a flange to the sheet metal body the edge is on.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_edge_flange(
     feature: FeatureId,
     model: &Model,
     bodies: &[Arc<Body>],
     def: &EdgeFlangeFeature,
     spec: &EdgeFlangeSpec,
+    outline: Option<(Plane, &Sketch)>,
+    up_to: Option<peet_math::DVec3>,
     seed: u64,
 ) -> Result<Applied, FeatureError> {
     let edge = def.edge.as_ref().ok_or_else(|| {
@@ -357,9 +536,45 @@ pub(crate) fn apply_edge_flange(
         .edge_site(&body.solid, found.id)
         .map_err(FeatureError)?;
     let mut layout = sheet.layout.clone();
-    layout
-        .add_edge_flange(feature.0, &site, spec)
-        .map_err(FeatureError)?;
+    let relief =
+        edge_flange_relief(def, &layout.settings, &model.parameters).map_err(FeatureError)?;
+    let own = peet_sheetmetal::FlangeOwn {
+        relief,
+        model: edge_flange_bend(def, &model.parameters).map_err(FeatureError)?,
+        set_out: edge_flange_position_offset(def, &model.parameters).map_err(FeatureError)?,
+    };
+    // Up to a point: as long as takes its end there
+    let mut spec = *spec;
+    if let Some(point) = up_to {
+        spec.length = layout
+            .edge_flange_length_to(feature.0, 0, &site, &spec, own, point)
+            .map_err(FeatureError)?;
+    }
+    let spec = &spec;
+    match outline {
+        None => layout.add_edge_flange_with(feature.0, &site, spec, own),
+        Some((plane, sketch)) => {
+            // The sketch's regions, projected onto the flange: its flat placement takes
+            // them to flat coordinates
+            refuse_splines(sketch)?;
+            let profile = find_regions(sketch);
+            let regions: Vec<_> = default_regions(&profile)
+                .into_iter()
+                .map(|i| profile.regions[i].clone())
+                .collect();
+            if regions.is_empty() {
+                return Err(FeatureError(
+                    "Its outline sketch has no closed region: draw the flange's shape.".to_owned(),
+                ));
+            }
+            let shape = |frame: &Frame| {
+                let to_flat = |p: DVec2| frame.to_local(plane.from_plane_coords(p)).truncate();
+                Area::from_regions(&regions, feature.0).mapped(&to_flat)
+            };
+            layout.add_edge_flange_outlined(feature.0, 0, &site, spec, own, &shape)
+        }
+    }
+    .map_err(FeatureError)?;
     let (new, warning) = sheet_body(model, layout, body.origin, stamp(seed, found.body))?;
     let mut out = bodies.to_vec();
     out[found.body] = Arc::new(new);
@@ -367,7 +582,10 @@ pub(crate) fn apply_edge_flange(
 }
 
 /// A sheet metal cut: the sketch's regions, mapped into the flat pattern through the face
-/// the sketch lies on, cut out of the sheet.
+/// the sketch lies on, cut out of the sheet. Other flanges with a face in the sketch's
+/// plane are cut too, each through its own place in the flat pattern: two tabs side by
+/// side are far apart in the blank, and a sketch across both means both.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_sheet_cut(
     feature: FeatureId,
     model: &Model,
@@ -375,32 +593,44 @@ pub(crate) fn apply_sheet_cut(
     face: Option<&FaceRef>,
     plane: &Plane,
     sketch: &Sketch,
+    reach: Option<(f64, f64)>,
     seed: u64,
 ) -> Result<Applied, FeatureError> {
-    let face = face.ok_or_else(|| {
-        FeatureError(
-            "Sketch the cut on a flat face of the sheet metal part: a sheet metal cut goes square through the sheet from there."
-                .to_owned(),
-        )
-    })?;
-    let found = find_face(bodies, face).ok_or_else(|| {
-        FeatureError(format!(
-            "The face its sketch is on no longer exists ({}).",
-            model.describe_face(&face.name)
-        ))
-    })?;
-    let body = &bodies[found.body];
-    let sheet = body.sheet.as_ref().ok_or_else(|| {
-        FeatureError(
+    let found = match face {
+        Some(face) => Some(find_face(bodies, face).ok_or_else(|| {
+            FeatureError(format!(
+                "The face its sketch is on no longer exists ({}).",
+                model.describe_face(&face.name)
+            ))
+        })?),
+        None => None,
+    };
+    if let Some(found) = &found
+        && bodies[found.body].sheet.is_none()
+    {
+        return Err(FeatureError(
             "The sketch is not on a sheet metal body. Use Cut-Extrude for solid bodies.".to_owned(),
-        )
-    })?;
-    let (_, frame, _) = sheet.flange_face(found.id).ok_or_else(|| {
-        FeatureError(
-            "Sketch the cut on a flat face of the sheet (a flange's top or bottom), not on a bend or an edge."
-                .to_owned(),
-        )
-    })?;
+        ));
+    }
+    // A sketch on a plane, or on a face that is not a flange's top or bottom (the sheet's
+    // edge): cut from there, as SolidWorks' cut-extrude does from any plane.
+    let on_flange = found.as_ref().and_then(|found| {
+        let sheet = bodies[found.body].sheet.as_ref()?;
+        Some((found.body, sheet, sheet.flange_face(found.id)?))
+    });
+    let Some((body_index, sheet, (on_piece, frame, top))) = on_flange else {
+        return sheet_cut_anywhere(
+            feature,
+            model,
+            bodies,
+            found.map(|f| f.body),
+            plane,
+            sketch,
+            reach,
+            seed,
+        );
+    };
+    let body = &bodies[body_index];
     refuse_splines(sketch)?;
     let profile = find_regions(sketch);
     if profile.regions.is_empty() {
@@ -413,20 +643,539 @@ pub(crate) fn apply_sheet_cut(
         .map(|i| profile.regions[i].clone())
         .collect();
     let to_flat = |p: DVec2| frame.to_local(plane.from_plane_coords(p)).truncate();
-    let area = Area::from_regions(&regions, feature.0).mapped(&to_flat);
+    // Into the sheet from the face the sketch is on
+    let into = frame.z_axis() * if top { -1.0 } else { 1.0 };
+    let thickness = sheet.layout.settings.thickness;
+    let origin = plane.from_plane_coords(DVec2::ZERO);
+    // With an end, the cut is SolidWorks' cut-extrude: straight from the sketch, so a flange
+    // it doesn't reach into is left, its own included (a cut going off the sheet's face), and
+    // where it ends in a bend it is made normal to the sheet where its wall leaves the sheet.
+    let reaches = |piece: &peet_sheetmetal::Piece| {
+        reach.is_none_or(|span| {
+            let a = (piece.frame.origin - origin).dot(into);
+            let b = a + thickness * piece.frame.z_axis().dot(into);
+            reaches_into(span, a, b)
+        })
+    };
     let mut layout = sheet.layout.clone();
-    layout.add_cut(area);
+    // The other flanges that lie in the sketch's plane, each with its own way into the flat
+    // pattern. One that the first mapping already puts in the right place (it is next to
+    // the sketch's flange in the blank too) is left to that mapping.
+    let probes = [DVec2::ZERO, DVec2::X, DVec2::Y];
+    let mut cut = vec![false; layout.pieces.len()];
+    cut[on_piece] = true;
+    let mut others: Vec<(usize, Frame)> = Vec::new();
+    for (i, piece) in layout.pieces.iter().enumerate() {
+        if i == on_piece || !piece.is_flange() {
+            continue;
+        }
+        let other = piece.frame;
+        let level = other.to_local(origin).z;
+        let in_plane = other.z_axis().dot(frame.z_axis()).abs() > 1.0 - 1e-9
+            && (level.abs() < 1e-6 || (level - thickness).abs() < 1e-6);
+        if !in_plane {
+            continue;
+        }
+        cut[i] = true;
+        if !reaches(piece) {
+            continue;
+        }
+        let through = |p: DVec2| other.to_local(plane.from_plane_coords(p)).truncate();
+        if probes
+            .iter()
+            .all(|p| through(*p).distance(to_flat(*p)) < 1e-6)
+        {
+            continue;
+        }
+        others.push((i, other));
+    }
+    // A shape that lies over another flange in the plane and not over the sketch's own is
+    // that flange's alone, as SolidWorks cuts square through the sheet: through the sketch's
+    // flange it would land wherever that flange's place in the blank puts it (on the base,
+    // for a hole in the lip across from the one sketched on).
+    let own: Vec<_> = regions
+        .iter()
+        .filter(|r| {
+            let Some(c) = crate::extrude::interior_point(r) else {
+                return true;
+            };
+            layout.pieces[on_piece].covers(to_flat(c))
+                || !others.iter().any(|(i, other)| {
+                    let at = other.to_local(plane.from_plane_coords(c)).truncate();
+                    layout.pieces[*i].covers(at)
+                })
+        })
+        .cloned()
+        .collect();
+    if !own.is_empty() && reaches(&layout.pieces[on_piece]) {
+        let mut area = Area::from_regions(&own, feature.0).mapped(&to_flat);
+        if reach.is_some() {
+            area = straight_into_bends(&sheet.layout, on_piece, !top, area);
+        }
+        layout.add_cut(area);
+    }
+    for (i, other) in others {
+        let through = |p: DVec2| other.to_local(plane.from_plane_coords(p)).truncate();
+        let area = Area::from_regions(&regions, feature.0).mapped(&through);
+        layout.add_cut_on(area, vec![i]);
+    }
+    if let Some(span) = reach {
+        let world = |p: DVec2| plane.from_plane_coords(p);
+        for (area, pieces) in cut_beyond(&layout, &cut, &world, into, span, &regions, feature.0) {
+            layout.add_cut_on(area, pieces);
+        }
+    }
+    // A shape over sheet that an earlier cut has taken away already: SolidWorks keeps such a
+    // cut (a pattern of it can cut elsewhere), so it stays, with a warning.
+    let over_sheet = regions.iter().any(|r| {
+        let (lo, hi) = r.outer.bounds();
+        let c = (lo + hi) / 2.0;
+        r.contains(c) && layout.pieces[on_piece].covers(to_flat(c))
+    });
     let before = peet_kernel::validate::measure::volume(&body.solid);
-    let (new, warning) = sheet_body(model, layout, body.origin, stamp(seed, found.body))?;
+    let (new, mut warning) = sheet_body(model, layout, body.origin, stamp(seed, body_index))?;
     let after = peet_kernel::validate::measure::volume(&new.solid);
     if (before - after).abs() <= 1e-9 * before.abs().max(1.0) {
-        return Err(FeatureError(
-            "The cut doesn't remove any material: its shape is off the sheet.".to_owned(),
-        ));
+        if !over_sheet {
+            return Err(FeatureError(
+                "The cut doesn't remove any material: its shape is off the sheet.".to_owned(),
+            ));
+        }
+        warning.get_or_insert_with(|| {
+            "The cut removes nothing: an earlier cut has taken the sheet there away already."
+                .to_owned()
+        });
     }
     let mut out = bodies.to_vec();
-    out[found.body] = Arc::new(new);
+    out[body_index] = Arc::new(new);
     Ok((out, warning))
+}
+
+/// A sheet metal cut whose sketch is not on a flange's top or bottom: on a plane, or on a
+/// face along the sheet's edge. It cuts as SolidWorks' cut-extrude does from such a sketch:
+/// through the flanges with a face in the sketch's plane, and with a reach, through every
+/// flange the reach takes in ([`cut_beyond`]), going in against the sketch plane's normal
+/// (into the face, for a sketch on one). `body` is the body of the face the sketch is on;
+/// for a sketch on a plane every sheet metal body is cut.
+#[allow(clippy::too_many_arguments)]
+fn sheet_cut_anywhere(
+    feature: FeatureId,
+    model: &Model,
+    bodies: &[Arc<Body>],
+    body: Option<usize>,
+    plane: &Plane,
+    sketch: &Sketch,
+    reach: Option<(f64, f64)>,
+    seed: u64,
+) -> Result<Applied, FeatureError> {
+    refuse_splines(sketch)?;
+    let profile = find_regions(sketch);
+    if profile.regions.is_empty() {
+        return Err(FeatureError(
+            "The sketch has no closed region to cut. Draw a closed shape.".to_owned(),
+        ));
+    }
+    let regions: Vec<_> = default_regions(&profile)
+        .into_iter()
+        .map(|i| profile.regions[i].clone())
+        .collect();
+    let world = |p: DVec2| plane.from_plane_coords(p);
+    let into = -plane.normal();
+    let mut out = bodies.to_vec();
+    let mut warning = None;
+    let mut cut_any = false;
+    for (index, b) in bodies.iter().enumerate() {
+        let Some(sheet) = &b.sheet else { continue };
+        if body.is_some_and(|i| i != index) {
+            continue;
+        }
+        let cuts = cut_from_plane(&sheet.layout, &world, into, reach, &regions, feature.0);
+        if cuts.is_empty() {
+            continue;
+        }
+        let mut layout = sheet.layout.clone();
+        for (area, pieces) in cuts {
+            layout.add_cut_on(area, pieces);
+        }
+        let before = peet_kernel::validate::measure::volume(&b.solid);
+        let (new, w) = sheet_body(model, layout, b.origin, stamp(seed, index))?;
+        let after = peet_kernel::validate::measure::volume(&new.solid);
+        if (before - after).abs() > 1e-9 * before.abs().max(1.0) {
+            cut_any = true;
+            warning = warning.or(w);
+            out[index] = Arc::new(new);
+        }
+    }
+    if !cut_any {
+        return Err(FeatureError(if reach.is_none() {
+            "Its sketch is not on a flange's top or bottom, and no flange has a face in its plane. \
+             Sketch the cut on a flat face of the sheet, or give it an end (blind or through all) \
+             to cut from where the sketch is."
+                .to_owned()
+        } else {
+            "The cut doesn't remove any material: nothing of the sheet is within its reach \
+             under its shape. Check its direction (reverse) and its depth."
+                .to_owned()
+        }));
+    }
+    Ok((out, warning))
+}
+
+/// Whether a sheet metal cut's sketch is off a flange's top or bottom, and is cut from as
+/// [`sheet_cut_anywhere`] does: `Some(None)` for a sketch on a plane, `Some(Some(body))` for
+/// one on a face of a sheet metal body that is not a flange's top or bottom (its edge).
+pub(crate) fn off_flange(bodies: &[Arc<Body>], face: Option<&FaceRef>) -> Option<Option<usize>> {
+    let Some(face) = face else { return Some(None) };
+    let found = find_face(bodies, face)?;
+    let sheet = bodies[found.body].sheet.as_ref()?;
+    sheet
+        .flange_face(found.id)
+        .is_none()
+        .then_some(Some(found.body))
+}
+
+/// The cuts a sheet metal cut makes in `layout` from a sketch placed in the model by
+/// `world`, going `into` from its plane, each with the pieces it is cut from: the flanges
+/// with a face in the sketch's plane, cut square through by the regions, and with a reach,
+/// the others it takes in ([`cut_beyond`]).
+pub(crate) fn cut_from_plane(
+    layout: &Layout,
+    world: &dyn Fn(DVec2) -> DVec3,
+    into: DVec3,
+    reach: Option<(f64, f64)>,
+    regions: &[peet_sketch::region::Region],
+    owner: u32,
+) -> Vec<(Area, Vec<usize>)> {
+    let t = layout.settings.thickness;
+    let origin = world(DVec2::ZERO);
+    let mut done = vec![false; layout.pieces.len()];
+    let mut out = Vec::new();
+    for (i, piece) in layout.pieces.iter().enumerate() {
+        if !piece.is_flange() || piece.frame.z_axis().cross(into).length() > 1e-9 {
+            continue;
+        }
+        let level = piece.frame.to_local(origin).z;
+        if level.abs() < 1e-6 || (level - t).abs() < 1e-6 {
+            done[i] = true;
+            // With an end, only a flange the cut goes into from its plane
+            let a = (piece.frame.origin - origin).dot(into);
+            let b = a + t * piece.frame.z_axis().dot(into);
+            if reach.is_some_and(|span| !reaches_into(span, a, b)) {
+                continue;
+            }
+            let through = |p: DVec2| piece.frame.to_local(world(p)).truncate();
+            out.push((Area::from_regions(regions, owner).mapped(&through), vec![i]));
+        }
+    }
+    if let Some(span) = reach {
+        out.extend(cut_beyond(layout, &done, world, into, span, regions, owner));
+    }
+    out
+}
+
+/// Whether a cut reaching over `span` along the way into the sheet goes into a flange that
+/// lies between `a` and `b` along it.
+fn reaches_into(span: (f64, f64), a: f64, b: f64) -> bool {
+    span.1.min(a.max(b)) - span.0.max(a.min(b)) > 1e-6
+}
+
+/// A cut's outline, drawn on a face of flange `piece` and mapped into flat coordinates as
+/// the face's plane maps it, with what lies past the flange's edge over one of its bends
+/// moved to where it cuts the bend. A straight cut-extrude meets the bend in a line on the
+/// face it leaves the sheet through (`far_top`: the sheet's top side), and SolidWorks'
+/// normal cut makes its wall square to the sheet there: at the angle where that face is as
+/// far from the bend's start as the outline, on into the next flange if the bend turns less
+/// than a right angle. What is on the flange, or not over a bend, stays. A line that runs
+/// past an end of a bend is split there, and where the two sides move apart a line along
+/// the end of the bend joins them.
+fn straight_into_bends(layout: &Layout, piece: usize, far_top: bool, area: Area) -> Area {
+    use peet_sheetmetal::layout::Edge2;
+    // A bend an unfold has laid flat is cut straight through, as the flange is
+    let bends: Vec<_> = layout
+        .bends()
+        .filter(|(i, b)| {
+            (b.parent == piece || b.child == Some(piece)) && !layout.flat_bends.contains(i)
+        })
+        .map(|(_, b)| *b)
+        .collect();
+    if bends.is_empty() {
+        return area;
+    }
+    // How far past the flange's edge `p` is over bend `b`, and which way that is
+    let past = |b: &peet_sheetmetal::layout::Bend, p: DVec2| {
+        let (s, _) = b.strip_coords(p);
+        if b.parent == piece {
+            (s, b.across)
+        } else {
+            (b.width() - s, -b.across)
+        }
+    };
+    let over = |p: DVec2| {
+        bends.iter().find(|b| {
+            let (_, w) = b.strip_coords(p);
+            (-1e-9..=b.length + 1e-9).contains(&w) && past(b, p).0 > 1e-9
+        })
+    };
+    let moved = |b: &peet_sheetmetal::layout::Bend, p: DVec2| {
+        let (e, out) = past(b, p);
+        if e <= 1e-9 {
+            return p;
+        }
+        let v = b.values;
+        let radius = if far_top == b.up {
+            v.radius
+        } else {
+            v.radius + v.thickness
+        };
+        let turn = v.angle.min(std::f64::consts::FRAC_PI_2);
+        let reach = radius * turn.sin();
+        let flat = if e <= reach {
+            (e / radius).asin() / v.angle * v.allowance
+        } else if v.angle < std::f64::consts::FRAC_PI_2 {
+            v.allowance + (e - reach) / v.angle.cos()
+        } else {
+            turn / v.angle * v.allowance + (e - reach)
+        };
+        p + out * (flat - e)
+    };
+    let ends = |e: &Edge2| {
+        let (a, b) = (e.curve.start(), e.curve.end());
+        if e.reversed { (b, a) } else { (a, b) }
+    };
+    let mut loops = Vec::new();
+    for l in area.loops {
+        let mut out: Vec<Edge2> = Vec::new();
+        for edge in l {
+            // Lines split where they run past an end of a bend
+            let parts = match edge.curve {
+                Curve::Line { .. } => {
+                    let (a, b) = ends(&edge);
+                    let mut ts = vec![0.0, 1.0];
+                    for bend in &bends {
+                        let (_, wa) = bend.strip_coords(a);
+                        let (_, wb) = bend.strip_coords(b);
+                        for w in [0.0, bend.length] {
+                            let t = (w - wa) / (wb - wa);
+                            if (wb - wa).abs() > 1e-12
+                                && t > 1e-9
+                                && t < 1.0 - 1e-9
+                                && past(bend, a.lerp(b, t)).0 > 1e-9
+                            {
+                                ts.push(t);
+                            }
+                        }
+                    }
+                    ts.sort_by(f64::total_cmp);
+                    ts.windows(2)
+                        .map(|t| Edge2::line(a.lerp(b, t[0]), a.lerp(b, t[1]), edge.tag))
+                        .collect()
+                }
+                _ => vec![edge],
+            };
+            for part in parts {
+                let Some(bend) = over(part.curve.point_at(0.5)) else {
+                    out.push(part);
+                    continue;
+                };
+                let one = Area {
+                    loops: vec![vec![part]],
+                }
+                .mapped(&|p| moved(bend, p));
+                out.extend(one.loops.into_iter().flatten());
+            }
+        }
+        // Join what moved apart
+        let mut joined: Vec<Edge2> = Vec::new();
+        let n = out.len();
+        for (i, e) in out.iter().enumerate() {
+            joined.push(e.clone());
+            let next = &out[(i + 1) % n];
+            let (_, end) = ends(e);
+            let (start, _) = ends(next);
+            if end.distance(start) > 1e-9 {
+                joined.push(Edge2::line(end, start, e.tag));
+            }
+        }
+        loops.push(joined);
+    }
+    Area { loops }
+}
+
+/// How far out from its edge an edge flange is set, evaluated.
+pub(crate) fn edge_flange_position_offset(
+    def: &EdgeFlangeFeature,
+    params: &Parameters,
+) -> Result<f64, String> {
+    def.position_offset
+        .evaluate(ScalarKind::Length, params)
+        .map_err(|m| format!("Position offset: {m}."))
+}
+
+/// How far a sheet metal cut reaches along the way into the sheet from the face its sketch
+/// is on, measured from that face: `None` for a cut through its own sheet only.
+pub(crate) fn sheet_cut_reach(
+    c: &crate::feature::SheetCutFeature,
+    params: &Parameters,
+) -> Result<Option<(f64, f64)>, String> {
+    use crate::feature::SheetCutEnd;
+    let r = match c.end {
+        SheetCutEnd::Sheet => return Ok(None),
+        SheetCutEnd::Blind => {
+            let d = c
+                .depth
+                .evaluate(ScalarKind::Length, params)
+                .map_err(|m| format!("Depth: {m}."))?;
+            if d.is_nan() || d <= 0.0 {
+                return Err("The depth must be greater than zero.".to_owned());
+            }
+            d
+        }
+        SheetCutEnd::ThroughAll => f64::INFINITY,
+    };
+    let (lo, hi) = if c.both { (-r, r) } else { (0.0, r) };
+    Ok(Some(if c.reverse { (-hi, -lo) } else { (lo, hi) }))
+}
+
+/// The cuts a sheet metal cut with a reach makes in flanges other than the ones with a
+/// face in its sketch's plane (`done`), each with the pieces it is cut from. `world`
+/// places the sketch's points in the model, `into` is the way into the sheet, and `span`
+/// the reach along it from the sketch's plane.
+///
+/// A flange parallel to the sketch is cut square through by the regions if it lies
+/// wholly within the reach. A flange square to the sketch is cut where the regions cross
+/// its middle, as far along `into` as the reach and the flange both go. Flanges at other
+/// angles are left alone.
+pub(crate) fn cut_beyond(
+    layout: &Layout,
+    done: &[bool],
+    world: &dyn Fn(DVec2) -> DVec3,
+    into: DVec3,
+    span: (f64, f64),
+    regions: &[peet_sketch::region::Region],
+    owner: u32,
+) -> Vec<(Area, Vec<usize>)> {
+    let t = layout.settings.thickness;
+    let origin = world(DVec2::ZERO);
+    let (ax, ay) = (world(DVec2::X) - origin, world(DVec2::Y) - origin);
+    let mut out = Vec::new();
+    for (i, piece) in layout.pieces.iter().enumerate() {
+        if done.get(i).copied().unwrap_or(true) || !piece.is_flange() {
+            continue;
+        }
+        let z = piece.frame.z_axis();
+        let along = z.dot(into);
+        let level = (piece.frame.origin - origin).dot(into);
+        if along.abs() > 1.0 - 1e-9 {
+            let (a, b) = (level, level + t * along);
+            if a.min(b) < span.0 - 1e-6 || a.max(b) > span.1 + 1e-6 {
+                continue;
+            }
+            let through = |p: DVec2| piece.frame.to_local(world(p)).truncate();
+            out.push((Area::from_regions(regions, owner).mapped(&through), vec![i]));
+        } else if along.abs() < 1e-9 {
+            // The flange's middle crosses the sketch's plane in a line: m c + u s
+            let m = DVec2::new(ax.dot(z), ay.dot(z));
+            if m.length() < 1e-9 {
+                continue;
+            }
+            let m = m.normalize();
+            let c = t / 2.0 - (origin - piece.frame.origin).dot(z);
+            let u = m.perp();
+            let at = |s: f64| m * c + u * s;
+            // How far along `into` the flange goes
+            let mut extent = (f64::INFINITY, f64::NEG_INFINITY);
+            for e in piece.outline.edges() {
+                for p in [e.curve.start(), e.curve.end()] {
+                    let k = (piece.frame.to_world(p.extend(t / 2.0)) - origin).dot(into);
+                    extent = (extent.0.min(k), extent.1.max(k));
+                }
+            }
+            let (k0, k1) = (span.0.max(extent.0), span.1.min(extent.1));
+            if k1 <= k0 {
+                continue;
+            }
+            // Where the reach goes on past an end of the flange into a bend, the band runs
+            // on across the bend in the flat pattern: the bend at that end, and how far.
+            let flat_into = piece.frame.to_local(piece.frame.origin + into).truncate();
+            let past = |end: f64, ahead: DVec2| -> Option<(usize, f64)> {
+                if end <= 1e-6 {
+                    return None;
+                }
+                layout.bends().find_map(|(j, b)| {
+                    let out = if b.parent == i {
+                        b.across
+                    } else if b.child == Some(i) {
+                        -b.across
+                    } else {
+                        return None;
+                    };
+                    (out.dot(ahead) > 1.0 - 1e-6).then_some((j, b.width()))
+                })
+            };
+            let beyond = [
+                past(extent.0 - span.0, -flat_into),
+                past(span.1 - extent.1, flat_into),
+            ];
+            // Where the line goes in and out of the regions
+            let size = regions
+                .iter()
+                .map(|r| {
+                    let (lo, hi) = r.outer.bounds();
+                    lo.abs().max(hi.abs()).max_element()
+                })
+                .fold(0.0_f64, f64::max)
+                + c.abs()
+                + 1.0;
+            let line = Curve::Line {
+                a: at(-size),
+                b: at(size),
+            };
+            let mut stops = vec![-size, size];
+            for r in regions {
+                for l in std::iter::once(&r.outer).chain(&r.holes) {
+                    for e in &l.edges {
+                        let hits = line.intersect(&e.curve);
+                        stops.extend(hits.iter().map(|h| (h.t_a - 0.5) * 2.0 * size));
+                    }
+                }
+            }
+            stops.sort_by(f64::total_cmp);
+            let mut bands: Vec<(f64, f64)> = Vec::new();
+            for w in stops.windows(2) {
+                let inside = regions.iter().any(|r| r.contains(at((w[0] + w[1]) / 2.0)));
+                if w[1] - w[0] < 1e-9 || !inside {
+                    continue;
+                }
+                match bands.last_mut() {
+                    Some(last) if (last.1 - w[0]).abs() < 1e-9 => last.1 = w[1],
+                    _ => bands.push((w[0], w[1])),
+                }
+            }
+            for (b, (s0, s1)) in bands.into_iter().enumerate() {
+                let corner =
+                    |s: f64, k: f64| piece.frame.to_local(world(at(s)) + into * k).truncate();
+                let back = beyond[0].map_or(DVec2::ZERO, |(_, w)| -flat_into * w);
+                let ahead = beyond[1].map_or(DVec2::ZERO, |(_, w)| flat_into * w);
+                let points = [
+                    corner(s0, k0) + back,
+                    corner(s1, k0) + back,
+                    corner(s1, k1) + ahead,
+                    corner(s0, k1) + ahead,
+                ];
+                // Numbered apart from the flanges' own parts: one per flange and band
+                let part = (1u32 << 31) | ((i as u32) << 8) | b as u32;
+                let tag = |j: usize| CurveTag::Generated {
+                    owner,
+                    part,
+                    index: j as u8,
+                };
+                let mut pieces = vec![i];
+                pieces.extend(beyond.iter().flatten().map(|(j, _)| *j));
+                out.push((Area::polygon(&points, tag), pieces));
+            }
+        }
+    }
+    out
 }
 
 /// Where to draw the length handle of an edge flange: the middle of its far end (on the
@@ -611,9 +1360,10 @@ fn sketch_lines(sketch: &Sketch) -> Vec<(u32, DVec2, DVec2)> {
 
 /// The flange whose material holds a point of the flat pattern.
 fn flange_at(layout: &Layout, p: DVec2) -> Option<usize> {
-    layout.pieces.iter().position(|pc| {
-        pc.is_flange() && pc.outline.contains(p) && !pc.trims.iter().any(|t| t.contains(p))
-    })
+    layout
+        .pieces
+        .iter()
+        .position(|pc| pc.is_flange() && pc.covers(p))
 }
 
 /// A sketch line in flat coordinates: its entity and its two ends.
@@ -751,7 +1501,26 @@ pub(crate) fn apply_miter_flange(
         .as_ref()
         .expect("checked by edge_on_sheet");
     let sites = chain_sites(sites).map_err(FeatureError)?;
+    let parent = &sheet.layout.pieces[sites[0].piece];
+    let t = sheet.layout.settings.thickness;
+    let profile = miter_profile(&sites, &parent.frame, plane, sketch, t)?;
+    let mut layout = sheet.layout.clone();
+    layout
+        .add_miter_flange(feature.0, &sites, &profile, offsets, gap)
+        .map_err(FeatureError)?;
+    rebuild_sheet(model, bodies, index, layout, seed)
+}
 
+/// A mitre flange's profile across its edges: its points as distances out from the edge
+/// it is drawn square to and heights above the bottom side of the sheet, starting at the
+/// edge. `frame` is the placement of the face the edges are on.
+pub(crate) fn miter_profile(
+    sites: &[EdgeSite],
+    frame: &Frame,
+    plane: &Plane,
+    sketch: &Sketch,
+    t: f64,
+) -> Result<Vec<DVec2>, FeatureError> {
     // The profile, in the flat pattern's frame of the face the edges are on.
     let chain = open_chain(sketch).map_err(|m| {
         FeatureError(format!(
@@ -760,16 +1529,14 @@ pub(crate) fn apply_miter_flange(
     })?;
     let mut points: Vec<DVec2> = vec![chain[0].a];
     points.extend(chain.iter().map(|l| l.b));
-    let parent = &sheet.layout.pieces[sites[0].piece];
-    let t = sheet.layout.settings.thickness;
     let local: Vec<DVec3> = points
         .iter()
-        .map(|&p| parent.frame.to_local(plane.from_plane_coords(p)))
+        .map(|&p| frame.to_local(plane.from_plane_coords(p)))
         .collect();
     // The edge the profile is drawn square to, and the profile in its plane.
     let tol = 1e-4;
     let mut profile = None;
-    for s in &sites {
+    for s in sites {
         let d = (s.b - s.a).normalize_or_zero();
         let out = DVec2::new(d.y, -d.x);
         let along: Vec<f64> = local.iter().map(|q| (q.truncate() - s.a).dot(d)).collect();
@@ -794,22 +1561,17 @@ pub(crate) fn apply_miter_flange(
             break;
         }
     }
-    let profile = profile.ok_or_else(|| {
+    profile.ok_or_else(|| {
         FeatureError(
             "The profile must be drawn square to one of the edges, starting at that edge's top or bottom corner. Sketch it on the face at the end of the edge, or on a plane square to it."
                 .to_owned(),
         )
-    })?;
-    let mut layout = sheet.layout.clone();
-    layout
-        .add_miter_flange(feature.0, &sites, &profile, offsets, gap)
-        .map_err(FeatureError)?;
-    rebuild_sheet(model, bodies, index, layout, seed)
+    })
 }
 
 /// Puts edges in chain order: each starting where the one before ends (they may close a
 /// loop).
-fn chain_sites(mut sites: Vec<EdgeSite>) -> Result<Vec<EdgeSite>, String> {
+pub(crate) fn chain_sites(mut sites: Vec<EdgeSite>) -> Result<Vec<EdgeSite>, String> {
     let same = |p: DVec2, q: DVec2| p.distance(q) <= 1e-6;
     // Start where no other edge ends (or anywhere, for a closed loop).
     let start = (0..sites.len())
@@ -845,6 +1607,151 @@ pub(crate) fn corner_spec(def: &CornerFeature, params: &Parameters) -> Result<Co
     })
 }
 
+/// A break corner: rounds or chamfers the picked corners of the sheet, in the flat pattern.
+pub(crate) fn apply_break_corner(
+    feature: FeatureId,
+    model: &Model,
+    bodies: &[Arc<Body>],
+    def: &crate::feature::BreakCornerFeature,
+    size: f64,
+    seed: u64,
+) -> Result<Applied, FeatureError> {
+    if def.edges.is_empty() && def.faces.is_empty() {
+        return Err(FeatureError(
+            "Pick the corners to break: the short edges through the sheet where two sides of a flat face meet, or flat faces to break every corner of."
+                .to_owned(),
+        ));
+    }
+    // The corners: those picked, then every corner of the faces picked (the edges through
+    // the sheet at their vertices), each once. (body, edge, whether it came from a face)
+    let mut corners: Vec<(usize, peet_kernel::EdgeId, bool)> = Vec::new();
+    for edge in &def.edges {
+        let found = find_edge(bodies, edge).ok_or_else(|| {
+            FeatureError(
+                "A corner it refers to no longer exists. Edit it and pick the corners again."
+                    .to_owned(),
+            )
+        })?;
+        corners.push((found.body, found.id, false));
+    }
+    for face in &def.faces {
+        let found = find_face(bodies, face).ok_or_else(|| {
+            FeatureError(format!(
+                "A face it refers to no longer exists ({}). Edit it and pick the faces again.",
+                model.describe_face(&face.name)
+            ))
+        })?;
+        let solid = &bodies[found.body].solid;
+        let t = bodies[found.body]
+            .sheet
+            .as_ref()
+            .map_or(0.0, |s| s.layout.settings.thickness);
+        let mut around = Vec::new();
+        let mut vertices = Vec::new();
+        for &l in &solid.face(found.id).loops {
+            for c in solid.loop_coedges(l) {
+                around.push(solid.coedge(c).edge);
+                vertices.push(solid.coedge_start(c));
+            }
+        }
+        for e in solid.edge_ids() {
+            let edge = solid.edge(e);
+            let through = solid
+                .vertex(edge.start)
+                .point
+                .distance(solid.vertex(edge.end).point);
+            if around.contains(&e)
+                || !(vertices.contains(&edge.start) || vertices.contains(&edge.end))
+                || !matches!(edge.curve, peet_kernel::Curve3::Line(_))
+                || (through - t).abs() > 1e-6
+                || corners.iter().any(|&(b, x, _)| b == found.body && x == e)
+            {
+                continue;
+            }
+            corners.push((found.body, e, true));
+        }
+    }
+    let mut index = None;
+    let mut cuts = Vec::new();
+    for (n, &(at, edge, of_face)) in corners.iter().enumerate() {
+        if index.is_some_and(|i| i != at) {
+            return Err(FeatureError(
+                "The corners must all be on one sheet metal body.".to_owned(),
+            ));
+        }
+        index = Some(at);
+        let body = &bodies[at];
+        let sheet = body.sheet.as_ref().ok_or_else(|| {
+            FeatureError(
+                "Break corner is for sheet metal bodies. Use Fillet or Chamfer on a solid."
+                    .to_owned(),
+            )
+        })?;
+        let tag = |i: u8| CurveTag::Generated {
+            owner: feature.0,
+            part: n as u32,
+            index: i,
+        };
+        match sheet.corner_break(&body.solid, edge, def.kind, size, tag) {
+            Ok(cut) => cuts.push(cut),
+            // A face's edge through the sheet that is not a corner of two sides (where a
+            // bend or a curve meets it) is not one of its corners.
+            Err(_) if of_face => {}
+            Err(m) => return Err(FeatureError(format!("Corner {}: {m}", n + 1))),
+        }
+    }
+    if cuts.is_empty() {
+        return Err(FeatureError(
+            "The faces picked have no corners to break: two straight sides meeting at an edge through the sheet."
+                .to_owned(),
+        ));
+    }
+    let index = index.expect("there are corners");
+    // Two corners at the ends of one side share it: what they take of it must not overlap.
+    let overlap = |p: &[DVec2; 2], q: &[DVec2; 2]| {
+        let d = p[1] - p[0];
+        let length = d.length();
+        let d = d / length;
+        let on_line = |x: DVec2| (x - p[0]).perp_dot(d).abs() < 1e-6;
+        if !(on_line(q[0]) && on_line(q[1])) {
+            return false;
+        }
+        let (u0, u1) = ((q[0] - p[0]).dot(d), (q[1] - p[0]).dot(d));
+        u0.max(u1).min(length) - u0.min(u1).max(0.0) > 1e-6
+    };
+    for i in 0..cuts.len() {
+        for j in i + 1..cuts.len() {
+            if cuts[i].0 == cuts[j].0
+                && cuts[i]
+                    .2
+                    .iter()
+                    .any(|p| cuts[j].2.iter().any(|q| overlap(p, q)))
+            {
+                return Err(FeatureError(format!(
+                    "Corners {} and {} are at the two ends of one side, which is too short for both at that size.",
+                    i + 1,
+                    j + 1
+                )));
+            }
+        }
+    }
+    let mut layout = bodies[index]
+        .sheet
+        .as_ref()
+        .expect("checked")
+        .layout
+        .clone();
+    for (piece, area, _, adds) in cuts {
+        if adds {
+            // A rounded inside corner fills in what earlier cuts took there.
+            layout.add_sheet(piece, area);
+        } else {
+            layout.add_cut_on(area, vec![piece]);
+        }
+    }
+    rebuild_sheet(model, bodies, index, layout, seed)
+}
+
 /// A corner treatment: changes how the flanges meet at the corners of the picked faces.
 pub(crate) fn apply_corner(
     model: &Model,
@@ -855,7 +1762,7 @@ pub(crate) fn apply_corner(
 ) -> Result<Applied, FeatureError> {
     // The faces' body (or the first sheet metal body), and which corners they pick.
     let mut index = None;
-    let mut picks: Vec<(usize, usize)> = Vec::new(); // (face's piece, face's end or 2: both)
+    let mut picks: Vec<(usize, usize, Option<bool>)> = Vec::new(); // (face's piece, face's end or 2: both, a mitre's)
     for f in &def.faces {
         let found = find_face(bodies, f).ok_or_else(|| {
             FeatureError(format!(
@@ -873,18 +1780,22 @@ pub(crate) fn apply_corner(
             FeatureError("Corners are of sheet metal bodies: pick a flange's face.".to_owned())
         })?;
         let tag = &sheet.faces[found.id.index()];
-        let end = match *tag {
+        // Which end of the flange the face is, and whether it is the end's mitre with a
+        // flange across a bend (a square end is at a corner on the flange's own face)
+        let (end, across) = match *tag {
             FaceTag::Wall {
                 tag: CurveTag::Generated { index, .. },
                 ..
-            } if index == wall::FLANGE_START => 0,
-            FaceTag::Wall {
-                tag: CurveTag::Generated { index, .. },
-                ..
-            } if index == wall::FLANGE_END => 1,
-            _ => 2,
+            } => match index {
+                wall::FLANGE_START => (0, Some(false)),
+                wall::FLANGE_END => (1, Some(false)),
+                wall::MITRE_START => (0, Some(true)),
+                wall::MITRE_END => (1, Some(true)),
+                _ => (2, None),
+            },
+            _ => (2, None),
         };
-        picks.push((tag.piece(), end));
+        picks.push((tag.piece(), end, across));
     }
     let index = match index {
         Some(i) => i,
@@ -898,11 +1809,12 @@ pub(crate) fn apply_corner(
     let mut changed = 0;
     for c in &mut layout.corners {
         let hit = def.faces.is_empty()
-            || picks.iter().any(|&(piece, end)| {
-                c.attachments.iter().zip(c.ends).any(|(&a, e)| {
-                    let att = &sheet.layout.attachments[a];
-                    att.pieces.contains(&piece) && (end == 2 || end == e)
-                })
+            || picks.iter().any(|&(piece, end, across)| {
+                across.is_none_or(|x| x == c.across.is_some())
+                    && c.attachments.iter().zip(c.ends).any(|(&a, e)| {
+                        let att = &sheet.layout.attachments[a];
+                        att.pieces.contains(&piece) && (end == 2 || end == e)
+                    })
             });
         if hit {
             c.spec = spec;
@@ -1085,4 +1997,142 @@ pub(crate) fn apply_form(
         warning = w;
     }
     Ok((out, warning))
+}
+
+/// The bends that faces belong to, each a bend piece of body `body` (the first face's
+/// body if `None`): the body, and the pieces.
+fn bends_of(
+    model: &Model,
+    bodies: &[Arc<Body>],
+    mut body: Option<usize>,
+    faces: &[FaceRef],
+) -> Result<(Option<usize>, Vec<usize>), FeatureError> {
+    let mut pieces = Vec::new();
+    for face in faces {
+        let found = find_face(bodies, face).ok_or_else(|| {
+            FeatureError(format!(
+                "A bend it refers to no longer exists ({}). Edit it and pick the bends again.",
+                model.describe_face(&face.name)
+            ))
+        })?;
+        if body.is_some_and(|b| b != found.body) {
+            return Err(FeatureError(
+                "The bends must be on the same sheet metal body as the fixed face.".to_owned(),
+            ));
+        }
+        body = Some(found.body);
+        let sheet = bodies[found.body].sheet.as_ref().ok_or_else(|| {
+            FeatureError("Pick a face of a bend of a sheet metal body.".to_owned())
+        })?;
+        let piece = sheet.faces[found.id.index()].piece();
+        if sheet.layout.pieces[piece].bend().is_none() {
+            return Err(FeatureError(format!(
+                "{} is not a bend's face: pick the bend's inside or outside face.",
+                model.describe_face(&face.name)
+            )));
+        }
+        if !pieces.contains(&piece) {
+            pieces.push(piece);
+        }
+    }
+    Ok((body, pieces))
+}
+
+/// Lays bends of a sheet metal body flat, the fixed face staying where it is.
+pub(crate) fn apply_unfold(
+    model: &Model,
+    bodies: &[Arc<Body>],
+    def: &crate::feature::UnfoldFeature,
+    seed: u64,
+) -> Result<Applied, FeatureError> {
+    let (index, piece) = match &def.fixed {
+        Some(fixed) => {
+            let found = find_face(bodies, fixed).ok_or_else(|| {
+                FeatureError(format!(
+                    "The fixed face no longer exists ({}).",
+                    model.describe_face(&fixed.name)
+                ))
+            })?;
+            let sheet = bodies[found.body].sheet.as_ref().ok_or_else(|| {
+                FeatureError("The fixed face is not on a sheet metal body.".to_owned())
+            })?;
+            let (piece, _, _) = sheet.flange_face(found.id).ok_or_else(|| {
+                FeatureError(
+                    "The fixed face must be a flange's top or bottom face, not a bend or an edge."
+                        .to_owned(),
+                )
+            })?;
+            (found.body, piece)
+        }
+        // The largest flat face of the only sheet metal body
+        None => {
+            let mut sheets = bodies.iter().enumerate().filter(|(_, b)| b.sheet.is_some());
+            let (Some((index, body)), None) = (sheets.next(), sheets.next()) else {
+                return Err(FeatureError(
+                    "Pick the fixed face: a flat face of a flange, which stays where it is."
+                        .to_owned(),
+                ));
+            };
+            let sheet = body.sheet.as_ref().expect("a sheet metal body");
+            let piece = body
+                .solid
+                .face_ids()
+                .filter_map(|f| {
+                    let (piece, _, _) = sheet.flange_face(f)?;
+                    Some((
+                        piece,
+                        peet_kernel::validate::measure::face_area(&body.solid, f),
+                    ))
+                })
+                .max_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(piece, _)| piece)
+                .ok_or_else(|| FeatureError("The body has no flat face to fix.".to_owned()))?;
+            (index, piece)
+        }
+    };
+    let sheet = bodies[index].sheet.as_ref().expect("a sheet metal body");
+    let (_, bends) = bends_of(model, bodies, Some(index), &def.bends)?;
+    if sheet.layout.bends().next().is_none() {
+        return Err(FeatureError("The body has no bends to unfold.".to_owned()));
+    }
+    let mut layout = sheet.layout.clone();
+    layout.unfold(piece, &bends).map_err(FeatureError)?;
+    rebuild_sheet(model, bodies, index, layout, seed)
+}
+
+/// Folds bends an unfold laid flat back, the unfold's fixed face staying where it is.
+pub(crate) fn apply_fold(
+    model: &Model,
+    bodies: &[Arc<Body>],
+    def: &crate::feature::FoldFeature,
+    seed: u64,
+) -> Result<Applied, FeatureError> {
+    let (body, bends) = bends_of(model, bodies, None, &def.bends)?;
+    let index = body
+        .or_else(|| {
+            bodies.iter().position(|b| {
+                b.sheet
+                    .as_ref()
+                    .is_some_and(|s| !s.layout.flat_bends.is_empty())
+            })
+        })
+        .ok_or_else(|| {
+            FeatureError(
+                "No bends are laid flat: an unfold before the fold lays them flat.".to_owned(),
+            )
+        })?;
+    let Some(sheet) = bodies[index].sheet.as_ref() else {
+        return Err(FeatureError(
+            "The bends are not of a sheet metal body.".to_owned(),
+        ));
+    };
+    if bends.iter().any(|b| !sheet.layout.flat_bends.contains(b)) {
+        return Err(FeatureError(
+            "A bend it folds is not laid flat: pick bends an unfold before it laid flat."
+                .to_owned(),
+        ));
+    }
+    let mut layout = sheet.layout.clone();
+    layout.fold(&bends);
+    rebuild_sheet(model, bodies, index, layout, seed)
 }

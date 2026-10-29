@@ -6,10 +6,10 @@ use std::f64::consts::{PI, TAU};
 use peet_math::tolerance::LINEAR;
 use peet_math::{DVec2, DVec3};
 
-use super::domain::{FaceGeom, Where};
+use super::domain::{BoundaryEdge, FaceGeom, Where};
 use super::roots::{Implicit, Roots, solve};
 use super::util::{bounded_distance, boxes_overlap, curve_bounds, grow, param_from, param_tol};
-use crate::geom::Curve3;
+use crate::geom::{Curve3, Surface};
 
 /// The part of a curve to clip.
 #[derive(Clone, Copy, Debug)]
@@ -49,8 +49,14 @@ pub(crate) fn clip(curve: &Curve3, span: Span, faces: &[&FaceGeom]) -> Vec<(f64,
         }
     };
 
-    let mut breaks: Vec<f64> = Vec::new();
-    for f in faces {
+    let mut breaks: Vec<Break> = Vec::new();
+    for (i, f) in faces.iter().enumerate() {
+        let others: Vec<&FaceGeom> = faces
+            .iter()
+            .enumerate()
+            .filter(|&(j, _)| j != i)
+            .map(|(_, g)| *g)
+            .collect();
         for e in &f.edges {
             if !boxes_overlap(&curve_box, &e.bounds) {
                 continue;
@@ -62,9 +68,14 @@ pub(crate) fn clip(curve: &Curve3, span: Span, faces: &[&FaceGeom]) -> Vec<(f64,
                 for t in ts {
                     let p = curve.point(t);
                     if bounded_distance(&e.curve, e.t0, e.t1, p).0 <= 2.0 * LINEAR
-                        && let Some(t) = place(t)
+                        && let Some(t) = place(refine(curve, t, e, &others))
                     {
-                        breaks.push(t);
+                        let fitted = matches!(e.curve, Curve3::Nurbs(_));
+                        breaks.push(Break {
+                            t,
+                            rank: if fitted { 0 } else { 1 },
+                            fitted: if fitted { vec![e] } else { Vec::new() },
+                        });
                     }
                 }
             }
@@ -83,26 +94,52 @@ pub(crate) fn clip(curve: &Curve3, span: Span, faces: &[&FaceGeom]) -> Vec<(f64,
                 && curve.distance(v) <= LINEAR
                 && let Some(t) = place(curve.param(v))
             {
-                breaks.push(t);
+                breaks.push(Break {
+                    t,
+                    rank: 2,
+                    fitted: Vec::new(),
+                });
             }
         }
     }
     if !periodic {
-        breaks.push(lo);
-        breaks.push(hi);
-    }
-    breaks.sort_by(f64::total_cmp);
-    // Merge breaks that are the same point.
-    let mut cuts: Vec<f64> = Vec::with_capacity(breaks.len());
-    for t in breaks {
-        match cuts.last() {
-            Some(&last) if same_point(curve, last, t) => {}
-            _ => cuts.push(t),
+        for t in [lo, hi] {
+            breaks.push(Break {
+                t,
+                rank: 1,
+                fitted: Vec::new(),
+            });
         }
     }
-    if periodic && cuts.len() > 1 && same_point(curve, cuts[0], cuts[cuts.len() - 1]) {
-        cuts.pop();
+    breaks.sort_by(|a, b| a.t.total_cmp(&b.t));
+    // Merge breaks that are the same point. Where the curve runs along a fitted edge
+    // (within tolerance of it all the way between two breaks), those are one point too:
+    // the fit's error moved where the curve seems to meet it, or made it seem to cross
+    // where the two only touch. The most exact of them stays.
+    let mut kept: Vec<Break> = Vec::with_capacity(breaks.len());
+    for b in breaks {
+        kept.push(b);
+        // A merged break can reach back further along a fitted edge it brought along.
+        while let [.., a, b] = &kept[..]
+            && (same_point(curve, a.t, b.t) || along_fitted(curve, a, b))
+        {
+            let b = kept.pop().expect("two breaks");
+            kept.last_mut().expect("two breaks").absorb(b);
+        }
     }
+    // Round a closed curve, the last break and the first can be one point too.
+    if periodic && kept.len() > 1 {
+        let last = &kept[kept.len() - 1];
+        let before = Break {
+            t: last.t - TAU,
+            ..last.clone()
+        };
+        if same_point(curve, kept[0].t, last.t) || along_fitted(curve, &before, &kept[0]) {
+            kept.pop();
+            kept[0].absorb(before);
+        }
+    }
+    let cuts: Vec<f64> = kept.iter().map(|b| b.t).collect();
 
     let mut intervals: Vec<(f64, f64)> = Vec::new();
     if periodic {
@@ -131,6 +168,101 @@ pub(crate) fn clip(curve: &Curve3, span: Span, faces: &[&FaceGeom]) -> Vec<(f64,
     });
     intervals
 }
+
+/// A parameter where a clipped curve is cut.
+#[derive(Clone)]
+struct Break<'a> {
+    t: f64,
+    /// How exact it is: a vertex 2, a crossing with an exact edge (or an end of the span)
+    /// 1, a crossing with a fitted edge 0.
+    rank: u8,
+    /// The fitted edges it is a crossing with.
+    fitted: Vec<&'a BoundaryEdge>,
+}
+
+impl<'a> Break<'a> {
+    /// Takes in another break at the same point, keeping the more exact parameter.
+    fn absorb(&mut self, other: Break<'a>) {
+        if other.rank > self.rank {
+            (self.t, self.rank) = (other.t, other.rank);
+        }
+        self.fitted.extend(other.fitted);
+    }
+}
+
+/// Whether `curve` stays within tolerance of a fitted edge either of two breaks is on,
+/// all the way from one to the other.
+fn along_fitted(curve: &Curve3, a: &Break, b: &Break) -> bool {
+    const SAMPLES: usize = 8;
+    a.fitted.iter().chain(&b.fitted).any(|e| {
+        (0..=SAMPLES).all(|i| {
+            let p = curve.point(a.t + (b.t - a.t) * i as f64 / SAMPLES as f64);
+            bounded_distance(&e.curve, e.t0, e.t1, p).0 <= LINEAR
+        })
+    })
+}
+
+/// Where a traced curve meets a boundary edge, found again from exact geometry.
+///
+/// A traced curve (a freeform fit of where two surfaces cross) is only within a fraction
+/// of `LINEAR` of the true crossing, and its direction is only as good as that over the
+/// length of a piece. Where it crosses an edge steeply that hardly matters, but where it
+/// touches the edge (a cylinder meeting another just where that one's seam runs) the
+/// point of contact slides along both by that error over the curvature: microns, enough
+/// to leave a sliver edge beside the exact vertex a later operation puts there. The
+/// point is on the edge and on the other faces' surfaces, and those are exact: the point
+/// of the edge nearest `curve.point(t)` that is on all of them is taken instead.
+fn refine(curve: &Curve3, t: f64, e: &BoundaryEdge, others: &[&FaceGeom]) -> f64 {
+    let exact = |c: &Curve3| !matches!(c, Curve3::Nurbs(_));
+    if exact(curve)
+        || !exact(&e.curve)
+        || others.is_empty()
+        || others
+            .iter()
+            .any(|f| matches!(f.surface, Surface::Nurbs(_)))
+    {
+        return t;
+    }
+    let off = |s: f64| {
+        let q = e.curve.point(s);
+        others
+            .iter()
+            .map(|f| f.surface.signed_distance(q).abs())
+            .sum::<f64>()
+    };
+    // A search a little wider than the error, along the edge.
+    let p = curve.point(t);
+    let (_, s) = bounded_distance(&e.curve, e.t0, e.t1, p);
+    let reach = REFINE_REACH * param_tol(&e.curve);
+    let (lo, hi) = ((s - reach).max(e.t0), (s + reach).min(e.t1));
+    // An edge lying in the other surface has no one point to find. (Near a point where
+    // it touches the surface it stays within tolerance for a while, so look at all of it.)
+    if [0.0, 0.25, 0.5, 0.75, 1.0]
+        .iter()
+        .all(|f| off(e.t0 + (e.t1 - e.t0) * f) <= LINEAR)
+    {
+        return t;
+    }
+    const GOLD: f64 = 0.618_033_988_749_894_8;
+    let (mut x0, mut x1) = (lo, hi);
+    for _ in 0..100 {
+        let (m0, m1) = (x1 - GOLD * (x1 - x0), x0 + GOLD * (x1 - x0));
+        if off(m0) < off(m1) {
+            x1 = m1;
+        } else {
+            x0 = m0;
+        }
+    }
+    let s = 0.5 * (x0 + x1);
+    let q = e.curve.point(s);
+    if off(s) > 0.01 * LINEAR || curve.distance(q) > LINEAR {
+        return t;
+    }
+    curve.param(q)
+}
+
+/// How far (in multiples of `LINEAR`) [`refine`] looks along an edge.
+const REFINE_REACH: f64 = 100.0;
 
 fn same_point(curve: &Curve3, a: f64, b: f64) -> bool {
     curve.point(a).distance_squared(curve.point(b)) <= LINEAR * LINEAR

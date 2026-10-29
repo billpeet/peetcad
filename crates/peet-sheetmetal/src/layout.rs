@@ -333,6 +333,9 @@ pub struct Piece {
     pub outline: Area,
     /// Parts of the outline given up (to a bend that starts inside the flange).
     pub trims: Vec<Area>,
+    /// Sheet added to the outline (a flange set out from its edge, a rounded inside
+    /// corner). Trims take from it too.
+    pub adds: Vec<Area>,
     /// Model from flat: where this flange is (for a bend, its parent's placement).
     pub frame: Frame,
 }
@@ -348,6 +351,12 @@ impl Piece {
     pub fn is_flange(&self) -> bool {
         matches!(self.kind, PieceKind::Flange)
     }
+
+    /// Whether the piece has sheet at `p` (flat coordinates), before cuts.
+    pub fn covers(&self, p: DVec2) -> bool {
+        (self.outline.contains(p) || self.adds.iter().any(|a| a.contains(p)))
+            && !self.trims.iter().any(|t| t.contains(p))
+    }
 }
 
 /// Material removed through the thickness.
@@ -357,11 +366,30 @@ pub struct Cut {
     /// The pieces the cut applies to: those that existed when it was made, plus the pieces
     /// later split off them (by a sketched bend), which keep their holes.
     pub pieces: Vec<usize>,
+    /// Sheet added to a piece after the cut (a tab, a rounded inside corner), which the
+    /// cut leaves: what is added fills the cut in.
+    pub keep: Vec<(usize, Area)>,
 }
 
 impl Cut {
+    /// A cut of `area` out of `pieces`.
+    pub fn new(area: Area, pieces: Vec<usize>) -> Self {
+        Self {
+            area,
+            pieces,
+            keep: Vec::new(),
+        }
+    }
+
     pub fn applies_to(&self, piece: usize) -> bool {
         self.pieces.contains(&piece)
+    }
+
+    /// Whether the cut takes the sheet of `piece` at `p` away.
+    pub fn removes(&self, piece: usize, p: DVec2) -> bool {
+        self.applies_to(piece)
+            && self.area.contains(p)
+            && !self.keep.iter().any(|(k, a)| *k == piece && a.contains(p))
     }
 }
 
@@ -398,6 +426,9 @@ pub mod wall {
     pub const TRIM: u8 = 8;
     pub const RELIEF_START: u8 = 12;
     pub const RELIEF_END: u8 = 16;
+    /// A flange's ends where it is mitred with a flange on the face across a bend.
+    pub const MITRE_START: u8 = 20;
+    pub const MITRE_END: u8 = 21;
     /// Open profiles: the walls along the depth sides, the two ends, and bend sides.
     pub const PROFILE_SIDE_LOW: u8 = 0;
     pub const PROFILE_SIDE_HIGH: u8 = 1;
@@ -424,6 +455,11 @@ pub struct Layout {
     pub corners: Vec<Corner>,
     /// Dimples, embosses and louvers pressed into flanges.
     pub forms: Vec<Form>,
+    /// The bends an unfold has laid flat ([`Layout::unfold`]): each is built as a flat
+    /// strip, and what is beyond it lies in its parent's plane. Empty in a folded part.
+    pub flat_bends: Vec<usize>,
+    /// The flange that stays where it is while bends are laid flat and folded again.
+    pub fixed: usize,
 }
 
 /// A rectangle in a 2D frame `(o, u, v)`: `o + x·u + y·v` for `x` in `x0..x1`, `y` in
@@ -470,12 +506,15 @@ impl Layout {
                 kind: PieceKind::Flange,
                 outline: Area::from_regions(regions, owner),
                 trims: Vec::new(),
+                adds: Vec::new(),
                 frame,
             }],
             cuts: Vec::new(),
             attachments: Vec::new(),
             corners: Vec::new(),
             forms: Vec::new(),
+            flat_bends: Vec::new(),
+            fixed: 0,
         })
     }
 
@@ -490,6 +529,20 @@ impl Layout {
         chain: &[ChainLine],
         depth: [f64; 2],
         flip: bool,
+    ) -> Result<Self, String> {
+        Self::open_profile_with(settings, owner, plane, chain, depth, flip, &[])
+    }
+
+    /// [`Self::open_profile`] with a bend model of each bend's own, in order along the
+    /// profile (`None`, or none given: the body's), as SolidWorks' sketched bends can have.
+    pub fn open_profile_with(
+        settings: SheetSettings,
+        owner: u32,
+        plane: &Plane,
+        chain: &[ChainLine],
+        depth: [f64; 2],
+        flip: bool,
+        models: &[Option<BendModel>],
     ) -> Result<Self, String> {
         settings.check()?;
         let t = settings.thickness;
@@ -520,7 +573,8 @@ impl Layout {
             }
             // Turning towards the material bends towards the top side (z = t).
             let up = (cross > 0.0) == (side > 0.0);
-            let values = BendValues::new(settings.model, angle, settings.radius, t)
+            let model = models.get(k).copied().flatten().unwrap_or(settings.model);
+            let values = BendValues::new(model, angle, settings.radius, t)
                 .map_err(|m| format!("Corner {}: {m}", k + 1))?;
             // The sketch line is the outside of the bend when it turns towards the material.
             let setback = if up {
@@ -592,6 +646,7 @@ impl Layout {
                 kind: PieceKind::Flange,
                 outline: rect(o, u, v, [x, x + flat_len[i]], y, tags),
                 trims: Vec::new(),
+                adds: Vec::new(),
                 frame,
             });
             x += flat_len[i];
@@ -622,6 +677,7 @@ impl Layout {
                 kind: PieceKind::Bend(bend),
                 outline: rect(o, u, v, [x, x + values.allowance], y, tags),
                 trims: Vec::new(),
+                adds: Vec::new(),
                 frame,
             });
             frame = frame.compose(&bend.fold_frame());
@@ -634,15 +690,32 @@ impl Layout {
             attachments: Vec::new(),
             corners: Vec::new(),
             forms: Vec::new(),
+            flat_bends: Vec::new(),
+            fixed: 0,
         })
+    }
+
+    /// Cuts `area` (in flat coordinates) out of the pieces `pieces` only.
+    pub fn add_cut_on(&mut self, area: Area, pieces: Vec<usize>) {
+        self.cuts.push(Cut::new(area, pieces));
     }
 
     /// Cuts `area` (in flat coordinates) out of every piece that exists now.
     pub fn add_cut(&mut self, area: Area) {
-        self.cuts.push(Cut {
-            area,
-            pieces: (0..self.pieces.len()).collect(),
-        });
+        self.cuts
+            .push(Cut::new(area, (0..self.pieces.len()).collect()));
+    }
+
+    /// Adds sheet to a flange: `area` (in flat coordinates) becomes part of `piece`, cuts
+    /// made before included, as a tab or a rounded inside corner fills in what an earlier
+    /// cut took away. Later cuts cut it as they cut the rest of the piece.
+    pub fn add_sheet(&mut self, piece: usize, area: Area) {
+        for c in &mut self.cuts {
+            if c.applies_to(piece) {
+                c.keep.push((piece, area.clone()));
+            }
+        }
+        self.pieces[piece].adds.push(area);
     }
 
     /// The pieces that are bends, with their index.
@@ -656,6 +729,99 @@ impl Layout {
     /// The bend model, for reports.
     pub fn model(&self) -> BendModel {
         self.settings.model
+    }
+
+    /// Lays bends flat, as SolidWorks' unfold does: each of `bends` (bend pieces; empty
+    /// for every bend) opens out to a flat strip, and what lies beyond it turns into its
+    /// parent's plane. Flange `fixed` stays where it is. What is added to the part while
+    /// they are flat (a cut) is in flat coordinates, so [`Layout::fold`] carries it back
+    /// round the bends.
+    pub fn unfold(&mut self, fixed: usize, bends: &[usize]) -> Result<(), String> {
+        if !self.pieces.get(fixed).is_some_and(Piece::is_flange) {
+            return Err("The fixed face must be a flat face of a flange.".to_owned());
+        }
+        let all: Vec<usize> = self.bends().map(|(i, _)| i).collect();
+        let bends = if bends.is_empty() { &all[..] } else { bends };
+        if let Some(b) = bends.iter().find(|b| !all.contains(b)) {
+            return Err(format!("Piece {b} is not a bend."));
+        }
+        for &b in bends {
+            if !self.flat_bends.contains(&b) {
+                self.flat_bends.push(b);
+            }
+        }
+        self.fixed = fixed;
+        self.place(fixed);
+        Ok(())
+    }
+
+    /// Folds bends laid flat by [`Layout::unfold`] back (`bends`; empty for all of them),
+    /// keeping the unfold's fixed flange where it is.
+    pub fn fold(&mut self, bends: &[usize]) {
+        if bends.is_empty() {
+            self.flat_bends.clear();
+        } else {
+            self.flat_bends.retain(|b| !bends.contains(b));
+        }
+        self.place(self.fixed);
+    }
+
+    /// The layout with every bend folded, the fixed flange where it is.
+    pub fn folded(&self) -> Layout {
+        let mut out = self.clone();
+        if !out.flat_bends.is_empty() {
+            out.fold(&[]);
+        }
+        out
+    }
+
+    /// Places every piece again from flange `fixed`, which stays: across a folded bend
+    /// by the bend's fold, across a flat one in its parent's plane. A piece no bend
+    /// reaches keeps its placement.
+    fn place(&mut self, fixed: usize) {
+        let mut placed: Vec<Option<Frame>> = vec![None; self.pieces.len()];
+        placed[fixed] = Some(self.pieces[fixed].frame);
+        let links: Vec<(usize, usize, Option<usize>, Frame)> = self
+            .bends()
+            .map(|(i, b)| {
+                let fold = if self.flat_bends.contains(&i) {
+                    Frame::WORLD
+                } else {
+                    b.fold_frame()
+                };
+                (i, b.parent, b.child, fold)
+            })
+            .collect();
+        loop {
+            let mut more = false;
+            for &(bend, parent, child, fold) in &links {
+                if placed[parent].is_none()
+                    && let Some(c) = child.and_then(|c| placed[c])
+                {
+                    placed[parent] = Some(c.compose(&fold.inverse()));
+                    more = true;
+                }
+                let Some(p) = placed[parent] else { continue };
+                if placed[bend].is_none() {
+                    placed[bend] = Some(p);
+                    more = true;
+                }
+                if let Some(c) = child
+                    && placed[c].is_none()
+                {
+                    placed[c] = Some(p.compose(&fold));
+                    more = true;
+                }
+            }
+            if !more {
+                break;
+            }
+        }
+        for (piece, frame) in self.pieces.iter_mut().zip(placed) {
+            if let Some(f) = frame {
+                piece.frame = f;
+            }
+        }
     }
 }
 

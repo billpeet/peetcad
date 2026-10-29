@@ -67,7 +67,8 @@ impl ReliefType {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum FlangePosition {
     /// The flange's outer face is flush with the original edge: the part keeps its
-    /// outside size (the usual choice for enclosures).
+    /// outside size (the usual choice for enclosures). At an angle other than 90° the
+    /// outer face goes through the edge on the sheet's far face, as in SolidWorks.
     MaterialInside,
     /// The flange's inner face is flush with the original edge.
     MaterialOutside,
@@ -154,6 +155,9 @@ pub struct BendValues {
     pub allowance: f64,
 }
 
+/// The inner radius a bend of radius 0 is given (see [`BendValues::new`]).
+pub const SHARP_RADIUS: f64 = 1e-4;
+
 impl BendValues {
     /// Works out the allowance of a bend from the bend model.
     pub fn new(model: BendModel, angle: f64, radius: f64, thickness: f64) -> Result<Self, String> {
@@ -189,6 +193,10 @@ impl BendValues {
     }
 
     fn make(model: BendModel, angle: f64, radius: f64, thickness: f64) -> Result<Self, String> {
+        // A sharp bend, as SolidWorks allows: the folded part needs an inner face to bend
+        // round, so it is given the least radius that has one. That moves the setbacks by
+        // under a tenth of a micron.
+        let radius = radius.max(SHARP_RADIUS);
         let ossb = (radius + thickness) * (angle / 2.0).tan();
         let allowance = match model {
             BendModel::KFactor(k) => angle * (radius + k * thickness),

@@ -100,6 +100,10 @@ pub struct ObjectDraw {
     /// then left out of the pick pass entirely, so it doesn't occlude either).
     /// `u32::MAX` is reserved.
     pub pick_object: Option<u32>,
+    /// How much of it is seen: 1 opaque, 0 not at all. Below 1 it is drawn blended over
+    /// what is behind it, after everything opaque, the farthest first; picking can look
+    /// through it ([`crate::PickRequest::through_transparent`]).
+    pub opacity: f32,
 }
 
 impl Default for ObjectDraw {
@@ -112,6 +116,7 @@ impl Default for ObjectDraw {
             show_edges: true,
             highlight: 0.0,
             pick_object: None,
+            opacity: 1.0,
         }
     }
 }
@@ -289,6 +294,8 @@ pub struct ViewportRenderer {
     background_pipeline: wgpu::RenderPipeline,
     grid_pipeline: wgpu::RenderPipeline,
     mesh_pipeline: wgpu::RenderPipeline,
+    /// The see-through meshes: blended, and not hiding what is drawn after them.
+    transparent_pipeline: wgpu::RenderPipeline,
     line_pipeline: wgpu::RenderPipeline,
     edge_pipeline: wgpu::RenderPipeline,
     overlay_tri_pipeline: wgpu::RenderPipeline,
@@ -393,7 +400,7 @@ impl ViewportRenderer {
             step_mode: wgpu::VertexStepMode::Instance,
             attributes: &wgpu::vertex_attr_array![
                 4 => Float32x4, 5 => Float32x4, 6 => Float32x4, 7 => Float32x4,
-                8 => Float32x4, 9 => Uint32
+                8 => Float32x4, 9 => Uint32x4
             ],
         };
 
@@ -475,12 +482,25 @@ impl ViewportRenderer {
             shader: &mesh_shader,
             vs: "vs_mesh",
             fs: "fs_mesh",
-            vertex_layout: Some(mesh_vertex_layout),
+            vertex_layout: Some(mesh_vertex_layout.clone()),
             instanced: true,
             topology: wgpu::PrimitiveTopology::TriangleList,
             depth_write: true,
             depth_compare: wgpu::CompareFunction::GreaterEqual,
             blend: false,
+        });
+        let transparent_pipeline = pipeline(PipelineDesc {
+            label: "mesh_transparent",
+            layout: &layout_globals_only,
+            shader: &mesh_shader,
+            vs: "vs_mesh",
+            fs: "fs_mesh",
+            vertex_layout: Some(mesh_vertex_layout.clone()),
+            instanced: true,
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            depth_write: false,
+            depth_compare: wgpu::CompareFunction::GreaterEqual,
+            blend: true,
         });
         let line_pipeline = pipeline(PipelineDesc {
             label: "lines",
@@ -597,6 +617,7 @@ impl ViewportRenderer {
             background_pipeline,
             grid_pipeline,
             mesh_pipeline,
+            transparent_pipeline,
             line_pipeline,
             edge_pipeline,
             overlay_tri_pipeline,
@@ -770,7 +791,7 @@ impl ViewportRenderer {
             |mesh| self.meshes.get(&mesh).map(|m| m.bounds),
             &view_proj,
             style.highlight,
-            false,
+            None,
         );
         self.instances
             .write(device, queue, bytemuck::cast_slice(&batches.instances));
@@ -837,7 +858,7 @@ impl ViewportRenderer {
                 .instances
                 .buffer
                 .as_ref()
-                .filter(|_| !batches.instances.is_empty())
+                .filter(|_| !batches.batches.is_empty())
             {
                 pass.set_pipeline(&self.mesh_pipeline);
                 pass.set_vertex_buffer(1, instances.slice(..));
@@ -873,6 +894,37 @@ impl ViewportRenderer {
                 pass.set_pipeline(&self.grid_pipeline);
                 pass.draw(0..6, 0..1);
                 stats.draw_calls += 1;
+            }
+            // See-through meshes, farthest first, each with its edges: blended over what is
+            // behind them, and not hiding what comes after.
+            if let Some(instances) = &self
+                .instances
+                .buffer
+                .as_ref()
+                .filter(|_| !batches.transparent.is_empty())
+            {
+                for b in &batches.transparent {
+                    let Some(mesh) = self.meshes.get(&b.mesh) else {
+                        continue;
+                    };
+                    if mesh.index_count > 0 {
+                        pass.set_pipeline(&self.transparent_pipeline);
+                        pass.set_vertex_buffer(1, instances.slice(..));
+                        pass.set_vertex_buffer(0, mesh.vertices.slice(..));
+                        pass.set_index_buffer(mesh.indices.slice(..), wgpu::IndexFormat::Uint32);
+                        pass.draw_indexed(0..mesh.index_count, 0, b.all.clone());
+                        stats.draw_calls += 1;
+                        stats.triangles += mesh.index_count as usize / 3 * b.all.len();
+                    }
+                    if let (Some(edges), false) = (&mesh.edges, b.edges.is_empty()) {
+                        pass.set_pipeline(&self.edge_pipeline);
+                        pass.set_vertex_buffer(1, instances.slice(..));
+                        pass.set_vertex_buffer(0, edges.slice(..));
+                        pass.draw(0..mesh.edge_vertex_count, b.edges.clone());
+                        stats.draw_calls += 1;
+                        stats.lines += mesh.edge_vertex_count as usize / 2 * b.edges.len();
+                    }
+                }
             }
             if let (Some(buffer), false) = (
                 &self.overlay_tris.buffer,
@@ -962,7 +1014,7 @@ impl ViewportRenderer {
             |mesh| self.meshes.get(&mesh).map(|m| m.bounds),
             &pick_view_proj,
             [0.0; 3],
-            true,
+            Some(pick.request.through_transparent),
         );
         self.pick_instances
             .write(device, queue, bytemuck::cast_slice(&batches.instances));

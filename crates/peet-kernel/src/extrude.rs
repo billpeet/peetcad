@@ -32,7 +32,7 @@ use peet_sketch::Curve;
 use peet_sketch::region::{LoopEdge, Region};
 
 use crate::geom::{Circle3, Curve3, Cylinder, Surface};
-use crate::nurbs::NurbsSurface;
+use crate::nurbs::{NurbsCurve, NurbsSurface};
 use crate::profile::spline_curve;
 use crate::topo::{EdgeId, ShellId, VertexId};
 use crate::{KernelError, Solid};
@@ -89,6 +89,29 @@ pub fn extrude_traced(
     from: f64,
     to: f64,
 ) -> Result<(Solid, Vec<ExtrudeFace>), KernelError> {
+    extrude_along_traced(plane, regions, from, to, plane.normal())
+}
+
+/// Extrudes `regions` along `direction`, which need not be square to the plane (but must
+/// leave it): from `from` to `to` mm along it. The caps are the profile itself, in planes
+/// parallel to the sketch's, with its own circles and arcs; the sides are planes for
+/// lines and, for arcs and circles at a slant, the exact ruled surface (an elliptic
+/// cylinder) between the arc at both ends. This is a sweep of the profile along a
+/// straight path that keeps its attitude, as SolidWorks' sweep along a line does.
+pub fn extrude_along_traced(
+    plane: &Plane,
+    regions: &[Region],
+    from: f64,
+    to: f64,
+    direction: DVec3,
+) -> Result<(Solid, Vec<ExtrudeFace>), KernelError> {
+    let rise = direction.normalize_or_zero();
+    if rise.dot(plane.normal()) <= 1e-6 {
+        return Err(KernelError::InvalidInput(
+            "the direction of extrusion runs along the profile's plane, or back through it"
+                .to_owned(),
+        ));
+    }
     if !from.is_finite() || !to.is_finite() {
         return Err(KernelError::InvalidInput(
             "extrude depth is not a finite number".to_owned(),
@@ -108,6 +131,7 @@ pub fn extrude_traced(
     let mut builder = Builder {
         solid: Solid::new(),
         plane: *plane,
+        rise,
         from,
         to,
         faces: Vec::new(),
@@ -300,6 +324,8 @@ fn full_circle(pieces: &[Piece], outer: bool) -> Option<PreparedLoop> {
 struct Builder {
     solid: Solid,
     plane: Plane,
+    /// The unit direction the profile is carried along: the plane's normal, or a slant.
+    rise: DVec3,
     from: f64,
     to: f64,
     /// What each face of `solid` is, in face order.
@@ -328,7 +354,31 @@ impl Builder {
     }
 
     fn point(&self, uv: DVec2, h: f64) -> DVec3 {
-        self.plane.from_plane_coords(uv) + self.normal() * h
+        self.plane.from_plane_coords(uv) + self.rise * h
+    }
+
+    /// Whether the profile is carried at a slant to its plane.
+    fn slanted(&self) -> bool {
+        self.rise.cross(self.normal()).length() > 1e-12
+    }
+
+    /// The ruled surface between a circle's arc at `from` and at `to`, with its outside to
+    /// the right of the arc run from `start` over `sweep` (radians, either way): what an
+    /// arc of the profile sweeps at a slant.
+    fn slanted_arc_surface(
+        &self,
+        center: DVec2,
+        radius: f64,
+        start: f64,
+        sweep: f64,
+    ) -> Result<Surface, KernelError> {
+        let low = NurbsCurve::arc(&self.frame_at(center, self.from), radius, start, sweep);
+        let rise = self.rise * (self.to - self.from);
+        let high = low.mapped(|q| q + rise);
+        let surface = NurbsSurface::skin_at(&[low, high], &[0.0, 1.0]).map_err(|e| {
+            KernelError::InvalidInput(format!("an arc of the profile can't be swept: {e}"))
+        })?;
+        Ok(Surface::Nurbs(Arc::new(surface)))
     }
 
     /// A frame with the sketch plane's axes, at 2D point `uv` lifted by `h`.
@@ -386,6 +436,35 @@ impl Builder {
             edge,
         };
         match *l {
+            // At a slant the side is a freeform surface, which has no seam: the circle is
+            // two half circles (in loop order), each with a side of its own, and the caps
+            // keep the circle, in two arcs.
+            PreparedLoop::Circle {
+                center,
+                radius,
+                start_angle,
+                reversed,
+                source,
+            } if self.slanted() => {
+                use std::f64::consts::PI;
+                let half = |from: f64| {
+                    let curve = Curve::Arc {
+                        center,
+                        radius,
+                        start_angle: if reversed { from - PI } else { from },
+                        sweep: PI,
+                    };
+                    Piece {
+                        curve,
+                        reversed,
+                        source,
+                    }
+                };
+                let step = if reversed { -PI } else { PI };
+                let halves =
+                    PreparedLoop::Pieces(vec![half(start_angle), half(start_angle + step)]);
+                self.add_loop_sides(shell, &halves, region, loop_index)
+            }
             PreparedLoop::Circle {
                 center,
                 radius,
@@ -489,7 +568,7 @@ impl Builder {
                 if p.reversed {
                     low = low.reversed();
                 }
-                let rise = self.normal() * (to - from);
+                let rise = self.rise * (to - from);
                 let high = low.mapped(|q| q + rise);
                 let surface = NurbsSurface::skin_at(&[low.clone(), high.clone()], &[0.0, 1.0])
                     .map_err(|e| {
@@ -519,7 +598,7 @@ impl Builder {
                 let (a, b) = p.ends();
                 let a3 = self.point(a, self.from);
                 let dir = self.point(b, self.from) - a3;
-                let n = self.normal();
+                let n = self.rise;
                 let surface = Plane::from_origin_normal_x(a3, dir.cross(n), dir)
                     .map(Surface::Plane)
                     .expect("line pieces are longer than the merge tolerance");
@@ -548,14 +627,29 @@ impl Builder {
                 };
                 let be = arc_edge(from, b0, b1);
                 let te = arc_edge(to, t0, t1);
+                // At a slant: the ruled surface, run the way the loop goes
+                let (surface, face_reversed) = if self.slanted() {
+                    let (start, sweep) = if p.reversed {
+                        (start_angle + sweep, -sweep)
+                    } else {
+                        (start_angle, sweep)
+                    };
+                    (
+                        self.slanted_arc_surface(center, radius, start, sweep)?,
+                        false,
+                    )
+                } else {
+                    let surface = Surface::Cylinder(Cylinder {
+                        frame: self.frame_at(center, 0.0),
+                        radius,
+                    });
+                    (surface, p.reversed)
+                };
                 SideEdges {
                     bottom: be,
                     top: te,
-                    surface: Surface::Cylinder(Cylinder {
-                        frame: self.frame_at(center, 0.0),
-                        radius,
-                    }),
-                    face_reversed: p.reversed,
+                    surface,
+                    face_reversed,
                     reversed: p.reversed,
                 }
             }
@@ -741,6 +835,73 @@ mod tests {
             let d = plane.signed_distance(v.point);
             assert!(close(d.abs(), 2.5, 1e-9), "{d}");
         }
+    }
+
+    #[test]
+    fn slanted_circle_keeps_its_circles() {
+        // A circle carried along a line at a slant to its plane: the ends are the circle
+        // itself (in two halves, as the freeform side has no seam), and the volume is the
+        // area times the height.
+        let mut s = Sketch::new();
+        s.add_circle(DVec2::ZERO, 4.0);
+        let dir = DVec3::new(3.5, 0.0, -35.5);
+        let length = dir.length();
+        let solid = extrude_along_traced(&Plane::TOP, &regions_of(&s), -length, 0.0, -dir)
+            .unwrap()
+            .0;
+        assert_eq!(check(&solid), counts(4, 6, 4, 0, 1, 0));
+        let end = DVec3::new(3.5, 0.0, -35.5);
+        let circles = solid
+            .edges
+            .iter()
+            .filter(|e| match &e.curve {
+                Curve3::Circle(c) => {
+                    (c.radius - 4.0).abs() < 1e-9
+                        && (c.frame.origin.distance(end) < 1e-9
+                            || c.frame.origin.distance(DVec3::ZERO) < 1e-9)
+                }
+                _ => false,
+            })
+            .count();
+        assert_eq!(circles, 4);
+        assert!(close(measure::volume(&solid), PI * 16.0 * 35.5, 1e-6));
+    }
+
+    #[test]
+    fn slanted_slot_with_a_hole() {
+        let mut s = Sketch::new();
+        shapes::slot(&mut s, DVec2::ZERO, DVec2::new(10.0, 0.0), 3.0);
+        s.add_circle(DVec2::new(5.0, 0.0), 1.0);
+        let regions = regions_of(&s);
+        let solid =
+            extrude_along_traced(&Plane::TOP, &regions, 0.0, 5.0, DVec3::new(1.0, 1.0, 2.0))
+                .unwrap()
+                .0;
+        check(&solid);
+        // As much as the same regions extruded square to the plane to the same height
+        let height = 5.0 * 2.0 / 6.0_f64.sqrt();
+        let square = measure::volume(&extrude(&Plane::TOP, &regions, 0.0, height).unwrap());
+        let v = measure::volume(&solid);
+        assert!(close(v, square, 1e-6), "{v} {square}");
+    }
+
+    #[test]
+    fn slanted_rod_joins_a_boss_round_its_end() {
+        // Locking Rod Behind Door: a rod swept along a slanted line, and a round boss across
+        // its end.
+        let mut s = Sketch::new();
+        s.add_circle(DVec2::ZERO, 4.0);
+        let dir = DVec3::new(3.5, 0.0, -35.5);
+        let length = dir.length();
+        let rod = extrude_along_traced(&Plane::TOP, &regions_of(&s), -length, 0.0, -dir)
+            .unwrap()
+            .0;
+        let mut b = Sketch::new();
+        b.add_circle(DVec2::new(2.940199, -29.82202), 7.5);
+        let boss = extrude(&Plane::front(), &regions_of(&b), -8.0, 8.0).unwrap();
+        let joined =
+            crate::boolean::boolean(&rod, &boss, crate::boolean::BooleanOp::Union).unwrap();
+        check(&joined);
     }
 
     #[test]

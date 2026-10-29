@@ -12,26 +12,38 @@
 //!   draft; the hole wizard; bodies imported from other CAD systems.
 //! - [`naming`]: persistent names for faces, edges and vertices, so references survive
 //!   upstream edits.
+//! - [`dimensions`]: every dimension's address `NAME@FEATURE`, as SolidWorks names them.
+//! - [`equations`]: an assembly's equations, which read and set its components' dimensions.
 //! - [`config`]: configurations, named versions of the part that differ in what is
 //!   suppressed and in the parameters' values.
 //! - [`DependencyGraph`]: which feature uses which.
 //! - [`Engine`]: incremental regeneration into bodies, with per-feature status.
 //! - [`Assembly`]: parts placed relative to each other, inside a [`Model`] that is an
 //!   assembly instead of a part.
+//! - [`in_context`]: a part's sketch following another component of an assembly it is
+//!   used in (SolidWorks' in-context references).
 //! - [`History`]: undo and redo.
 //!
 //! The crate has no UI or GPU dependency: everything here runs headless.
 
+mod asm_config;
+pub mod asm_cut;
 mod assembly;
+mod bodies;
 pub mod config;
 mod convert;
+pub mod dimensions;
+mod display_state;
 mod dressup;
+pub mod equations;
 mod extrude;
 pub mod feature;
+mod flexible;
 pub mod hash;
 mod history;
 pub mod hole;
 mod import;
+pub mod in_context;
 mod loft;
 mod mate;
 mod material;
@@ -44,34 +56,47 @@ mod regen;
 mod revolve;
 pub mod samples;
 pub mod sheet;
+pub mod sketch3d;
 mod sweep;
 mod units;
+mod weldment;
 
+pub use asm_config::{ComponentState, MateState};
+pub use asm_cut::{AssemblyCut, CutConversion, CutId, CutPlane};
 pub use assembly::{
     Assembly, CompId, Component, ComponentPattern, DefId, Definition, ExplodeId, ExplodeStep, Link,
-    MAX_PATTERN, PatternId, PatternInstance, PatternKind, PatternLine, PatternStep, relative_to,
+    MAX_PATTERN, PatternId, PatternInstance, PatternKind, PatternLine, PatternStep, Pose,
+    evaluate_pattern_count, pattern_count, relative_to,
 };
-pub use config::{ConfigId, Configuration, Scope, Slot, SlotValue};
+pub use bodies::{InsertPartFeature, MoveBodyFeature, PartSource, body_motion};
+pub use config::{ConfigId, Configuration, Held, Scope, Slot, SlotValue};
 pub use convert::ConvertToSheetFeature;
+pub use display_state::{DisplayState, DisplayStateId, DisplayStates, Look, transparency};
 pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
+pub use equations::{Equation, EquationTarget, ReferenceDimension};
 pub use extrude::{
     EndCondition, Extrude, ExtrudeInput, Operation, RegionSelection, apply_extrude, default_regions,
 };
 pub use feature::{
-    Axis, AxisDef, AxisRef, BaseFlangeFeature, BendModelDef, CoordSystemDef, CornerFeature,
-    EdgeFlangeFeature, ExtrudeFeature, Feature, FeatureId, FeatureKind, FormFeature, HemFeature,
-    JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, PatternDef, PatternFeature,
-    PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind, SheetCutFeature, SheetSettingsDef,
-    SketchFeature, SketchedBendFeature, StdAxis, StdPlane,
+    Axis, AxisDef, AxisRef, BaseFlangeFeature, BendModelDef, BreakCornerFeature, CoordSystemDef,
+    CornerFeature, EdgeFlangeFeature, ExtrudeFeature, Feature, FeatureId, FeatureKind, FoldFeature,
+    FormFeature, HemFeature, JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature,
+    PatternDef, PatternFeature, PlaneDef, PlaneRef, PointDef, PointRef, Scalar, ScalarKind,
+    SheetCutEnd, SheetCutFeature, SheetSettingsDef, SketchFeature, SketchedBendFeature, StdAxis,
+    StdPlane, UnfoldFeature,
 };
 pub use history::History;
 pub use hole::{HoleEnd, HoleFeature, HoleFit, HoleKind, HoleSizes, METRIC, MetricSize};
 pub use import::{ImportFeature, ImportedSolid};
 pub use loft::{LoftFeature, LoftInput, apply_loft};
-pub use mate::{Drag, Mate, MateEnd, MateGeom, MateId, MateKind};
+pub use mate::{
+    Align, BodyMate, Drag, Mate, MateEnd, MateGeom, MateId, MateKind, PathAxis, PathRoll,
+    SketchRef, WidthMode,
+};
 pub use material::{Material, STEEL_DENSITY};
 pub use model::{
-    Datum, DependencyGraph, Model, ModelV4, ModelV5, ModelV7, ModelV8, ModelV9, ModelV10,
+    Datum, DependencyGraph, Model, ModelV4, ModelV5, ModelV7, ModelV8, ModelV9, ModelV10, ModelV11,
+    ModelV12Early, ModelV12NoDisplayStates,
 };
 pub use naming::{Body, EdgeRef, FaceName, FaceOrigin, FaceRef, FaceRole, Found, VertexRef};
 pub use placement::face_sketch_plane;
@@ -79,7 +104,9 @@ pub use regen::{Engine, Evaluation, FeatureState, Instance, Output, SketchStatus
 pub use revolve::{
     RevolveAxisRef, RevolveFeature, RevolveInput, apply_revolve, default_axis, sketch_axis,
 };
+pub use sketch3d::Sketch3dFeature;
 pub use sweep::{SweepFeature, SweepInput, apply_sweep};
+pub use weldment::{MemberCorner, StructuralMemberFeature};
 
 /// Why a feature failed to rebuild. The message is shown next to the feature.
 #[derive(Clone, Debug, PartialEq)]

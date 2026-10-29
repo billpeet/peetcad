@@ -274,6 +274,7 @@ fn the_tools_changes_are_made_by_operations() {
                     spacing: Scalar::new(20.0),
                     count: Scalar::new(2.0),
                     flip: false,
+                    up_to: None,
                 },
                 second: None,
             },
@@ -295,6 +296,7 @@ fn the_tools_changes_are_made_by_operations() {
                 spacing: Scalar::new(12.0),
                 count: Scalar::new(2.0),
                 flip: true,
+                up_to: None,
             }),
         );
     });

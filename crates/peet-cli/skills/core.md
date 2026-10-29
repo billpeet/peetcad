@@ -98,6 +98,45 @@ for their limits and an example.
 For features that appear only at certain sizes, read `peet skills configurations`
 for `set_suppression_expression`.
 
+## Dimensions by name
+
+Every number of a part has an address `NAME@FEATURE`, as in SolidWorks: a sketch
+dimension `Width@Sketch1` (its name, or `d1`, `d2`), and any other feature's numeric
+value `d1@Extrude1`, `d2@Extrude1`, … in the order `peet ops FEATURE` lists its fields,
+or by its field (`depth@Extrude1`). Use addresses to drive a part the way FabSys drives
+SolidWorks.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [80, 50], "as": "r"}, {"type": "coincident", "of": ["r.bottom.start", "origin"]}, {"type": "length", "of": ["r.bottom"], "value": 80, "name": "Width"}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "set", "name": "Width@Sketch1", "value": 120}
+{"op": "set", "name": "d1@Extrude1", "value": "\"Width@Sketch1\" / 20"}
+{"op": "name_dimension", "feature": "Extrude1", "dimension": "depth", "name": "Thick"}
+{"op": "set_parameter", "name": "Base Height", "value": "8mm"}
+{"op": "set", "name": "Thick@Extrude1", "value": "\"Base Height\" / 2"}
+{"op": "set", "name": "Base Height", "value": "12mm"}
+{"op": "set", "name": "width@sketch1", "value": 100}
+{"op": "dimensions", "feature": "Extrude1"}
+```
+
+- `set` sets a dimension by address, or a parameter by name, to a number or an
+  expression. It takes `configurations` as `edit` does. A reference (driven) dimension
+  can't be set. As in SolidWorks, an address's case doesn't matter when only one
+  dimension matches it (`Width@Sketch1` finds `width@Sketch1`).
+- A parameter's name is a word, or any text without `"` or `@`, as SolidWorks names its
+  global variables (`Base Height`, `50.00mm-`). Quote a name that isn't a word in an
+  expression: `"Base Height" / 2`. `set` takes it unquoted.
+- Any expression reads a dimension by address. Quote it when it isn't `word@word`:
+  `"Dia.@Sketch1"`, `"Bend Radius@Sheet-Metal"`. A quote after a number is inches (`2"`).
+- `dimensions` lists every address with its value (and each configuration's where they
+  differ); `feature` or `name` narrows it.
+- `name_dimension` renames one, found by its name or field. A sketch dimension's name
+  is any text without `"` or `@`. A value of another feature can take a whole address
+  (`D2@Sketch10`) for a SolidWorks name whose feature PeetCAD doesn't have. Expressions
+  using the old name are not changed.
+- A pattern count from an expression is rounded to the nearest whole number, as
+  SolidWorks does. Function names are not case sensitive (`IIF`, `INT`).
+
 ## Several documents in one run
 
 Use this to read from one part while building another, or to make several parts in one
@@ -129,7 +168,8 @@ script. Otherwise one `peet` call per part is simpler.
 - **Pointing at existing geometry** (a sketch on a face, the edge for a flange or a
   fillet, anything taking a plane, face, edge or vertex): `peet skills selectors`.
 - **Solid features** (extrude and cut directions, revolve, sweep, loft, holes, fillets,
-  shell, patterns, freeform faces, bodies from a STEP file): `peet skills solids`.
+  shell, patterns, moving and copying bodies, another part's bodies, weldment frames,
+  freeform faces, bodies from a STEP file): `peet skills solids`.
 - **Sheet metal** (base flange, flanges, cuts, converting a solid to sheet metal, flat
   pattern, DXF, materials, checks): `peet skills sheet-metal`.
 - **Putting parts together** (an assembly: inserting parts as components, placing them,

@@ -53,8 +53,12 @@ use crate::peet::{PeetError, Reader, SectionKind, Writer};
 ///   inside nested assembly definitions.
 /// - Model 11: user names for faces and edges. Schema 10 models, including nested
 ///   assembly definitions, are read as [`peet_model::ModelV10`] and converted.
+/// - Model 12: an edge flange can have a relief of its own (two more fields of the
+///   feature), and a feature can name its numeric values (`D2@Sketch10`, one more field of
+///   every feature). Schema 11 models, including nested assembly definitions, are read as
+///   [`peet_model::ModelV11`] and converted; schemas 8 to 10 read the old flange too.
 pub const METADATA_SCHEMA: u16 = 1;
-pub const MODEL_SCHEMA: u16 = 11;
+pub const MODEL_SCHEMA: u16 = 12;
 /// The last model schema without configurations.
 const MODEL_SCHEMA_BEFORE_CONFIGURATIONS: u16 = 4;
 /// The last model schema without materials and assemblies.
@@ -189,6 +193,21 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
         Some(10) => r
             .read::<peet_model::ModelV10>(SectionKind::MODEL)?
             .map(Model::from),
+        Some(11) => r
+            .read::<peet_model::ModelV11>(SectionKind::MODEL)?
+            .map(Model::from),
+        Some(12) => match r.read_whole::<Model>(SectionKind::MODEL) {
+            Some(m) => Some(m),
+            // One saved before display states.
+            None => match r.read_whole::<peet_model::ModelV12NoDisplayStates>(SectionKind::MODEL) {
+                Some(m) => Some(m.into()),
+                // A part saved while schema 12 was being made, before derived configurations.
+                None => match r.read_whole::<peet_model::ModelV12Early>(SectionKind::MODEL) {
+                    Some(m) => Some(m.into()),
+                    None => r.read(SectionKind::MODEL)?,
+                },
+            },
+        },
         _ => r.read(SectionKind::MODEL)?,
     };
     let mut model =
@@ -402,6 +421,133 @@ mod tests {
         w.section(SectionKind::MODEL, 10, &peet_model::ModelV10::of(&outer))
             .unwrap();
         assert_eq!(open(&w.finish()).unwrap().model, outer);
+    }
+
+    #[test]
+    fn schema_11_patterns_still_open() {
+        // Linear patterns as schema 11 wrote them: before a direction could run up to a
+        // reference.
+        let (part, _) = peet_model::samples::chassis();
+        assert!(part.features().any(|f| matches!(
+            &f.kind,
+            peet_model::FeatureKind::Pattern(p)
+                if matches!(p.def, peet_model::PatternDef::Linear { .. })
+        )));
+        let mut w = Writer::new();
+        w.section(SectionKind::MODEL, 11, &peet_model::ModelV11::of(&part))
+            .unwrap();
+        assert_eq!(open(&w.finish()).unwrap().model, part);
+    }
+
+    #[test]
+    fn early_schema_12_parts_and_derived_configurations_open() {
+        // A part as schema 12 was written before derived configurations, and one with a
+        // derived configuration as it is written now.
+        let (mut part, _) = peet_model::samples::chassis();
+        let base = part.add_configuration("Long", None).unwrap();
+        let mut w = Writer::new();
+        w.section(
+            SectionKind::MODEL,
+            12,
+            &peet_model::ModelV12Early::of(&part),
+        )
+        .unwrap();
+        assert_eq!(open(&w.finish()).unwrap().model, part);
+        part.add_derived_configuration("Long painted", base)
+            .unwrap();
+        let bytes = save(&part, &Metadata::default(), None).unwrap();
+        let opened = open(&bytes).unwrap().model;
+        assert_eq!(opened, part);
+        let derived = opened.configuration_named("Long painted").unwrap();
+        assert_eq!(derived.parent, Some(base));
+    }
+
+    #[test]
+    fn schema_11_models_still_open() {
+        // A sheet metal part with an edge flange, on its own and inside an assembly, as
+        // schema 11 wrote it: before the flange had a relief of its own.
+        let (part, _) = peet_model::samples::enclosure();
+        assert!(
+            part.features()
+                .any(|f| matches!(f.kind, peet_model::FeatureKind::EdgeFlange(_)))
+        );
+        let mut assembly = Model::new_assembly();
+        let def = assembly
+            .assembly_mut()
+            .unwrap()
+            .define(Arc::new(part.clone()));
+        assembly
+            .assembly_mut()
+            .unwrap()
+            .insert(def, peet_math::Frame::WORLD);
+        for model in [part, assembly] {
+            let mut w = Writer::new();
+            w.section(SectionKind::MODEL, 11, &peet_model::ModelV11::of(&model))
+                .unwrap();
+            assert_eq!(open(&w.finish()).unwrap().model, model);
+        }
+    }
+
+    #[test]
+    fn schema_12_assemblies_from_before_display_states_open() {
+        // An assembly with a sub-assembly, as schema 12 wrote it before display states and
+        // component transparency; and one with them, as it is written now.
+        let (mut model, _) = peet_model::samples::enclosure_assembly();
+        let sub = model.clone();
+        let def = model.assembly_mut().unwrap().define(Arc::new(sub));
+        let inner = model
+            .assembly_mut()
+            .unwrap()
+            .insert(def, peet_math::Frame::WORLD)
+            .unwrap();
+        model
+            .assembly_mut()
+            .unwrap()
+            .component_mut(inner)
+            .unwrap()
+            .color = Some([1, 2, 3]);
+        let mut w = Writer::new();
+        w.section(
+            SectionKind::MODEL,
+            12,
+            &peet_model::ModelV12NoDisplayStates::of(&model),
+        )
+        .unwrap();
+        assert_eq!(open(&w.finish()).unwrap().model, model);
+
+        let shown = model.add_display_state("Shown", None).unwrap();
+        model.add_display_state("See through", None).unwrap();
+        model
+            .set_look(inner, None, |l| l.transparency = 0.6)
+            .unwrap();
+        model.activate_display_state(shown);
+        let bytes = save(&model, &Metadata::default(), None).unwrap();
+        let opened = open(&bytes).unwrap().model;
+        assert_eq!(opened, model);
+        assert_eq!(opened.all_display_states().len(), 2);
+        // A part is the same in every layout: one saved before display states opens too.
+        let (part, _) = bracket();
+        let mut w = Writer::new();
+        w.section(
+            SectionKind::MODEL,
+            12,
+            &peet_model::ModelV12NoDisplayStates::of(&part),
+        )
+        .unwrap();
+        assert_eq!(open(&w.finish()).unwrap().model, part);
+    }
+
+    #[test]
+    fn schema_11_mates_still_open() {
+        // Mates as schema 11 wrote them: one `flip` (aligned), no alignment or flipped
+        // dimension of their own.
+        let (model, _) = peet_model::samples::enclosure_assembly();
+        let mates: Vec<_> = model.assembly().unwrap().mates().collect();
+        assert!(mates.iter().any(|m| m.flip()) && mates.iter().any(|m| !m.flip()));
+        let mut w = Writer::new();
+        w.section(SectionKind::MODEL, 11, &peet_model::ModelV11::of(&model))
+            .unwrap();
+        assert_eq!(open(&w.finish()).unwrap().model, model);
     }
 
     #[test]

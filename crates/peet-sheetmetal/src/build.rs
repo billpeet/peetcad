@@ -33,8 +33,10 @@
 
 use std::collections::HashMap;
 use std::f64::consts::PI;
+use std::sync::Arc;
 
 use peet_kernel::geom::{Circle3, Curve3, Cylinder, Surface};
+use peet_kernel::nurbs::{NurbsCurve, NurbsSurface};
 use peet_kernel::topo::{EdgeId, FaceId, ShellId, VertexId};
 use peet_kernel::{Solid, transform, validate};
 use peet_math::{DVec2, DVec3, Frame, Plane, tolerance};
@@ -173,7 +175,319 @@ pub struct SheetBody {
     pub forms: Vec<FormMark>,
 }
 
+/// How a corner of the sheet is broken.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub enum BreakKind {
+    /// Rounded, with a radius.
+    Fillet,
+    /// Cut straight across, the same distance along both sides.
+    Chamfer,
+}
+
+impl BreakKind {
+    pub const ALL: [Self; 2] = [Self::Fillet, Self::Chamfer];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Fillet => "Fillet",
+            Self::Chamfer => "Chamfer",
+        }
+    }
+}
+
+/// The round of radius `r` at a corner `at` of the flat outline where `incoming` (which
+/// ends there) meets `outgoing` (which starts there), one of them or both arcs: what
+/// [`SheetBody::corner_break`] returns for it but the piece. The round is tangent to both
+/// sides, as SolidWorks' fillet is: its centre is `r` from each, on the sheet's side of an
+/// outside corner and the other side of an inside one.
+fn round_curved_corner(
+    incoming: &(Curve, bool),
+    outgoing: &(Curve, bool),
+    at: DVec2,
+    r: f64,
+    tag: &impl Fn(u8) -> CurveTag,
+) -> Result<(crate::Area, [[DVec2; 2]; 2], bool), String> {
+    // Direction of travel along a side at a point of it.
+    let heading = |(curve, reversed): &(Curve, bool), q: DVec2| -> Option<DVec2> {
+        let d = match *curve {
+            Curve::Line { a, b } => (b - a).normalize_or_zero(),
+            Curve::Arc { center, .. } => (q - center).normalize_or_zero().perp(),
+            _ => return None,
+        };
+        Some(if *reversed { -d } else { d })
+    };
+    let unsupported = || "Only a corner between straight sides and arcs can be rounded.".to_owned();
+    let d1 = heading(incoming, at).ok_or_else(unsupported)?;
+    let d2 = heading(outgoing, at).ok_or_else(unsupported)?;
+    let signed = d1.perp_dot(d2).atan2(d1.dot(d2));
+    if signed.abs() <= 1e-6 {
+        return Err("The sides meet without a corner there: nothing to round.".to_owned());
+    }
+    // The sheet is on the left of the outline: an outside corner turns left.
+    let inside = signed < 0.0;
+    let side = if inside { -1.0 } else { 1.0 };
+    // Each side moved `r` towards the round's centre: a line, or a circle.
+    enum Offset {
+        Line(DVec2, DVec2),
+        Circle(DVec2, f64),
+    }
+    let offset = |(curve, reversed): &(Curve, bool)| match *curve {
+        Curve::Line { a, b } => {
+            let d = if *reversed { a - b } else { b - a }.normalize();
+            let n = d.perp() * side * r;
+            Offset::Line(a + n, d)
+        }
+        Curve::Arc { center, radius, .. } => {
+            // Counter-clockwise, its centre is on the left: towards it is to the left.
+            let left_is_in = !*reversed;
+            let grow = if left_is_in == (side > 0.0) { -r } else { r };
+            Offset::Circle(center, radius + grow)
+        }
+        _ => unreachable!("checked above"),
+    };
+    let (o1, o2) = (offset(incoming), offset(outgoing));
+    // Where the two meet, nearest the corner.
+    let line_circle = |p: DVec2, d: DVec2, c: DVec2, rr: f64| -> Vec<DVec2> {
+        let f = p - c;
+        let b = f.dot(d);
+        let disc = b * b - (f.length_squared() - rr * rr);
+        if disc < 0.0 {
+            return Vec::new();
+        }
+        let s = disc.sqrt();
+        vec![p + d * (-b - s), p + d * (-b + s)]
+    };
+    let candidates: Vec<DVec2> = match (&o1, &o2) {
+        (Offset::Line(p, d), Offset::Circle(c, rr))
+        | (Offset::Circle(c, rr), Offset::Line(p, d)) => line_circle(*p, *d, *c, *rr),
+        (Offset::Circle(c1, r1), Offset::Circle(c2, r2)) => {
+            let v = *c2 - *c1;
+            let dist = v.length();
+            if dist <= 1e-12 {
+                Vec::new()
+            } else {
+                let x = (dist * dist + r1 * r1 - r2 * r2) / (2.0 * dist);
+                let h2 = r1 * r1 - x * x;
+                if h2 < 0.0 {
+                    Vec::new()
+                } else {
+                    let (u, h) = (v / dist, h2.sqrt());
+                    let m = *c1 + u * x;
+                    vec![m + u.perp() * h, m - u.perp() * h]
+                }
+            }
+        }
+        (Offset::Line(..), Offset::Line(..)) => unreachable!("two lines are rounded by the caller"),
+    };
+    let center = candidates
+        .into_iter()
+        .min_by(|a, b| a.distance(at).total_cmp(&b.distance(at)))
+        .ok_or("The corner's sides are too short or too tightly curved for that radius.")?;
+    // Where the round touches each side.
+    let touch = |(curve, _): &(Curve, bool)| match *curve {
+        Curve::Line { a, b } => {
+            let d = (b - a).normalize();
+            a + d * (center - a).dot(d)
+        }
+        Curve::Arc {
+            center: c, radius, ..
+        } => c + (center - c).normalize() * radius,
+        _ => unreachable!("checked above"),
+    };
+    let (t1, t2) = (touch(incoming), touch(outgoing));
+    // Each touching point must be on its side, between the corner and the side's far end.
+    let on_side = |(curve, _): &(Curve, bool), q: DVec2| match *curve {
+        Curve::Line { a, b } => {
+            let len = a.distance(b);
+            let u = (q - a).dot((b - a) / len);
+            (-1e-9..=len + 1e-9).contains(&u)
+        }
+        Curve::Arc {
+            center: c,
+            start_angle,
+            sweep,
+            ..
+        } => {
+            let v = q - c;
+            let rel = (v.y.atan2(v.x) - start_angle).rem_euclid(std::f64::consts::TAU);
+            rel <= sweep + 1e-9 || rel >= std::f64::consts::TAU - 1e-9
+        }
+        _ => false,
+    };
+    if !(on_side(incoming, t1) && on_side(outgoing, t2)) {
+        return Err("The corner's sides are too short for that radius.".to_owned());
+    }
+    // The stretch of a side between two of its points, run from `p` to `q`.
+    let stretch =
+        |(curve, reversed): &(Curve, bool), p: DVec2, q: DVec2, tag: CurveTag| match *curve {
+            Curve::Arc {
+                center: c, radius, ..
+            } => arc_between(c, radius, p, q, !*reversed, tag),
+            _ => Edge2::line(p, q, tag),
+        };
+    // The round from t2 back to t1, the short way round its centre.
+    let ccw = (t2 - center).perp_dot(t1 - center) > 0.0;
+    let edges = vec![
+        stretch(incoming, t1, at, tag(0)),
+        stretch(outgoing, at, t2, tag(1)),
+        arc_between(center, r, t2, t1, ccw, tag(2)),
+    ];
+    Ok((
+        crate::Area { loops: vec![edges] },
+        [[at, t1], [at, t2]],
+        inside,
+    ))
+}
+
+/// The arc of the circle (`center`, `radius`) from `p` to `q`, counter-clockwise or not.
+fn arc_between(center: DVec2, radius: f64, p: DVec2, q: DVec2, ccw: bool, tag: CurveTag) -> Edge2 {
+    let angle = |x: DVec2| (x - center).y.atan2((x - center).x);
+    let (from, to) = if ccw { (p, q) } else { (q, p) };
+    let sweep = (angle(to) - angle(from)).rem_euclid(std::f64::consts::TAU);
+    Edge2 {
+        curve: Curve::Arc {
+            center,
+            radius,
+            start_angle: angle(from),
+            sweep,
+        },
+        reversed: !ccw,
+        tag,
+    }
+}
+
 impl SheetBody {
+    /// What breaking a corner of the sheet changes: the piece the corner is on, the
+    /// region in flat coordinates, the stretch of each of the corner's two sides that it
+    /// takes (from the corner), and whether the region is added to the sheet. An outside
+    /// corner loses the region; an inside corner (of a notch) gains it, as a fillet on an
+    /// inside corner does in SolidWorks. `edge` is the corner's edge through the sheet (of the
+    /// folded solid), where two straight sides of a flat part of the sheet meet. `size` is
+    /// a fillet's radius or a chamfer's distance along each side.
+    pub fn corner_break(
+        &self,
+        solid: &Solid,
+        edge: EdgeId,
+        kind: BreakKind,
+        size: f64,
+        tag: impl Fn(u8) -> CurveTag,
+    ) -> Result<BrokenCorner, String> {
+        const NOT_A_CORNER: &str = "Pick a corner of the sheet: the short edge through its thickness where two straight sides of a flat face meet.";
+        if !(size.is_finite() && size > crate::layout::MIN_LENGTH) {
+            return Err("The size must be greater than zero.".to_owned());
+        }
+        let e = solid
+            .edges
+            .get(edge.index())
+            .ok_or("The edge is not on this body.")?;
+        let ends = [e.start, e.end].map(|v| solid.vertices[v.index()].point);
+        let t = self.layout.settings.thickness;
+        for (index, piece) in self.layout.pieces.iter().enumerate() {
+            if !piece.is_flange() {
+                continue;
+            }
+            // Through this piece: the two ends are one point of it, at its two faces.
+            let local = ends.map(|p| piece.frame.to_local(p));
+            let through = (local[0].z - local[1].z).abs();
+            let level = local[0].z.min(local[1].z);
+            if local[0].truncate().distance(local[1].truncate()) > 1e-6
+                || (through - t).abs() > 1e-6
+                || level.abs() > 1e-6
+            {
+                continue;
+            }
+            let at = local[0].truncate();
+            for l in &self.outline {
+                let n = l.edges.len();
+                let ends_of = |k: usize| {
+                    let (curve, reversed) = &l.edges[k];
+                    let (a, b) = (curve.start(), curve.end());
+                    if *reversed { (b, a) } else { (a, b) }
+                };
+                for k in 0..n {
+                    let next = (k + 1) % n;
+                    let ((from, corner), (start, to)) = (ends_of(k), ends_of(next));
+                    if corner.distance(at) > 1e-6 || start.distance(at) > 1e-6 {
+                        continue;
+                    }
+                    let straight = |k: usize| matches!(l.edges[k].0, Curve::Line { .. });
+                    if !(straight(k) && straight(next)) {
+                        if kind == BreakKind::Fillet {
+                            return round_curved_corner(
+                                &l.edges[k],
+                                &l.edges[next],
+                                at,
+                                size,
+                                &tag,
+                            )
+                            .map(|(area, sides, inside)| (index, area, sides, inside));
+                        }
+                        return Err(
+                            "Only a corner between two straight sides can be chamfered.".to_owned()
+                        );
+                    }
+                    // The outline has the sheet on its left, so an outside corner turns left
+                    // and an inside one right.
+                    let (d1, d2) = ((at - from).normalize(), (to - at).normalize());
+                    let signed = d1.perp_dot(d2).atan2(d1.dot(d2));
+                    if signed.abs() <= 1e-6 {
+                        continue;
+                    }
+                    let inside = signed < 0.0;
+                    let turn = signed.abs();
+                    let along = match kind {
+                        BreakKind::Chamfer => size,
+                        BreakKind::Fillet => size * (turn / 2.0).tan(),
+                    };
+                    let room = from.distance(at).min(to.distance(at));
+                    if along > room + 1e-9 {
+                        return Err(format!(
+                            "The corner's sides are too short for that: at most {:.3} mm here.",
+                            match kind {
+                                BreakKind::Chamfer => room,
+                                BreakKind::Fillet => room / (turn / 2.0).tan(),
+                            }
+                        ));
+                    }
+                    let (a, b) = (at - d1 * along, at + d2 * along);
+                    let mut edges = vec![Edge2::line(a, at, tag(0)), Edge2::line(at, b, tag(1))];
+                    edges.push(match kind {
+                        BreakKind::Chamfer => Edge2::line(b, a, tag(2)),
+                        BreakKind::Fillet => {
+                            // The round touches both sides: its centre is `size` from each, on
+                            // the sheet's side of an outside corner (running counter-clockwise
+                            // from `a` to `b`) and the notch's side of an inside one (running
+                            // counter-clockwise from `b` to `a`).
+                            let center = if inside {
+                                a - d1.perp() * size
+                            } else {
+                                a + d1.perp() * size
+                            };
+                            let start = if inside { b } else { a } - center;
+                            Edge2 {
+                                curve: Curve::Arc {
+                                    center,
+                                    radius: size,
+                                    start_angle: start.y.atan2(start.x),
+                                    sweep: turn,
+                                },
+                                reversed: !inside,
+                                tag: tag(2),
+                            }
+                        }
+                    });
+                    return Ok((
+                        index,
+                        crate::Area { loops: vec![edges] },
+                        [[at, a], [at, b]],
+                        inside,
+                    ));
+                }
+            }
+        }
+        Err(NOT_A_CORNER.to_owned())
+    }
+
     /// Where an edge flange on `edge` (of the folded or flat solid) would go: the edge must
     /// be where the top or bottom face of a flange meets a straight wall of it.
     pub fn edge_site(&self, solid: &Solid, edge: EdgeId) -> Result<EdgeSite, String> {
@@ -266,7 +580,18 @@ pub const SPLINE_REFUSAL: &str = "Sheet metal can't use splines yet: flat patter
 pub fn build(layout: Layout) -> Result<(Solid, SheetBody), SheetError> {
     // The geometry comes from the layout with its corners worked out; the body keeps the
     // layout as defined, so later features can add to it and change its corners.
-    let resolved = layout.resolved();
+    // Corners are worked out on the folded part: one whose bends an unfold has laid flat
+    // keeps the corners it has folded, and lies flat where it is unfolded.
+    let resolved = if layout.flat_bends.is_empty() {
+        layout.resolved()
+    } else {
+        let mut r = layout.folded().resolved();
+        for (piece, at) in r.pieces.iter_mut().zip(&layout.pieces) {
+            piece.frame = at.frame;
+        }
+        r.flat_bends.clone_from(&layout.flat_bends);
+        r
+    };
     let flat = Flat::new(&resolved)?;
     let (local, faces, info) = flat.thicken(&resolved)?;
     if let Err(problems) = validate::validate(&local) {
@@ -422,6 +747,17 @@ impl UnionFind {
     }
 }
 
+/// How thin a region of the flat pattern may be, as a fraction of the thickness, for two
+/// pieces to share it without that counting as an overlap.
+const SLIVER: f64 = 0.005;
+
+/// Whether a region is a sliver: nowhere wider than [`SLIVER`] times the thickness `t`
+/// (twice its area over its perimeter, which for a thin region is about its width).
+fn is_sliver(region: &Region, t: f64) -> bool {
+    let perimeter: f64 = region.outer.edges.iter().map(|e| e.curve.length()).sum();
+    perimeter > 0.0 && 2.0 * region.area().abs() / perimeter < SLIVER * t
+}
+
 /// A point strictly inside a region (the centroid of its largest triangle).
 fn interior_point(region: &Region) -> Option<DVec2> {
     let (lo, hi) = region.outer.bounds();
@@ -504,12 +840,42 @@ fn drop_scrap(layout: &Layout, kept: Vec<(Region, usize)>) -> Vec<(Region, usize
     let s = &layout.settings;
     let relief = s.radius + s.thickness * (1.0 + s.relief_ratio);
     let scrap = 2.0 * relief * relief;
-    let keep: Vec<bool> = (0..n)
+    let mut keep: Vec<bool> = (0..n)
         .map(|i| {
             let fragment = fragments.find(i);
             largest[&kept[i].1].0 == fragment || size[&fragment] > scrap
         })
         .collect();
+    // A fragment still joined to what is kept of another piece is part of the sheet, not
+    // scrap: a bend cut across in several places is in several strips, each joining its
+    // flanges.
+    let joined = |i: usize, j: usize| {
+        edges[i].iter().any(|a| {
+            edges[j]
+                .iter()
+                .any(|b| a.0 == b.0 && close(a.1, b.2) && close(a.2, b.1))
+        })
+    };
+    loop {
+        let mut grew = false;
+        for i in 0..n {
+            if keep[i] {
+                continue;
+            }
+            if (0..n).any(|j| keep[j] && kept[j].1 != kept[i].1 && joined(i, j)) {
+                let fragment = fragments.find(i);
+                for (k, kk) in keep.iter_mut().enumerate() {
+                    if fragments.find(k) == fragment {
+                        *kk = true;
+                    }
+                }
+                grew = true;
+            }
+        }
+        if !grew {
+            break;
+        }
+    }
     kept.into_iter()
         .zip(keep)
         .filter_map(|(k, keep)| keep.then_some(k))
@@ -550,6 +916,65 @@ fn split_closed(curve: Curve, reversed: bool) -> Vec<(Curve, bool)> {
 
 fn close(a: DVec2, b: DVec2) -> bool {
     a.distance(b) <= SAME_POINT
+}
+
+/// The flat pattern's edges without boundary edges shorter than [`SAME_POINT`], each one's
+/// two vertex groups joined into one.
+///
+/// Two curves that nearly meet (a cut drawn a micron off an edge it is meant to run along,
+/// an arc that dips a micron past a line) cross the arrangement's own tolerance and leave a
+/// boundary edge a micron or so long. Its wall through the sheet encloses no area. The
+/// edges on either side of it end within [`SAME_POINT`] of the joined vertex, which is
+/// as close as the body's vertices are held to their curves.
+fn drop_short_edges(edges: Vec<FEdge>, faces: &mut [MFace], uf: &mut UnionFind) -> Vec<FEdge> {
+    let short: Vec<bool> = edges
+        .iter()
+        .map(|e| e.twin.is_none() && e.curve.length() < SAME_POINT)
+        .collect();
+    if !short.contains(&true) {
+        return edges;
+    }
+    let mut drop = vec![false; edges.len()];
+    for f in faces.iter() {
+        for l in &f.loops {
+            // A loop of nothing but short edges is left whole: it is a face of its own,
+            // which validation reports.
+            if l.iter().filter(|&&e| !short[e]).count() >= 2 {
+                for &e in l.iter().filter(|&&e| short[e]) {
+                    drop[e] = true;
+                }
+            }
+        }
+    }
+    for (e, edge) in edges.iter().enumerate() {
+        if drop[e] {
+            uf.union(edge.start, edge.end);
+        }
+    }
+    let mut index = vec![usize::MAX; edges.len()];
+    let mut kept = Vec::with_capacity(edges.len());
+    for (e, edge) in edges.into_iter().enumerate() {
+        if !drop[e] {
+            index[e] = kept.len();
+            kept.push(edge);
+        }
+    }
+    for edge in &mut kept {
+        edge.start = uf.find(edge.start);
+        edge.twin = edge.twin.map(|t| index[t]);
+    }
+    for f in faces.iter_mut() {
+        for l in &mut f.loops {
+            l.retain(|&e| !drop[e]);
+            for e in l.iter_mut() {
+                *e = index[*e];
+            }
+            for k in 0..l.len() {
+                kept[l[k]].next = l[(k + 1) % l.len()];
+            }
+        }
+    }
+    kept
 }
 
 /// Whether the edge from `a` to `b` lies on the line through `o` along `dir`, within
@@ -596,6 +1021,7 @@ impl Flat {
         }
         for p in &layout.pieces {
             p.trims.iter().flat_map(|t| t.edges()).for_each(&mut add);
+            p.adds.iter().flat_map(|a| a.edges()).for_each(&mut add);
         }
         for c in &layout.cuts {
             c.area.edges().for_each(&mut add);
@@ -618,14 +1044,10 @@ impl Flat {
             };
             let mut owner: Option<usize> = None;
             for (pi, piece) in layout.pieces.iter().enumerate() {
-                if !piece.outline.contains(p) || piece.trims.iter().any(|t| t.contains(p)) {
+                if !piece.covers(p) {
                     continue;
                 }
-                if layout
-                    .cuts
-                    .iter()
-                    .any(|c| c.applies_to(pi) && c.area.contains(p))
-                {
+                if layout.cuts.iter().any(|c| c.removes(pi, p)) {
                     continue;
                 }
                 // A form's outline is a hole that its own faces fill.
@@ -638,6 +1060,12 @@ impl Flat {
                     continue;
                 }
                 if let Some(prev) = owner {
+                    // A sliver two pieces share, as where a flange ends a few microns past
+                    // the corner of a cut beside it, stays with the earlier piece: SolidWorks
+                    // builds such a part, and the later piece loses next to nothing.
+                    if is_sliver(&region, layout.settings.thickness) {
+                        continue;
+                    }
                     return Err(SheetError::Overlap {
                         a: layout.pieces[prev].origin,
                         b: piece.origin,
@@ -872,6 +1300,7 @@ impl Flat {
                 edges[e].twin = edge_of_half.get(&t).copied();
             }
         }
+        let mut edges = drop_short_edges(edges, &mut faces, &mut uf);
         // `end` must be the group of the following edge's start (merging skipped corners).
         for e in 0..edges.len() {
             let next = edges[e].next;
@@ -1386,6 +1815,8 @@ fn piece_map(layout: &Layout, piece: usize) -> Map<'_> {
     let p = &layout.pieces[piece];
     match &p.kind {
         PieceKind::Flange => Map::Rigid(p.frame),
+        // A bend laid flat lies in its parent's plane
+        PieceKind::Bend(_) if layout.flat_bends.contains(&piece) => Map::Rigid(p.frame),
         PieceKind::Bend(b) => Map::Bend {
             parent: p.frame,
             bend: b,
@@ -1447,28 +1878,16 @@ fn fold(layout: &Layout, flat: &Flat, local: &Solid, info: &Info) -> Result<Soli
                         Curve::Line { .. } => line_between(vs, ve)?,
                         _ => (transform::curve(&edge.curve, &frame), edge.t0, edge.t1),
                     },
-                    Map::Bend { parent, bend } => {
-                        let Curve::Line { a, b } = fedge.curve else {
-                            return Err(SheetError::AcrossBend {
-                                tag: fedge.tag,
-                                bend: layout.pieces[p].origin,
-                                curved: true,
-                            });
-                        };
-                        let dir = (b - a).normalize_or_zero();
-                        if dir.perp_dot(bend.along).abs() <= PARALLEL {
-                            line_between(vs, ve)?
-                        } else if dir.perp_dot(bend.across).abs() <= PARALLEL {
+                    Map::Bend { parent, bend } => match straight_across(&fedge.curve, bend) {
+                        Some(Across::Along) => line_between(vs, ve)?,
+                        Some(Across::Square(a, b)) => {
                             let z = if top { t } else { 0.0 };
                             arc_across(parent, bend, a, b, z, vs)
-                        } else {
-                            return Err(SheetError::AcrossBend {
-                                tag: fedge.tag,
-                                bend: layout.pieces[p].origin,
-                                curved: false,
-                            });
                         }
-                    }
+                        // A slanted line winds round the bend, and a curve does what it does:
+                        // neither is a line or a circle once folded.
+                        None => curve_across(parent, bend, &edge.curve, edge.t0, edge.t1)?,
+                    },
                 }
             }
         };
@@ -1508,33 +1927,23 @@ fn fold(layout: &Layout, flat: &Flat, local: &Solid, info: &Info) -> Result<Soli
                 match piece_map(layout, p) {
                     Map::Rigid(frame) => (transform::surface(&face.surface, &frame), face.reversed),
                     Map::Bend { parent, bend } => {
-                        let Curve::Line { .. } = fedge.curve else {
-                            return Err(SheetError::AcrossBend {
-                                tag: fedge.tag,
-                                bend: layout.pieces[p].origin,
-                                curved: true,
-                            });
-                        };
-                        let (a, b) = fedge.ends();
-                        let dir = (b - a).normalize_or_zero();
-                        let normal = DVec2::new(dir.y, -dir.x);
-                        let (s, _) = bend.strip_coords(a);
-                        let n3 = if dir.perp_dot(bend.along).abs() <= PARALLEL
-                            || dir.perp_dot(bend.across).abs() <= PARALLEL
-                        {
-                            parent.vector_to_world(bend.fold_vector(s, normal.extend(0.0)))
+                        if straight_across(&fedge.curve, bend).is_some() {
+                            let (a, b) = fedge.ends();
+                            let dir = (b - a).normalize_or_zero();
+                            let normal = DVec2::new(dir.y, -dir.x);
+                            let (s, _) = bend.strip_coords(a);
+                            let n3 =
+                                parent.vector_to_world(bend.fold_vector(s, normal.extend(0.0)));
+                            let at = parent.to_world(bend.fold_point(a.extend(0.0)));
+                            let x = parent.vector_to_world(bend.fold_vector(s, dir.extend(0.0)));
+                            let plane =
+                                Plane::from_origin_normal_x(at, n3, x).ok_or_else(|| {
+                                    SheetError::Invalid("a degenerate wall".to_owned())
+                                })?;
+                            (Surface::Plane(plane), false)
                         } else {
-                            return Err(SheetError::AcrossBend {
-                                tag: fedge.tag,
-                                bend: layout.pieces[p].origin,
-                                curved: false,
-                            });
-                        };
-                        let at = parent.to_world(bend.fold_point(a.extend(0.0)));
-                        let x = parent.vector_to_world(bend.fold_vector(s, dir.extend(0.0)));
-                        let plane = Plane::from_origin_normal_x(at, n3, x)
-                            .ok_or_else(|| SheetError::Invalid("a degenerate wall".to_owned()))?;
-                        (Surface::Plane(plane), false)
+                            wall_across(parent, bend, fedge, t)?
+                        }
                     }
                 }
             }
@@ -1585,6 +1994,92 @@ fn arc_across(
     )
 }
 
+/// How a flat edge that folds to a line or a circle crosses a bend.
+enum Across {
+    /// Along the bend line: it stays a line.
+    Along,
+    /// Square to the bend line, from the first point to the second: it folds to an arc.
+    Square(DVec2, DVec2),
+}
+
+/// How a flat edge in a bend folds, if it folds to a line or a circle: a line along the
+/// bend or square to it. `None` for a slanted line and for anything curved.
+fn straight_across(curve: &Curve, bend: &Bend) -> Option<Across> {
+    let Curve::Line { a, b } = *curve else {
+        return None;
+    };
+    let dir = (b - a).normalize_or_zero();
+    if dir.perp_dot(bend.along).abs() <= PARALLEL {
+        Some(Across::Along)
+    } else if dir.perp_dot(bend.across).abs() <= PARALLEL {
+        Some(Across::Square(a, b))
+    } else {
+        None
+    }
+}
+
+/// The degree of the freeform curves and walls of edges that cross a bend on a slant.
+const ACROSS_DEGREE: usize = 5;
+
+/// A fitted curve or surface that could not be made, as a build error.
+fn unfitted(e: peet_kernel::nurbs::NurbsError) -> SheetError {
+    SheetError::Invalid(format!(
+        "an edge across a bend could not be folded: {}",
+        e.0
+    ))
+}
+
+/// The curve an edge of the flat solid folds into across a bend, when that is neither a
+/// line nor a circle: the flat edge taken point by point round the bend, and a smooth
+/// curve fitted through it to a fifth of the modelling tolerance. It keeps the flat
+/// edge's parameters.
+fn curve_across(
+    parent: Frame,
+    bend: &Bend,
+    flat: &Curve3,
+    t0: f64,
+    t1: f64,
+) -> Result<(Curve3, f64, f64), SheetError> {
+    let shape = |t: f64| Some(parent.to_world(bend.fold_point(flat.point(t))));
+    let curve = NurbsCurve::fitted(
+        &shape,
+        &[t0.min(t1), t0.max(t1)],
+        ACROSS_DEGREE,
+        tolerance::LINEAR / 5.0,
+    )
+    .map_err(unfitted)?;
+    Ok((Curve3::Nurbs(Arc::new(curve)), t0, t1))
+}
+
+/// The wall through the sheet along such an edge. Folding turns each line through the
+/// thickness into a line along a radius of the bend, so the wall is ruled: straight
+/// from the edge's fold at the bottom of the sheet to its fold at the top.
+fn wall_across(
+    parent: Frame,
+    bend: &Bend,
+    edge: &FEdge,
+    thickness: f64,
+) -> Result<(Surface, bool), SheetError> {
+    let side = |z: f64| {
+        let shape =
+            |u: f64| Some(parent.to_world(bend.fold_point(edge.curve.point_at(u).extend(z))));
+        NurbsCurve::fitted(&shape, &[0.0, 1.0], ACROSS_DEGREE, tolerance::LINEAR / 5.0)
+    };
+    let surface = NurbsSurface::skin(&[
+        side(0.0).map_err(unfitted)?,
+        side(thickness).map_err(unfitted)?,
+    ])
+    .map_err(unfitted)?;
+    // Out of the material is to the right of the edge, as for every wall.
+    let middle = edge.curve.point_at(0.5);
+    let (s, _) = bend.strip_coords(middle);
+    let out = right_normal(&edge.curve, edge.reversed, middle);
+    let out = parent.vector_to_world(bend.fold_vector(s, out.extend(0.0)));
+    let (lo, hi) = surface.domain();
+    let reversed = surface.normal((lo + hi) / 2.0).dot(out) < 0.0;
+    Ok((Surface::Nurbs(Arc::new(surface)), reversed))
+}
+
 /// The cylinder a bend's top or bottom side (at height `z`) folds onto.
 fn bend_cylinder(parent: Frame, bend: &Bend, z: f64) -> Surface {
     let (axis_point, axis_dir) = bend.axis();
@@ -1620,6 +2115,10 @@ struct FormCtx<'a> {
 
 /// An edge used by a loop: the edge, and whether the loop runs against its direction.
 type Use = (EdgeId, bool);
+
+/// A broken corner as laid out: the piece it is on, the area it takes away or adds, the two sides
+/// it meets (each from its corner along the side) and whether the corner is an inside one.
+type BrokenCorner = (usize, crate::Area, [[DVec2; 2]; 2], bool);
 
 /// The right-hand normal of a curve traversed in loop order, at `p`.
 fn right_normal(curve: &Curve, reversed: bool, p: DVec2) -> DVec2 {

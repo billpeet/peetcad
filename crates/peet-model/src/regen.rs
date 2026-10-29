@@ -45,7 +45,7 @@ use crate::feature::{
 };
 use crate::mate::{self, MateId};
 use crate::naming::{Body, find_edge, find_face, find_vertex};
-use crate::{Axis, Model, hash, pattern, sheet};
+use crate::{Axis, Model, flexible, hash, pattern, sheet};
 
 /// How well defined a sketch is.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -153,6 +153,12 @@ pub struct Instance {
     pub frame: Frame,
     /// The colour of the part the body belongs to.
     pub color: Option<[u8; 3]>,
+    /// How transparent it is drawn (0 opaque, 1 not seen): its component's, or, inside a
+    /// sub-assembly, the sub-assembly's component's if that has one.
+    pub transparency: f32,
+    /// Hidden inside a sub-assembly: a component below the first of `path` is hidden
+    /// there. (Whether the first is hidden is the assembly's own component's `visible`.)
+    pub hidden: bool,
 }
 
 /// The result of a rebuild.
@@ -167,10 +173,25 @@ pub struct Evaluation {
     components: HashMap<CompId, Status>,
     mates: HashMap<MateId, Status>,
     patterns: HashMap<crate::PatternId, Status>,
+    cuts: HashMap<crate::CutId, Status>,
     /// For an assembly: how many ways its components can still move (six for each that
     /// is not fixed, less what the mates hold).
     pub freedom: usize,
     component_freedom: HashMap<CompId, usize>,
+    /// For an assembly: where each component is, at every depth (by its path from a
+    /// component of this assembly down), in this assembly's coordinates.
+    component_frames: HashMap<Vec<CompId>, Frame>,
+    /// For an assembly: how many ways each component that moves inside a flexible
+    /// sub-assembly can still move, by its path.
+    inner_freedom: HashMap<Vec<CompId>, usize>,
+    /// For an assembly: its equations that can't be worked out, by their place in its
+    /// list, with why.
+    pub equation_failures: Vec<(usize, String)>,
+    /// For an assembly: what each reference dimension measured, or why it can't be.
+    pub references: Vec<(String, Result<f64, String>)>,
+    /// For an assembly: each in-context reference of its components' parts, and how it
+    /// stands in this assembly (see [`crate::in_context`]).
+    pub external: Vec<crate::in_context::Resolved>,
     pub stats: Stats,
 }
 
@@ -184,6 +205,20 @@ impl Evaluation {
     /// along with others it is mated to: 0 for one that is fixed or fully held.
     pub fn component_freedom(&self, id: CompId) -> Option<usize> {
         self.component_freedom.get(&id).copied()
+    }
+
+    /// Where a component of an assembly is, at any depth (by its path from a component
+    /// of this assembly down to it), in this assembly's coordinates. A component in a
+    /// flexible sub-assembly is where this assembly's solve put it.
+    pub fn component_frame(&self, path: &[CompId]) -> Option<Frame> {
+        self.component_frames.get(path).copied()
+    }
+
+    /// How many ways a component that moves inside a flexible sub-assembly (by its path:
+    /// the sub-assembly's component of this assembly first) can still move, on its own
+    /// or along with others.
+    pub fn inner_freedom(&self, path: &[CompId]) -> Option<usize> {
+        self.inner_freedom.get(path).copied()
     }
 
     /// How a mate of an assembly came out.
@@ -202,6 +237,11 @@ impl Evaluation {
     /// How a component pattern of an assembly came out.
     pub fn pattern_status(&self, id: crate::PatternId) -> Option<&Status> {
         self.patterns.get(&id)
+    }
+
+    /// How an assembly cut came out.
+    pub fn cut_status(&self, id: crate::CutId) -> Option<&Status> {
+        self.cuts.get(&id)
     }
 
     /// The component patterns that can't be worked out, with why.
@@ -256,13 +296,32 @@ struct Assembled {
     components: HashMap<CompId, Status>,
     mates: HashMap<MateId, Status>,
     patterns: HashMap<crate::PatternId, Status>,
+    cuts: HashMap<crate::CutId, Status>,
     freedom: usize,
     component_freedom: HashMap<CompId, usize>,
+    component_frames: HashMap<Vec<CompId>, Frame>,
+    inner_freedom: HashMap<Vec<CompId>, usize>,
+    references: Vec<(String, Result<f64, String>)>,
+    external: Vec<crate::in_context::Resolved>,
+    /// Whether an in-context reference moved, so its part changed and must be rebuilt.
+    in_context_changed: bool,
 }
 
-/// A definition of an assembly as last rebuilt.
+/// A definition of an assembly, in one of its configurations: the definition, and the
+/// configuration if it is not the one its model has active.
+type PartKey = (DefId, Option<crate::ConfigId>);
+
+/// The part a component shows: its definition in the configuration it uses.
+fn part_key(assembly: &crate::Assembly, c: &crate::Component) -> PartKey {
+    (c.definition, assembly.configuration_of(c))
+}
+
+/// A definition of an assembly, in one configuration, as last rebuilt.
 struct Part {
-    /// The model that was rebuilt: nothing is done while the definition still has it.
+    /// The definition's model that was rebuilt: nothing is done while the definition
+    /// still has it.
+    source: Arc<Model>,
+    /// What was rebuilt: the definition's model, in the configuration.
     model: Arc<Model>,
     engine: Engine,
 }
@@ -271,12 +330,18 @@ struct Part {
 #[derive(Default)]
 pub struct Engine {
     cache: HashMap<FeatureId, Cached>,
-    /// For an assembly: an engine per definition.
-    parts: HashMap<DefId, Part>,
+    /// For an assembly: an engine per definition, and per configuration of it that its
+    /// components show.
+    parts: HashMap<PartKey, Part>,
     /// For an assembly: what is kept between solves of the same mates.
     mates: mate::Memo,
     /// A pull on a component, for the next rebuild only.
     drag: Option<mate::Drag>,
+    /// For an assembly: the bodies its cuts left of its component instances.
+    cut_cache: HashMap<u64, Vec<Arc<Body>>>,
+    /// The name the model is known by as an assembly, for its parts' in-context references:
+    /// its file's name (see [`crate::in_context::context_key`]).
+    context: Option<String>,
     evaluation: Evaluation,
 }
 
@@ -319,6 +384,12 @@ impl Engine {
         self.drag = drag;
     }
 
+    /// Names the model this engine rebuilds as a context of in-context references: the
+    /// assembly's file name (or its name, if it has no file).
+    pub fn set_context(&mut self, name: Option<String>) {
+        self.context = name;
+    }
+
     /// Forgets every remembered result, so the next rebuild recomputes everything.
     pub fn clear(&mut self) {
         self.cache.clear();
@@ -330,7 +401,24 @@ impl Engine {
     /// into the model.
     pub fn regenerate(&mut self, model: &mut Model) -> &Evaluation {
         let start = Instant::now();
+        model.refresh_dimension_values();
+        // An assembly's equations set its components' parts and suppression first.
+        let mut equation_failures = model.apply_equations();
+        // Patterns whose counts are expressions make or remove copies to match.
+        model.sync_pattern_counts();
         let params_key = hash::of(&model.parameters);
+        // The values of dimensions read by address are not part of the table's own hash:
+        // only the sketches whose expressions might read them depend on them (the other
+        // features are keyed on their evaluated values).
+        let dimensions_key = hash::of(
+            &model
+                .parameters
+                .dimensions
+                .0
+                .iter()
+                .map(|(a, q)| (a, q.value, q.kind()))
+                .collect::<Vec<_>>(),
+        );
         let built = model.rollback_index();
         let mut run = Run {
             bodies: Vec::new(),
@@ -338,6 +426,7 @@ impl Engine {
             states: HashMap::with_capacity(model.len()),
             out_keys: HashMap::new(),
             stats: Stats::default(),
+            dimensions_key,
         };
         for index in 0..model.len() {
             let feature = model.feature_arc(index);
@@ -355,7 +444,7 @@ impl Engine {
                 Some(Status::Suppressed)
             } else {
                 // What it uses, in tree order, so the message names the first.
-                let mut parents = feature.kind.dependencies();
+                let mut parents = feature.kind.suppressed_with();
                 parents.sort_by_key(|p| model.index_of(*p));
                 parents
                     .into_iter()
@@ -390,7 +479,34 @@ impl Engine {
             }
         }
         self.cache.retain(|id, _| run.states.contains_key(id));
-        let assembled = self.assemble(model, &mut run.stats);
+        let mut assembled = self.assemble(model, &mut run.stats);
+        // What the reference dimensions measure, which equations may read, and where the
+        // geometry in-context parts follow is: a part an equation or an in-context
+        // reference changes is rebuilt and the mates solved again, until nothing changes
+        // (SolidWorks solves the mates, then the in-context parts, and repeats).
+        for round in 0..6 {
+            let mut changed = false;
+            if let Some(assembly) = model.assembly_mut() {
+                for (name, value) in &assembled.references {
+                    changed |= assembly.set_reference_value(name, value.as_ref().ok().copied());
+                }
+            }
+            let in_context = assembled.in_context_changed;
+            if !changed && !in_context {
+                break;
+            }
+            // What expressions read now.
+            model.refresh_dimension_values();
+            let equations = model.assembly().is_some_and(|a| !a.equations().is_empty());
+            if (!equations && !in_context) || round == 5 {
+                break;
+            }
+            if equations {
+                equation_failures = model.apply_equations();
+                model.sync_pattern_counts();
+            }
+            assembled = self.assemble(model, &mut run.stats);
+        }
         run.stats.ms = start.elapsed().as_secs_f64() * 1000.0;
         self.evaluation = Evaluation {
             bodies: run.bodies,
@@ -399,16 +515,104 @@ impl Engine {
             components: assembled.components,
             mates: assembled.mates,
             patterns: assembled.patterns,
+            cuts: assembled.cuts,
             freedom: assembled.freedom,
             component_freedom: assembled.component_freedom,
+            component_frames: assembled.component_frames,
+            inner_freedom: assembled.inner_freedom,
+            equation_failures,
+            references: assembled.references,
+            external: assembled.external,
             stats: run.stats,
         };
         &self.evaluation
     }
 
-    /// Rebuilds the parts of an assembly (those whose model changed), solves its mates
-    /// and places the parts' bodies. A part's solved sketches are written back into its
-    /// definition, and the placements the mates come to into the components.
+    /// Reference planes of this definition and its active descendants, including
+    /// definitions with no solid bodies. Inner placements are already solved.
+    pub(crate) fn mate_planes(&self, model: &Model) -> Vec<mate::ComponentPlane> {
+        let mut planes: Vec<_> = crate::StdPlane::ALL
+            .into_iter()
+            .map(|p| (Vec::new(), PlaneRef::Standard(p), p.plane()))
+            .collect();
+        for feature in model.features() {
+            let Some(state) = self.evaluation.states.get(&feature.id) else {
+                continue;
+            };
+            if !matches!(state.status, Status::Ok | Status::Warning(_)) {
+                continue;
+            }
+            let plane = match state.output {
+                Output::Plane(p) => p,
+                Output::Frame(frame) => Plane { frame },
+                _ => continue,
+            };
+            planes.push((Vec::new(), PlaneRef::Feature(feature.id), plane));
+        }
+        if let Some(assembly) = model.assembly() {
+            for c in assembly.components().filter(|c| {
+                !c.suppressed
+                    && !matches!(
+                        self.evaluation.component_status(c.id),
+                        Some(Status::Suppressed)
+                    )
+            }) {
+                let Some(part) = self.parts.get(&part_key(assembly, c)) else {
+                    continue;
+                };
+                let flexible = flexible::is_flexible(c, &part.model);
+                for (mut path, reference, plane) in part.engine.mate_planes(&part.model) {
+                    let posed = if flexible {
+                        flexible::correction(&c.poses, part.engine.evaluation(), &path)
+                    } else {
+                        Frame::WORLD
+                    };
+                    path.insert(0, c.id);
+                    planes.push((
+                        path,
+                        reference,
+                        Plane {
+                            frame: c.placement.compose(&posed.compose(&plane.frame)),
+                        },
+                    ));
+                }
+            }
+        }
+        planes
+    }
+
+    /// This definition's model and those of its active descendants, where each is in
+    /// the definition's coordinates: for mates on their sketches.
+    pub(crate) fn mate_models(&self, model: &Arc<Model>) -> Vec<mate::ComponentModel> {
+        let mut models = vec![(Vec::new(), model.clone(), Frame::WORLD)];
+        if let Some(assembly) = model.assembly() {
+            for c in assembly.components().filter(|c| {
+                !c.suppressed
+                    && !matches!(
+                        self.evaluation.component_status(c.id),
+                        Some(Status::Suppressed)
+                    )
+            }) {
+                let Some(part) = self.parts.get(&part_key(assembly, c)) else {
+                    continue;
+                };
+                let flexible = flexible::is_flexible(c, &part.model);
+                for (mut path, inner, frame) in part.engine.mate_models(&part.model) {
+                    // Where a flexible component's pose puts it, as `mate_planes` has it.
+                    let posed = if flexible {
+                        flexible::correction(&c.poses, part.engine.evaluation(), &path)
+                    } else {
+                        Frame::WORLD
+                    };
+                    path.insert(0, c.id);
+                    models.push((path, inner, c.placement.compose(&posed.compose(&frame))));
+                }
+            }
+        }
+        models
+    }
+
+    /// Rebuilds definitions, solves mates and writes back solved placements.
     fn assemble(&mut self, model: &mut Model, stats: &mut Stats) -> Assembled {
         let Some(assembly) = model.assembly() else {
             self.parts.clear();
@@ -417,20 +621,52 @@ impl Engine {
             return Assembled::default();
         };
         // ---- The definitions ----
+        // Each in its active configuration, and in each other configuration a component
+        // shows (SolidWorks' referenced configuration): built once however many show it.
         let mut written = Vec::new();
-        for def in assembly.definitions() {
-            let part = self.parts.entry(def.id).or_insert_with(|| Part {
+        let mut keys: Vec<PartKey> = assembly
+            .definitions()
+            .map(|d| (d.id, None))
+            .chain(assembly.components().map(|c| part_key(assembly, c)))
+            .collect();
+        keys.sort();
+        keys.dedup();
+        for key in &keys {
+            let Some(def) = assembly.definition(key.0) else {
+                continue;
+            };
+            let part = self.parts.entry(*key).or_insert_with(|| Part {
                 // A model no definition has, so the first rebuild is not skipped.
+                source: Arc::new(Model::new()),
                 model: Arc::new(Model::new()),
                 engine: Self::new(),
             });
-            if Arc::ptr_eq(&part.model, &def.model) {
+            // A sub-assembly is the context of its parts' in-context references by its
+            // file's name, or its own.
+            if def.model.is_assembly() {
+                part.engine.context = Some(
+                    def.link
+                        .as_ref()
+                        .map_or_else(|| def.model.name.clone(), |l| l.path.clone()),
+                );
+            }
+            if Arc::ptr_eq(&part.source, &def.model) {
                 continue;
             }
-            let mut rebuilt = (*def.model).clone();
+            let mut rebuilt = match key.1 {
+                Some(config) => def.model.with_configuration(config),
+                None => (*def.model).clone(),
+            };
             let done = part.engine.regenerate(&mut rebuilt).stats;
             stats.rebuilt += done.rebuilt;
             stats.reused += done.reused;
+            if key.1.is_some() {
+                // Another configuration than the definition's own: what its rebuild
+                // writes back is kept here, not in the definition.
+                part.source = def.model.clone();
+                part.model = Arc::new(rebuilt);
+                continue;
+            }
             part.model = if rebuilt == *def.model {
                 def.model.clone()
             } else {
@@ -438,26 +674,30 @@ impl Engine {
                 written.push((def.id, rebuilt.clone()));
                 rebuilt
             };
+            part.source = part.model.clone();
         }
-        self.parts
-            .retain(|id, _| assembly.definition(*id).is_some());
+        self.parts.retain(|key, _| keys.contains(key));
 
         // ---- The mates ----
         // Solved from where the components are, with the bodies of their parts (and, for
         // a sub-assembly, of the parts in it) to find the mates' faces in.
         let parts = &self.parts;
         let place = |c: &crate::Component, frame: Frame| -> Option<mate::Placed> {
-            let built = parts.get(&c.definition)?.engine.evaluation();
+            let part = parts.get(&part_key(assembly, c))?;
+            let built = part.engine.evaluation();
+            let poses: &[crate::Pose] = if flexible::is_flexible(c, &part.model) {
+                &c.poses
+            } else {
+                &[]
+            };
             let bodies = built
                 .bodies
                 .iter()
                 .map(|b| (Vec::new(), b.clone(), Frame::WORLD))
-                .chain(
-                    built
-                        .instances
-                        .iter()
-                        .map(|i| (i.path.clone(), i.body.clone(), i.frame)),
-                )
+                .chain(built.instances.iter().map(|i| {
+                    let posed = flexible::correction(poses, built, &i.path);
+                    (i.path.clone(), i.body.clone(), posed.compose(&i.frame))
+                }))
                 .collect();
             Some(mate::Placed {
                 id: c.id,
@@ -466,26 +706,66 @@ impl Engine {
                 // A pattern's copy is where its pattern puts it: the mates don't move it.
                 fixed: c.fixed || c.pattern.is_some(),
                 bodies,
+                planes: part.engine.mate_planes(&part.model),
+                models: part.engine.mate_models(&part.model),
             })
         };
-        let placed: Vec<mate::Placed> = assembly
-            .components()
-            .filter(|c| !c.suppressed)
-            .filter_map(|c| place(c, c.placement))
+        // A flexible sub-assembly is taken apart: what moves in it is solved here, with
+        // its own mates (see `flexible`).
+        let mut expanded: HashMap<CompId, flexible::Expanded> = HashMap::new();
+        let (mut next_id, mut next_mate) = (u32::MAX, u32::MAX);
+        let mut placed: Vec<mate::Placed> = Vec::new();
+        let mut inner_mates: Vec<crate::Mate> = Vec::new();
+        for c in assembly.components().filter(|c| !c.suppressed) {
+            let Some(part) = parts.get(&part_key(assembly, c)) else {
+                continue;
+            };
+            if flexible::is_flexible(c, &part.model) {
+                let mut x = flexible::expand(
+                    c,
+                    &part.model,
+                    &part.engine,
+                    c.fixed,
+                    &mut next_id,
+                    &mut next_mate,
+                );
+                placed.append(&mut x.placed);
+                inner_mates.append(&mut x.mates);
+                expanded.insert(c.id, x);
+            } else if let Some(p) = place(c, c.placement) {
+                placed.push(p);
+            }
+        }
+        let own_mates: Vec<Option<crate::Mate>> = assembly
+            .mates()
+            .map(|m| flexible::rewrite(m, &expanded))
             .collect();
-        let mates: Vec<&crate::Mate> = assembly.mates().collect();
-        let structure: Vec<(CompId, DefId, bool, bool)> = assembly
+        // The sub-assemblies' own mates first: when they can't all hold, a hinge stays a
+        // hinge and the parent's mate that would break it fails.
+        let mates: Vec<&crate::Mate> = inner_mates
+            .iter()
+            .chain(
+                assembly
+                    .mates()
+                    .zip(&own_mates)
+                    .map(|(m, r)| r.as_ref().unwrap_or(m)),
+            )
+            .collect();
+        let structure: Vec<(CompId, PartKey, bool, bool, bool)> = assembly
             .components()
             .map(|c| {
                 (
                     c.id,
-                    c.definition,
+                    part_key(assembly, c),
                     c.fixed || c.pattern.is_some(),
                     c.suppressed,
+                    expanded.contains_key(&c.id),
                 )
             })
             .collect();
-        let key = hash::of(&(&mates, structure, &model.parameters));
+        let units: Vec<(CompId, bool)> = placed.iter().map(|c| (c.id, c.fixed)).collect();
+        let planes: Vec<_> = placed.iter().map(|c| (c.id, &c.planes)).collect();
+        let key = hash::of(&(&mates, structure, units, &model.parameters, planes));
         let drag = self.drag.take();
         let solved = mate::solve(
             &mates,
@@ -495,10 +775,44 @@ impl Engine {
             &mut self.mates,
             drag,
         );
+        let mut frames = solved.frames;
+        let mut statuses = solved.statuses;
+        for m in &inner_mates {
+            statuses.remove(&m.id);
+        }
+        let mut component_freedom = solved.component_freedom;
+        // Where what moves in each flexible sub-assembly is now, in its coordinates.
+        let mut inner_freedom = HashMap::new();
+        let mut posed: HashMap<CompId, Vec<crate::Pose>> = HashMap::new();
+        for (id, x) in &expanded {
+            let Some(frame) = frames.get(id).copied() else {
+                continue;
+            };
+            posed.insert(*id, flexible::poses(frame, x, &frames));
+            for (path, unit) in x.units.iter().filter(|(path, _)| !path.is_empty()) {
+                frames.remove(unit);
+                if let Some(f) = component_freedom.remove(unit) {
+                    let mut full = vec![*id];
+                    full.extend(path);
+                    inner_freedom.insert(full, f);
+                }
+            }
+        }
+        // Poses that only differ by rounding are kept, so the model doesn't change.
+        let mut reposed: Vec<(CompId, Vec<crate::Pose>)> = Vec::new();
+        for c in assembly.components() {
+            let new = posed.remove(&c.id).unwrap_or_default();
+            if flexible::same_poses(&c.poses, &new) {
+                posed.insert(c.id, c.poses.clone());
+            } else {
+                posed.insert(c.id, new.clone());
+                reposed.push((c.id, new));
+            }
+        }
+
         // ---- The patterns ----
         // After the mates: each copy goes where its original now is, moved by its place
         // in the pattern. A copy whose original is suppressed is left out with it.
-        let mut frames = solved.frames;
         let mut patterns = HashMap::new();
         let mut left_out: Vec<CompId> = Vec::new();
         for pattern in assembly.patterns() {
@@ -536,6 +850,14 @@ impl Engine {
             let length = |s: &crate::Scalar, kind| s.evaluate(kind, &model.parameters);
             // How each place moves a component from where the original is.
             let moves = (|| -> Result<Vec<([u32; 2], Frame)>, String> {
+                // A count that is an expression must still work out (the copies are
+                // those of the last count that did).
+                for count in pattern.kind.counts().into_iter().flatten() {
+                    if count.expression.is_some() {
+                        crate::assembly::evaluate_pattern_count(count, &model.parameters)
+                            .map_err(|e| format!("Count: {e}"))?;
+                    }
+                }
                 let places = pattern.kind.places();
                 Ok(match &pattern.kind {
                     crate::PatternKind::Linear { first, second } => {
@@ -574,8 +896,9 @@ impl Engine {
                         let angle = length(angle, crate::ScalarKind::Angle)?;
                         // All the way round: evenly spaced. Else from the first to the
                         // last over the angle.
+                        let count = crate::assembly::pattern_count(count);
                         let step = if (angle.abs() - 360.0).abs() < 1e-9 {
-                            angle / f64::from((*count).max(1))
+                            angle / f64::from(count.max(1))
                         } else {
                             angle / f64::from(count.saturating_sub(1).max(1))
                         }
@@ -622,6 +945,27 @@ impl Engine {
                 }
             }
         }
+        // ---- The reference dimensions ----
+        // Measured where the components are now.
+        let references = assembly
+            .references()
+            .map(|r| {
+                let at = |end: &crate::MateEnd| -> Result<mate::Located, String> {
+                    let gone = || "A component it is measured to is gone or suppressed.".to_owned();
+                    let c = end
+                        .component()
+                        .and_then(|id| assembly.component(id))
+                        .filter(|c| !c.suppressed)
+                        .ok_or_else(gone)?;
+                    let frame = frames.get(&c.id).copied().unwrap_or(c.placement);
+                    let on = place(c, frame).ok_or_else(gone)?;
+                    mate::locate(end, &on)
+                };
+                let value =
+                    at(&r.a).and_then(|a| at(&r.b).and_then(|b| crate::equations::measure(&a, &b)));
+                (r.name.clone(), value)
+            })
+            .collect();
         let moved: Vec<(CompId, Frame)> = assembly
             .components()
             .filter_map(|c| {
@@ -630,19 +974,60 @@ impl Engine {
             })
             .collect();
 
+        // ---- In-context references ----
+        // Where the geometry each in-context part follows is now that the mates and
+        // patterns have placed the components, in the part's coordinates: a part whose
+        // references moved is changed, and rebuilt (and the mates solved again) by the
+        // next round of `regenerate`.
+        let (in_context, external) = crate::in_context::update(
+            assembly,
+            self.context.as_deref(),
+            &|def| parts.get(&(def, None)).map(|p| p.model.clone()),
+            &|id| {
+                let c = assembly
+                    .component(id)
+                    .filter(|c| !c.suppressed && !left_out.contains(&c.id))?;
+                place(c, frames.get(&id).copied().unwrap_or(c.placement))
+            },
+            &|id| {
+                let c = assembly.component(id).filter(|c| !c.suppressed)?;
+                Some(frames.get(&id).copied().unwrap_or(c.placement))
+            },
+            &|id| {
+                assembly
+                    .component(id)
+                    .and_then(|c| parts.get(&part_key(assembly, c)))
+                    .map(|p| p.engine.evaluation().external.clone())
+                    .unwrap_or_default()
+            },
+        );
+
         // ---- The components ----
         let mut instances = Vec::new();
         let mut components = HashMap::new();
+        let mut component_frames = HashMap::new();
         for c in assembly.components() {
             if c.suppressed || left_out.contains(&c.id) {
                 components.insert(c.id, Status::Suppressed);
                 continue;
             }
-            let Some(part) = self.parts.get(&c.definition) else {
+            let Some(part) = self.parts.get(&part_key(assembly, c)) else {
                 continue;
             };
             let placement = frames.get(&c.id).copied().unwrap_or(c.placement);
             let built = part.engine.evaluation();
+            let poses: &[crate::Pose] = match posed.get(&c.id) {
+                Some(p) if flexible::is_flexible(c, &part.model) => p,
+                _ => &[],
+            };
+            component_frames.insert(vec![c.id], placement);
+            for (path, frame) in &built.component_frames {
+                let mut full = Vec::with_capacity(path.len() + 1);
+                full.push(c.id);
+                full.extend(path);
+                let posed = flexible::correction(poses, built, path);
+                component_frames.insert(full, placement.compose(&posed.compose(frame)));
+            }
             let before = instances.len();
             for body in &built.bodies {
                 instances.push(Instance {
@@ -650,25 +1035,49 @@ impl Engine {
                     body: body.clone(),
                     frame: placement,
                     color: c.color.or(part.model.color),
+                    transparency: c.transparency,
+                    hidden: false,
                 });
             }
-            // A sub-assembly's components, as one rigid thing.
+            // A sub-assembly's components: as one rigid thing, or for a flexible one
+            // where this assembly's solve put them.
             for inner in &built.instances {
                 let mut path = Vec::with_capacity(inner.path.len() + 1);
                 path.push(c.id);
                 path.extend(&inner.path);
+                let posed = flexible::correction(poses, built, &inner.path);
                 instances.push(Instance {
                     path,
                     body: inner.body.clone(),
-                    frame: placement.compose(&inner.frame),
+                    frame: placement.compose(&posed.compose(&inner.frame)),
                     color: c.color.or(inner.color),
+                    transparency: if c.transparency > 0.0 {
+                        c.transparency
+                    } else {
+                        inner.transparency
+                    },
+                    hidden: inner.hidden
+                        || part
+                            .model
+                            .assembly()
+                            .and_then(|a| a.component(inner.path[0]))
+                            .is_some_and(|x| !x.visible),
                 });
             }
             let name = &part.model.name;
             let failed = built.failures().count()
                 + built.component_problems().count()
                 + built.mate_failures().count();
-            let status = if failed > 0 {
+            let missing = c
+                .configuration
+                .filter(|id| part.model.configuration(*id).is_none());
+            let status = if missing.is_some() {
+                Status::Warning(format!(
+                    "{name} no longer has the configuration {} showed, so it shows {}: choose one of its configurations with 'component_configuration'.",
+                    c.name,
+                    part.model.active_configuration().name
+                ))
+            } else if failed > 0 {
                 Status::Warning(if part.model.is_assembly() {
                     format!(
                         "{failed} of the components of {name} need attention: open it to see which."
@@ -689,11 +1098,66 @@ impl Engine {
             };
             components.insert(c.id, status);
         }
-        if (!written.is_empty() || !moved.is_empty())
+        // ---- The cuts ----
+        // On the instances, as the mates and patterns placed them: the parts are not
+        // changed (see `asm_cut`).
+        let mut cut_writes = Vec::new();
+        let cuts = if assembly.cuts().len() == 0 {
+            self.cut_cache.clear();
+            HashMap::new()
+        } else {
+            let locate = |id: CompId| {
+                let c = assembly.component(id).filter(|c| !c.suppressed)?;
+                place(c, frames.get(&id).copied().unwrap_or(c.placement))
+            };
+            crate::asm_cut::apply(
+                assembly,
+                &model.parameters,
+                &mut instances,
+                &locate,
+                &mut self.cut_cache,
+                &mut cut_writes,
+            )
+        };
+        // Where a component is belongs to the active configuration: the others keep
+        // theirs (see `asm_config`).
+        let several = model.configurations().len() > 1;
+        let before: Vec<(CompId, crate::ComponentState)> = if several {
+            moved
+                .iter()
+                .map(|(id, _)| *id)
+                .chain(reposed.iter().map(|(id, _)| *id))
+                .filter_map(|id| Some((id, crate::ComponentState::of(assembly.component(id)?))))
+                .collect()
+        } else {
+            Vec::new()
+        };
+        if !cut_writes.is_empty()
             && let Some(assembly) = model.assembly_mut()
         {
+            for (id, plane, sketch, conversions) in cut_writes {
+                if let Some(cut) = assembly.cut_mut(id) {
+                    cut.placement = plane;
+                    cut.sketch = sketch;
+                    cut.conversions = conversions;
+                }
+            }
+        }
+        let in_context_changed = !in_context.is_empty();
+        if (!written.is_empty() || !moved.is_empty() || !reposed.is_empty() || in_context_changed)
+            && let Some(assembly) = model.assembly_mut()
+        {
+            for (id, poses) in reposed {
+                if let Some(c) = assembly.component_mut(id) {
+                    c.poses = poses;
+                }
+            }
             for (id, rebuilt) in written {
                 assembly.set_model(id, rebuilt);
+            }
+            // After the rebuilt models: the updates were made to those.
+            for (id, updated) in in_context {
+                assembly.set_model(id, Arc::new(updated));
             }
             for (id, frame) in moved {
                 if let Some(c) = assembly.component_mut(id) {
@@ -701,13 +1165,22 @@ impl Engine {
                 }
             }
         }
+        for (id, was) in before {
+            model.rescope_component(id, was, &crate::Scope::This);
+        }
         Assembled {
             instances,
             components,
-            mates: solved.statuses,
+            mates: statuses,
             patterns,
+            cuts,
             freedom: solved.freedom,
-            component_freedom: solved.component_freedom,
+            component_freedom,
+            component_frames,
+            inner_freedom,
+            references,
+            external,
+            in_context_changed,
         }
     }
 
@@ -735,21 +1208,57 @@ impl Engine {
         let state = match &feature.kind {
             FeatureKind::Sketch(s) => match ctx.plane(&s.plane).and_then(|plane| {
                 let mut sketch = s.sketch.clone();
+                // What is projected from something no longer there (suppressed, or gone)
+                // stays where it was, as SolidWorks leaves a dangling relation.
+                let mut dangling = 0usize;
                 for projection in &s.projections {
-                    use crate::projection::{Shape, Source, intersect_plane, project_edge};
+                    use crate::projection::{
+                        Shape, Source, intersect_plane, project_edge, project_sketch_entity,
+                    };
                     let shape = match &projection.source {
-                        Source::Point(p) => Shape::Point(plane.to_plane_coords(ctx.point(p)?)),
-                        Source::Plane(p) => intersect_plane(plane, ctx.plane(p)?)?,
-                        Source::Edge(e) => {
-                            let found = find_edge(ctx.bodies, e).ok_or(
-                                "The projected edge no longer exists. Replace its projection.",
-                            )?;
-                            project_edge(ctx.bodies[found.body].solid.edge(found.id), plane)?
-                        }
+                        Source::Point(p) => match ctx.point(p) {
+                            Ok(at) => Shape::Point(plane.to_plane_coords(at)),
+                            Err(_) => {
+                                dangling += 1;
+                                continue;
+                            }
+                        },
+                        Source::Plane(p) => match ctx.plane(p) {
+                            Ok(other) => intersect_plane(plane, other)?,
+                            Err(_) => {
+                                dangling += 1;
+                                continue;
+                            }
+                        },
+                        Source::SketchEntity {
+                            sketch: other,
+                            entity,
+                        } => match ctx.sketch_input(*other) {
+                            Ok((from_plane, from)) => {
+                                project_sketch_entity(from, from_plane, *entity, plane)?
+                            }
+                            Err(_) => {
+                                dangling += 1;
+                                continue;
+                            }
+                        },
+                        Source::Edge(e) => match find_edge(ctx.bodies, e) {
+                            Some(found) => {
+                                project_edge(ctx.bodies[found.body].solid.edge(found.id), plane)?
+                            }
+                            None => {
+                                dangling += 1;
+                                continue;
+                            }
+                        },
+                        // Where it last was: its context assembly keeps that up to date.
+                        Source::External(x) => x.last.project(plane).map_err(|e| {
+                            format!("Its in-context reference to {}: {e}", x.describe())
+                        })?,
                     };
                     shape.update(&mut sketch, projection.entity)?;
                 }
-                Ok((plane, sketch))
+                Ok((plane, sketch, dangling))
             }) {
                 Err(e) => fail(
                     e,
@@ -758,8 +1267,21 @@ impl Engine {
                         definition: SketchStatus::Under,
                     },
                 ),
-                Ok((plane, projected)) => {
-                    let key = hash::of(&(1u8, &projected, params_key, &plane));
+                Ok((plane, projected, dangling)) => {
+                    // A sketch whose expressions may read other features' dimensions
+                    // (`Width@Sketch1`, `"Dia.@Sketch1"`) is solved again when they change.
+                    let reads_others = projected.constraints().any(|(_, c)| {
+                        c.dimension
+                            .as_ref()
+                            .and_then(|d| d.expression.as_deref())
+                            .is_some_and(|e| e.contains(['@', '"']))
+                    });
+                    let params_key = if reads_others {
+                        hash::combine(params_key, run.dimensions_key)
+                    } else {
+                        params_key
+                    };
+                    let key = hash::of(&(1u8, &projected, params_key, &plane, dangling));
                     match self.cache.get(&id).filter(|c| c.key == key) {
                         Some(c) => {
                             if projected != s.sketch || plane != s.placement {
@@ -769,11 +1291,17 @@ impl Engine {
                             reused(&c.state)
                         }
                         None => {
-                            let (state, sketch) = solve_sketch(&projected, plane, model, &s.sketch);
+                            let (mut state, sketch) =
+                                solve_sketch(&projected, plane, model, &s.sketch);
+                            if dangling > 0 && state.status == Status::Ok {
+                                state.status = Status::Warning(format!(
+                                    "{dangling} of what it projects is no longer there (suppressed, or gone), so it stays where it was. Replace the projection if it should follow something else."
+                                ));
+                            }
                             let out_key = hash::of(&(&sketch, &plane));
                             // Keyed on the solved sketch: that is what the model holds
                             // from now on.
-                            let key = hash::of(&(1u8, &sketch, params_key, &plane));
+                            let key = hash::of(&(1u8, &sketch, params_key, &plane, dangling));
                             run.out_keys.insert(id, out_key);
                             self.cache.insert(
                                 id,
@@ -809,11 +1337,16 @@ impl Engine {
                         }
                         _ => None,
                     };
-                    Ok((plane, depth, up_to, sketch))
+                    let draft = e
+                        .params
+                        .draft
+                        .evaluate(ScalarKind::Angle, &model.parameters)
+                        .map_err(|m| format!("Draft: {m}."))?;
+                    Ok((plane, depth, draft, up_to, sketch))
                 })();
                 match inputs {
                     Err(m) => fail(m, Output::None),
-                    Ok((plane, depth, up_to, sketch)) => {
+                    Ok((plane, depth, draft, up_to, sketch)) => {
                         let sketch_key = run.out_keys.get(&e.sketch).copied().unwrap_or(0);
                         let key = hash::of(&(
                             2u8,
@@ -822,6 +1355,7 @@ impl Engine {
                             sketch_key,
                             run.body_key,
                             depth,
+                            draft,
                             &up_to,
                         ));
                         self.solid_feature(id, key, run, |bodies| {
@@ -832,6 +1366,7 @@ impl Engine {
                                 sketch,
                                 params: &e.params,
                                 depth,
+                                draft,
                                 up_to,
                                 stamp: key,
                                 mirror: false,
@@ -876,25 +1411,63 @@ impl Engine {
                     }
                 }
             }
-            FeatureKind::EdgeFlange(e) => match sheet::edge_flange_spec(e, &model.parameters) {
+            FeatureKind::EdgeFlange(e) => match sheet::edge_flange_spec(e, &model.parameters)
+                .and_then(|spec| Ok((spec, e.outline.map(|s| ctx.sketch_input(s)).transpose()?)))
+                .and_then(|(spec, outline)| {
+                    let up_to = e
+                        .up_to
+                        .as_ref()
+                        .map(|p| ctx.point(p).map_err(|m| format!("Up to: {m}")))
+                        .transpose()?;
+                    Ok((spec, outline, up_to))
+                }) {
                 Err(m) => fail(m, Output::None),
-                Ok(spec) => {
-                    let values = (spec.length, spec.angle, spec.offsets, spec.radius);
-                    let key = hash::of(&(4u8, id, &**e, run.body_key, values));
+                Ok((spec, outline, up_to)) => {
+                    // The relief ratio as it evaluates now: the definition only holds its
+                    // expression.
+                    let ratio = e
+                        .relief_ratio
+                        .as_ref()
+                        .and_then(|r| r.evaluate(ScalarKind::Number, &model.parameters).ok());
+                    let bend = sheet::edge_flange_bend(e, &model.parameters)
+                        .ok()
+                        .flatten()
+                        .map(|b| match b {
+                            peet_sheetmetal::BendModel::KFactor(v) => (0u8, v),
+                            peet_sheetmetal::BendModel::Allowance(v) => (1u8, v),
+                            peet_sheetmetal::BendModel::Deduction(v) => (2u8, v),
+                        });
+                    let set_out = sheet::edge_flange_position_offset(e, &model.parameters).ok();
+                    let values = (
+                        spec.length,
+                        spec.angle,
+                        spec.offsets,
+                        spec.radius,
+                        ratio,
+                        bend,
+                        set_out,
+                    );
+                    let outline_key = e.outline.and_then(|s| run.out_keys.get(&s).copied());
+                    let up_to_key = up_to.map(|p| p.to_array());
+                    let key =
+                        hash::of(&(4u8, id, &**e, run.body_key, values, outline_key, up_to_key));
                     self.solid_feature(id, key, run, |bodies| {
-                        sheet::apply_edge_flange(id, model, bodies, e, &spec, key)
+                        sheet::apply_edge_flange(id, model, bodies, e, &spec, outline, up_to, key)
                     })
                 }
             },
-            FeatureKind::SheetCut(c) => match ctx.sketch_input(c.sketch) {
+            FeatureKind::SheetCut(c) => match ctx
+                .sketch_input(c.sketch)
+                .and_then(|input| Ok((input, sheet::sheet_cut_reach(c, &model.parameters)?)))
+            {
                 Err(m) => fail(m, Output::None),
-                Ok((plane, sketch)) => {
+                Ok(((plane, sketch), reach)) => {
                     let face = match model.sketch(c.sketch).map(|s| &s.plane) {
                         Some(PlaneRef::Face(f)) => Some(f.clone()),
                         _ => None,
                     };
                     let sketch_key = run.out_keys.get(&c.sketch).copied().unwrap_or(0);
-                    let key = hash::of(&(5u8, id, sketch_key, run.body_key, &face));
+                    let key = hash::of(&(5u8, id, sketch_key, run.body_key, &face, &**c, reach));
                     self.solid_feature(id, key, run, |bodies| {
                         sheet::apply_sheet_cut(
                             id,
@@ -903,6 +1476,7 @@ impl Engine {
                             face.as_ref(),
                             &plane,
                             sketch,
+                            reach,
                             key,
                         )
                     })
@@ -1029,6 +1603,27 @@ impl Engine {
                     })
                 }
             },
+            FeatureKind::BreakCorner(b) => match ctx.scalar(&b.size, ScalarKind::Length, "Size") {
+                Err(m) => fail(m, Output::None),
+                Ok(size) => {
+                    let key = hash::of(&(23u8, id, &**b, run.body_key, size));
+                    self.solid_feature(id, key, run, |bodies| {
+                        sheet::apply_break_corner(id, model, bodies, b, size, key)
+                    })
+                }
+            },
+            FeatureKind::Unfold(u) => {
+                let key = hash::of(&(26u8, id, &**u, run.body_key));
+                self.solid_feature(id, key, run, |bodies| {
+                    sheet::apply_unfold(model, bodies, u, key)
+                })
+            }
+            FeatureKind::Fold(f) => {
+                let key = hash::of(&(27u8, id, &**f, run.body_key));
+                self.solid_feature(id, key, run, |bodies| {
+                    sheet::apply_fold(model, bodies, f, key)
+                })
+            }
             FeatureKind::Form(f) => {
                 let inputs = (|| {
                     let (plane, sketch) = ctx.sketch_input(f.sketch)?;
@@ -1060,7 +1655,7 @@ impl Engine {
             }
             FeatureKind::Pattern(p) => {
                 let inputs = (|| {
-                    let motions = ctx.pattern_motions(&p.def)?;
+                    let motions = ctx.pattern_motions(&p.def, &p.seeds)?;
                     let seeds = ctx.seeds(&p.seeds)?;
                     Ok((motions, seeds))
                 })();
@@ -1315,6 +1910,170 @@ impl Engine {
                     crate::import::apply_import(id, bodies, i, key)
                 })
             }
+            FeatureKind::MoveBody(m) => {
+                let inputs = (|| {
+                    let mut by = [0.0; 3];
+                    for (k, (s, axis)) in m.translate.iter().zip(["X", "Y", "Z"]).enumerate() {
+                        by[k] =
+                            ctx.scalar(s, ScalarKind::Length, &format!("Distance along {axis}"))?;
+                    }
+                    let mut turn = [0.0; 3];
+                    for (k, (s, axis)) in m.rotate.iter().zip(["X", "Y", "Z"]).enumerate() {
+                        turn[k] =
+                            ctx.scalar(s, ScalarKind::Angle, &format!("Angle about {axis}"))?;
+                    }
+                    let center = ctx.point(&m.center).map_err(|e| format!("Centre: {e}"))?;
+                    let copies = if m.copy {
+                        let n = ctx.scalar(&m.copies, ScalarKind::Number, "Copies")?;
+                        if n.fract().abs() > 1e-9 || n < 1.0 || n > 1000.0 {
+                            return Err(format!(
+                                "Copies: {n} is not a whole number from 1 to 1000."
+                            ));
+                        }
+                        n.round() as usize
+                    } else {
+                        0
+                    };
+                    // The reference planes the mates name, where they are now
+                    let mut planes = Vec::new();
+                    for mate in &m.mates {
+                        for geom in [&mate.moved, &mate.to] {
+                            if let crate::MateGeom::Plane(
+                                r @ (PlaneRef::Standard(_) | PlaneRef::Feature(_)),
+                            ) = geom
+                            {
+                                let plane =
+                                    ctx.plane(r).map_err(|e| format!("{}: {e}", mate.name))?;
+                                planes.push((r.clone(), plane));
+                            }
+                        }
+                    }
+                    Ok((
+                        crate::bodies::body_motion(DVec3::from(by), turn, center),
+                        copies,
+                        planes,
+                    ))
+                })();
+                match inputs {
+                    Err(e) => fail(e, Output::None),
+                    Ok((motion, copies, planes)) => {
+                        let key = hash::of(&(
+                            23u8,
+                            id,
+                            &**m,
+                            run.body_key,
+                            format!("{motion:?} {planes:?}"),
+                            copies,
+                            params_key,
+                        ));
+                        self.solid_feature(id, key, run, |bodies| {
+                            let (motion, mated) = if m.mates.is_empty() {
+                                (motion, None)
+                            } else {
+                                crate::bodies::mated_motion(
+                                    bodies,
+                                    m,
+                                    &motion,
+                                    planes,
+                                    &model.parameters,
+                                )?
+                            };
+                            let out = crate::bodies::apply_move_body(
+                                id, bodies, m, &motion, copies, key,
+                            )?;
+                            let warning = lost_sheet(model, bodies, &out.0, &feature.name);
+                            let warning = match (mated, warning) {
+                                (Some(a), Some(b)) => Some(format!("{a} {b}")),
+                                (a, b) => a.or(b),
+                            };
+                            Ok((out.0, warning))
+                        })
+                    }
+                }
+            }
+            FeatureKind::InsertPart(p) => {
+                let mirror = p
+                    .mirror
+                    .as_ref()
+                    .map(|r| ctx.plane(r).map_err(|e| format!("Mirror plane: {e}")))
+                    .transpose();
+                match mirror {
+                    Err(e) => fail(e, Output::None),
+                    Ok(mirror) => {
+                        let key = hash::of(&(24u8, id, &**p, run.body_key, &mirror));
+                        self.solid_feature(id, key, run, |bodies| {
+                            crate::bodies::apply_insert_part(id, bodies, p, mirror.as_ref(), key)
+                        })
+                    }
+                }
+            }
+            FeatureKind::StructuralMember(m) => {
+                let inputs = (|| {
+                    let rotate = ctx.scalar(&m.rotate, ScalarKind::Angle, "Rotate")?;
+                    let own = ctx.member_layout(m, rotate)?;
+                    // The members of earlier structural members, which these are trimmed to
+                    let mut earlier = Vec::new();
+                    if m.trim {
+                        for f in model.features().take_while(|f| f.id != id) {
+                            let FeatureKind::StructuralMember(e) = &f.kind else {
+                                continue;
+                            };
+                            if !run.states.get(&f.id).is_some_and(|s| s.status.is_built()) {
+                                continue;
+                            }
+                            let r = ctx.scalar(&e.rotate, ScalarKind::Angle, "Rotate")?;
+                            earlier.push((f.id, ctx.member_layout(e, r)?));
+                        }
+                    }
+                    Ok::<_, String>((own, earlier))
+                })();
+                match inputs {
+                    Err(e) => fail(e, Output::None),
+                    Ok((own, earlier)) => {
+                        let sketches = |def: &crate::StructuralMemberFeature| -> Vec<u64> {
+                            std::iter::once(def.profile)
+                                .chain(def.paths.iter().copied())
+                                .map(|s| run.out_keys.get(&s).copied().unwrap_or(0))
+                                .collect()
+                        };
+                        let mut key = hash::of(&(25u8, id, &**m, run.body_key, sketches(m)));
+                        for (e, _) in &earlier {
+                            if let Some(FeatureKind::StructuralMember(d)) =
+                                model.feature(*e).map(|f| &f.kind)
+                            {
+                                key = hash::combine(key, hash::of(&(&**d, sketches(d))));
+                            }
+                        }
+                        let earlier: Vec<&crate::weldment::Layout> =
+                            earlier.iter().map(|(_, l)| l).collect();
+                        self.solid_feature(id, key, run, |bodies| {
+                            crate::weldment::apply_structural_member(
+                                id, bodies, &own, m.corner, &earlier, key,
+                            )
+                        })
+                    }
+                }
+            }
+            // A 3D sketch is solved each time: a few points
+            FeatureKind::Sketch3d(s) => {
+                let values: Result<Vec<f64>, String> = s
+                    .dimensions
+                    .iter()
+                    .map(|d| ctx.scalar(d, ScalarKind::Length, "A dimension"))
+                    .collect();
+                match values.and_then(|v| s.solve(&v)) {
+                    Err(e) => fail(e, Output::None),
+                    Ok(points) => {
+                        let out_key = hash::of(&(31u8, id, &points));
+                        run.out_keys.insert(id, out_key);
+                        FeatureState {
+                            status: Status::Ok,
+                            output: Output::None,
+                            rebuilt: true,
+                        }
+                    }
+                }
+            }
             // Reference geometry is a few vector operations: always recomputed.
             FeatureKind::Plane(def) => reference(ctx.plane_def(def).map(Output::Plane)),
             FeatureKind::Axis(def) => reference(ctx.axis_def(def).map(Output::Axis)),
@@ -1403,6 +2162,8 @@ struct Run {
     states: HashMap<FeatureId, FeatureState>,
     out_keys: HashMap<FeatureId, u64>,
     stats: Stats,
+    /// The hash of the values of the dimensions expressions read by address.
+    dimensions_key: u64,
 }
 
 fn reused(state: &FeatureState) -> FeatureState {
@@ -1507,6 +2268,41 @@ impl<'m> Ctx<'m, '_> {
     }
 
     /// A built sketch's plane and geometry, for a feature that uses it.
+    /// A structural member's members, laid out.
+    fn member_layout(
+        &self,
+        def: &crate::StructuralMemberFeature,
+        rotate: f64,
+    ) -> Result<crate::weldment::Layout, String> {
+        let (plane, profile) = self
+            .sketch_input(def.profile)
+            .map_err(|m| m.replace("Its sketch", "Its profile"))?;
+        // Each path's lines in the model, with their ids: a sketch's, or a 3D sketch's
+        let mut paths: Vec<Vec<(u32, DVec3, DVec3)>> = Vec::new();
+        for &p in &def.paths {
+            if let Some(FeatureKind::Sketch3d(s)) = self.model.feature(p).map(|f| &f.kind) {
+                // Solved again: a few points
+                self.state_of(p, "A path")?;
+                let values = s
+                    .dimensions
+                    .iter()
+                    .map(|d| self.scalar(d, ScalarKind::Length, "A dimension"))
+                    .collect::<Result<Vec<f64>, String>>()?;
+                let points = s.solve(&values)?;
+                paths.push(s.path_lines(&points));
+                continue;
+            }
+            let (plane, sketch) = self
+                .sketch_input(p)
+                .map_err(|m| m.replace("Its sketch", "A path"))?;
+            paths.push(crate::weldment::sketch_lines(&plane, sketch));
+        }
+        if paths.is_empty() {
+            return Err("Pick the path sketches: the lines the members follow.".to_owned());
+        }
+        crate::weldment::layout((&plane, profile), &paths, rotate).map_err(|e| e.0)
+    }
+
     fn sketch_input(&self, id: FeatureId) -> Result<(Plane, &'m Sketch), String> {
         let state = self.state_of(id, "Its sketch")?;
         let Output::Sketch { plane, .. } = state.output else {
@@ -1526,6 +2322,14 @@ impl<'m> Ctx<'m, '_> {
                 Output::Plane(p) => Ok(p),
                 Output::Frame(frame) => Ok(Plane { frame }),
                 _ => Err(format!("{} is not a plane.", self.model.name_of(*id))),
+            },
+            // Another component's, in an assembly: where its context last had it.
+            PlaneRef::External(x) => match x.last {
+                crate::in_context::Geom::Plane(p) => Ok(p),
+                _ => Err(format!(
+                    "Its plane follows {}, which is not flat: break the reference ('break_references') and pick a plane.",
+                    x.describe()
+                )),
             },
             PlaneRef::Face(face) => {
                 let found = find_face(self.bodies, face).ok_or_else(|| {
@@ -1742,6 +2546,16 @@ impl<'m> Ctx<'m, '_> {
 fn seed_key(model: &Model, seeds: &[FeatureId], out_keys: &HashMap<FeatureId, u64>) -> u64 {
     let mut key = 0;
     for &s in seeds {
+        // A copy of a pattern or a mirror: what it copies too
+        match model.feature(s).map(|f| &f.kind) {
+            Some(FeatureKind::Pattern(p)) => {
+                key = hash::combine(key, seed_key(model, &p.seeds, out_keys))
+            }
+            Some(FeatureKind::Mirror(m)) => {
+                key = hash::combine(key, seed_key(model, &m.seeds, out_keys))
+            }
+            _ => {}
+        }
         let def = model.feature(s).map_or(0, |f| hash::of(&f.kind));
         let sketch = model
             .feature(s)
@@ -1755,7 +2569,40 @@ fn seed_key(model: &Model, seeds: &[FeatureId], out_keys: &HashMap<FeatureId, u6
 
 impl<'m> Ctx<'m, '_> {
     /// The copied features, resolved.
-    fn seeds(&self, ids: &[FeatureId]) -> Result<Vec<(String, pattern::Seed<'m>)>, String> {
+    /// Each with its place in the model, which the copies are built in the order of.
+    /// A copy of a pattern or a mirror is a copy of what it copies, where the pattern has it
+    /// (the original and each copy), as SolidWorks copies one.
+    fn seeds(&self, ids: &[FeatureId]) -> Result<Vec<pattern::SeedEntry<'m>>, String> {
+        let mut out = self.seeds_of(ids)?;
+        // A draft copies onto the copies of the features whose faces it drafts.
+        let copied: Vec<(FeatureId, bool)> =
+            out.iter().map(|(id, e)| (*id, e.3.is_empty())).collect();
+        for (id, (name, seed, ..)) in &mut out {
+            if let pattern::Seed::Draft { def, sources, .. } = seed {
+                for f in def.faces.iter().flat_map(|r| r.name.features()) {
+                    let at = copied.iter().position(|(c, plain)| *c == f && *plain);
+                    match at {
+                        Some(si) if !sources.iter().any(|(s, _)| *s == f) => sources.push((f, si)),
+                        Some(_) => {}
+                        None if f == *id => {}
+                        None => {
+                            return Err(format!(
+                                "{name} drafts faces of {}, which the pattern doesn't copy: add it to the features to copy, before {name}.",
+                                self.model.name_of(f)
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+        Ok(out.into_iter().map(|(_, e)| e).collect())
+    }
+
+    /// [`Ctx::seeds`], each with the feature it copies.
+    fn seeds_of(
+        &self,
+        ids: &[FeatureId],
+    ) -> Result<Vec<(FeatureId, pattern::SeedEntry<'m>)>, String> {
         if ids.is_empty() {
             return Err("Pick the features to copy.".to_owned());
         }
@@ -1764,7 +2611,59 @@ impl<'m> Ctx<'m, '_> {
             self.state_of(id, "A copied feature")?;
             let feature = self.model.feature(id).expect("state_of checked it exists");
             let name = feature.name.clone();
+            // What a pattern or a mirror copies, where it has it: the original included
+            let original = pattern::Motion::Rigid(Frame::WORLD);
+            let copies = match &feature.kind {
+                FeatureKind::Pattern(p) => {
+                    let mut motions = vec![original];
+                    motions.extend(self.pattern_motions(&p.def, &p.seeds)?);
+                    Some((motions, &p.seeds))
+                }
+                FeatureKind::Mirror(m) => {
+                    let plane = self
+                        .plane(&m.plane)
+                        .map_err(|e| format!("{name}'s mirror plane: {e}"))?;
+                    let motion = pattern::Motion::Mirror {
+                        point: plane.origin(),
+                        normal: plane.normal(),
+                    };
+                    Some((vec![original, motion], &m.seeds))
+                }
+                _ => None,
+            };
+            if let Some((motions, seeds)) = copies {
+                for (copied, (n, seed, index, inner)) in self.seeds_of(seeds)? {
+                    let moved = if inner.is_empty() {
+                        motions.clone()
+                    } else {
+                        motions
+                            .iter()
+                            .flat_map(|m| inner.iter().map(move |i| m.after(i)))
+                            .collect()
+                    };
+                    out.push((copied, (n, seed, index, moved)));
+                }
+                continue;
+            }
             let seed = match &feature.kind {
+                FeatureKind::BaseFlange(b) if b.tab => {
+                    let (plane, sketch) = self.sketch_input(b.sketch)?;
+                    pattern::Seed::Tab { plane, sketch }
+                }
+                FeatureKind::BreakCorner(_) => pattern::Seed::BreakCorner { original: id },
+                FeatureKind::MiterFlange(m) => {
+                    let (plane, sketch) = self.sketch_input(m.sketch)?;
+                    pattern::Seed::MiterFlange {
+                        original: id,
+                        plane,
+                        sketch,
+                        gap: self.scalar(&m.gap, ScalarKind::Length, "Gap")?,
+                        offsets: [
+                            self.scalar(&m.offset_start, ScalarKind::Length, "Start offset")?,
+                            self.scalar(&m.offset_end, ScalarKind::Length, "End offset")?,
+                        ],
+                    }
+                }
                 FeatureKind::Extrude(e) => {
                     let (plane, sketch) = self.sketch_input(e.sketch)?;
                     let depth = if e.params.end.uses_depth() {
@@ -1776,20 +2675,29 @@ impl<'m> Ctx<'m, '_> {
                         EndCondition::UpTo(r) => Some(self.plane(r)?),
                         _ => None,
                     };
+                    let draft = self.scalar(&e.params.draft, ScalarKind::Angle, "Draft")?;
                     pattern::Seed::Extrude {
                         plane,
                         sketch,
                         params: &e.params,
                         depth,
+                        draft,
                         up_to,
                     }
                 }
+                FeatureKind::EdgeFlange(e) => pattern::Seed::EdgeFlange {
+                    original: id,
+                    def: e,
+                    spec: sheet::edge_flange_spec(e, &self.model.parameters)?,
+                    outline: e.outline.map(|s| self.sketch_input(s)).transpose()?,
+                },
                 FeatureKind::SheetCut(c) => {
                     let (plane, sketch) = self.sketch_input(c.sketch)?;
                     pattern::Seed::SheetCut {
                         plane,
                         sketch,
                         face: sheet::sketch_face_ref(self.model, c.sketch),
+                        reach: sheet::sheet_cut_reach(c, &self.model.parameters)?,
                     }
                 }
                 FeatureKind::Revolve(r) => {
@@ -1814,6 +2722,19 @@ impl<'m> Ctx<'m, '_> {
                         sizes: self.hole_sizes(h)?,
                     }
                 }
+                FeatureKind::Draft(d) => {
+                    let Some(p) = &d.neutral else {
+                        return Err(format!("{name} has no neutral plane."));
+                    };
+                    pattern::Seed::Draft {
+                        def: d,
+                        neutral: self
+                            .plane(p)
+                            .map_err(|m| format!("{name}'s neutral plane: {m}"))?,
+                        angle: self.scalar(&d.angle, ScalarKind::Angle, "Angle")?,
+                        sources: Vec::new(),
+                    }
+                }
                 FeatureKind::Form(f) => {
                     let (plane, sketch) = self.sketch_input(f.sketch)?;
                     pattern::Seed::Form {
@@ -1826,20 +2747,144 @@ impl<'m> Ctx<'m, '_> {
                 }
                 other => {
                     return Err(format!(
-                        "{name} is a {}, which can't be copied: patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts and forms.",
-                        other.type_name().to_lowercase()
+                        "{name} is a {}, which can't be copied: {}",
+                        other.type_name().to_lowercase(),
+                        crate::feature::COPIED
                     ));
                 }
             };
-            out.push((name, seed));
+            out.push((
+                id,
+                (
+                    name,
+                    seed,
+                    self.model.index_of(id).unwrap_or(usize::MAX),
+                    Vec::new(),
+                ),
+            ));
         }
         Ok(out)
     }
 
+    /// The spacing and count of a linear pattern direction that runs up to a reference, as
+    /// SolidWorks has them: the distance along the direction from the seed (its centre, or
+    /// its reference) to the reference, less the offset, is what the copies span. Given the
+    /// spacing, as many copies as fit (one exactly at the end counts); given the count,
+    /// spread evenly over it.
+    fn up_to_reference(
+        &self,
+        u: &crate::feature::PatternUpTo,
+        d: &crate::feature::LinearDirection,
+        dir: DVec3,
+        seeds: &[FeatureId],
+        what: &str,
+    ) -> Result<(f64, u32), String> {
+        use crate::feature::{PatternBound, PatternKeeps};
+        let centre = self.seed_centre(seeds)?;
+        // How far along the direction from the seed's centre a bound is
+        let along = |b: &PatternBound| -> Result<f64, String> {
+            match b {
+                PatternBound::Point(p) => Ok((self.point(p)? - centre).dot(dir)),
+                PatternBound::Plane(p) => {
+                    let plane = self.plane(p)?;
+                    let n = plane.normal();
+                    let across = dir.dot(n);
+                    if across.abs() < 1e-9 {
+                        return Err(
+                            "the plane runs along the direction: pick one across it".to_owned()
+                        );
+                    }
+                    Ok((plane.origin() - centre).dot(n) / across)
+                }
+            }
+        };
+        let to = along(&u.to)?;
+        let from = match &u.seed {
+            Some(b) => along(b).map_err(|m| format!("the seed's reference: {m}"))?,
+            None => 0.0,
+        };
+        let offset = self.scalar(&u.offset, ScalarKind::Length, "Offset")?;
+        let span = to - from - if u.reverse_offset { -offset } else { offset };
+        if span <= 1e-9 {
+            return Err(format!(
+                "the reference, less the offset, is not ahead of the seed ({span:.4} mm along the direction): flip the direction, or the offset"
+            ));
+        }
+        match u.keeps {
+            PatternKeeps::Spacing => {
+                let spacing = self.scalar(&d.spacing, ScalarKind::Length, "Spacing")?;
+                if spacing <= 1e-9 {
+                    return Err("the spacing must be more than zero".to_owned());
+                }
+                let n = (span / spacing + 1e-9).floor() + 1.0;
+                // As a count of 1 does, it fails: there is nothing to copy
+                if n < 2.0 {
+                    return Err(format!(
+                        "there is no room for a copy: the reference, less the offset, is {span:.4} mm on, less than the spacing"
+                    ));
+                }
+                if n > 10_000.0 {
+                    return Err(format!("{n} copies would fit, and 10000 is the most"));
+                }
+                Ok((spacing, n as u32))
+            }
+            PatternKeeps::Count => {
+                let n = self.scalar(&d.count, ScalarKind::Number, &format!("{what} count"))?;
+                if !(n.is_finite() && n.fract() == 0.0 && (2.0..=10_000.0).contains(&n)) {
+                    return Err(format!(
+                        "the count must be a whole number between 2 and 10000 (it is {n})"
+                    ));
+                }
+                Ok((span / (n - 1.0), n as u32))
+            }
+        }
+    }
+
+    /// The middle of the box round the faces that `seeds` made (SolidWorks' centroid of a
+    /// pattern's seed, which its later releases call the bounding box centre).
+    fn seed_centre(&self, seeds: &[FeatureId]) -> Result<DVec3, String> {
+        let mut lo = DVec3::splat(f64::INFINITY);
+        let mut hi = DVec3::splat(f64::NEG_INFINITY);
+        for body in self.bodies {
+            for face in body.solid.face_ids() {
+                if !body.face_name(face).features().any(|f| seeds.contains(&f)) {
+                    continue;
+                }
+                for &l in &body.solid.face(face).loops {
+                    for c in body.solid.loop_coedges(l) {
+                        let edge = body.solid.edge(body.solid.coedge(c).edge);
+                        for k in 0..=8 {
+                            let p = edge.point_at_fraction(f64::from(k) / 8.0);
+                            lo = lo.min(p);
+                            hi = hi.max(p);
+                        }
+                    }
+                }
+            }
+        }
+        if lo.x.is_finite() {
+            Ok((lo + hi) / 2.0)
+        } else {
+            Err(
+                "the seed has no faces in the part to measure from: pick a reference on the seed"
+                    .to_owned(),
+            )
+        }
+    }
+
     /// Where a pattern's copies go (the original excluded).
-    fn pattern_motions(&self, def: &PatternDef) -> Result<Vec<pattern::Motion>, String> {
+    fn pattern_motions(
+        &self,
+        def: &PatternDef,
+        seeds: &[FeatureId],
+    ) -> Result<Vec<pattern::Motion>, String> {
         let count = |s: &crate::Scalar, what: &str| {
-            let n = self.scalar(s, ScalarKind::Number, &format!("{what} count"))?;
+            let mut n = self.scalar(s, ScalarKind::Number, &format!("{what} count"))?;
+            // A count an expression gives is rounded to the nearest whole number, as
+            // SolidWorks rounds an equation's value for a pattern's instances (7.8 is 8).
+            if s.expression.is_some() {
+                n = n.round();
+            }
             if n.is_finite() && n.fract() == 0.0 && (2.0..=10_000.0).contains(&n) {
                 Ok(n as u32)
             } else {
@@ -1854,9 +2899,16 @@ impl<'m> Ctx<'m, '_> {
                     let axis = self
                         .axis(&d.direction)
                         .map_err(|m| format!("{what}: {m}"))?;
-                    let spacing = self.scalar(&d.spacing, ScalarKind::Length, "Spacing")?;
                     let sign = if d.flip { -1.0 } else { 1.0 };
-                    Ok::<_, String>((axis.dir * spacing * sign, count(&d.count, what)?))
+                    let dir = axis.dir * sign;
+                    if let Some(u) = &d.up_to {
+                        let (spacing, n) = self
+                            .up_to_reference(u, d, dir, seeds, what)
+                            .map_err(|m| format!("Up to reference ({what}): {m}."))?;
+                        return Ok((dir * spacing, n));
+                    }
+                    let spacing = self.scalar(&d.spacing, ScalarKind::Length, "Spacing")?;
+                    Ok::<_, String>((dir * spacing, count(&d.count, what)?))
                 };
                 let (s1, n1) = step(first, "direction")?;
                 let (s2, n2) = match second {

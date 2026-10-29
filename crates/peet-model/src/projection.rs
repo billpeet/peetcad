@@ -1,5 +1,5 @@
 //! Persistent model geometry projected into a sketch before solving.
-use crate::{EdgeRef, PlaneRef, PointRef};
+use crate::{EdgeRef, FeatureId, PlaneRef, PointRef};
 use peet_kernel::Curve3;
 use peet_math::{DVec2, Plane};
 use peet_sketch::{EntityId, Geometry, Sketch};
@@ -10,6 +10,16 @@ pub enum Source {
     Edge(EdgeRef),
     Point(PointRef),
     Plane(PlaneRef),
+    /// An entity of another (earlier) sketch: a point, line, circle or arc, as SolidWorks
+    /// relates a sketch to (and converts) another sketch's entities.
+    SketchEntity {
+        sketch: FeatureId,
+        entity: EntityId,
+    },
+    /// Another component's geometry in an assembly the part is used in (SolidWorks'
+    /// in-context reference): the part is built from where it last was, and its context
+    /// assembly updates that (see [`crate::in_context`]).
+    External(Box<crate::in_context::External>),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -44,7 +54,64 @@ pub fn project_edge(edge: &peet_kernel::topo::Edge, plane: Plane) -> Result<Shap
                 } else { Ok(Shape::Arc(center, b, a)) }
             }
         }
-        _ => Err("Project a straight edge or a circular edge parallel to the sketch plane. This edge projects to a collapsed line or an unsupported curve.".into()),
+        // A circular edge seen edge on (its plane square to the sketch's, as a bend's end is from
+        // the sheet): the line it covers, as SolidWorks converts it
+        Curve3::Circle(c) if c.frame.z_axis().dot(plane.normal()).abs() < 1e-9 => {
+            let pts: Vec<DVec2> = (0..=64)
+                .map(|k| uv(edge.point_at_fraction(k as f64 / 64.0)))
+                .collect();
+            let along = (uv(c.frame.origin + c.frame.z_axis().cross(plane.normal())) - uv(c.frame.origin))
+                .normalize_or_zero();
+            let (lo, hi) = pts.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), p| {
+                let t = p.dot(along);
+                (lo.min(t), hi.max(t))
+            });
+            if hi - lo <= 1e-9 || hi.is_nan() || lo.is_nan() {
+                return Err("This edge projects to a point.".into());
+            }
+            let off = pts[0] - along * pts[0].dot(along);
+            Ok(Shape::Line(off + along * lo, off + along * hi))
+        }
+        _ => Err("Project a straight edge, a circular edge parallel to the sketch plane or one seen edge on. This edge projects to a collapsed line or an unsupported curve.".into()),
+    }
+}
+
+/// Another sketch's entity, seen from `plane`: a point or a line anywhere, a circle or an
+/// arc where the two sketches are parallel (seen from behind, an arc runs the other way).
+pub fn project_sketch_entity(
+    from: &Sketch,
+    from_plane: Plane,
+    entity: EntityId,
+    plane: Plane,
+) -> Result<Shape, String> {
+    let e = from
+        .entity(entity)
+        .ok_or("The entity it projects was deleted from its sketch.")?;
+    let at = |id: EntityId| plane.to_plane_coords(from_plane.from_plane_coords(from.point(id)));
+    let parallel = from_plane.normal().cross(plane.normal()).length() < 1e-9;
+    let facing = from_plane.normal().dot(plane.normal()) > 0.0;
+    match e.geometry {
+        Geometry::Point { pos } => Ok(Shape::Point(
+            plane.to_plane_coords(from_plane.from_plane_coords(pos)),
+        )),
+        Geometry::Line { start, end } => {
+            let (a, b) = (at(start), at(end));
+            if a.distance(b) <= 1e-9 {
+                return Err("The line it projects is seen end on: it projects to a point.".into());
+            }
+            Ok(Shape::Line(a, b))
+        }
+        Geometry::Circle { center, radius } if parallel => Ok(Shape::Circle(at(center), radius)),
+        Geometry::Arc { center, start, end } if parallel => Ok(if facing {
+            Shape::Arc(at(center), at(start), at(end))
+        } else {
+            Shape::Arc(at(center), at(end), at(start))
+        }),
+        Geometry::Circle { .. } | Geometry::Arc { .. } => Err(
+            "A circle or arc of another sketch can only be projected into a sketch parallel to it."
+                .into(),
+        ),
+        _ => Err("Project a point, line, circle or arc of the other sketch.".into()),
     }
 }
 
@@ -152,10 +219,34 @@ mod tests {
         assert!(b.abs_diff_eq(DVec2::new(10., 0.), 1e-9));
     }
     #[test]
+    fn a_circular_edge_seen_edge_on_projects_to_the_line_it_covers() {
+        // A quarter of a circle in the top plane, from +X to +Y, seen from the front
+        let arc = edge(
+            Curve3::Circle(Circle3 {
+                frame: Frame::WORLD,
+                radius: 10.,
+            }),
+            FRAC_PI_2,
+            false,
+        );
+        let Shape::Line(a, b) = project_edge(&arc, Plane::front()).unwrap() else {
+            panic!("expected a line")
+        };
+        let (lo, hi) = (a.x.min(b.x), a.x.max(b.x));
+        assert!(
+            (lo - 0.0).abs() < 1e-9 && (hi - 10.0).abs() < 1e-9,
+            "{a} {b}"
+        );
+        assert!(a.y.abs() < 1e-9 && b.y.abs() < 1e-9);
+    }
+    #[test]
     fn tilted_circle_and_collapsed_line_are_refused() {
         let circle = edge(
             Curve3::Circle(Circle3 {
-                frame: Frame::WORLD,
+                frame: Frame {
+                    origin: DVec3::ZERO,
+                    rotation: peet_math::DQuat::from_rotation_x(0.6),
+                },
                 radius: 10.,
             }),
             TAU,

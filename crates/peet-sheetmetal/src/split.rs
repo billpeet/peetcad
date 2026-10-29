@@ -396,6 +396,7 @@ impl Layout {
             kind: PieceKind::Bend(bend),
             outline: parent.outline.clone(),
             trims: bend_trims,
+            adds: parent.adds.clone(),
             frame: parent.frame,
         });
         self.pieces.push(Piece {
@@ -403,12 +404,23 @@ impl Layout {
             kind: PieceKind::Flange,
             outline: parent.outline.clone(),
             trims: child_trims,
+            adds: parent.adds.clone(),
             frame: child_frame,
         });
         self.pieces[piece].trims.push(after_start);
         for cut in &mut self.cuts {
             if cut.applies_to(piece) {
                 cut.pieces.extend([bend_index, child_index]);
+            }
+            let kept: Vec<Area> = cut
+                .keep
+                .iter()
+                .filter(|(k, _)| *k == piece)
+                .map(|(_, a)| a.clone())
+                .collect();
+            for a in kept {
+                cut.keep.push((bend_index, a.clone()));
+                cut.keep.push((child_index, a));
             }
         }
 

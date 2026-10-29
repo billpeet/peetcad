@@ -12,12 +12,12 @@ use serde::{Deserialize, Serialize};
 
 use peet_sheetmetal::corner::{CornerKind, CornerRelief};
 use peet_sheetmetal::{
-    BendLinePosition, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
+    BendLinePosition, BreakKind, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
 };
 
 use crate::convert::ConvertToSheetFeature;
 use crate::dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
-use crate::extrude::Extrude;
+use crate::extrude::{EndCondition, Extrude, Operation, RegionSelection};
 use crate::hole::HoleFeature;
 use crate::import::ImportFeature;
 use crate::loft::LoftFeature;
@@ -199,6 +199,10 @@ pub enum PlaneRef {
     Feature(FeatureId),
     /// A planar face of a body.
     Face(FaceRef),
+    /// A flat face or plane of another component in an assembly the part is used in
+    /// (SolidWorks' in-context sketch plane, plane or "up to" end condition): where it last
+    /// was, which its context assembly updates (see [`crate::in_context`]). Model schema 12.
+    External(Box<crate::in_context::External>),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -285,6 +289,89 @@ pub struct ExtrudeFeature {
     pub params: Extrude,
 }
 
+/// An extrusion as model schemas through 11 stored it: before its side could be flipped and
+/// its walls drafted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ExtrudeFeatureV11 {
+    sketch: FeatureId,
+    params: ExtrudeV11,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct ExtrudeV11 {
+    end: EndCondition,
+    depth: Scalar,
+    reverse: bool,
+    operation: Operation,
+    regions: RegionSelection,
+}
+
+impl From<ExtrudeFeatureV11> for ExtrudeFeature {
+    fn from(e: ExtrudeFeatureV11) -> Self {
+        let old = e.params;
+        let mut params = Extrude::new(old.operation);
+        params.end = old.end;
+        params.depth = old.depth;
+        params.reverse = old.reverse;
+        params.regions = old.regions;
+        Self {
+            sketch: e.sketch,
+            params,
+        }
+    }
+}
+
+impl From<&ExtrudeFeature> for ExtrudeFeatureV11 {
+    /// The old layout, which has no room for a flipped side or a draft.
+    fn from(e: &ExtrudeFeature) -> Self {
+        let p = &e.params;
+        Self {
+            sketch: e.sketch,
+            params: ExtrudeV11 {
+                end: p.end.clone(),
+                depth: p.depth.clone(),
+                reverse: p.reverse,
+                operation: p.operation,
+                regions: p.regions.clone(),
+            },
+        }
+    }
+}
+
+/// A conversion to sheet metal as model schemas through 11 stored it: before it could
+/// be given a thickness of its own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ConvertToSheetFeatureV11 {
+    face: Option<FaceRef>,
+    model: BendModelDef,
+    relief: ReliefType,
+    relief_ratio: Scalar,
+}
+
+impl From<ConvertToSheetFeatureV11> for ConvertToSheetFeature {
+    fn from(c: ConvertToSheetFeatureV11) -> Self {
+        Self {
+            face: c.face,
+            model: c.model,
+            relief: c.relief,
+            relief_ratio: c.relief_ratio,
+            thickness: None,
+        }
+    }
+}
+
+impl From<&ConvertToSheetFeature> for ConvertToSheetFeatureV11 {
+    /// The old layout, which has no room for a thickness of its own.
+    fn from(c: &ConvertToSheetFeature) -> Self {
+        Self {
+            face: c.face.clone(),
+            model: c.model.clone(),
+            relief: c.relief,
+            relief_ratio: c.relief_ratio.clone(),
+        }
+    }
+}
+
 /// How a sheet metal body works out the flat length of its bends, as entered.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub enum BendModelDef {
@@ -349,7 +436,17 @@ pub struct BaseFlangeFeature {
     pub symmetric: bool,
     /// Open profiles: extrude against the sketch normal.
     pub flip_depth: bool,
+    /// Open profiles: a bend model of each bend's own, in order along the profile (`None`,
+    /// or none given: the body's), as SolidWorks' sketched bends can have.
+    pub bends: Vec<Option<BendModelDef>>,
+    /// A tab: a closed sketch on a flat face of a sheet metal body (or in its plane) adds
+    /// to that body, as SolidWorks' base flange does on a part that has sheet metal
+    /// already. It takes the body's thickness and fills in what earlier cuts took.
+    pub tab: bool,
 }
+
+/// What patterns and mirrors copy, for messages.
+pub const COPIED: &str = "patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts, forms, edge and mitre flanges, tabs, break corners, drafts of the faces of features they also copy, and other patterns and mirrors.";
 
 impl BaseFlangeFeature {
     pub fn new(sketch: FeatureId) -> Self {
@@ -360,6 +457,49 @@ impl BaseFlangeFeature {
             depth: Scalar::new(50.0),
             symmetric: false,
             flip_depth: false,
+            bends: Vec::new(),
+            tab: false,
+        }
+    }
+}
+
+/// A base flange as model schemas through 11 stored it: before its bends could have models
+/// of their own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct BaseFlangeFeatureV11 {
+    sketch: FeatureId,
+    settings: SheetSettingsDef,
+    reverse: bool,
+    depth: Scalar,
+    symmetric: bool,
+    flip_depth: bool,
+}
+
+impl From<BaseFlangeFeatureV11> for BaseFlangeFeature {
+    fn from(b: BaseFlangeFeatureV11) -> Self {
+        Self {
+            sketch: b.sketch,
+            settings: b.settings,
+            reverse: b.reverse,
+            depth: b.depth,
+            symmetric: b.symmetric,
+            flip_depth: b.flip_depth,
+            bends: Vec::new(),
+            tab: false,
+        }
+    }
+}
+
+impl From<&BaseFlangeFeature> for BaseFlangeFeatureV11 {
+    /// The old layout, which has no room for the bends' own models.
+    fn from(b: &BaseFlangeFeature) -> Self {
+        Self {
+            sketch: b.sketch,
+            settings: b.settings.clone(),
+            reverse: b.reverse,
+            depth: b.depth.clone(),
+            symmetric: b.symmetric,
+            flip_depth: b.flip_depth,
         }
     }
 }
@@ -381,6 +521,24 @@ pub struct EdgeFlangeFeature {
     pub flip: bool,
     /// Inner bend radius, if not the body's default.
     pub radius: Option<Scalar>,
+    /// The relief where the flange is set back from an end of its edge, if not the
+    /// body's.
+    pub relief: Option<ReliefType>,
+    /// That relief's size as a multiple of the thickness, if not the body's.
+    pub relief_ratio: Option<Scalar>,
+    /// How the flat length of this flange's bend is worked out, if not as the body's.
+    pub bend: Option<BendModelDef>,
+    /// How far out from its edge the flange is set (SolidWorks' position offset): the
+    /// sheet runs on that far flat before the bend. Negative sets it in.
+    pub position_offset: Scalar,
+    /// A sketch of the flange's shape, as SolidWorks' flange profile: the flange is made
+    /// as wide and as long as the sketch's region reaches and cut to it. Its plane need not
+    /// be the flange's (one turned about the edge by the flange's angle is): the region is
+    /// projected onto the flange.
+    pub outline: Option<FeatureId>,
+    /// A point the flange runs up to, in place of its length (SolidWorks' "up to
+    /// vertex"): its end goes through the point, square to the flange, and follows it.
+    pub up_to: Option<PointRef>,
 }
 
 impl EdgeFlangeFeature {
@@ -394,6 +552,12 @@ impl EdgeFlangeFeature {
             offset_end: Scalar::new(0.0),
             flip: false,
             radius: None,
+            relief: None,
+            relief_ratio: None,
+            bend: None,
+            position_offset: Scalar::new(0.0),
+            outline: None,
+            up_to: None,
         }
     }
 }
@@ -403,6 +567,62 @@ impl EdgeFlangeFeature {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SheetCutFeature {
     pub sketch: FeatureId,
+    /// How far the cut reaches past the sheet it is drawn on.
+    pub end: SheetCutEnd,
+    /// For [`SheetCutEnd::Blind`]: how far, from the face the sketch is on.
+    pub depth: Scalar,
+    /// Away from the sheet, not into it.
+    pub reverse: bool,
+    /// As far the other way too.
+    pub both: bool,
+}
+
+impl SheetCutFeature {
+    pub fn new(sketch: FeatureId) -> Self {
+        Self {
+            sketch,
+            end: SheetCutEnd::Sheet,
+            depth: Scalar::new(10.0),
+            reverse: false,
+            both: false,
+        }
+    }
+}
+
+/// How far a sheet metal cut reaches, as SolidWorks' cut-extrude end conditions do. A
+/// cut goes square through each flange it reaches: through flanges parallel to its sketch
+/// that lie wholly within its reach, and across flanges square to it, and on across a bend at the end of one that the reach goes past.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum SheetCutEnd {
+    /// Through the sheet the sketch is on, and the flanges with a face in its plane.
+    Sheet,
+    /// As far as the depth from the sketch's face.
+    Blind,
+    /// Through every flange in its way.
+    ThroughAll,
+}
+
+impl SheetCutEnd {
+    pub const ALL: [Self; 3] = [Self::Sheet, Self::Blind, Self::ThroughAll];
+}
+
+/// A sheet metal cut as model schemas through 11 stored it: through its own sheet only.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct SheetCutFeatureV11 {
+    sketch: FeatureId,
+}
+
+impl From<SheetCutFeatureV11> for SheetCutFeature {
+    fn from(c: SheetCutFeatureV11) -> Self {
+        Self::new(c.sketch)
+    }
+}
+
+impl From<&SheetCutFeature> for SheetCutFeatureV11 {
+    /// The old layout, which has no room for a reach past the sheet.
+    fn from(c: &SheetCutFeature) -> Self {
+        Self { sketch: c.sketch }
+    }
 }
 
 /// A hem on an edge of a sheet metal body: the edge folded back over the sheet.
@@ -527,6 +747,83 @@ impl MiterFlangeFeature {
     }
 }
 
+/// Corners of a sheet metal body broken: rounded or cut straight across.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct BreakCornerFeature {
+    /// The corners: each the edge through the sheet where two straight sides of a flat
+    /// face meet.
+    pub edges: Vec<EdgeRef>,
+    pub kind: BreakKind,
+    /// A fillet's radius, or a chamfer's distance along each side.
+    pub size: Scalar,
+    /// Flat faces of the sheet whose every corner is broken, as SolidWorks' break corner
+    /// on a face: the corners are found again at each rebuild, so they follow the face
+    /// when a cut or a configuration changes it.
+    pub faces: Vec<FaceRef>,
+}
+
+impl BreakCornerFeature {
+    pub fn new(edges: Vec<EdgeRef>) -> Self {
+        Self {
+            edges,
+            kind: BreakKind::Fillet,
+            size: Scalar::new(2.0),
+            faces: Vec::new(),
+        }
+    }
+}
+
+/// A break corner as files of model schemas 8 to 11 hold it: before corners by face.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct BreakCornerFeatureV11 {
+    edges: Vec<EdgeRef>,
+    kind: BreakKind,
+    size: Scalar,
+}
+
+impl From<BreakCornerFeatureV11> for BreakCornerFeature {
+    fn from(b: BreakCornerFeatureV11) -> Self {
+        Self {
+            edges: b.edges,
+            kind: b.kind,
+            size: b.size,
+            faces: Vec::new(),
+        }
+    }
+}
+
+impl From<&BreakCornerFeature> for BreakCornerFeatureV11 {
+    /// The old layout, which has no room for faces.
+    fn from(b: &BreakCornerFeature) -> Self {
+        Self {
+            edges: b.edges.clone(),
+            kind: b.kind,
+            size: b.size.clone(),
+        }
+    }
+}
+
+/// Bends of a sheet metal body laid flat, as SolidWorks' unfold does: the features after
+/// it, up to a [`FoldFeature`], are made on the part with those bends flat (a cut across
+/// where a bend was is cut through the flat sheet), and the fold carries them back round
+/// the bends.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UnfoldFeature {
+    /// The flat face of a flange that stays where it is. `None`: the largest flat face of
+    /// the only sheet metal body.
+    pub fixed: Option<FaceRef>,
+    /// The bends to lay flat, each by one of its faces. Empty: every bend of the body.
+    pub bends: Vec<FaceRef>,
+}
+
+/// Bends laid flat by an [`UnfoldFeature`] folded again, the unfold's fixed face staying
+/// where it is.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FoldFeature {
+    /// The bends to fold, each by one of its faces. Empty: every bend laid flat.
+    pub bends: Vec<FaceRef>,
+}
+
 /// How the corners where flanges meet are treated.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CornerFeature {
@@ -579,7 +876,9 @@ impl FormFeature {
 
 /// Text dumps from older versions stored counts as integers. The binary layout uses
 /// the schema-specific migrations; current text also accepts the scalar representation.
-fn deserialize_pattern_count<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Scalar, D::Error> {
+pub(crate) fn deserialize_pattern_count<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Scalar, D::Error> {
     if !d.is_human_readable() {
         return Scalar::deserialize(d);
     }
@@ -604,6 +903,54 @@ pub struct LinearDirection {
     #[serde(deserialize_with = "deserialize_pattern_count")]
     pub count: Scalar,
     pub flip: bool,
+    /// Up to a reference (SolidWorks' "up to reference"): the count, or the spacing,
+    /// follows from how far the reference is from the seed. `None`: both as given.
+    pub up_to: Option<Box<PatternUpTo>>,
+}
+
+/// Something a linear pattern runs up to, or measures its seed from: a plane (a
+/// standard or reference plane, or a flat face) or a point (a vertex or reference point).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub enum PatternBound {
+    Plane(PlaneRef),
+    Point(PointRef),
+}
+
+/// Which of a linear pattern's spacing and count is given when it runs up to a
+/// reference: the other follows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum PatternKeeps {
+    /// The spacing is given: as many copies as fit before the reference.
+    Spacing,
+    /// The count is given: the copies are spread evenly up to the reference.
+    Count,
+}
+
+/// A linear pattern direction that runs up to a reference, as SolidWorks' "up to
+/// reference": the last copy is `offset` short of the reference (past it with
+/// `reverse_offset`), measured from the seed's centre along the direction or from a
+/// reference on the seed.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PatternUpTo {
+    pub to: PatternBound,
+    pub offset: Scalar,
+    pub reverse_offset: bool,
+    /// Where on the seed the offset is measured from. `None`: its centre (the middle of
+    /// what it makes, along the direction: SolidWorks' centroid).
+    pub seed: Option<PatternBound>,
+    pub keeps: PatternKeeps,
+}
+
+impl PatternBound {
+    /// The features it refers to.
+    pub fn features(&self, out: &mut Vec<FeatureId>) {
+        match self {
+            Self::Plane(PlaneRef::Feature(id)) => out.push(*id),
+            Self::Plane(PlaneRef::Face(f)) => out.extend(f.name.features()),
+            Self::Plane(PlaneRef::Standard(_) | PlaneRef::External(_)) => {}
+            Self::Point(p) => point_deps(p, out),
+        }
+    }
 }
 
 /// How a pattern places its copies.
@@ -669,9 +1016,42 @@ pub enum FeatureKind {
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
     ConvertToSheet(Box<ConvertToSheetFeature>),
+    BreakCorner(Box<BreakCornerFeature>),
+    MoveBody(Box<crate::bodies::MoveBodyFeature>),
+    InsertPart(Box<crate::bodies::InsertPartFeature>),
+    StructuralMember(Box<crate::weldment::StructuralMemberFeature>),
+    Unfold(Box<UnfoldFeature>),
+    Fold(Box<FoldFeature>),
+    /// A sketch in space: points and lines held by relations and dimensions.
+    Sketch3d(Box<crate::sketch3d::Sketch3dFeature>),
 }
 
 impl FeatureKind {
+    /// The yes-or-no settings that can differ between configurations, by the name their
+    /// operations give them (SolidWorks lets a cut's direction differ).
+    pub fn flags(&self) -> Vec<(&'static str, bool)> {
+        match self {
+            Self::SheetCut(c) => vec![("reverse", c.reverse), ("both", c.both)],
+            Self::Extrude(e) => vec![
+                ("reverse", e.params.reverse),
+                ("flip_side", e.params.flip_side),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
+    /// [`FeatureKind::flags`], to set.
+    pub fn flags_mut(&mut self) -> Vec<(&'static str, &mut bool)> {
+        match self {
+            Self::SheetCut(c) => vec![("reverse", &mut c.reverse), ("both", &mut c.both)],
+            Self::Extrude(e) => vec![
+                ("reverse", &mut e.params.reverse),
+                ("flip_side", &mut e.params.flip_side),
+            ],
+            _ => Vec::new(),
+        }
+    }
+
     pub fn type_name(&self) -> &'static str {
         match self {
             Self::Sketch(_) => "Sketch",
@@ -689,6 +1069,9 @@ impl FeatureKind {
             Self::Jog(_) => "Jog",
             Self::MiterFlange(_) => "Miter flange",
             Self::Corner(_) => "Corner",
+            Self::BreakCorner(_) => "Break corner",
+            Self::Unfold(_) => "Unfold",
+            Self::Fold(_) => "Fold",
             Self::Form(f) => match f.kind {
                 FormKind::Dimple => "Dimple",
                 FormKind::Emboss => "Emboss",
@@ -714,6 +1097,12 @@ impl FeatureKind {
             Self::Loft(l) if l.operation == crate::Operation::Cut => "Cut-loft",
             Self::Loft(_) => "Loft",
             Self::ConvertToSheet(_) => "Convert to sheet metal",
+            Self::MoveBody(m) if m.copy => "Copy body",
+            Self::MoveBody(_) => "Move body",
+            Self::InsertPart(p) if p.mirror.is_some() => "Mirrored part",
+            Self::InsertPart(_) => "Inserted part",
+            Self::StructuralMember(_) => "Structural member",
+            Self::Sketch3d(_) => "3D sketch",
         }
     }
 
@@ -735,6 +1124,9 @@ impl FeatureKind {
             Self::Jog(_) => "Jog",
             Self::MiterFlange(_) => "Miter-Flange",
             Self::Corner(_) => "Corner",
+            Self::BreakCorner(_) => "Break-Corner",
+            Self::Unfold(_) => "Unfold",
+            Self::Fold(_) => "Fold",
             Self::Form(f) => match f.kind {
                 FormKind::Dimple => "Dimple",
                 FormKind::Emboss => "Emboss",
@@ -760,6 +1152,10 @@ impl FeatureKind {
             Self::Loft(l) if l.operation == crate::Operation::Cut => "Cut-Loft",
             Self::Loft(_) => "Loft",
             Self::ConvertToSheet(_) => "Convert-To-Sheet",
+            Self::MoveBody(_) => "Body-Move",
+            Self::InsertPart(_) => "Part",
+            Self::StructuralMember(_) => "Structural-Member",
+            Self::Sketch3d(_) => "3DSketch",
         }
     }
 
@@ -776,6 +1172,7 @@ impl FeatureKind {
                 | Self::Jog(_)
                 | Self::MiterFlange(_)
                 | Self::Corner(_)
+                | Self::BreakCorner(_)
                 | Self::Form(_)
                 | Self::Pattern(_)
                 | Self::Mirror(_)
@@ -788,6 +1185,11 @@ impl FeatureKind {
                 | Self::Sweep(_)
                 | Self::Loft(_)
                 | Self::ConvertToSheet(_)
+                | Self::MoveBody(_)
+                | Self::InsertPart(_)
+                | Self::StructuralMember(_)
+                | Self::Unfold(_)
+                | Self::Fold(_)
         )
     }
 
@@ -803,8 +1205,11 @@ impl FeatureKind {
                 | Self::Jog(_)
                 | Self::MiterFlange(_)
                 | Self::Corner(_)
+                | Self::BreakCorner(_)
                 | Self::Form(_)
                 | Self::ConvertToSheet(_)
+                | Self::Unfold(_)
+                | Self::Fold(_)
         )
     }
 
@@ -822,16 +1227,44 @@ impl FeatureKind {
             Self::Hole(h) => Some(h.sketch),
             Self::Sweep(s) => Some(s.profile),
             Self::Loft(l) => l.sections.first().copied(),
+            Self::StructuralMember(m) => Some(m.profile),
             _ => None,
         }
     }
 
-    /// Whether a pattern or a mirror can copy the feature.
+    /// Whether a pattern or a mirror can copy the feature (see [`COPIED`]).
     pub fn can_be_copied(&self) -> bool {
-        matches!(
-            self,
-            Self::Extrude(_) | Self::SheetCut(_) | Self::Form(_) | Self::Revolve(_) | Self::Hole(_)
-        )
+        match self {
+            Self::BaseFlange(b) => b.tab,
+            other => matches!(
+                other,
+                Self::Extrude(_)
+                    | Self::SheetCut(_)
+                    | Self::Form(_)
+                    | Self::Revolve(_)
+                    | Self::Hole(_)
+                    | Self::EdgeFlange(_)
+                    | Self::MiterFlange(_)
+                    | Self::BreakCorner(_)
+                    | Self::Draft(_)
+                    | Self::Pattern(_)
+                    | Self::Mirror(_)
+            ),
+        }
+    }
+
+    /// The features whose suppression suppresses this one: those it refers to, but for a
+    /// sketch only what it is drawn on. What a sketch projects from something suppressed
+    /// stays where it was, as SolidWorks leaves a sketch's relations to it dangling.
+    pub fn suppressed_with(&self) -> Vec<FeatureId> {
+        match self {
+            Self::Sketch(s) => {
+                let mut out = Vec::new();
+                plane_deps(&s.plane, &mut out);
+                out
+            }
+            _ => self.dependencies(),
+        }
     }
 
     /// The features this one refers to directly, without duplicates.
@@ -845,6 +1278,8 @@ impl FeatureKind {
                         crate::projection::Source::Edge(e) => out.extend(e.features()),
                         crate::projection::Source::Point(p) => point_deps(p, &mut out),
                         crate::projection::Source::Plane(p) => plane_deps(p, &mut out),
+                        crate::projection::Source::SketchEntity { sketch, .. } => out.push(*sketch),
+                        crate::projection::Source::External(_) => {}
                     }
                 }
             }
@@ -886,6 +1321,10 @@ impl FeatureKind {
                 if let Some(edge) = &e.edge {
                     out.extend(edge.features());
                 }
+                out.extend(e.outline);
+                if let Some(p) = &e.up_to {
+                    point_deps(p, &mut out);
+                }
             }
             Self::SheetCut(c) => out.push(c.sketch),
             Self::Hem(h) => {
@@ -906,14 +1345,27 @@ impl FeatureKind {
                     out.extend(f.name.features());
                 }
             }
+            Self::BreakCorner(b) => {
+                for e in &b.edges {
+                    out.extend(e.features());
+                }
+                for f in &b.faces {
+                    out.extend(f.name.features());
+                }
+            }
             Self::Form(f) => out.push(f.sketch),
             Self::Pattern(p) => {
                 out.extend(&p.seeds);
                 match &p.def {
                     PatternDef::Linear { first, second } => {
-                        axis_deps(&first.direction, &mut out);
-                        if let Some(s) = second {
-                            axis_deps(&s.direction, &mut out);
+                        for d in std::iter::once(first).chain(second) {
+                            axis_deps(&d.direction, &mut out);
+                            if let Some(u) = &d.up_to {
+                                u.to.features(&mut out);
+                                if let Some(seed) = &u.seed {
+                                    seed.features(&mut out);
+                                }
+                            }
                         }
                     }
                     PatternDef::Circular { axis, .. } => axis_deps(axis, &mut out),
@@ -959,6 +1411,44 @@ impl FeatureKind {
                     out.extend(f.name.features());
                 }
             }
+            Self::MoveBody(m) => {
+                for f in &m.bodies {
+                    out.extend(f.name.features());
+                }
+                point_deps(&m.center, &mut out);
+                for mate in &m.mates {
+                    for geom in [&mate.moved, &mate.to] {
+                        match geom {
+                            crate::MateGeom::Face(f) => out.extend(f.name.features()),
+                            crate::MateGeom::Edge(e) => out.extend(e.features()),
+                            crate::MateGeom::Vertex(v) => out.extend(v.features()),
+                            crate::MateGeom::Plane(p) => plane_deps(p, &mut out),
+                            crate::MateGeom::Sketch(s) => out.push(s.feature),
+                            crate::MateGeom::Origin => {}
+                        }
+                    }
+                }
+            }
+            Self::InsertPart(p) => {
+                if let Some(plane) = &p.mirror {
+                    plane_deps(plane, &mut out);
+                }
+            }
+            Self::StructuralMember(m) => {
+                out.push(m.profile);
+                out.extend(&m.paths);
+            }
+            Self::Unfold(u) => {
+                for f in u.fixed.iter().chain(&u.bends) {
+                    out.extend(f.name.features());
+                }
+            }
+            Self::Fold(f) => {
+                for b in &f.bends {
+                    out.extend(b.name.features());
+                }
+            }
+            Self::Sketch3d(_) => {}
         }
         out.sort_unstable();
         out.dedup();
@@ -969,7 +1459,7 @@ impl FeatureKind {
     pub fn scalars(&self) -> Vec<&Scalar> {
         match self {
             Self::Sketch(_) | Self::Axis(_) | Self::CoordSystem(_) => Vec::new(),
-            Self::Extrude(e) => vec![&e.params.depth],
+            Self::Extrude(e) => vec![&e.params.depth, &e.params.draft],
             Self::Plane(PlaneDef::Offset { distance, .. }) => vec![distance],
             Self::Plane(PlaneDef::Angled { angle, .. }) => vec![angle],
             Self::Plane(PlaneDef::Midplane { .. }) => Vec::new(),
@@ -981,11 +1471,24 @@ impl FeatureKind {
                 v
             }
             Self::EdgeFlange(e) => {
-                let mut v = vec![&e.length, &e.angle, &e.offset_start, &e.offset_end];
+                let mut v = vec![
+                    &e.length,
+                    &e.angle,
+                    &e.offset_start,
+                    &e.offset_end,
+                    &e.position_offset,
+                ];
                 v.extend(e.radius.as_ref());
+                v.extend(e.relief_ratio.as_ref());
+                v.extend(e.bend.as_ref().map(|b| match b {
+                    BendModelDef::KFactor(s)
+                    | BendModelDef::Allowance(s)
+                    | BendModelDef::Deduction(s) => s,
+                }));
                 v
             }
-            Self::SheetCut(_) | Self::Mirror(_) => Vec::new(),
+            Self::SheetCut(c) => vec![&c.depth],
+            Self::Mirror(_) => Vec::new(),
             Self::Hem(h) => vec![
                 &h.length,
                 &h.gap,
@@ -1006,12 +1509,19 @@ impl FeatureKind {
             }
             Self::MiterFlange(m) => vec![&m.gap, &m.offset_start, &m.offset_end],
             Self::Corner(c) => vec![&c.gap, &c.relief_size],
+            Self::BreakCorner(b) => vec![&b.size],
             Self::Form(f) => vec![&f.height],
             Self::Pattern(p) => match &p.def {
                 PatternDef::Linear { first, second } => {
                     let mut v = vec![&first.spacing, &first.count];
+                    if let Some(u) = &first.up_to {
+                        v.push(&u.offset);
+                    }
                     if let Some(s) = second {
                         v.extend([&s.spacing, &s.count]);
+                        if let Some(u) = &s.up_to {
+                            v.push(&u.offset);
+                        }
                     }
                     v
                 }
@@ -1030,8 +1540,25 @@ impl FeatureKind {
                 &h.countersink_diameter,
                 &h.countersink_angle,
             ],
-            Self::Import(_) | Self::Sweep(_) | Self::Loft(_) => Vec::new(),
+            Self::Import(_)
+            | Self::Sweep(_)
+            | Self::Loft(_)
+            | Self::InsertPart(_)
+            | Self::Unfold(_)
+            | Self::Fold(_) => Vec::new(),
             Self::ConvertToSheet(c) => c.scalars(),
+            Self::MoveBody(m) => {
+                let mut v: Vec<&Scalar> = m.translate.iter().chain(&m.rotate).collect();
+                v.push(&m.copies);
+                for mate in &m.mates {
+                    if let crate::MateKind::Distance(s) | crate::MateKind::Angle(s) = &mate.kind {
+                        v.push(s);
+                    }
+                }
+                v
+            }
+            Self::StructuralMember(m) => vec![&m.rotate],
+            Self::Sketch3d(s) => s.dimensions.iter().collect(),
         }
     }
 }
@@ -1054,7 +1581,10 @@ macro_rules! slots {
                 };
             }
             match self {
-                Self::Extrude(e) => vec![("depth", Length, & $($m)? e.params.depth)],
+                Self::Extrude(e) => vec![
+                    ("depth", Length, & $($m)? e.params.depth),
+                    ("draft", Angle, & $($m)? e.params.draft),
+                ],
                 Self::Plane(PlaneDef::Offset { distance, .. }) => {
                     vec![("distance", Length, distance)]
                 }
@@ -1079,9 +1609,16 @@ macro_rules! slots {
                         ("angle", Angle, & $($m)? e.angle),
                         ("offset_start", Length, & $($m)? e.offset_start),
                         ("offset_end", Length, & $($m)? e.offset_end),
+                        ("position_offset", Length, & $($m)? e.position_offset),
                     ];
                     if let Some(r) = & $($m)? e.radius {
                         v.push(("radius", Length, r));
+                    }
+                    if let Some(r) = & $($m)? e.relief_ratio {
+                        v.push(("relief_ratio", Number, r));
+                    }
+                    if let Some(b) = & $($m)? e.bend {
+                        v.push(bend!(b));
                     }
                     v
                 }
@@ -1130,13 +1667,20 @@ macro_rules! slots {
                         ("relief_size", Length, & $($m)? c.relief_size),
                     ]
                 }
+                Self::BreakCorner(b) => vec![("size", Length, & $($m)? b.size)],
                 Self::Form(f) => vec![("height", Length, & $($m)? f.height)],
                 Self::Pattern(p) => match & $($m)? p.def {
                     PatternDef::Linear { first, second } => {
                         let mut v = vec![("spacing", Length, & $($m)? first.spacing), ("count", Number, & $($m)? first.count)];
+                        if let Some(u) = & $($m)? first.up_to {
+                            v.push(("up_to_offset", Length, & $($m)? u.offset));
+                        }
                         if let Some(s) = second {
                             v.push(("spacing2", Length, & $($m)? s.spacing));
                             v.push(("count2", Number, & $($m)? s.count));
+                            if let Some(u) = & $($m)? s.up_to {
+                                v.push(("up_to_offset2", Length, & $($m)? u.offset));
+                            }
                         }
                         v
                     }
@@ -1160,21 +1704,86 @@ macro_rules! slots {
                 }
                 Self::ConvertToSheet(c) => {
                     let c = & $($m)? **c;
-                    vec![
+                    let mut v = vec![
                         bend!(& $($m)? c.model),
                         ("relief_ratio", Number, & $($m)? c.relief_ratio),
-                    ]
+                    ];
+                    if let Some(t) = & $($m)? c.thickness {
+                        v.push(("thickness", Length, t));
+                    }
+                    v
                 }
+                Self::SheetCut(c) => vec![("depth", Length, & $($m)? c.depth)],
+                Self::MoveBody(b) => {
+                    let b = & $($m)? **b;
+                    let [dx, dy, dz] = & $($m)? b.translate;
+                    let [rx, ry, rz] = & $($m)? b.rotate;
+                    let mut v = vec![
+                        ("dx", Length, dx),
+                        ("dy", Length, dy),
+                        ("dz", Length, dz),
+                        ("rx", Angle, rx),
+                        ("ry", Angle, ry),
+                        ("rz", Angle, rz),
+                        ("copies", Number, & $($m)? b.copies),
+                    ];
+                    // Each distance or angle mate's value, by the mate's place (see
+                    // `MATE_FIELDS`), after the move's own so that their names stay put.
+                    for (field, mate) in crate::bodies::MATE_FIELDS.iter().zip(& $($m)? b.mates) {
+                        match & $($m)? mate.kind {
+                            crate::MateKind::Distance(s) => v.push((*field, Length, s)),
+                            crate::MateKind::Angle(s) => v.push((*field, Angle, s)),
+                            _ => {}
+                        }
+                    }
+                    v
+                }
+                Self::StructuralMember(m) => vec![("rotate", Angle, & $($m)? m.rotate)],
+                // A 3D sketch's dimensions: d1, d2, … (named D1, D2, … as SolidWorks has them)
+                Self::Sketch3d(s) => crate::sketch3d::DIMENSION_FIELDS
+                    .iter()
+                    .zip(& $($m)? s.dimensions)
+                    .map(|(n, d)| (*n, Length, d))
+                    .collect(),
+                Self::Unfold(_) | Self::Fold(_) => Vec::new(),
                 Self::Sketch(_)
                 | Self::Axis(_)
                 | Self::CoordSystem(_)
                 | Self::Plane(PlaneDef::Midplane { .. })
                 | Self::Point(PointDef::Vertex(_))
-                | Self::SheetCut(_)
                 | Self::Mirror(_)
                 | Self::Import(_)
+                | Self::InsertPart(_)
                 | Self::Sweep(_)
                 | Self::Loft(_) => Vec::new(),
+            }
+        }
+    };
+}
+
+macro_rules! plane_refs {
+    ($(#[$doc:meta])* $name:ident $(, $m:tt)?) => {
+        $(#[$doc])*
+        pub fn $name(& $($m)? self) -> Vec<(&'static str, & $($m)? PlaneRef)> {
+            match self {
+                Self::Sketch(s) => vec![("sketch_plane", & $($m)? s.plane)],
+                Self::Extrude(e) => match & $($m)? e.params.end {
+                    crate::EndCondition::UpTo(p) => vec![("up_to", p)],
+                    _ => Vec::new(),
+                },
+                Self::Plane(PlaneDef::Offset { from, .. } | PlaneDef::Angled { from, .. }) => {
+                    vec![("plane", from)]
+                }
+                Self::Plane(PlaneDef::Midplane { a, b }) | Self::Axis(AxisDef::TwoPlanes(a, b)) => {
+                    vec![("plane", a), ("plane", b)]
+                }
+                Self::CoordSystem(def) => vec![("orientation", & $($m)? def.orientation)],
+                Self::Mirror(mirror) => vec![("mirror_plane", & $($m)? mirror.plane)],
+                Self::Draft(d) => match & $($m)? d.neutral {
+                    Some(p) => vec![("neutral_plane", p)],
+                    None => Vec::new(),
+                },
+                _ => Vec::new(),
             }
         }
     };
@@ -1192,11 +1801,22 @@ impl FeatureKind {
         /// [`FeatureKind::slots`], for changing the values.
         slots_mut, mut
     }
+    plane_refs! {
+        /// The planes the feature is placed on or measured from, each with what it is to
+        /// the feature: `sketch_plane`, `plane` (what a reference plane or axis is made
+        /// from), `up_to` (an extrusion's end), `orientation` (a coordinate system's),
+        /// `mirror_plane` or `neutral_plane`. Where an in-context plane can be.
+        plane_refs
+    }
+    plane_refs! {
+        /// [`FeatureKind::plane_refs`], for changing them.
+        plane_refs_mut, mut
+    }
 }
 
 fn plane_deps(r: &PlaneRef, out: &mut Vec<FeatureId>) {
     match r {
-        PlaneRef::Standard(_) => {}
+        PlaneRef::Standard(_) | PlaneRef::External(_) => {}
         PlaneRef::Feature(id) => out.push(*id),
         PlaneRef::Face(f) => out.extend(f.name.features()),
     }
@@ -1254,6 +1874,7 @@ impl From<LinearDirectionV9> for LinearDirection {
             spacing: d.spacing,
             count: Scalar::new(f64::from(d.count)),
             flip: d.flip,
+            up_to: None,
         }
     }
 }
@@ -1324,14 +1945,14 @@ impl From<PatternFeature> for PatternFeatureV9 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum FeatureKindV9 {
     Sketch(Box<SketchFeature>),
-    Extrude(Box<ExtrudeFeature>),
+    Extrude(Box<ExtrudeFeatureV11>),
     Plane(PlaneDef),
     Axis(AxisDef),
     Point(PointDef),
     CoordSystem(CoordSystemDef),
-    BaseFlange(Box<BaseFlangeFeature>),
-    EdgeFlange(Box<EdgeFlangeFeature>),
-    SheetCut(Box<SheetCutFeature>),
+    BaseFlange(Box<BaseFlangeFeatureV11>),
+    EdgeFlange(Box<EdgeFlangeFeatureV11>),
+    SheetCut(Box<SheetCutFeatureV11>),
     Hem(Box<HemFeature>),
     SketchedBend(Box<SketchedBendFeature>),
     Jog(Box<JogFeature>),
@@ -1349,20 +1970,21 @@ pub(crate) enum FeatureKindV9 {
     Import(Box<ImportFeature>),
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
-    ConvertToSheet(Box<ConvertToSheetFeature>),
+    ConvertToSheet(Box<ConvertToSheetFeatureV11>),
+    BreakCorner(Box<BreakCornerFeatureV11>),
 }
 impl From<FeatureKindV9> for FeatureKind {
     fn from(k: FeatureKindV9) -> Self {
         match k {
             FeatureKindV9::Sketch(v) => Self::Sketch(v),
-            FeatureKindV9::Extrude(v) => Self::Extrude(v),
+            FeatureKindV9::Extrude(v) => Self::Extrude(Box::new((*v).into())),
             FeatureKindV9::Plane(v) => Self::Plane(v),
             FeatureKindV9::Axis(v) => Self::Axis(v),
             FeatureKindV9::Point(v) => Self::Point(v),
             FeatureKindV9::CoordSystem(v) => Self::CoordSystem(v),
-            FeatureKindV9::BaseFlange(v) => Self::BaseFlange(v),
-            FeatureKindV9::EdgeFlange(v) => Self::EdgeFlange(v),
-            FeatureKindV9::SheetCut(v) => Self::SheetCut(v),
+            FeatureKindV9::BaseFlange(v) => Self::BaseFlange(Box::new((*v).into())),
+            FeatureKindV9::EdgeFlange(v) => Self::EdgeFlange(Box::new((*v).into())),
+            FeatureKindV9::SheetCut(v) => Self::SheetCut(Box::new((*v).into())),
             FeatureKindV9::Hem(v) => Self::Hem(v),
             FeatureKindV9::SketchedBend(v) => Self::SketchedBend(v),
             FeatureKindV9::Jog(v) => Self::Jog(v),
@@ -1379,7 +2001,8 @@ impl From<FeatureKindV9> for FeatureKind {
             FeatureKindV9::Import(v) => Self::Import(v),
             FeatureKindV9::Sweep(v) => Self::Sweep(v),
             FeatureKindV9::Loft(v) => Self::Loft(v),
-            FeatureKindV9::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKindV9::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((*v).into())),
+            FeatureKindV9::BreakCorner(v) => Self::BreakCorner(Box::new((*v).into())),
         }
     }
 }
@@ -1388,14 +2011,14 @@ impl From<FeatureKind> for FeatureKindV9 {
     fn from(k: FeatureKind) -> Self {
         match k {
             FeatureKind::Sketch(v) => Self::Sketch(v),
-            FeatureKind::Extrude(v) => Self::Extrude(v),
+            FeatureKind::Extrude(v) => Self::Extrude(Box::new((&*v).into())),
             FeatureKind::Plane(v) => Self::Plane(v),
             FeatureKind::Axis(v) => Self::Axis(v),
             FeatureKind::Point(v) => Self::Point(v),
             FeatureKind::CoordSystem(v) => Self::CoordSystem(v),
-            FeatureKind::BaseFlange(v) => Self::BaseFlange(v),
-            FeatureKind::EdgeFlange(v) => Self::EdgeFlange(v),
-            FeatureKind::SheetCut(v) => Self::SheetCut(v),
+            FeatureKind::BaseFlange(v) => Self::BaseFlange(Box::new((&*v).into())),
+            FeatureKind::EdgeFlange(v) => Self::EdgeFlange(Box::new((&*v).into())),
+            FeatureKind::SheetCut(v) => Self::SheetCut(Box::new((&*v).into())),
             FeatureKind::Hem(v) => Self::Hem(v),
             FeatureKind::SketchedBend(v) => Self::SketchedBend(v),
             FeatureKind::Jog(v) => Self::Jog(v),
@@ -1412,7 +2035,322 @@ impl From<FeatureKind> for FeatureKindV9 {
             FeatureKind::Import(v) => Self::Import(v),
             FeatureKind::Sweep(v) => Self::Sweep(v),
             FeatureKind::Loft(v) => Self::Loft(v),
-            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((&*v).into())),
+            FeatureKind::BreakCorner(v) => Self::BreakCorner(Box::new((&*v).into())),
+            FeatureKind::MoveBody(_)
+            | FeatureKind::InsertPart(_)
+            | FeatureKind::StructuralMember(_)
+            | FeatureKind::Unfold(_)
+            | FeatureKind::Fold(_)
+            | FeatureKind::Sketch3d(_) => {
+                panic!("schemas before 12 have bodies moved or parts inserted")
+            }
+        }
+    }
+}
+
+/// An edge flange as model schemas through 11 stored it: before a flange could have a
+/// relief of its own.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct EdgeFlangeFeatureV11 {
+    edge: Option<EdgeRef>,
+    length: Scalar,
+    angle: Scalar,
+    position: FlangePosition,
+    offset_start: Scalar,
+    offset_end: Scalar,
+    flip: bool,
+    radius: Option<Scalar>,
+}
+
+impl From<EdgeFlangeFeatureV11> for EdgeFlangeFeature {
+    fn from(e: EdgeFlangeFeatureV11) -> Self {
+        Self {
+            edge: e.edge,
+            length: e.length,
+            angle: e.angle,
+            position: e.position,
+            offset_start: e.offset_start,
+            offset_end: e.offset_end,
+            flip: e.flip,
+            radius: e.radius,
+            relief: None,
+            relief_ratio: None,
+            bend: None,
+            position_offset: Scalar::new(0.0),
+            outline: None,
+            up_to: None,
+        }
+    }
+}
+
+impl From<&EdgeFlangeFeature> for EdgeFlangeFeatureV11 {
+    /// The old layout, which has no room for the flange's own relief and bend model.
+    fn from(e: &EdgeFlangeFeature) -> Self {
+        Self {
+            edge: e.edge.clone(),
+            length: e.length.clone(),
+            angle: e.angle.clone(),
+            position: e.position,
+            offset_start: e.offset_start.clone(),
+            offset_end: e.offset_end.clone(),
+            flip: e.flip,
+            radius: e.radius.clone(),
+        }
+    }
+}
+
+/// A linear pattern direction as model schemas 10 and 11 stored it: before it could run
+/// up to a reference.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct LinearDirectionV11 {
+    direction: AxisRef,
+    spacing: Scalar,
+    #[serde(deserialize_with = "deserialize_pattern_count")]
+    count: Scalar,
+    flip: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum PatternDefV11 {
+    Linear {
+        first: LinearDirectionV11,
+        second: Option<LinearDirectionV11>,
+    },
+    Circular {
+        axis: AxisRef,
+        #[serde(deserialize_with = "deserialize_pattern_count")]
+        count: Scalar,
+        angle: Scalar,
+        flip: bool,
+    },
+}
+
+/// A pattern as model schemas 10 and 11 stored it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct PatternFeatureV11 {
+    seeds: Vec<FeatureId>,
+    def: PatternDefV11,
+}
+
+impl From<LinearDirectionV11> for LinearDirection {
+    fn from(d: LinearDirectionV11) -> Self {
+        Self {
+            direction: d.direction,
+            spacing: d.spacing,
+            count: d.count,
+            flip: d.flip,
+            up_to: None,
+        }
+    }
+}
+
+impl From<&LinearDirection> for LinearDirectionV11 {
+    /// The old layout, which has no room for a reference to run up to.
+    fn from(d: &LinearDirection) -> Self {
+        Self {
+            direction: d.direction.clone(),
+            spacing: d.spacing.clone(),
+            count: d.count.clone(),
+            flip: d.flip,
+        }
+    }
+}
+
+impl From<PatternFeatureV11> for PatternFeature {
+    fn from(p: PatternFeatureV11) -> Self {
+        let def = match p.def {
+            PatternDefV11::Linear { first, second } => PatternDef::Linear {
+                first: first.into(),
+                second: second.map(Into::into),
+            },
+            PatternDefV11::Circular {
+                axis,
+                count,
+                angle,
+                flip,
+            } => PatternDef::Circular {
+                axis,
+                count,
+                angle,
+                flip,
+            },
+        };
+        Self {
+            seeds: p.seeds,
+            def,
+        }
+    }
+}
+
+impl From<&PatternFeature> for PatternFeatureV11 {
+    fn from(p: &PatternFeature) -> Self {
+        let def = match &p.def {
+            PatternDef::Linear { first, second } => PatternDefV11::Linear {
+                first: first.into(),
+                second: second.as_ref().map(Into::into),
+            },
+            PatternDef::Circular {
+                axis,
+                count,
+                angle,
+                flip,
+            } => PatternDefV11::Circular {
+                axis: axis.clone(),
+                count: count.clone(),
+                angle: angle.clone(),
+                flip: *flip,
+            },
+        };
+        Self {
+            seeds: p.seeds.clone(),
+            def,
+        }
+    }
+}
+
+/// The feature kinds as model schemas 10 and 11 stored them. The variant order is frozen.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum FeatureKindV11 {
+    Sketch(Box<SketchFeature>),
+    Extrude(Box<ExtrudeFeatureV11>),
+    Plane(PlaneDef),
+    Axis(AxisDef),
+    Point(PointDef),
+    CoordSystem(CoordSystemDef),
+    BaseFlange(Box<BaseFlangeFeatureV11>),
+    EdgeFlange(Box<EdgeFlangeFeatureV11>),
+    SheetCut(Box<SheetCutFeatureV11>),
+    Hem(Box<HemFeature>),
+    SketchedBend(Box<SketchedBendFeature>),
+    Jog(Box<JogFeature>),
+    MiterFlange(Box<MiterFlangeFeature>),
+    Corner(Box<CornerFeature>),
+    Form(Box<FormFeature>),
+    Pattern(Box<PatternFeatureV11>),
+    Mirror(Box<MirrorFeature>),
+    Revolve(Box<RevolveFeature>),
+    Blend(Box<BlendFeature>),
+    Shell(Box<ShellFeature>),
+    Draft(Box<DraftFeature>),
+    Hole(Box<HoleFeature>),
+    Import(Box<ImportFeature>),
+    Sweep(Box<SweepFeature>),
+    Loft(Box<LoftFeature>),
+    ConvertToSheet(Box<ConvertToSheetFeatureV11>),
+    BreakCorner(Box<BreakCornerFeatureV11>),
+}
+
+impl From<FeatureKindV11> for FeatureKind {
+    fn from(k: FeatureKindV11) -> Self {
+        match k {
+            FeatureKindV11::Sketch(v) => Self::Sketch(v),
+            FeatureKindV11::Extrude(v) => Self::Extrude(Box::new((*v).into())),
+            FeatureKindV11::Plane(v) => Self::Plane(v),
+            FeatureKindV11::Axis(v) => Self::Axis(v),
+            FeatureKindV11::Point(v) => Self::Point(v),
+            FeatureKindV11::CoordSystem(v) => Self::CoordSystem(v),
+            FeatureKindV11::BaseFlange(v) => Self::BaseFlange(Box::new((*v).into())),
+            FeatureKindV11::EdgeFlange(v) => Self::EdgeFlange(Box::new((*v).into())),
+            FeatureKindV11::SheetCut(v) => Self::SheetCut(Box::new((*v).into())),
+            FeatureKindV11::Hem(v) => Self::Hem(v),
+            FeatureKindV11::SketchedBend(v) => Self::SketchedBend(v),
+            FeatureKindV11::Jog(v) => Self::Jog(v),
+            FeatureKindV11::MiterFlange(v) => Self::MiterFlange(v),
+            FeatureKindV11::Corner(v) => Self::Corner(v),
+            FeatureKindV11::Form(v) => Self::Form(v),
+            FeatureKindV11::Pattern(v) => Self::Pattern(Box::new((*v).into())),
+            FeatureKindV11::Mirror(v) => Self::Mirror(v),
+            FeatureKindV11::Revolve(v) => Self::Revolve(v),
+            FeatureKindV11::Blend(v) => Self::Blend(v),
+            FeatureKindV11::Shell(v) => Self::Shell(v),
+            FeatureKindV11::Draft(v) => Self::Draft(v),
+            FeatureKindV11::Hole(v) => Self::Hole(v),
+            FeatureKindV11::Import(v) => Self::Import(v),
+            FeatureKindV11::Sweep(v) => Self::Sweep(v),
+            FeatureKindV11::Loft(v) => Self::Loft(v),
+            FeatureKindV11::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((*v).into())),
+            FeatureKindV11::BreakCorner(v) => Self::BreakCorner(Box::new((*v).into())),
+        }
+    }
+}
+
+impl From<FeatureKind> for FeatureKindV11 {
+    fn from(k: FeatureKind) -> Self {
+        match k {
+            FeatureKind::Sketch(v) => Self::Sketch(v),
+            FeatureKind::Extrude(v) => Self::Extrude(Box::new((&*v).into())),
+            FeatureKind::Plane(v) => Self::Plane(v),
+            FeatureKind::Axis(v) => Self::Axis(v),
+            FeatureKind::Point(v) => Self::Point(v),
+            FeatureKind::CoordSystem(v) => Self::CoordSystem(v),
+            FeatureKind::BaseFlange(v) => Self::BaseFlange(Box::new((&*v).into())),
+            FeatureKind::EdgeFlange(v) => Self::EdgeFlange(Box::new((&*v).into())),
+            FeatureKind::SheetCut(v) => Self::SheetCut(Box::new((&*v).into())),
+            FeatureKind::Hem(v) => Self::Hem(v),
+            FeatureKind::SketchedBend(v) => Self::SketchedBend(v),
+            FeatureKind::Jog(v) => Self::Jog(v),
+            FeatureKind::MiterFlange(v) => Self::MiterFlange(v),
+            FeatureKind::Corner(v) => Self::Corner(v),
+            FeatureKind::Form(v) => Self::Form(v),
+            FeatureKind::Pattern(v) => Self::Pattern(Box::new((&*v).into())),
+            FeatureKind::Mirror(v) => Self::Mirror(v),
+            FeatureKind::Revolve(v) => Self::Revolve(v),
+            FeatureKind::Blend(v) => Self::Blend(v),
+            FeatureKind::Shell(v) => Self::Shell(v),
+            FeatureKind::Draft(v) => Self::Draft(v),
+            FeatureKind::Hole(v) => Self::Hole(v),
+            FeatureKind::Import(v) => Self::Import(v),
+            FeatureKind::Sweep(v) => Self::Sweep(v),
+            FeatureKind::Loft(v) => Self::Loft(v),
+            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((&*v).into())),
+            FeatureKind::BreakCorner(v) => Self::BreakCorner(Box::new((&*v).into())),
+            FeatureKind::MoveBody(_)
+            | FeatureKind::InsertPart(_)
+            | FeatureKind::StructuralMember(_)
+            | FeatureKind::Unfold(_)
+            | FeatureKind::Fold(_)
+            | FeatureKind::Sketch3d(_) => {
+                panic!("schemas before 12 have bodies moved or parts inserted")
+            }
+        }
+    }
+}
+
+/// A feature as model schemas 10 and 11 stored it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FeatureV11 {
+    id: FeatureId,
+    name: String,
+    suppressed: bool,
+    suppression_expression: Option<String>,
+    visible: bool,
+    kind: FeatureKindV11,
+}
+
+impl From<Feature> for FeatureV11 {
+    fn from(f: Feature) -> Self {
+        Self {
+            id: f.id,
+            name: f.name,
+            suppressed: f.suppressed,
+            suppression_expression: f.suppression_expression,
+            visible: f.visible,
+            kind: f.kind.into(),
+        }
+    }
+}
+
+impl From<FeatureV11> for Feature {
+    fn from(f: FeatureV11) -> Self {
+        Self {
+            id: f.id,
+            name: f.name,
+            suppressed: f.suppressed,
+            suppression_expression: f.suppression_expression,
+            visible: f.visible,
+            kind: f.kind.into(),
+            dimension_names: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1448,6 +2386,7 @@ impl From<FeatureV9> for Feature {
             suppressed: f.suppressed,
             visible: f.visible,
             kind: f.kind.into(),
+            dimension_names: std::collections::BTreeMap::new(),
         }
     }
 }
@@ -1467,6 +2406,11 @@ pub struct Feature {
     /// Whether the feature's own geometry (a sketch, a reference plane) is drawn.
     pub visible: bool,
     pub kind: FeatureKind,
+    /// Names given to the feature's numeric values, by field (`length` → `D2@Sketch10`).
+    /// A value not listed has its default name (see [`crate::dimensions`]). A sketch's
+    /// dimensions keep their names in the sketch.
+    #[serde(default)]
+    pub dimension_names: std::collections::BTreeMap<String, String>,
 }
 
 impl Feature {
@@ -1526,14 +2470,14 @@ pub(crate) struct SketchFeatureV8 {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) enum FeatureKindV8 {
     Sketch(Box<SketchFeatureV8>),
-    Extrude(Box<ExtrudeFeature>),
+    Extrude(Box<ExtrudeFeatureV11>),
     Plane(PlaneDef),
     Axis(AxisDef),
     Point(PointDef),
     CoordSystem(CoordSystemDef),
-    BaseFlange(Box<BaseFlangeFeature>),
-    EdgeFlange(Box<EdgeFlangeFeature>),
-    SheetCut(Box<SheetCutFeature>),
+    BaseFlange(Box<BaseFlangeFeatureV11>),
+    EdgeFlange(Box<EdgeFlangeFeatureV11>),
+    SheetCut(Box<SheetCutFeatureV11>),
     Hem(Box<HemFeature>),
     SketchedBend(Box<SketchedBendFeature>),
     Jog(Box<JogFeature>),
@@ -1550,7 +2494,8 @@ pub(crate) enum FeatureKindV8 {
     Import(Box<ImportFeature>),
     Sweep(Box<SweepFeature>),
     Loft(Box<LoftFeature>),
-    ConvertToSheet(Box<ConvertToSheetFeature>),
+    ConvertToSheet(Box<ConvertToSheetFeatureV11>),
+    BreakCorner(Box<BreakCornerFeatureV11>),
 }
 impl From<FeatureKindV8> for FeatureKind {
     fn from(kind: FeatureKindV8) -> Self {
@@ -1561,14 +2506,14 @@ impl From<FeatureKindV8> for FeatureKind {
                 sketch: s.sketch,
                 projections: Vec::new(),
             })),
-            FeatureKindV8::Extrude(v) => Self::Extrude(v),
+            FeatureKindV8::Extrude(v) => Self::Extrude(Box::new((*v).into())),
             FeatureKindV8::Plane(v) => Self::Plane(v),
             FeatureKindV8::Axis(v) => Self::Axis(v),
             FeatureKindV8::Point(v) => Self::Point(v),
             FeatureKindV8::CoordSystem(v) => Self::CoordSystem(v),
-            FeatureKindV8::BaseFlange(v) => Self::BaseFlange(v),
-            FeatureKindV8::EdgeFlange(v) => Self::EdgeFlange(v),
-            FeatureKindV8::SheetCut(v) => Self::SheetCut(v),
+            FeatureKindV8::BaseFlange(v) => Self::BaseFlange(Box::new((*v).into())),
+            FeatureKindV8::EdgeFlange(v) => Self::EdgeFlange(Box::new((*v).into())),
+            FeatureKindV8::SheetCut(v) => Self::SheetCut(Box::new((*v).into())),
             FeatureKindV8::Hem(v) => Self::Hem(v),
             FeatureKindV8::SketchedBend(v) => Self::SketchedBend(v),
             FeatureKindV8::Jog(v) => Self::Jog(v),
@@ -1585,7 +2530,8 @@ impl From<FeatureKindV8> for FeatureKind {
             FeatureKindV8::Import(v) => Self::Import(v),
             FeatureKindV8::Sweep(v) => Self::Sweep(v),
             FeatureKindV8::Loft(v) => Self::Loft(v),
-            FeatureKindV8::ConvertToSheet(v) => Self::ConvertToSheet(v),
+            FeatureKindV8::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((*v).into())),
+            FeatureKindV8::BreakCorner(v) => Self::BreakCorner(Box::new((*v).into())),
         }
     }
 }
@@ -1597,14 +2543,14 @@ impl From<&FeatureKind> for FeatureKindV8 {
                 placement: s.placement,
                 sketch: s.sketch.clone(),
             })),
-            FeatureKind::Extrude(v) => Self::Extrude(v.clone()),
+            FeatureKind::Extrude(v) => Self::Extrude(Box::new((&**v).into())),
             FeatureKind::Plane(v) => Self::Plane(v.clone()),
             FeatureKind::Axis(v) => Self::Axis(v.clone()),
             FeatureKind::Point(v) => Self::Point(v.clone()),
             FeatureKind::CoordSystem(v) => Self::CoordSystem(v.clone()),
-            FeatureKind::BaseFlange(v) => Self::BaseFlange(v.clone()),
-            FeatureKind::EdgeFlange(v) => Self::EdgeFlange(v.clone()),
-            FeatureKind::SheetCut(v) => Self::SheetCut(v.clone()),
+            FeatureKind::BaseFlange(v) => Self::BaseFlange(Box::new((&**v).into())),
+            FeatureKind::EdgeFlange(v) => Self::EdgeFlange(Box::new((&**v).into())),
+            FeatureKind::SheetCut(v) => Self::SheetCut(Box::new((&**v).into())),
             FeatureKind::Hem(v) => Self::Hem(v.clone()),
             FeatureKind::SketchedBend(v) => Self::SketchedBend(v.clone()),
             FeatureKind::Jog(v) => Self::Jog(v.clone()),
@@ -1621,7 +2567,16 @@ impl From<&FeatureKind> for FeatureKindV8 {
             FeatureKind::Import(v) => Self::Import(v.clone()),
             FeatureKind::Sweep(v) => Self::Sweep(v.clone()),
             FeatureKind::Loft(v) => Self::Loft(v.clone()),
-            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(v.clone()),
+            FeatureKind::ConvertToSheet(v) => Self::ConvertToSheet(Box::new((&**v).into())),
+            FeatureKind::BreakCorner(v) => Self::BreakCorner(Box::new((&**v).into())),
+            FeatureKind::MoveBody(_)
+            | FeatureKind::InsertPart(_)
+            | FeatureKind::StructuralMember(_)
+            | FeatureKind::Unfold(_)
+            | FeatureKind::Fold(_)
+            | FeatureKind::Sketch3d(_) => {
+                panic!("schemas before 12 have no {}", kind.type_name())
+            }
         }
     }
 }
@@ -1642,6 +2597,7 @@ impl From<FeatureV8> for Feature {
             suppressed: f.suppressed,
             visible: f.visible,
             kind: f.kind.into(),
+            dimension_names: std::collections::BTreeMap::new(),
         }
     }
 }

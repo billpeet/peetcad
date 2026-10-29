@@ -10,11 +10,11 @@ use peet_sketch::expr::Parameters;
 use serde::{Deserialize, Serialize};
 
 use crate::assembly::Assembly;
-use crate::config::{Configurations, ConfigurationsV5};
+use crate::config::{Configurations, ConfigurationsV5, ConfigurationsV11};
 use crate::extrude::{Extrude, Operation};
 use crate::feature::{
-    ExtrudeFeature, Feature, FeatureId, FeatureKind, FeatureV8, FeatureV9, PlaneRef, SketchFeature,
-    StdPlane,
+    ExtrudeFeature, Feature, FeatureId, FeatureKind, FeatureV8, FeatureV9, FeatureV11, PlaneRef,
+    SketchFeature, StdPlane,
 };
 use crate::material::Material;
 use crate::naming::{FaceName, FaceRole};
@@ -95,7 +95,7 @@ pub struct ModelLegacy<F> {
     datums_visible: [bool; 4],
     next_id: u32,
     name_counters: BTreeMap<String, u32>,
-    configurations: Configurations,
+    configurations: ConfigurationsV11,
     material: Option<Material>,
     color: Option<[u8; 3]>,
     assembly: Option<crate::assembly::AssemblyLegacy<F>>,
@@ -106,7 +106,186 @@ pub type ModelV8 = ModelLegacy<FeatureV8>;
 /// A schema 9 model: sketch projections, with literal pattern counts and no suppression rules.
 pub type ModelV9 = ModelLegacy<FeatureV9>;
 /// A schema 10 model: projections and suppression rules, before user geometry names.
-pub type ModelV10 = ModelLegacy<Feature>;
+pub type ModelV10 = ModelLegacy<FeatureV11>;
+
+/// A part as model schema 12 held it while that schema was being made, before derived
+/// configurations: today's layout with every configuration on its own. A file of schema 12
+/// that is not today's layout is read as this.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelV12Early {
+    name: String,
+    features: Vec<Arc<Feature>>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+    configurations: ConfigurationsV11,
+    material: Option<Material>,
+    color: Option<[u8; 3]>,
+    /// Always `None`: an assembly of then is not read.
+    assembly: Option<Arc<Assembly>>,
+    geometry_names: BTreeMap<String, crate::naming::NamedGeometry>,
+}
+
+impl ModelV12Early {
+    /// `m` as it was saved then, to test reading it.
+    pub fn of(m: &Model) -> Self {
+        Self {
+            name: m.name.clone(),
+            features: m.features.clone(),
+            parameters: m.parameters.clone(),
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters.clone(),
+            configurations: ConfigurationsV11::of(&m.configurations),
+            material: m.material.clone(),
+            color: m.color,
+            assembly: None,
+            geometry_names: m.geometry_names.clone(),
+        }
+    }
+}
+
+impl From<ModelV12Early> for Model {
+    fn from(m: ModelV12Early) -> Self {
+        Self {
+            name: m.name,
+            features: m.features,
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            configurations: m.configurations.into(),
+            material: m.material,
+            color: m.color,
+            assembly: m.assembly,
+            geometry_names: m.geometry_names,
+        }
+    }
+}
+
+/// A model as model schema 12 held it before display states: today's layout, with
+/// assemblies whose components have no transparency and that have no display states. A
+/// file of schema 12 that is neither today's layout nor [`ModelV12Early`] is read as this.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelV12NoDisplayStates {
+    name: String,
+    features: Vec<Arc<Feature>>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+    configurations: Configurations,
+    material: Option<Material>,
+    color: Option<[u8; 3]>,
+    assembly: Option<crate::assembly::AssemblyV12NoDisplayStates>,
+    geometry_names: BTreeMap<String, crate::naming::NamedGeometry>,
+}
+
+impl ModelV12NoDisplayStates {
+    /// `m` as it was saved then (its display states and transparencies are lost), to test
+    /// reading it.
+    pub fn of(m: &Model) -> Self {
+        Self {
+            name: m.name.clone(),
+            features: m.features.clone(),
+            parameters: m.parameters.clone(),
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters.clone(),
+            configurations: m.configurations.clone(),
+            material: m.material.clone(),
+            color: m.color,
+            assembly: m
+                .assembly()
+                .map(crate::assembly::AssemblyV12NoDisplayStates::of),
+            geometry_names: m.geometry_names.clone(),
+        }
+    }
+}
+
+impl From<ModelV12NoDisplayStates> for Model {
+    fn from(m: ModelV12NoDisplayStates) -> Self {
+        Self {
+            name: m.name,
+            features: m.features,
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            configurations: m.configurations,
+            material: m.material,
+            color: m.color,
+            assembly: m.assembly.map(|a| Arc::new(a.into())),
+            geometry_names: m.geometry_names,
+        }
+    }
+}
+
+/// A schema 11 model: today's layout, with features as they were before an edge flange
+/// could have a relief of its own. The file format is not self-describing, so an older
+/// model is read as this and converted.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelV11 {
+    name: String,
+    features: Vec<FeatureV11>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+    configurations: ConfigurationsV11,
+    material: Option<Material>,
+    color: Option<[u8; 3]>,
+    assembly: Option<crate::assembly::AssemblyV11>,
+    geometry_names: BTreeMap<String, crate::naming::NamedGeometry>,
+}
+
+impl ModelV11 {
+    /// `m` as schema 11 saved it (a flange's own relief is lost), used to verify the
+    /// migration of parts and nested assemblies.
+    pub fn of(m: &Model) -> Self {
+        Self {
+            name: m.name.clone(),
+            features: m.features().cloned().map(FeatureV11::from).collect(),
+            parameters: m.parameters.clone(),
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters.clone(),
+            configurations: ConfigurationsV11::of(&m.configurations),
+            material: m.material.clone(),
+            color: m.color,
+            assembly: m.assembly().map(crate::assembly::AssemblyV11::of),
+            geometry_names: m.geometry_names.clone(),
+        }
+    }
+}
+
+impl From<ModelV11> for Model {
+    fn from(m: ModelV11) -> Self {
+        Self {
+            name: m.name,
+            features: m.features.into_iter().map(|f| Arc::new(f.into())).collect(),
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            configurations: m.configurations.into(),
+            material: m.material,
+            color: m.color,
+            assembly: m.assembly.map(|a| Arc::new(a.into())),
+            geometry_names: m.geometry_names,
+        }
+    }
+}
 
 impl<F: From<Feature>> ModelLegacy<F> {
     /// The old layout, used to verify migration of parts and nested assemblies.
@@ -119,7 +298,7 @@ impl<F: From<Feature>> ModelLegacy<F> {
             datums_visible: m.datums_visible,
             next_id: m.next_id,
             name_counters: m.name_counters.clone(),
-            configurations: m.configurations.clone(),
+            configurations: ConfigurationsV11::of(&m.configurations),
             material: m.material.clone(),
             color: m.color,
             assembly: m.assembly().map(crate::assembly::AssemblyLegacy::of),
@@ -137,7 +316,7 @@ impl<F: Into<Feature>> From<ModelLegacy<F>> for Model {
             datums_visible: m.datums_visible,
             next_id: m.next_id,
             name_counters: m.name_counters,
-            configurations: m.configurations,
+            configurations: m.configurations.into(),
             material: m.material,
             color: m.color,
             assembly: m.assembly.map(|a| Arc::new(a.into())),
@@ -158,7 +337,7 @@ pub struct ModelV7 {
     datums_visible: [bool; 4],
     next_id: u32,
     name_counters: BTreeMap<String, u32>,
-    configurations: Configurations,
+    configurations: ConfigurationsV11,
 }
 
 impl From<ModelV7> for Model {
@@ -171,7 +350,7 @@ impl From<ModelV7> for Model {
             datums_visible: m.datums_visible,
             next_id: m.next_id,
             name_counters: m.name_counters,
-            configurations: m.configurations,
+            configurations: m.configurations.into(),
             material: None,
             color: None,
             assembly: None,
@@ -192,7 +371,7 @@ impl ModelV7 {
             datums_visible: model.datums_visible,
             next_id: model.next_id,
             name_counters: model.name_counters.clone(),
-            configurations: model.configurations.clone(),
+            configurations: ConfigurationsV11::of(&model.configurations),
         }
     }
 }
@@ -436,6 +615,7 @@ impl Model {
                 suppression_expression: None,
                 visible: true,
                 kind,
+                dimension_names: BTreeMap::new(),
             }),
         );
         if let Some(r) = &mut self.rollback {
@@ -582,7 +762,7 @@ impl Model {
     /// hidden.
     pub fn add_sheet_cut(&mut self, sketch: FeatureId) -> FeatureId {
         let id = self.add(FeatureKind::SheetCut(Box::new(
-            crate::feature::SheetCutFeature { sketch },
+            crate::feature::SheetCutFeature::new(sketch),
         )));
         self.hide(sketch);
         id
@@ -624,6 +804,13 @@ impl Model {
         )));
         self.hide(sketch);
         id
+    }
+
+    /// Adds a break corner on `edges`, the corners of a sheet metal body.
+    pub fn add_break_corner(&mut self, edges: Vec<crate::naming::EdgeRef>) -> FeatureId {
+        self.add(FeatureKind::BreakCorner(Box::new(
+            crate::feature::BreakCornerFeature::new(edges),
+        )))
     }
 
     /// Adds a corner treatment for the corners at `faces` (every corner if empty).
@@ -750,7 +937,7 @@ impl Model {
         let max = self.features.iter().map(|f| f.id.0).max().unwrap_or(0);
         self.next_id = self.next_id.max(max.saturating_add(1));
         self.rollback = self.rollback.filter(|&b| b < self.features.len());
-        self.parameters.evaluate();
+        self.refresh_dimension_values();
         self.validate_configurations()?;
         if self.assembly.is_some() && !self.features.is_empty() {
             return Err(

@@ -1,6 +1,6 @@
 ---
 name: configurations
-description: Configurations in peet - several versions of one part in one file (sizes, with and without features), giving a size, a sketch dimension or a parameter another value in some versions, switching between them, and exporting each.
+description: Configurations in peet - several versions of one part in one file (sizes, with and without features), giving a size, a sketch dimension or a parameter another value in some versions, derived configurations that follow a parent, switching between them, and exporting each.
 ---
 
 # Configurations
@@ -31,21 +31,23 @@ the active one.
 - `add_configuration` makes a copy of the active configuration (or of `copy`) **and
   makes it active**, so the operations after it change the new one.
 - What can differ: whether a feature is suppressed, a parameter's value, a feature's
-  numeric values, and a sketch's dimensions.
+  numeric values, a sketch's dimensions, a cut's or extrusion's direction (`reverse`,
+  `both`, `flip_side`) and the plane or face a sketch is on (`on`). See "Directions and
+  sketch planes that differ".
 - Everything else is the part's, in every configuration: a new feature, what is drawn in
-  a sketch, a new parameter, and the fields of a feature that aren't numbers (a
-  direction, an end condition, the edges of a fillet).
+  a sketch, a new parameter, and the other fields of a feature that aren't numbers (an
+  end condition, the edges of a fillet).
 
 ## Which configurations a change applies to
 
-`suppress`, `set_parameter`, `edit` and `set_dimension` take `configurations`:
+`suppress`, `set_parameter`, `edit`, `set_dimension` and `set` take `configurations`:
 
 - `"this"`: the active configuration only;
 - `"all"`: every configuration, and the value no longer differs between them;
 - a name or a list of names: those, without making them active.
 
 **Left out, it depends on the operation.** `suppress` and `set_parameter` mean `"this"`.
-`edit` and `set_dimension` change a value that already differs between configurations in
+`edit`, `set_dimension` and `set` (of a dimension) change a value that already differs between configurations in
 the active one, and a value that doesn't in all of them: so say `"this"` (or name the
 configurations) the first time a size is to differ, and nothing after that.
 
@@ -74,6 +76,65 @@ thickness that features and sketches use); set the value itself when it is one n
 - `configurations` shows what differs under `values`, by feature and by the value's
   name, as it would be typed (`"2 * t"` for an expression). An expression is evaluated
   with each configuration's own parameters.
+
+## Derived configurations
+
+A **derived configuration** (SolidWorks' "Add Derived Configuration") has a parent and
+follows it: a change made to the parent is made to it too, except where it has a value of
+its own. Use one for a variant of a variant (a painted version of the long size) so that
+changing the long size changes both.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [80, 50]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 8}
+{"op": "add_configuration", "name": "Long"}
+{"op": "add_configuration", "name": "Long thin", "parent": "Long"}
+{"op": "edit", "feature": "Extrude1", "depth": 4, "configurations": "this"}
+{"op": "edit", "feature": "Extrude1", "depth": 12, "configurations": "Long"}
+{"op": "set_parameter", "name": "finish", "value": 2, "configurations": "Long"}
+{"op": "configurations"}
+```
+
+"Long thin" keeps its depth of 4 (its own) and takes `finish` = 2 from "Long".
+
+- `add_configuration` with `parent` makes one: it starts as a copy of the parent (so
+  `copy` is refused with it) and becomes active.
+- **Its own value** is one that differs from its parent's. A change to the parent reaches
+  every configuration derived from it (at any depth) that has the parent's value there; a
+  change to a derived configuration stays in it. In an assembly the same holds for each
+  field of a component (suppressed, the configuration of its part, fixed, where it is),
+  each mate and each equation.
+- `configurations` gives a derived one's `parent`.
+- **Deleting a parent deletes the configurations derived from it**, as in SolidWorks.
+
+## Directions and sketch planes that differ
+
+SolidWorks lets a cut go the other way in one configuration, and a sketch sit on another
+face (a door's hinge holes on the left-hand return in one configuration and the
+right-hand one in the other). `edit` with `configurations` takes a sheet metal cut's
+`reverse` and `both`, an extrusion's or cut's `reverse` and `flip_side`, and a sketch's
+`on`:
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 10}
+{"op": "plane", "from": "top", "distance": 10, "name": "Over"}
+{"op": "sketch", "on": "Over", "name": "Holes", "draw": [{"type": "circle", "center": [20, 20], "radius": 3}]}
+{"op": "cut", "sketch": "Holes", "depth": 5}
+{"op": "add_configuration", "name": "Under"}
+{"op": "edit", "feature": "Holes", "on": "top", "configurations": "this"}
+{"op": "edit", "feature": "Cut-Extrude1", "reverse": true, "configurations": "this"}
+{"op": "configurations"}
+{"op": "faces"}
+```
+
+- The drawing is the same in every configuration: it keeps its coordinates on the other
+  plane. Pick a plane whose axes put it where it should be (a face facing the other way
+  mirrors it); a reference plane turned 180° about an axis faces the other way.
+- A cut's direction is the sketch plane's: a sketch moved to a plane facing the other
+  way usually needs its cut turned too, in the same configurations.
+- `configurations` lists these under `settings`, by feature, then `reverse` (and the
+  others) or `on`, with each configuration's value.
 
 ## What is suppressed with a feature
 
@@ -110,8 +171,10 @@ flag. A malformed expression is refused. An unknown name, invalid unit or evalua
 error makes the feature fail at rebuild, and appears in `failures`. Fix the rule or
 its parameter, or clear it. Check each configuration, since their parameter values
 can select different branches. Translate SolidWorks suppression strings to numeric
-results: `"suppressed"` becomes 1 and `"unsuppressed"` becomes 0. Use a named parameter
-for a sketch size that a suppression rule needs to read.
+results: `"suppressed"` becomes 1 and `"unsuppressed"` becomes 0. A rule reads a
+dimension by its address, as SolidWorks' equations do: `"iif(\"Height@Sketch1\" > 1500, 0,
+1)"` (`peet skills core`, "Dimensions by name"). An address reads and `set` sets the
+active configuration's value.
 
 ## Checking and exporting each
 
@@ -146,3 +209,6 @@ Put an `export` where each `bodies` is to write a file per configuration.
   another value there.
 - **A part keeps at least one configuration.** Deleting the active one makes its
   neighbour active; the reply's `configuration` says which.
+- **SolidWorks' flat-pattern configurations** (`DefaultSM-FLAT-PATTERN`, derived ones it
+  makes for sheet metal) are not configurations in PeetCAD: the flat pattern is the
+  `flat_pattern` view and export of the configuration itself.

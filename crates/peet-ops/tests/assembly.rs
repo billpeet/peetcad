@@ -26,6 +26,702 @@ fn error(doc: &mut Document, op: Value) -> String {
     reply.json["error"].as_str().unwrap().to_owned()
 }
 
+fn nested_mate_fixture() -> Document {
+    let mut part = Document::default();
+    ok(
+        &mut part,
+        json!({"op": "sketch", "on": "top", "draw": [
+            {"type": "rectangle", "from": [0, 0], "to": [40, 30]}
+        ]}),
+    );
+    ok(
+        &mut part,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+    );
+    ok(
+        &mut part,
+        json!({"op": "plane", "from": "top", "distance": 7, "name": "MatePlane"}),
+    );
+    ok(
+        &mut part,
+        json!({"op": "name_face", "face": {"normal": [0, 0, 1]}, "name": "TopFace"}),
+    );
+    let mut shelf = Model::new_assembly();
+    let a = shelf.assembly_mut().unwrap();
+    let d = a.define(Arc::new(part.model.clone()));
+    let c = a
+        .insert(
+            d,
+            Frame {
+                origin: DVec3::new(0.0, 0.0, 100.0),
+                rotation: peet_math::DQuat::from_rotation_x(std::f64::consts::FRAC_PI_2),
+            },
+        )
+        .unwrap();
+    a.component_mut(c).unwrap().name = "Plate".to_owned();
+    let mut stand = Model::new_assembly();
+    let a = stand.assembly_mut().unwrap();
+    let d = a.define(Arc::new(shelf));
+    let c = a
+        .insert(
+            d,
+            Frame {
+                origin: DVec3::new(20.0, 30.0, 40.0),
+                rotation: peet_math::DQuat::from_rotation_z(std::f64::consts::FRAC_PI_2),
+            },
+        )
+        .unwrap();
+    a.component_mut(c).unwrap().name = "Shelf".to_owned();
+    let mut model = Model::new_assembly();
+    let a = model.assembly_mut().unwrap();
+    let d = a.define(Arc::new(part.model));
+    let c = a.insert(d, Frame::WORLD).unwrap();
+    a.component_mut(c).unwrap().name = "Base".to_owned();
+    let d = a.define(Arc::new(stand));
+    let c = a
+        .insert(
+            d,
+            Frame {
+                origin: DVec3::new(60.0, 0.0, 0.0),
+                ..Frame::WORLD
+            },
+        )
+        .unwrap();
+    a.component_mut(c).unwrap().name = "Stand".to_owned();
+    Document::from_model(model, None)
+}
+
+fn stand_x(doc: &Document) -> f64 {
+    doc.model
+        .assembly()
+        .unwrap()
+        .component(peet_model::CompId(2))
+        .unwrap()
+        .placement
+        .origin
+        .x
+}
+
+#[test]
+fn nested_reference_planes_follow_edits_and_survive_files() {
+    let mut doc = nested_mate_fixture();
+    let result = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 12, "flip": true,
+            "a": {"component": "Base", "plane": "right"},
+            "b": {"component": ["Stand", "Shelf", "Plate"], "plane": "MatePlane"}
+        }),
+    );
+    assert_eq!(result["mate"]["status"], "ok", "{result}");
+    assert_eq!(result["mate"]["b"]["on"], "plane");
+    assert_eq!(
+        result["mate"]["b"]["path"],
+        json!(["Stand", "Shelf", "Plate"])
+    );
+    assert!((stand_x(&doc) + 15.0).abs() < 1e-7);
+
+    // Edit the leaf definition. The root mate follows the same plane id through a rename.
+    doc.change("Edit nested plane", |model| {
+        let root = model.assembly_mut().unwrap();
+        let stand_id = root.component(peet_model::CompId(2)).unwrap().definition;
+        let mut stand = (*root.definition(stand_id).unwrap().model).clone();
+        let shelf_id = stand
+            .assembly()
+            .unwrap()
+            .component(peet_model::CompId(1))
+            .unwrap()
+            .definition;
+        let mut shelf = (*stand
+            .assembly()
+            .unwrap()
+            .definition(shelf_id)
+            .unwrap()
+            .model)
+            .clone();
+        let plate_id = shelf
+            .assembly()
+            .unwrap()
+            .component(peet_model::CompId(1))
+            .unwrap()
+            .definition;
+        let mut plate = Document::from_model(
+            (*shelf
+                .assembly()
+                .unwrap()
+                .definition(plate_id)
+                .unwrap()
+                .model)
+                .clone(),
+            None,
+        );
+        ok(
+            &mut plate,
+            json!({"op": "edit", "feature": "MatePlane", "distance": 17}),
+        );
+        ok(
+            &mut plate,
+            json!({"op": "rename", "feature": "MatePlane", "name": "RenamedPlane"}),
+        );
+        shelf
+            .assembly_mut()
+            .unwrap()
+            .set_model(plate_id, Arc::new(plate.model));
+        stand
+            .assembly_mut()
+            .unwrap()
+            .set_model(shelf_id, Arc::new(shelf));
+        root.set_model(stand_id, Arc::new(stand));
+    });
+    assert!((stand_x(&doc) + 25.0).abs() < 1e-7);
+    let dir = temp("nested-plane");
+    let path = dir.join("nested.peet");
+    ok(&mut doc, json!({"op": "save", "path": path}));
+    let reopened = peet_io::document::open(&std::fs::read(path).unwrap()).unwrap();
+    let mut doc = Document::from_model(reopened.model, None);
+    let mates = ok(&mut doc, json!({"op": "mates"}));
+    assert_eq!(mates["mates"][0]["status"], "ok");
+    assert!((stand_x(&doc) + 25.0).abs() < 1e-7);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn nested_named_faces_and_mixed_name_id_paths_are_scriptable() {
+    let mut doc = nested_mate_fixture();
+    let result = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident", "flip": true,
+            "a": {"component": "Base", "plane": "right"},
+            "b": {"component": [2, "Shelf", 1], "face": {"name": "TopFace"}}
+        }),
+    );
+    assert_eq!(result["mate"]["status"], "ok", "{result}");
+    assert!((stand_x(&doc) + 25.0).abs() < 1e-7);
+    let root = doc.model.assembly().unwrap();
+    let stand = root
+        .definition_of(peet_model::CompId(2))
+        .unwrap()
+        .model
+        .assembly()
+        .unwrap();
+    // The inner components remain rigid in their original local placements.
+    assert_eq!(
+        stand
+            .component(peet_model::CompId(1))
+            .unwrap()
+            .placement
+            .origin,
+        DVec3::new(20.0, 30.0, 40.0)
+    );
+}
+
+#[test]
+fn a_missing_nested_component_fails_its_plane_mate_and_restoring_it_recovers() {
+    let mut doc = nested_mate_fixture();
+    ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 12, "flip": true,
+            "a": {"component": "Base", "plane": "right"},
+            "b": {"component": ["Stand", "Shelf", "Plate"], "plane": "MatePlane"}
+        }),
+    );
+    for suppressed in [true, false] {
+        doc.change("Suppress inner component", |model| {
+            let root = model.assembly_mut().unwrap();
+            let id = root.component(peet_model::CompId(2)).unwrap().definition;
+            let mut stand = (*root.definition(id).unwrap().model).clone();
+            stand
+                .assembly_mut()
+                .unwrap()
+                .component_mut(peet_model::CompId(1))
+                .unwrap()
+                .suppressed = suppressed;
+            root.set_model(id, Arc::new(stand));
+        });
+        let mates = ok(&mut doc, json!({"op": "mates"}));
+        assert_eq!(
+            mates["mates"][0]["status"],
+            if suppressed { "failed" } else { "ok" }
+        );
+        assert_eq!(doc.evaluation().freedom, if suppressed { 6 } else { 3 });
+    }
+}
+
+#[test]
+fn mate_paths_and_planes_explain_invalid_selections() {
+    let mut doc = nested_mate_fixture();
+    for (end, message) in [
+        (json!({"component": [], "plane": "top"}), "empty"),
+        (
+            json!({"component": ["Base", "Child"], "plane": "top"}),
+            "not a sub-assembly",
+        ),
+        (
+            json!({"component": ["Stand", "Missing"], "plane": "top"}),
+            "Shelf",
+        ),
+        (
+            json!({"component": ["Stand", "Shelf", "Plate"], "plane": "Missing"}),
+            "MatePlane",
+        ),
+        (
+            json!({"component": "Base", "plane": "Extrude1"}),
+            "not a plane",
+        ),
+        (
+            json!({"component": "Base", "plane": "top", "face": {"normal": [0, 0, 1]}}),
+            "expected",
+        ),
+    ] {
+        let e = error(
+            &mut doc,
+            json!({"op": "mate", "type": "coincident",
+                "a": {"component": "Base", "plane": "top"}, "b": end
+            }),
+        );
+        assert!(e.contains(message), "{e}");
+    }
+}
+
+#[test]
+fn planar_face_selectors_are_also_plane_ends() {
+    let mut doc = nested_mate_fixture();
+    let result = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident", "flip": true,
+            "a": {"component": "Base", "plane": "right"},
+            "b": {"component": ["Stand", "Shelf", "Plate"], "plane": {"name": "TopFace"}}
+        }),
+    );
+    assert_eq!(result["mate"]["status"], "ok", "{result}");
+    assert!(matches!(
+        doc.model.assembly().unwrap().mates().next().unwrap().b.geom,
+        Some(peet_model::MateGeom::Plane(peet_model::PlaneRef::Face(_)))
+    ));
+    assert!((stand_x(&doc) + 25.0).abs() < 1e-7);
+}
+
+#[test]
+fn standard_planes_mate_components_without_bodies() {
+    let mut model = Model::new_assembly();
+    let a = model.assembly_mut().unwrap();
+    let d = a.define(Arc::new(Model::new()));
+    a.insert(d, Frame::WORLD).unwrap();
+    a.insert(
+        d,
+        Frame {
+            origin: DVec3::splat(30.0),
+            ..Frame::WORLD
+        },
+    )
+    .unwrap();
+    let mut doc = Document::from_model(model, None);
+    for plane in ["top", "front", "right"] {
+        let r = ok(
+            &mut doc,
+            json!({"op": "mate", "type": "coincident", "flip": true,
+                "a": {"component": 1, "plane": plane}, "b": {"component": 2, "plane": plane}
+            }),
+        );
+        assert_eq!(r["mate"]["status"], "ok", "{r}");
+    }
+    assert_eq!(doc.evaluation().freedom, 0);
+    assert!(stand_x(&doc).abs() < 1e-7);
+}
+
+fn width_fixture() -> Document {
+    let make = |length| {
+        let mut part = Document::default();
+        ok(
+            &mut part,
+            json!({"op": "sketch", "on": "top", "draw": [
+                {"type": "rectangle", "from": [0, 0], "to": [length, 30]}
+            ]}),
+        );
+        ok(
+            &mut part,
+            json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+        );
+        part.model
+    };
+    let mut model = Model::new_assembly();
+    let a = model.assembly_mut().unwrap();
+    let width = a.define(Arc::new(make(40)));
+    let tab = a.define(Arc::new(make(20)));
+    let c = a.insert(width, Frame::WORLD).unwrap();
+    a.component_mut(c).unwrap().name = "Width".to_owned();
+    let c = a
+        .insert(
+            tab,
+            Frame {
+                origin: DVec3::new(60.0, 13.0, 17.0),
+                ..Frame::WORLD
+            },
+        )
+        .unwrap();
+    a.component_mut(c).unwrap().name = "Tab".to_owned();
+    Document::from_model(model, None)
+}
+
+fn width_op() -> Value {
+    json!({"op": "mate", "type": "width", "name": "Center",
+        "a": [{"component": "Width", "face": {"normal": [-1, 0, 0]}},
+              {"component": "Width", "face": {"normal": [1, 0, 0]}}],
+        "b": [{"component": "Tab", "face": {"normal": [-1, 0, 0]}},
+              {"component": "Tab", "face": {"normal": [1, 0, 0]}}]
+    })
+}
+
+#[test]
+fn a_width_mate_centers_and_follows_both_faces_and_survives_files() {
+    let mut doc = width_fixture();
+    let result = ok(&mut doc, width_op());
+    assert_eq!(result["mate"]["status"], "ok", "{result}");
+    assert_eq!(result["mate"]["a"].as_array().unwrap().len(), 2);
+    assert_eq!(result["mate"]["b"].as_array().unwrap().len(), 2);
+    assert!((stand_x(&doc) - 10.0).abs() < 1e-7);
+    assert_eq!(doc.evaluation().freedom, 3);
+    let initial = doc
+        .model
+        .assembly()
+        .unwrap()
+        .component(peet_model::CompId(2))
+        .unwrap()
+        .placement;
+    assert_eq!(initial.origin.y, 13.0);
+    assert_eq!(initial.origin.z, 17.0);
+    assert!(initial.rotation.to_scaled_axis().length() < 1e-8);
+    doc.change("Widen the fixed part", |model| {
+        let a = model.assembly_mut().unwrap();
+        let id = a.component(peet_model::CompId(1)).unwrap().definition;
+        let mut part = Document::from_model((*a.definition(id).unwrap().model).clone(), None);
+        // Rectangle entity coordinates are edited through the same model API as the UI.
+        let sketch = part
+            .model
+            .features()
+            .find(|f| f.sketch().is_some())
+            .unwrap()
+            .id;
+        let s = part
+            .model
+            .feature_mut(sketch)
+            .unwrap()
+            .sketch_mut()
+            .unwrap();
+        let points: Vec<_> = s
+            .sketch
+            .entities()
+            .filter(|(_, e)| matches!(e.geometry, peet_sketch::sketch::Geometry::Point { .. }))
+            .map(|(id, _)| id)
+            .collect();
+        for point in points {
+            let mut position = s.sketch.point(point);
+            if position.x > 30.0 {
+                position.x = 60.0;
+                s.sketch.set_point(point, position);
+            }
+        }
+        a.set_model(id, Arc::new(part.model));
+    });
+    assert!((stand_x(&doc) - 20.0).abs() < 1e-7);
+    let dir = temp("width-mate");
+    let file = dir.join("width.peet");
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let loaded = peet_io::document::open(&std::fs::read(file).unwrap()).unwrap();
+    let mut loaded = Document::from_model(loaded.model, None);
+    let mates = ok(&mut loaded, json!({"op": "mates"}));
+    assert_eq!(mates["mates"][0]["type"], "width");
+    assert_eq!(mates["mates"][0]["status"], "ok");
+    assert!((stand_x(&loaded) - 20.0).abs() < 1e-7);
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn all_width_modes_position_the_tab_and_free_mode_limits_dragging() {
+    let mut doc = width_fixture();
+    let mut op = width_op();
+    op["mode"] = json!("free");
+    let r = ok(&mut doc, op);
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    assert!((stand_x(&doc) - 20.0).abs() < 1e-6);
+    assert_eq!(doc.evaluation().freedom, 4);
+    for x in [8.0_f64, -100.0, 100.0] {
+        let r = ok(
+            &mut doc,
+            json!({"op": "place", "component": "Tab", "at": [x, 13, 17]}),
+        );
+        assert!((stand_x(&doc) - x.clamp(0.0, 20.0)).abs() < 1e-6, "{r}");
+    }
+    let r = ok(
+        &mut doc,
+        json!({"op": "drag", "component": "Tab", "point": [0, 0, 0], "to": [-40, 13, 17]}),
+    );
+    assert!(stand_x(&doc).abs() < 1e-5, "{r}");
+    assert!((r["short_by"].as_f64().unwrap() - 40.0).abs() < 1e-4, "{r}");
+    ok(
+        &mut doc,
+        json!({"op": "set_parameter", "name": "gap", "value": "4mm"}),
+    );
+    let r = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "dimension", "distance": "gap"}),
+    );
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    assert!((stand_x(&doc) - 4.0).abs() < 1e-6);
+    ok(
+        &mut doc,
+        json!({"op": "set_parameter", "name": "gap", "value": "7mm"}),
+    );
+    assert!((stand_x(&doc) - 7.0).abs() < 1e-6);
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "distance": 3}),
+    );
+    assert!((stand_x(&doc) - 3.0).abs() < 1e-6);
+    for (percent, x) in [(0, 0.0), (25, 5.0), (50, 10.0), (100, 20.0)] {
+        let r = ok(
+            &mut doc,
+            json!({"op": "edit_mate", "mate": "Center", "mode": "percent", "percent": percent}),
+        );
+        assert_eq!(r["mate"]["status"], "ok", "{r}");
+        assert!((stand_x(&doc) - x).abs() < 1e-6, "{r}");
+    }
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "centered"}),
+    );
+    assert!((stand_x(&doc) - 10.0).abs() < 1e-6);
+    assert_eq!(doc.evaluation().freedom, 3);
+}
+
+#[test]
+fn invalid_width_selections_values_and_modes_are_explained_and_recover() {
+    let mut doc = width_fixture();
+    let mut malformed = width_op();
+    malformed["a"] = json!([]);
+    assert!(error(&mut doc, malformed).contains("exactly two"));
+    // A pair may be on two components (as in SolidWorks), but not every end on one.
+    let mut mixed = width_op();
+    mixed["a"][0]["component"] = json!("Tab");
+    mixed["a"][1]["component"] = json!("Tab");
+    assert!(error(&mut doc, mixed).contains("a mate joins two components"));
+    let mut wrong = width_op();
+    wrong["mode"] = json!("unknown");
+    assert!(error(&mut doc, wrong).contains("Width mode"));
+    let mut wrong = width_op();
+    wrong["a"][1]["face"] = json!({"normal": [0, 1, 0]});
+    let r = ok(&mut doc, wrong);
+    assert_eq!(r["mate"]["status"], "failed");
+    assert!(r["mate"]["message"].as_str().unwrap().contains("parallel"));
+    ok(&mut doc, json!({"op": "delete", "mate": "Center"}));
+    ok(&mut doc, width_op());
+    for mode in [
+        json!({"mode": "percent", "percent": 101}),
+        json!({"mode": "dimension", "distance": 21}),
+    ] {
+        let mut op = mode;
+        op["op"] = json!("edit_mate");
+        op["mate"] = json!("Center");
+        let r = ok(&mut doc, op);
+        assert_eq!(r["mate"]["status"], "failed", "{r}");
+    }
+    let r = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "free"}),
+    );
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    assert!(
+        error(
+            &mut doc,
+            json!({"op": "edit_mate", "mate": "Center", "flip": true})
+        )
+        .contains("does not take flip")
+    );
+    ok(&mut doc, json!({"op": "delete", "component": "Tab"}));
+    assert_eq!(doc.model.assembly().unwrap().mates().count(), 0);
+}
+
+#[test]
+fn a_centred_tab_may_be_wider_than_its_width_pair() {
+    // As in SolidWorks: centred, the midplanes coincide whichever is wider.
+    let mut doc = width_fixture();
+    let mut op = width_op();
+    let (a, b) = (op["a"].clone(), op["b"].clone());
+    op["a"] = b;
+    op["b"] = a;
+    let r = ok(&mut doc, op);
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    let width = doc
+        .model
+        .assembly()
+        .unwrap()
+        .components()
+        .find(|c| c.name == "Width")
+        .unwrap()
+        .placement;
+    let tab = doc
+        .model
+        .assembly()
+        .unwrap()
+        .components()
+        .find(|c| c.name == "Tab")
+        .unwrap()
+        .placement;
+    assert!(
+        ((width.origin.x + 20.0) - (tab.origin.x + 10.0)).abs() < 1e-6,
+        "{width:?} {tab:?}"
+    );
+    // Placed within the gap, it has to fit.
+    let r = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "percent", "percent": 50}),
+    );
+    assert_eq!(r["mate"]["status"], "failed", "{r}");
+    assert!(
+        r["mate"]["message"].as_str().unwrap().contains("wider"),
+        "{r}"
+    );
+}
+
+#[test]
+fn cylindrical_width_tabs_use_their_diameter_for_clearance() {
+    let mut doc = width_fixture();
+    let mut cylinder = Document::default();
+    ok(
+        &mut cylinder,
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 5}]}),
+    );
+    ok(
+        &mut cylinder,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 20}),
+    );
+    doc.change("Replace tab", |m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.define(Arc::new(cylinder.model.clone()));
+        a.replace(peet_model::CompId(2), d);
+    });
+    let mut op = width_op();
+    op["b"] = json!({"component": "Tab", "face": {"at": [5, 0, 10]}});
+    let r = ok(&mut doc, op);
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    assert!((stand_x(&doc) - 20.0).abs() < 1e-6);
+    assert_eq!(doc.evaluation().freedom, 4);
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "free"}),
+    );
+    for (x, expected) in [(-100.0, 5.0), (100.0, 35.0)] {
+        ok(
+            &mut doc,
+            json!({"op": "place", "component": "Tab", "at": [x, 13, 17]}),
+        );
+        assert!((stand_x(&doc) - expected).abs() < 1e-6);
+    }
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "dimension", "distance": 4}),
+    );
+    assert!((stand_x(&doc) - 9.0).abs() < 1e-6);
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Center", "mode": "percent", "percent": 25}),
+    );
+    assert!((stand_x(&doc) - 12.5).abs() < 1e-6);
+}
+
+#[test]
+fn width_mates_resolve_nested_plane_pairs_and_preserve_their_rigid_placements() {
+    let mut doc = nested_mate_fixture();
+    doc.change("Width reference", |m| {
+        let a = m.assembly_mut().unwrap();
+        let d = a.component(peet_model::CompId(1)).unwrap().definition;
+        let mut part = Document::from_model((*a.definition(d).unwrap().model).clone(), None);
+        ok(
+            &mut part,
+            json!({"op": "plane", "from": "right", "distance": 40, "name": "Far"}),
+        );
+        a.set_model(d, Arc::new(part.model));
+    });
+    let r = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "width",
+            "a": [{"component": "Base", "plane": "right"}, {"component": "Base", "plane": "Far"}],
+            "b": [{"component": ["Stand", "Shelf", "Plate"], "plane": "top"}, {"component": ["Stand", "Shelf", "Plate"], "plane": "MatePlane"}]
+        }),
+    );
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    assert_eq!(
+        r["mate"]["b"][1]["path"],
+        json!(["Stand", "Shelf", "Plate"])
+    );
+    assert!((stand_x(&doc) + 3.5).abs() < 1e-6);
+}
+
+#[test]
+fn width_mate_creation_and_mode_changes_translate_to_operations() {
+    let mut doc = width_fixture();
+    let mut replay = Document::from_model(doc.model.clone(), None);
+    let mut host = Headless::default();
+    for (index, op) in [
+        width_op(),
+        json!({"op": "edit_mate", "mate": "Center", "mode": "percent", "percent": 25}),
+        json!({"op": "edit_mate", "mate": "Center", "mode": "free"}),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        ok(&mut doc, op);
+        let result = apply_model(
+            &mut host,
+            &mut replay,
+            doc.model.clone(),
+            "Width edit",
+            index as u64 + 1,
+        );
+        assert_eq!(result.untranslated, None, "{:?}", result.ops);
+        assert_eq!(replay.model, doc.model);
+    }
+}
+
+#[test]
+fn width_mates_solve_from_perpendicular_plane_or_axis_orientations() {
+    let mut doc = width_fixture();
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Tab", "rotate": {"axis": "z", "angle": 90}}),
+    );
+    let r = ok(&mut doc, width_op());
+    assert_eq!(r["mate"]["status"], "ok", "{r}");
+    let frame = doc
+        .model
+        .assembly()
+        .unwrap()
+        .component(peet_model::CompId(2))
+        .unwrap()
+        .placement;
+    assert!((frame.to_world(DVec3::new(10.0, 15.0, 2.5)).x - 20.0).abs() < 1e-6);
+    assert!(frame.vector_to_world(DVec3::X).cross(DVec3::X).length() < 1e-6);
+}
+
+#[test]
+fn free_width_limits_conflict_with_a_mate_that_pushes_the_tab_outside() {
+    let mut doc = width_fixture();
+    let mut op = width_op();
+    op["mode"] = json!("free");
+    ok(&mut doc, op);
+    let r = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident",
+            "a": {"component": "Width", "face": {"normal": [1, 0, 0]}},
+            "b": {"component": "Tab", "face": {"normal": [-1, 0, 0]}}
+        }),
+    );
+    assert_eq!(r["mate"]["status"], "failed", "{r}");
+    let r = ok(&mut doc, json!({"op": "mates"}));
+    assert_eq!(r["mates"][0]["status"], "ok", "{r}");
+    assert_eq!(r["mates"][1]["status"], "failed", "{r}");
+    assert!(stand_x(&doc) <= 20.0 + 1e-6);
+}
+
 fn temp(name: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!("peet-asm-{name}-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -519,7 +1215,8 @@ fn the_applications_changes_to_an_assembly_are_made_by_operations() {
         ops,
         [Op::Component {
             component: CompSel::Id(second),
-            change: ComponentChange::Delete
+            change: ComponentChange::Delete,
+            configurations: None,
         }]
     );
 
@@ -533,6 +1230,7 @@ fn the_applications_changes_to_an_assembly_are_made_by_operations() {
             fixed: None,
             link: false,
             absolute: false,
+            configuration: None,
         },
         Undo::Step,
     );
@@ -578,6 +1276,192 @@ fn at(reply: &Value) -> [f64; 3] {
 
 fn near(a: [f64; 3], b: [f64; 3]) -> bool {
     a.iter().zip(b).all(|(x, y)| (x - y).abs() < 1e-6)
+}
+
+/// The placement of the component called `name`.
+fn placement(doc: &Document, name: &str) -> Frame {
+    doc.model
+        .assembly()
+        .unwrap()
+        .components()
+        .find(|c| c.name == name)
+        .unwrap_or_else(|| panic!("no component {name}"))
+        .placement
+}
+
+#[test]
+fn a_distance_is_measured_either_way_and_ends_go_either_way_round() {
+    let dir = temp("align");
+    let (plate, pin) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Base"}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Lid", "at": [0, 0, 30]}),
+    );
+    let up = json!({"normal": [0, 0, 1]});
+    let down = json!({"normal": [0, 0, -1]});
+    let z = |doc: &Document| placement(doc, "Lid").origin.z;
+
+    // 10 in front of the base's top face; flipped, 10 behind it (SolidWorks' flip
+    // dimension), and back.
+    let made = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 10,
+               "a": {"component": "Base", "face": up},
+               "b": {"component": "Lid", "face": down}}),
+    );
+    assert!((z(&doc) - 15.0).abs() < 1e-6, "{made}");
+    let flipped = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Distance1", "flip_dimension": true}),
+    );
+    assert_eq!(flipped["mate"]["flip_dimension"], true);
+    assert!((z(&doc) + 5.0).abs() < 1e-6, "{flipped}");
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Distance1", "flip_dimension": false}),
+    );
+    assert!((z(&doc) - 15.0).abs() < 1e-6);
+    ok(&mut doc, json!({"op": "delete", "mate": "Distance1"}));
+
+    // Aligned and measured the other way, given when the mate is added: the lid's top
+    // 10 below the base's, the same way up.
+    let made = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 10, "align": "aligned",
+               "flip_dimension": true,
+               "a": {"component": "Base", "face": up},
+               "b": {"component": "Lid", "face": up}}),
+    );
+    assert_eq!(made["mate"]["flip"], true);
+    assert_eq!(made["mate"]["align"], "aligned");
+    assert!((z(&doc) + 10.0).abs() < 1e-6, "{made}");
+    let lid_up = |doc: &Document| placement(doc, "Lid").vector_to_world(DVec3::Z).z;
+    assert!((lid_up(&doc) - 1.0).abs() < 1e-9);
+    ok(&mut doc, json!({"op": "delete", "mate": "Distance1"}));
+
+    // Planes: closest keeps the lid the way up it is; the default turns it over.
+    let made = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "coincident", "align": "closest",
+               "a": {"component": "Base", "face": up},
+               "b": {"component": "Lid", "face": up}}),
+    );
+    assert_eq!(made["mate"]["align"], "closest");
+    assert!((lid_up(&doc) - 1.0).abs() < 1e-9 && (z(&doc) - 0.0).abs() < 1e-6);
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Coincident1", "flip": false}),
+    );
+    assert!(
+        (lid_up(&doc) + 1.0).abs() < 1e-9,
+        "the faces go against each other"
+    );
+    ok(&mut doc, json!({"op": "delete", "mate": "Coincident1"}));
+
+    // Axes: whichever way is nearer, unless asked. The pin's axis and the hole's both
+    // point up in their parts.
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": pin, "name": "Pin", "at": [-30, 10, 40]}),
+    );
+    let hole = json!({"at": [24, 15, 2.5]});
+    let round = json!({"at": [4, 0, 10]});
+    let pin_up = |doc: &Document| placement(doc, "Pin").vector_to_world(DVec3::Z).z;
+    ok(
+        &mut doc,
+        json!({"op": "mate", "type": "concentric",
+               "a": {"component": "Base", "face": hole},
+               "b": {"component": "Pin", "face": round}}),
+    );
+    assert!((pin_up(&doc) - 1.0).abs() < 1e-9);
+    let turned = ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Concentric1", "align": "anti_aligned"}),
+    );
+    assert_eq!(turned["mate"]["align"], "anti_aligned");
+    assert!((pin_up(&doc) + 1.0).abs() < 1e-9, "{turned}");
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Concentric1", "align": "closest"}),
+    );
+    assert!(
+        (pin_up(&doc) + 1.0).abs() < 1e-9,
+        "closest leaves it as it is"
+    );
+    ok(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Concentric1", "align": "aligned"}),
+    );
+    assert!((pin_up(&doc) - 1.0).abs() < 1e-9);
+    let axis = placement(&doc, "Pin");
+    assert!(
+        (axis.origin.x - 20.0).abs() < 1e-6 && (axis.origin.y - 15.0).abs() < 1e-6,
+        "still in the hole: {axis:?}"
+    );
+
+    // Saved and opened again, the settings stay.
+    let file = dir.join("aligned.peet").to_string_lossy().into_owned();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let mut doc = Document::default();
+    ok(&mut doc, json!({"op": "open", "path": file}));
+    let mates = ok(&mut doc, json!({"op": "mates"}));
+    assert_eq!(mates["mates"][0]["align"], "aligned", "{mates}");
+
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Concentric1", "align": "sideways"}),
+    );
+    assert!(e.contains("aligned, anti_aligned or closest"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "edit_mate", "mate": "Concentric1", "flip": true, "align": "aligned"}),
+    );
+    assert!(e.contains("not both"), "{e}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_mate_added_suppressed_moves_nothing_until_it_is_unsuppressed() {
+    let dir = temp("suppressed-mate");
+    let (plate, _) = plate_and_pin(&dir);
+    let mut doc = assembly();
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Base"}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Lid", "at": [3, 4, 30],
+               "rotate": {"axis": [1, 0, 0], "angle": 180}}),
+    );
+    let before = placement(&doc, "Lid");
+    let made = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "distance", "distance": 10, "suppressed": true,
+               "a": {"component": "Base", "face": {"normal": [0, 0, 1]}},
+               "b": {"component": "Lid", "face": {"normal": [0, 0, -1]}}}),
+    );
+    assert_eq!(made["mate"]["status"], "suppressed", "{made}");
+    assert!(made.get("moved").is_none(), "nothing moves: {made}");
+    assert_eq!(placement(&doc, "Lid"), before);
+    // Unsuppressed, it is solved as any other mate.
+    let solved = ok(
+        &mut doc,
+        json!({"op": "suppress", "mate": "Distance1", "on": false}),
+    );
+    assert_eq!(solved["mate"]["status"], "ok", "{solved}");
+    let lid = placement(&doc, "Lid");
+    let bottom = lid
+        .to_world(DVec3::new(0.0, 0.0, 0.0))
+        .z
+        .min(lid.to_world(DVec3::new(0.0, 0.0, 5.0)).z);
+    assert!((bottom - 15.0).abs() < 1e-6, "{solved}");
+    std::fs::remove_dir_all(dir).ok();
 }
 
 #[test]
@@ -678,9 +1562,34 @@ fn components_are_mated_by_faces_of_their_parts() {
         json!({"op": "edit_mate", "mate": "Distance1", "distance": 2}),
     );
     assert!(near(at(&edited["moved"][0]), [0.0, -32.0, 5.0]), "{edited}");
+    // By SolidWorks' name for it, as FabSys sets it: D1@ the mate, in any case
+    let set = ok(
+        &mut doc,
+        json!({"op": "set", "name": "d1@distance1", "value": 4}),
+    );
+    assert!(near(at(&set["moved"][0]), [0.0, -34.0, 5.0]), "{set}");
     ok(
         &mut doc,
-        json!({"op": "set_parameter", "name": "gap", "value": "7mm"}),
+        json!({"op": "set", "name": "D1@Distance1", "value": 2}),
+    );
+    let why = error(
+        &mut doc,
+        json!({"op": "set", "name": "Width@Sketch1", "value": 2}),
+    );
+    assert!(why.contains("open_component"), "{why}");
+    // A mate's value in some of the assembly's configurations (it has one).
+    ok(
+        &mut doc,
+        json!({"op": "set", "name": "D1@Distance1", "value": 2, "configurations": "all"}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "set_parameter", "name": "gap", "value": "6mm"}),
+    );
+    // An assembly's own parameter (a global variable) by its name
+    ok(
+        &mut doc,
+        json!({"op": "set", "name": "gap", "value": "7mm"}),
     );
     let edited = ok(
         &mut doc,
@@ -995,14 +1904,23 @@ fn the_applications_mates_are_made_by_operations() {
         let held = a.add_mate(MateKind::Fasten(relative), whole(1), whole(3));
         a.mate_mut(held).unwrap().suppressed = true;
     });
-    assert_eq!(ops.len(), 3, "{ops:?}");
+    // A mate added suppressed is one operation.
+    assert_eq!(ops.len(), 2, "{ops:?}");
     let ops = change("Change", &|m| {
         let mate = m.assembly_mut().unwrap().mate_mut(MateId(1)).unwrap();
         mate.kind = MateKind::Distance(Scalar::new(8.0));
-        mate.flip = true;
+        mate.align = Some(peet_model::Align::Aligned);
+        mate.flip_dimension = true;
         mate.name = "Gap".to_owned();
     });
     assert_eq!(ops.len(), 2, "{ops:?}");
+    for align in [Some(peet_model::Align::Closest), None] {
+        let ops = change("Align", &|m| {
+            let mate = m.assembly_mut().unwrap().mate_mut(MateId(1)).unwrap();
+            mate.align = align;
+        });
+        assert_eq!(ops.len(), 1, "{ops:?}");
+    }
     let ops = change("Delete", &|m| {
         let a = m.assembly_mut().unwrap();
         a.remove_mate(MateId(1));
@@ -2017,17 +2935,10 @@ fn components_are_shown_hidden_and_coloured() {
     let mut part = Document::default();
     let e = error(&mut part, json!({"op": "show_all"}));
     assert!(e.contains("works on an assembly"), "{e}");
-    // Configurations are a part's: an assembly has none of its own to add or list.
-    for op in [
-        json!({"op": "add_configuration", "name": "Long"}),
-        json!({"op": "configurations"}),
-    ] {
-        let e = error(&mut doc, op);
-        assert!(
-            e.contains("is an assembly") && e.contains("open_component"),
-            "{e}"
-        );
-    }
+    // An assembly has configurations of its own (see tests/assembly_configurations.rs).
+    ok(&mut doc, json!({"op": "add_configuration", "name": "Long"}));
+    let listed = ok(&mut doc, json!({"op": "configurations"}));
+    assert_eq!(listed["active"], "Long");
 }
 
 #[test]
@@ -2482,14 +3393,14 @@ fn the_applications_patterns_are_made_by_operations() {
         assert_eq!(through.bodies.len(), direct.bodies.len(), "{label}");
         done.ops
     };
-    let row = |count| PatternKind::Linear {
+    let row = |count: u32| PatternKind::Linear {
         first: PatternStep {
             direction: PatternLine::Fixed {
                 origin: DVec3::ZERO,
                 direction: DVec3::X,
             },
             spacing: Scalar::new(150.0),
-            count,
+            count: Scalar::new(f64::from(count)),
             flip: false,
         },
         second: None,
@@ -2530,4 +3441,212 @@ fn the_applications_patterns_are_made_by_operations() {
         m.assembly_mut().unwrap().remove(one);
     });
     assert_eq!(ops.len(), 1, "{ops:?}");
+}
+
+/// A hinge: a post, fixed, and an arm round it (concentric, bottoms flush), free to turn.
+/// Saved as an assembly file in `dir`.
+fn hinge_file(dir: &std::path::Path) -> String {
+    let file = dir.join("hinge.peet").to_string_lossy().into_owned();
+    let mut host = Headless::default();
+    let mut session = Session::default();
+    for op in [
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 5}]}),
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 25}),
+        json!({"op": "new", "keep": true}),
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-10, -10], "to": [70, 10]}, {"type": "circle", "center": [0, 0], "radius": 5}]}),
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 6}),
+        json!({"op": "new", "assembly": true, "keep": true}),
+        json!({"op": "insert", "part": 1, "name": "Post"}),
+        json!({"op": "insert", "part": 2, "name": "Arm"}),
+        json!({"op": "mate", "type": "concentric", "a": {"component": "Post", "face": {"at": [5, 0, 10]}}, "b": {"component": "Arm", "face": {"at": [5, 0, 3]}}}),
+        json!({"op": "mate", "type": "coincident", "flip": true, "a": {"component": "Post", "face": {"normal": [0, 0, -1]}}, "b": {"component": "Arm", "face": {"normal": [0, 0, -1]}}}),
+        json!({"op": "save", "path": file}),
+    ] {
+        let reply = apply_session_json(&mut host, &mut session, &op, Undo::Step);
+        assert!(reply.ok, "{op}: {}", reply.json);
+    }
+    file
+}
+
+fn plate_file(dir: &std::path::Path) -> String {
+    let file = dir.join("base.peet").to_string_lossy().into_owned();
+    let mut plate = Document::default();
+    ok(
+        &mut plate,
+        json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-50, -50], "to": [50, 50]}]}),
+    );
+    ok(
+        &mut plate,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+    );
+    ok(&mut plate, json!({"op": "save", "path": file}));
+    file
+}
+
+/// The component called `name` in a `components` reply.
+fn listed<'a>(reply: &'a Value, name: &str) -> &'a Value {
+    reply["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == name)
+        .unwrap_or_else(|| panic!("no {name} in {reply}"))
+}
+
+#[test]
+fn a_flexible_sub_assembly_moves_as_its_parents_mates_ask() {
+    let dir = temp("flexible");
+    let hinge = hinge_file(&dir);
+    let base = plate_file(&dir);
+    let mut doc = assembly();
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": base, "name": "Base"}),
+    );
+    for (name, x) in [("Hinge", 0), ("Rigid", 200)] {
+        ok(
+            &mut doc,
+            json!({"op": "insert", "path": hinge, "name": name, "at": [x, 0, 5], "fixed": true}),
+        );
+    }
+    let parallel = |to: &str| {
+        json!({"op": "mate", "type": "parallel", "align": "closest",
+            "a": {"component": "Base", "face": {"normal": [0, 1, 0]}},
+            "b": {"component": [to, "Arm"], "face": {"normal": [1, 0, 0]}}})
+    };
+    // Rigid: the arm is posed as the hinge's file has it, so the mate can't turn it.
+    let rigid = ok(&mut doc, parallel("Rigid"));
+    assert_eq!(rigid["mate"]["status"], "failed", "{rigid}");
+    ok(&mut doc, json!({"op": "delete", "mate": "Parallel1"}));
+
+    // Mistakes.
+    let e = error(&mut doc, json!({"op": "flexible", "component": "Base"}));
+    assert!(e.contains("only a sub-assembly"), "{e}");
+    let e = error(
+        &mut doc,
+        json!({"op": "place", "component": ["Rigid", "Arm"], "rotate": {"axis": "z", "angle": 30}}),
+    );
+    assert!(e.contains("rigid sub-assembly"), "{e}");
+
+    // Flexible: the arm turns. Its own freedom is reported under `moving`.
+    let made = ok(&mut doc, json!({"op": "flexible", "component": "Hinge"}));
+    assert_eq!(made["component"]["flexible"], true);
+    assert_eq!(made["freedom"], 1, "{made}");
+    assert_eq!(made["component"]["moving"][0]["path"], json!(["Arm"]));
+    assert_eq!(made["component"]["moving"][0]["freedom"], 1);
+    let e = error(
+        &mut doc,
+        json!({"op": "place", "component": ["Hinge", "Post"], "at": [0, 0, 0]}),
+    );
+    assert!(e.contains("fixed in its sub-assembly"), "{e}");
+    let placed = ok(
+        &mut doc,
+        json!({"op": "place", "component": ["Hinge", "Arm"], "rotate": {"axis": "z", "angle": 60}}),
+    );
+    assert_eq!(
+        placed["component"]["moving"][0]["rotate"],
+        json!({"axis": [0.0, 0.0, 1.0], "angle": 60.0})
+    );
+    let mated = ok(&mut doc, parallel("Hinge"));
+    assert_eq!(mated["mate"]["status"], "ok", "{mated}");
+    assert_eq!(mated["freedom"], 0);
+    let all = ok(&mut doc, json!({"op": "components"}));
+    let h = listed(&all, "Hinge");
+    assert_eq!(
+        h["moving"][0]["rotate"],
+        json!({"axis": [0.0, 0.0, 1.0], "angle": 90.0})
+    );
+    assert_eq!(h["moving"][0]["freedom"], 0);
+    // The arm along Y now; the other hinge's along X still.
+    assert_eq!(h["max"], json!([10.0, 70.0, 30.0]));
+    assert_eq!(listed(&all, "Rigid")["max"], json!([270.0, 10.0, 30.0]));
+
+    // Saved and opened, posed as it was.
+    let file = dir.join("flexible.peet").to_string_lossy().into_owned();
+    ok(&mut doc, json!({"op": "save", "path": file}));
+    let mut again = Document::default();
+    ok(&mut again, json!({"op": "open", "path": file}));
+    assert_eq!(again.model, doc.model);
+    let all = ok(&mut again, json!({"op": "components"}));
+    assert_eq!(listed(&all, "Hinge")["max"], json!([10.0, 70.0, 30.0]));
+
+    // Exported where it is: the posed hinge is a product of its own.
+    let step = dir.join("flexible.step").to_string_lossy().into_owned();
+    let out = ok(&mut doc, json!({"op": "export", "path": step}));
+    assert_eq!(out["bodies"], 5, "{out}");
+    let mut read = assembly();
+    ok(&mut read, json!({"op": "import_step", "path": step}));
+    let imported = ok(&mut read, json!({"op": "components"}));
+    let maxes: Vec<&Value> = imported["components"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| &c["max"])
+        .collect();
+    assert!(maxes.contains(&&json!([10.0, 70.0, 30.0])), "{maxes:?}");
+    assert!(maxes.contains(&&json!([270.0, 10.0, 30.0])), "{maxes:?}");
+
+    // Rigid again: as its file has it, and the mate can't hold.
+    let back = ok(
+        &mut doc,
+        json!({"op": "flexible", "component": "Hinge", "on": false}),
+    );
+    assert_eq!(back["component"]["max"], json!([70.0, 10.0, 30.0]));
+    let mates = ok(&mut doc, json!({"op": "mates"}));
+    assert_eq!(mates["mates"][0]["status"], "failed", "{mates}");
+    std::fs::remove_dir_all(dir).ok();
+}
+
+#[test]
+fn a_flexible_sub_assembly_inside_a_flexible_one_moves_too() {
+    let dir = temp("flexible-nested");
+    let hinge = hinge_file(&dir);
+    let base = plate_file(&dir);
+    // A door: a plate with the hinge on it, flexible there too.
+    let mut door = assembly();
+    ok(
+        &mut door,
+        json!({"op": "insert", "path": base, "name": "Panel"}),
+    );
+    ok(
+        &mut door,
+        json!({"op": "insert", "path": hinge, "name": "Hinge", "at": [0, 0, 5], "fixed": true}),
+    );
+    ok(&mut door, json!({"op": "flexible", "component": "Hinge"}));
+    let door_file = dir.join("door.peet").to_string_lossy().into_owned();
+    ok(&mut door, json!({"op": "save", "path": door_file}));
+
+    let mut doc = assembly();
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": base, "name": "Base"}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": door_file, "name": "Door", "at": [0, 0, 100], "fixed": true}),
+    );
+    let made = ok(&mut doc, json!({"op": "flexible", "component": "Door"}));
+    assert_eq!(made["freedom"], 1, "{made}");
+    assert_eq!(
+        made["component"]["moving"][0]["path"],
+        json!(["Hinge", "Arm"])
+    );
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": ["Door", "Hinge", "Arm"], "rotate": {"axis": "z", "angle": 60}}),
+    );
+    let mated = ok(
+        &mut doc,
+        json!({"op": "mate", "type": "parallel", "align": "closest",
+            "a": {"component": "Base", "face": {"normal": [0, 1, 0]}},
+            "b": {"component": ["Door", "Hinge", "Arm"], "face": {"normal": [1, 0, 0]}}}),
+    );
+    assert_eq!(mated["mate"]["status"], "ok", "{mated}");
+    assert_eq!(mated["freedom"], 0);
+    let all = ok(&mut doc, json!({"op": "components"}));
+    let d = listed(&all, "Door");
+    assert_eq!(d["moving"][0]["rotate"]["angle"], 90.0, "{d}");
+    // The door's plate is 100 square; the arm reaches 70 along Y from the post.
+    assert_eq!(d["max"], json!([50.0, 70.0, 130.0]));
+    std::fs::remove_dir_all(dir).ok();
 }

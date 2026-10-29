@@ -207,6 +207,7 @@ impl Icon {
             C::NewAssembly => Self::NewDocument,
             C::InsertComponent => Self::Open,
             C::EditComponent => Self::EditSketch,
+            C::EditInContext => Self::Reference,
             C::InsertLinkedComponent => Self::ImportStep,
             C::UpdateLinks => Self::RollToEnd,
             C::InterferenceCheck => Self::Checks,
@@ -268,7 +269,7 @@ impl Icon {
     /// The icon for a feature in the tree.
     pub fn for_feature(kind: &FeatureKind) -> Self {
         match kind {
-            FeatureKind::Sketch(_) => Self::Sketch,
+            FeatureKind::Sketch(_) | FeatureKind::Sketch3d(_) => Self::Sketch,
             FeatureKind::Extrude(e) if e.params.operation == Operation::Cut => Self::Cut,
             FeatureKind::Extrude(_) => Self::Extrude,
             FeatureKind::Plane(_) => Self::RefPlane,
@@ -282,7 +283,8 @@ impl Icon {
             FeatureKind::SketchedBend(_) => Self::SketchedBend,
             FeatureKind::Jog(_) => Self::Jog,
             FeatureKind::MiterFlange(_) => Self::MiterFlange,
-            FeatureKind::Corner(_) => Self::Corner,
+            FeatureKind::Corner(_) | FeatureKind::BreakCorner(_) => Self::Corner,
+            FeatureKind::Unfold(_) | FeatureKind::Fold(_) => Self::FlatPattern,
             FeatureKind::Form(f) => match f.kind {
                 peet_sheetmetal::FormKind::Dimple => Self::Dimple,
                 peet_sheetmetal::FormKind::Emboss => Self::Emboss,
@@ -308,6 +310,10 @@ impl Icon {
             FeatureKind::Loft(l) if l.operation == Operation::Cut => Self::CutLoft,
             FeatureKind::Loft(_) => Self::Loft,
             FeatureKind::ConvertToSheet(_) => Self::ConvertToSheet,
+            FeatureKind::MoveBody(_) => Self::LinearPattern,
+            FeatureKind::InsertPart(p) if p.mirror.is_some() => Self::MirrorFeature,
+            FeatureKind::InsertPart(_) => Self::ImportStep,
+            FeatureKind::StructuralMember(_) => Self::Sweep,
         }
     }
 

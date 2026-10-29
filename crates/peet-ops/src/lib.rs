@@ -45,11 +45,15 @@
 mod analysis;
 mod args;
 mod assembly;
+mod cut;
 mod diff;
+mod display;
+mod equations;
 mod explode;
 mod export;
 mod fields;
 mod host;
+mod in_context;
 mod library;
 mod links;
 mod mate;
@@ -63,18 +67,20 @@ mod value;
 
 pub use assembly::{CompSel, ComponentChange, InsertSource, Placing, Point3};
 pub use diff::{Translation, apply_model, apply_model_scoped, diff, diff_scoped};
+pub use display::{DisplayChange, DisplayScope, DisplayStateSel, LookChange};
 pub use explode::{ExplodeChange, ExplodeSel};
 pub use export::export_bytes;
 pub use fields::{
-    AngledPlane, BaseFlange, Blend, CircularPattern, ConvertToSheet, CoordinateSystem,
+    AngledPlane, BaseFlange, Blend, BreakCorner, CircularPattern, ConvertToSheet, CoordinateSystem,
     CoordinatesPoint, Corner, CylinderAxis, Draft, EdgeAxis, EdgeFlange, Extrude, FeatureArgs,
-    Form, Hem, Hole, Jog, LinearPattern, Loft, MidPlane, Mirror, MiterFlange, OffsetPlane,
-    PlanesAxis, Revolve, SheetCut, Shell, SketchPlane, SketchedBend, Sweep, VertexPoint,
+    Fold, Form, Hem, Hole, Jog, LinearPattern, Loft, MidPlane, Mirror, MiterFlange, OffsetPlane,
+    PlanesAxis, Revolve, SheetCut, Shell, SketchPlane, SketchedBend, Sweep, Unfold, VertexPoint,
 };
 pub use host::{AppCommand, Headless, Host, SketchTool, Toggle, View, Window};
+pub use in_context::{InContextOp, MadeIn};
 pub use library::{CheckRule, Gauge, GaugeBend};
 pub use links::{PartSel, linked_files};
-pub use mate::{MateChange, MateEndSel, MateSel, MateType};
+pub use mate::{MateChange, MateEndSel, MateSel, MateType, WidthModeSel};
 pub use op::{
     DatumSel, DxfPlacement, DxfTarget, Format, New, Op, Place, Query, RollTo, Sample, Source,
 };
@@ -84,8 +90,9 @@ pub use pattern::{
 pub use session::{DocSel, SessionCommand, apply_session, apply_session_json};
 pub use sketch::{Draw, DrawItem, Ent, Measure, ProjectionSel, Relation};
 pub use value::{
-    AxisSel, Bend, Configs, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel, GeomSel,
-    HoleStandard, Input, PlaneSel, PointSel, Regions, RevolveAxis, Side, VertexQuery, VertexSel,
+    AxisSel, Bend, BoundSel, Configs, EdgeQuery, EdgeSel, End, FaceQuery, FaceSel, FeatureSel,
+    GeomSel, HoleStandard, Input, PlaneSel, PointSel, Regions, RevolveAxis, Side, VertexQuery,
+    VertexSel,
 };
 
 use peet_document::Document;
@@ -140,10 +147,22 @@ struct Done {
     mate: Option<peet_model::MateId>,
     /// A step of the exploded view the operation was about.
     explode_step: Option<peet_model::ExplodeId>,
+    /// A display state the operation was about.
+    display_state: Option<peet_model::DisplayStateId>,
     /// A component pattern the operation was about, reported with its copies.
     pattern: Option<peet_model::PatternId>,
+    /// An assembly cut the operation was about, reported with its status.
+    cut: Option<peet_model::CutId>,
     /// A pull on a component to solve the assembly with, and its undo label.
     drag: Option<(peet_model::Drag, String)>,
+    /// A reference dimension the operation was about, reported with what it measures.
+    reference: Option<String>,
+    /// An in-context reference the operation made: the component, its sketch and entity.
+    in_context: Option<(
+        Vec<peet_model::CompId>,
+        FeatureId,
+        peet_model::in_context::Holder,
+    )>,
     data: Map<String, Value>,
 }
 
@@ -176,7 +195,9 @@ fn rename(model: &mut Model, id: FeatureId, name: &str) -> Result<(), String> {
     Ok(())
 }
 
-/// Whether nothing but numeric values differs between two definitions of a feature.
+/// Whether nothing differs between two definitions of a feature but what can differ
+/// between configurations: numeric values, yes-or-no settings ([`FeatureKind::flags`]) and
+/// a sketch's plane.
 fn only_values_differ(before: &FeatureKind, after: &FeatureKind) -> bool {
     let mut probe = after.clone();
     let old = before.slots();
@@ -184,6 +205,16 @@ fn only_values_differ(before: &FeatureKind, after: &FeatureKind) -> bool {
         if let Some((_, _, was)) = old.iter().find(|(n, ..)| *n == name) {
             *value = (*was).clone();
         }
+    }
+    let flags = before.flags();
+    for (name, value) in probe.flags_mut() {
+        if let Some((_, was)) = flags.iter().find(|(n, _)| *n == name) {
+            *value = *was;
+        }
+    }
+    if let (FeatureKind::Sketch(p), FeatureKind::Sketch(b)) = (&mut probe, before) {
+        p.plane = b.plane.clone();
+        p.placement = b.placement;
     }
     probe == *before
 }
@@ -213,6 +244,15 @@ fn rescope(
             model.rescope_value(id, &v.slot, before, &scope)?;
         }
     }
+    // Yes-or-no settings and a sketch's plane: those that changed, or were given
+    let active = doc.model.active_configuration().id;
+    for (slot, now) in model.settings(id) {
+        if let Some(before) = doc.model.held_in(id, &slot, active)
+            && (before != now || given.contains(&slot))
+        {
+            model.rescope_held(id, &slot, before, &scope)?;
+        }
+    }
     Ok(())
 }
 
@@ -228,12 +268,28 @@ fn values_given(kind: &FeatureKind, fields: &FeatureArgs, doc: &Document) -> Vec
         *value = mark.clone();
     }
     let _ = fields.set(&mut probe, doc, false);
-    probe
+    let mut given: Vec<peet_model::Slot> = probe
         .slots()
         .into_iter()
         .filter(|(_, _, value)| **value != mark)
         .map(|(name, ..)| peet_model::Slot::Field(name.to_owned()))
-        .collect()
+        .collect();
+    // A yes-or-no setting given is one that comes out the same whatever it was before
+    let flags_after = |start: bool| {
+        let mut probe = kind.clone();
+        for (_, v) in probe.flags_mut() {
+            *v = start;
+        }
+        let _ = fields.set(&mut probe, doc, false);
+        probe.flags()
+    };
+    let (from_no, from_yes) = (flags_after(false), flags_after(true));
+    for ((name, a), (_, b)) in from_no.iter().zip(&from_yes) {
+        if a == b {
+            given.push(peet_model::Slot::Flag((*name).to_owned()));
+        }
+    }
+    given
 }
 
 fn check_copies(doc: &Document, kind: &FeatureKind) -> Result<(), String> {
@@ -245,12 +301,84 @@ fn check_copies(doc: &Document, kind: &FeatureKind) -> Result<(), String> {
     for id in seeds {
         if doc.feature(*id).is_some_and(|f| !f.kind.can_be_copied()) {
             return Err(format!(
-                "{} can't be copied: patterns and mirrors copy extrusions, cuts, revolves, holes, sheet metal cuts and forms.",
-                doc.model.name_of(*id)
+                "{} can't be copied: {}",
+                doc.model.name_of(*id),
+                peet_model::feature::COPIED
             ));
         }
     }
     Ok(())
+}
+
+/// Sets a value by its name: a parameter, or a dimension by its address. Returns the
+/// undo label.
+fn set_named(
+    model: &mut Model,
+    doc: &Document,
+    done: &mut Done,
+    target: &str,
+    value: &Input,
+    configurations: Option<&Configs>,
+) -> Result<String, String> {
+    // A name as an expression quotes it ("Base Height") is the name.
+    let target = target.trim();
+    let target = target
+        .strip_prefix('"')
+        .and_then(|t| t.strip_suffix('"'))
+        .map_or(target, str::trim);
+    if doc
+        .model
+        .parameters
+        .entries
+        .iter()
+        .any(|p| p.name == target)
+    {
+        let scope = configurations.cloned().unwrap_or_default().resolve(doc)?;
+        model
+            .set_parameter(target, &value.text(), &scope)
+            .map_err(|e| format!("{target}: {e}"))?;
+        return Ok(format!("Set {target}"));
+    }
+    let d = doc.model.find_dimension(target).ok_or_else(|| {
+        if target.contains('@') {
+            format!(
+                "No dimension of the part is called '{target}'. The 'dimensions' query lists their addresses."
+            )
+        } else {
+            format!(
+                "There is no parameter called '{target}'. A dimension is set by its address NAME@FEATURE (\"Width@Sketch1\"), which the 'dimensions' query lists."
+            )
+        }
+    })?;
+    if !d.driving {
+        return Err(format!(
+            "{} is a reference dimension: it measures the sketch and can't be set.",
+            d.address
+        ));
+    }
+    match d.field {
+        None => {
+            if let Some(s) = model.feature_mut(d.feature).and_then(|f| f.sketch_mut()) {
+                sketch::set_dimension(&mut s.sketch, doc, &d.name, value)?;
+            }
+            done.sketch = Some(d.feature);
+        }
+        Some(field) => {
+            let scalar = value
+                .scalar(d.kind, doc)
+                .map_err(|e| format!("{}: {e}", d.address))?;
+            if let Some((.., s)) = model
+                .feature_mut(d.feature)
+                .and_then(|f| f.kind.slots_mut().into_iter().find(|(n, ..)| *n == field))
+            {
+                *s = scalar;
+            }
+        }
+    }
+    rescope(model, doc, d.feature, configurations, &[d.slot])?;
+    done.feature = Some(d.feature);
+    done.data.insert("dimension".to_owned(), json!(d.address));
+    Ok(format!("Set {}", d.address))
 }
 
 fn add(doc: &Document, model: &mut Model, new: &[New]) -> Result<Vec<FeatureId>, String> {
@@ -271,6 +399,9 @@ fn add(doc: &Document, model: &mut Model, new: &[New]) -> Result<Vec<FeatureId>,
         }
         if let FeatureKind::Loft(loft) = &kind {
             sources.extend(loft.sections.iter().skip(1));
+        }
+        if let FeatureKind::StructuralMember(m) = &kind {
+            sources.extend(&m.paths);
         }
         let id = model.add(kind);
         for source in sources {
@@ -331,7 +462,9 @@ fn help() -> Map<String, Value> {
         .chain(mate::MATE_OPS.iter().map(|o| ("mate", o)))
         .chain(links::LINK_OPS.iter().map(|o| ("part", o)))
         .chain(explode::EXPLODE_OPS.iter().map(|o| ("explode_step", o)))
+        .chain(display::DISPLAY_OPS.iter().map(|o| ("display_state", o)))
         .chain(pattern::PATTERN_OPS.iter().map(|o| ("pattern", o)))
+        .chain(cut::CUT_OPS.iter().map(|o| ("cut", o)))
     {
         // Words a feature has too (rename, delete): the component's and the mate's
         // forms beside it.
@@ -346,6 +479,25 @@ fn help() -> Map<String, Value> {
                 );
             }
         }
+    }
+    for (form, name, fields_text, what) in equations::EQUATION_OPS {
+        match ops.get_mut(*name) {
+            Some(entry) => {
+                entry[*form] = json!({ "does": what, "fields": fields_text });
+            }
+            None => {
+                ops.insert(
+                    (*name).to_owned(),
+                    json!({ "does": what, "fields": fields_text, "in": "an assembly" }),
+                );
+            }
+        }
+    }
+    for (whom, name, fields_text, what) in in_context::IN_CONTEXT_OPS {
+        ops.insert(
+            (*name).to_owned(),
+            json!({ "does": what, "fields": fields_text, "in": whom }),
+        );
     }
     for (name, fields_text, what) in session::SESSION_OPS {
         ops.insert(
@@ -394,6 +546,30 @@ fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, V
         Query::Features => object(query::features(doc)),
         Query::Feature(f) => object(query::feature(doc, f.resolve(doc)?)),
         Query::Parameters => object(query::parameters(doc)),
+        Query::Dimensions {
+            feature,
+            name,
+            component,
+        } => {
+            if doc.is_assembly() {
+                if feature.is_some() {
+                    return Err(format!(
+                        "{} is an assembly: it has no features. 'dimensions' takes 'component' there.",
+                        doc.title()
+                    ));
+                }
+                equations::dimensions(doc, component.as_ref(), name.as_deref())?
+            } else {
+                if component.is_some() {
+                    return Err(format!(
+                        "{} is a part: 'component' is for an assembly's dimensions.",
+                        doc.title()
+                    ));
+                }
+                let feature = feature.as_ref().map(|f| f.resolve(doc)).transpose()?;
+                object(query::dimensions(doc, feature, name.as_deref())?)
+            }
+        }
         Query::Configurations => object(query::configurations(doc)),
         Query::Bodies => object(query::bodies(doc)),
         Query::Faces { body } => object(query::faces(doc, *body)?),
@@ -408,6 +584,7 @@ fn query(host: &mut dyn Host, doc: &Document, q: &Query) -> Result<Map<String, V
         Query::Components => assembly::components(doc)?,
         Query::Mates => mate::mates(doc)?,
         Query::ExplodeSteps => explode::steps(doc)?,
+        Query::DisplayStates => display::states(doc)?,
     })
 }
 
@@ -448,6 +625,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             fixed,
             link,
             absolute,
+            configuration,
         } => {
             if *absolute && !*link {
                 return Err("'absolute' is about a link: give it with \"link\": true.".to_owned());
@@ -460,13 +638,19 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 placing.as_ref(),
                 *fixed,
                 link.then_some(!*absolute),
+                configuration.as_deref(),
             )?;
             done.component = Some(id);
             label
         }
         Op::UpdateLinks => {
             links::unavailable()?;
-            let (updated, problems) = links::refresh(&mut model, links::folder(doc).as_deref(), 0);
+            let (mut updated, mut problems) =
+                links::refresh(&mut model, links::folder(doc).as_deref(), 0);
+            // A part's inserted parts are read again too.
+            let (inserted, unread) = links::refresh_inserted(&mut model, doc);
+            updated.extend(inserted);
+            problems.extend(unread);
             done.data = links::report(&updated, &problems);
             if updated.is_empty() {
                 return Ok(done);
@@ -485,9 +669,13 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             let id = part.resolve(doc)?;
             assembly::unlink(doc, &mut model, id)?
         }
-        Op::Component { component, change } => {
+        Op::Component {
+            component,
+            change,
+            configurations,
+        } => {
             let id = component.resolve(doc)?;
-            let label = assembly::change(doc, &mut model, id, change)?;
+            let label = assembly::change(doc, &mut model, id, change, configurations.as_ref())?;
             if *change == ComponentChange::Delete {
                 done.data.insert(
                     "deleted".to_owned(),
@@ -504,15 +692,28 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             a,
             b,
             flip,
+            align,
+            flip_dimension,
+            suppressed,
             name,
         } => {
-            let (id, label) = mate::add(doc, &mut model, kind, a, b, *flip, name.as_deref())?;
+            let settings = mate::MateSettings {
+                flip: *flip,
+                align: *align,
+                flip_dimension: *flip_dimension,
+                suppressed: *suppressed,
+            };
+            let (id, label) = mate::add(doc, &mut model, kind, a, b, settings, name.as_deref())?;
             done.mate = Some(id);
             label
         }
-        Op::EditMate { mate, change } => {
+        Op::EditMate {
+            mate,
+            change,
+            configurations,
+        } => {
             let id = mate.resolve(doc)?;
-            let label = mate::change(doc, &mut model, id, change)?;
+            let label = mate::change(doc, &mut model, id, change, configurations.as_ref())?;
             if *change == MateChange::Delete {
                 done.data.insert(
                     "deleted".to_owned(),
@@ -542,6 +743,24 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 );
             } else {
                 done.pattern = Some(id);
+            }
+            label
+        }
+        Op::AssemblyCut { spec } => {
+            let (id, label) = cut::add(doc, &mut model, spec)?;
+            done.cut = Some(id);
+            label
+        }
+        Op::EditAssemblyCut { cut: sel, change } => {
+            let id = sel.resolve(doc)?;
+            let label = cut::change(doc, &mut model, id, change)?;
+            if *change == cut::CutChange::Delete {
+                done.data.insert(
+                    "deleted".to_owned(),
+                    json!([label.trim_start_matches("Delete ")]),
+                );
+            } else {
+                done.cut = Some(id);
             }
             label
         }
@@ -583,12 +802,143 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.data.insert("exploded".to_owned(), json!(on));
             return Ok(done);
         }
+        Op::AddDisplayState {
+            name,
+            configuration,
+        } => {
+            let (id, label) = display::add(doc, &mut model, name, configuration.as_deref())?;
+            done.display_state = Some(id);
+            label
+        }
+        Op::EditDisplayState { state, change } => {
+            let id = state.resolve(doc)?;
+            let label = display::change(doc, &mut model, id, change)?;
+            if *change == display::DisplayChange::Delete {
+                done.data.insert(
+                    "deleted".to_owned(),
+                    json!([label.trim_start_matches("Delete ")]),
+                );
+            } else {
+                done.display_state = Some(id);
+            }
+            label
+        }
+        Op::DisplayState { state } => {
+            let id = state.resolve(doc)?;
+            done.changed = doc.activate_display_state(id);
+            done.display_state = Some(id);
+            return Ok(done);
+        }
+        Op::LinkDisplayStates { on } => {
+            if !model.link_display_states(*on) {
+                done.data.insert("linked".to_owned(), json!(*on));
+                return Ok(done);
+            }
+            done.data.insert("linked".to_owned(), json!(*on));
+            if *on {
+                "Link Display States"
+            } else {
+                "Unlink Display States"
+            }
+            .to_owned()
+        }
+        Op::Look {
+            component,
+            change,
+            display_states,
+        } => {
+            let label = display::look(doc, &mut model, component, change, display_states)?;
+            done.component = Some(component.resolve(doc)?);
+            label
+        }
         Op::ShowAll => {
             let (shown, label) = explode::show_all(doc, &mut model)?;
             done.data.insert("shown".to_owned(), json!(shown));
             if shown.is_empty() {
                 return Ok(done);
             }
+            label
+        }
+        Op::ComponentSuppression {
+            component,
+            value,
+            configurations,
+        } => {
+            let label = equations::suppression(
+                doc,
+                &mut model,
+                component,
+                value.as_deref(),
+                configurations.as_ref(),
+            )?;
+            done.component = Some(component.resolve(doc)?);
+            label
+        }
+        Op::ReferenceDimension { a, b, name } => {
+            let (name, label) = equations::add_reference(doc, &mut model, a, b, name.as_deref())?;
+            done.reference = Some(name);
+            label
+        }
+        Op::DeleteReference { name } => equations::delete_reference(doc, &mut model, name)?,
+        Op::InContext(in_context::InContextOp::Make {
+            component,
+            target,
+            from,
+            entity,
+            construction,
+        }) => {
+            let (c, f, e, label) = in_context::make(
+                doc,
+                &mut model,
+                &mut done.data,
+                component,
+                target,
+                from,
+                *entity,
+                *construction,
+            )?;
+            done.in_context = Some((c, f, e));
+            label
+        }
+        Op::InContext(in_context::InContextOp::List { component }) => {
+            done.data = in_context::list(doc, component.as_deref())?;
+            return Ok(done);
+        }
+        Op::InContext(in_context::InContextOp::Lock {
+            component,
+            feature,
+            on,
+        }) => {
+            match in_context::change(
+                doc,
+                &mut model,
+                &mut done.data,
+                component.as_deref(),
+                feature.as_ref(),
+                Some(*on),
+            )? {
+                Some(label) => label,
+                None => return Ok(done),
+            }
+        }
+        Op::InContext(in_context::InContextOp::Break { component, feature }) => {
+            match in_context::change(
+                doc,
+                &mut model,
+                &mut done.data,
+                component.as_deref(),
+                feature.as_ref(),
+                None,
+            )? {
+                Some(label) => label,
+                None => return Ok(done),
+            }
+        }
+        Op::MakeIndependent { component, name } => {
+            let id = component.resolve(doc)?;
+            let label =
+                equations::make_independent(doc, &mut model, &mut done.data, component, name)?;
+            done.component = Some(id);
             label
         }
         Op::Isolate { components } => {
@@ -844,6 +1194,20 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
         }
         Op::Save { path, caches } => {
             done.data = export::save(doc, path.as_ref(), *caches)?;
+            // The linked parts this assembly's in-context references changed are saved
+            // with it, as SolidWorks saves them.
+            let written = in_context::write_moved_links(doc)?;
+            if !written.is_empty() {
+                done.data.insert(
+                    "parts_written".to_owned(),
+                    json!(
+                        written
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                    ),
+                );
+            }
             return Ok(done);
         }
         Op::ImportStep { file } => {
@@ -932,7 +1296,8 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                     f.kind = other;
                 }
             }
-            // Only numeric values can differ between configurations.
+            // Only numeric values, yes-or-no settings and a sketch's plane can differ
+            // between configurations.
             let several = doc.model.configurations().len() > 1;
             if let (Some(c), Some(before)) = (configurations, doc.feature(id))
                 && several
@@ -940,7 +1305,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 && !only_values_differ(&before.kind, &f.kind)
             {
                 return Err(format!(
-                    "Only the numeric values of {} can differ between configurations: change its other fields in an 'edit' without 'configurations' (they are the same in every configuration).",
+                    "Only the numeric values, the yes-or-no settings (such as 'reverse') and a sketch's plane ('on') of {} can differ between configurations: change its other fields in an 'edit' without 'configurations' (they are the same in every configuration).",
                     f.name
                 ));
             }
@@ -1000,6 +1365,96 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             done.sketch = Some(id);
             format!("Edit {}", model.name_of(id))
         }
+        Op::Set {
+            name,
+            value,
+            configurations,
+        } => {
+            let target = name.trim();
+            let parameter = || {
+                let t = target.trim_matches('"').trim();
+                doc.model.parameters.entries.iter().any(|p| p.name == t)
+            };
+            if doc.is_assembly() && !parameter() && equations::reaches_component(doc, target) {
+                let target = target.trim_matches('"').trim();
+                equations::set(
+                    doc,
+                    &mut model,
+                    &mut done.data,
+                    target,
+                    value.as_ref(),
+                    configurations.as_ref(),
+                )?
+            } else if let Some((id, value_name)) = (doc.is_assembly() && !parameter())
+                .then(|| pattern::value_address(doc, target))
+                .flatten()
+            {
+                if configurations.is_some() {
+                    return Err(
+                        "A component pattern is the same in every configuration: leave 'configurations' out."
+                            .to_owned(),
+                    );
+                }
+                let Some(value) = value.as_ref() else {
+                    return Err(format!(
+                        "'value' null clears an equation of an assembly: '{target}' is a component pattern's value. Give a value."
+                    ));
+                };
+                let label = pattern::set_value(doc, &mut model, id, &value_name, value)?;
+                done.pattern = Some(id);
+                label
+            } else if value.is_none() {
+                return Err(format!(
+                    "'value' null clears an equation of an assembly that sets a component's value: '{target}' is not one. Give a value."
+                ));
+            } else if doc.is_assembly() && !parameter() {
+                let id = mate::value_address(doc, target, configurations.is_some())?;
+                let change = MateChange::Edit {
+                    value: value.clone(),
+                    flip: None,
+                    align: None,
+                    flip_dimension: None,
+                };
+                let label = mate::change(doc, &mut model, id, &change, configurations.as_ref())?;
+                done.mate = Some(id);
+                label
+            } else {
+                set_named(
+                    &mut model,
+                    doc,
+                    &mut done,
+                    target,
+                    value.as_ref().expect("a value"),
+                    configurations.as_ref(),
+                )?
+            }
+        }
+        Op::NameDimension {
+            feature,
+            dimension,
+            name,
+        } => {
+            let id = feature.resolve(doc)?;
+            model.name_dimension(id, dimension, name)?;
+            done.feature = Some(id);
+            format!("Name {dimension} of {} {name}", model.name_of(id))
+        }
+        Op::SetText {
+            sketch,
+            text,
+            string,
+            style,
+        } => {
+            let id = sketch_id(doc, sketch)?;
+            let units = doc.model.parameters.units;
+            if let Some(s) = model.feature_mut(id).and_then(|f| f.sketch_mut()) {
+                let out = sketch::set_text(&mut s.sketch, *text, string.as_deref(), style, &units)?;
+                done.data.insert("text".to_owned(), out);
+            }
+            done.feature = Some(id);
+            done.sketch = Some(id);
+            format!("Edit {}", model.name_of(id))
+        }
         Op::NameFace { face, name } => {
             let target = select::face_ref(doc, face)?;
             model.name_geometry(name, peet_model::naming::NamedGeometry::Face(target))?;
@@ -1021,6 +1476,22 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             rename(&mut model, id, name)?;
             done.feature = Some(id);
             format!("Rename {}", doc.model.name_of(id))
+        }
+        Op::Suppress {
+            feature,
+            on,
+            configurations,
+        } if doc.is_assembly() => {
+            let FeatureSel::Name(name) = feature else {
+                return Err("In an assembly 'suppress' takes a component, or a feature of a component's part as FEATURE@COMPONENT.".to_owned());
+            };
+            if *configurations != Configs::default() {
+                return Err(
+                    "A feature of a component is its part's, suppressed in every instance: leave 'configurations' out."
+                        .to_owned(),
+                );
+            }
+            equations::suppress_feature(doc, &mut model, &mut done.data, name, *on)?
         }
         Op::Suppress {
             feature,
@@ -1151,12 +1622,25 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             name,
             copy,
             comment,
+            parent,
         } => {
             let copy = copy
                 .as_deref()
                 .map(|c| value::configuration(doc, c))
                 .transpose()?;
-            let id = model.add_configuration(name, copy)?;
+            let id = match parent {
+                Some(_) if copy.is_some() => {
+                    return Err(
+                        "A derived configuration starts as a copy of its parent: give 'parent' or 'copy', not both."
+                            .to_owned(),
+                    );
+                }
+                Some(parent) => {
+                    let parent = value::configuration(doc, parent)?;
+                    model.add_derived_configuration(name, parent)?
+                }
+                None => model.add_configuration(name, copy)?,
+            };
             if let Some(comment) = comment {
                 model.set_configuration_comment(id, comment);
             }
@@ -1320,8 +1804,23 @@ pub(crate) fn apply_with(
     if let Some(id) = done.pattern {
         out.insert("pattern".to_owned(), pattern::pattern_out(doc, id));
     }
+    if let Some(id) = done.display_state {
+        out.insert("display_state".to_owned(), display::state_out(doc, id));
+    }
     if let Some(id) = done.explode_step {
         out.insert("explode_step".to_owned(), explode::step_out(doc, id));
+    }
+    if let Some(id) = done.cut {
+        out.insert("cut".to_owned(), cut::cut_out(doc, id));
+    }
+    if let Some(name) = &done.reference {
+        out.insert("reference".to_owned(), equations::reference_out(doc, name));
+    }
+    if let Some((c, f, e)) = &done.in_context {
+        out.insert(
+            "in_context".to_owned(),
+            in_context::made_out(doc, c, *f, *e),
+        );
     }
     if done.changed && !done.replaced && doc.is_assembly() {
         // The components that are somewhere else now: what a mate, or a placement that

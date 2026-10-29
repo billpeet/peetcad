@@ -1,6 +1,6 @@
 ---
 name: solids
-description: Solid features in peet - extrude and cut directions and end conditions, revolve, sweep, loft, holes, fillets and chamfers, shell, draft, patterns and mirrors, freeform faces and imported STEP bodies.
+description: Solid features in peet - extrude and cut directions and end conditions, revolve, sweep, loft, holes, fillets and chamfers, shell, draft, patterns and mirrors, moving and copying bodies, inserting or mirroring another part, structural members (weldment frames), freeform faces and imported STEP bodies.
 ---
 
 # Solid features
@@ -26,11 +26,40 @@ selectors`). `peet ops NAME` gives a feature's fields. Change one later with
   the sketch is on. `"reverse": true` turns either round. If a cut "doesn't reach any
   body", it went the wrong way or its sketch is not on the body.
 - `end`: `"blind"` (uses `depth`), `"mid_plane"` (`depth` split to both sides),
-  `"through_all"`, or `{"up_to": plane}`.
+  `"through_all"`, `"through_next"`, or `{"up_to": plane}`.
+- `"through_next"` is SolidWorks' "up to next": a `cut` goes on until it has come out of
+  the first material in its way, so holes through one wall of a channel stop there and
+  leave the wall across from it; an `extrude` goes until it meets material. If there is
+  nothing in its way it fails: reverse it, or use `through_all`.
+
+```jsonl
+{"op": "sketch", "on": "top", "name": "Channel", "draw": [{"type": "polyline", "closed": true, "points": [[0, 0], [60, 0], [60, 40], [54, 40], [54, 6], [6, 6], [6, 40], [0, 40]]}]}
+{"op": "extrude", "sketch": "Channel", "depth": 100}
+{"op": "sketch", "on": {"at": [0, 20, 50], "normal": [-1, 0, 0]}, "name": "Bolt holes", "draw": [{"type": "circle", "center": [20, -30], "radius": 4}, {"type": "circle", "center": [20, -70], "radius": 4}]}
+{"op": "cut", "sketch": "Bolt holes", "end": "through_next"}
+```
 - `operation`: `"add"` joins the bodies it touches (and is a new body if it touches
   none), `"new_body"` always makes a separate body, `"cut"` removes.
 - A sketch with several regions extrudes all the outer ones, with regions inside them as
   holes. `regions` picks others: a list of sketch points, one inside each region wanted.
+  Regions picked side by side are extruded as one shape.
+- `draft` leans the walls by that many degrees from the direction of extrusion, pivoting
+  on the sketch plane: what is added or removed narrows as it goes
+  (`"draft_outward": true` widens it). A draft too steep for the depth fails to build;
+  it can't be used with `mid_plane`.
+- `"flip_side": true` on a cut removes everything **outside** its regions within its
+  reach instead of inside. With a draft, the material removed still narrows, so the
+  regions grow with depth: that is how a bolt head's corners are chamfered.
+
+```jsonl
+{"op": "sketch", "on": "right", "draw": [{"type": "polygon", "center": [0, 0], "vertex": [0, 7.5], "sides": 6}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5.3}
+{"op": "sketch", "on": {"feature": "Extrude1", "side": "end"}, "name": "Chamfer", "draw": [{"type": "circle", "center": [0, 0], "radius": 6.5}]}
+{"op": "cut", "sketch": "Chamfer", "end": "through_all", "flip_side": true, "draft": 60}
+{"op": "sketch", "on": "top", "name": "Boss", "draw": [{"type": "rectangle", "from": [20, -5], "to": [30, 5]}]}
+{"op": "extrude", "sketch": "Boss", "depth": 10, "draft": 5}
+{"op": "bodies"}
+```
 
 ## Revolve
 
@@ -45,6 +74,19 @@ draw the profile on one side of a construction centreline. `axis` can also be
 `sweep` takes two sketches: `profile` (closed regions) and `path` (connected lines and
 arcs in another sketch, starting on the profile's plane and square to it). A corner
 between two straight pieces of the path is mitred. `cut_sweep` removes the same shape.
+
+- The profile can also sit **part way along** a straight piece of the path, square to
+  it: the path is swept both ways from it, end to end.
+- A path that leaves the profile's plane **at a slant** carries the profile along as
+  drawn, without turning it (a slanted cylinder from a circle). Such a path, like a
+  spline, can't have corners.
+
+```jsonl
+{"op": "sketch", "on": "top", "name": "Section", "draw": [{"type": "circle", "center": [0, 0], "radius": 3}]}
+{"op": "sketch", "on": "front", "name": "Rod", "draw": [{"type": "polyline", "points": [[0, 10], [0, 0], [0, -40], [20, -40]]}]}
+{"op": "sweep", "profile": "Section", "path": "Rod"}
+{"op": "bodies"}
+```
 
 The path can be a **spline** (see the sketching skill), for a pipe or a handle that
 curves freely:
@@ -140,9 +182,50 @@ shell goes through the wall, one added before it is shelled with the body.
 ## Patterns and mirrors
 
 `linear_pattern`, `circular_pattern` and `mirror` copy **features**, by name, not
-bodies. They copy extrudes, cuts, revolves, holes, sheet metal cuts and forms; to repeat
-a fillet, fillet all the edges in one feature. `count` includes the original. A linear
-pattern becomes a grid with `direction2`, `spacing2`, `count2`.
+bodies. They copy extrudes, cuts, revolves, holes, sheet metal cuts, forms, edge and
+mitre flanges, tabs and break corners (see the `sheet-metal` skill); to repeat
+a fillet, fillet all the edges in one feature. To copy whole bodies, use `move_body`
+(below). `count` includes the original. A linear pattern becomes a grid with
+`direction2`, `spacing2`, `count2`.
+
+A **draft** is copied with the features whose faces it drafts: list those features and
+then the draft, and each copy drafts the same faces of the copies. A draft of a face the
+pattern doesn't copy fails ("which the pattern doesn't copy"): add the feature that made
+that face to `features`.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 30}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 10}
+{"op": "sketch", "on": {"feature": "Extrude1", "side": "end"}, "name": "Slot", "draw": [{"type": "rectangle", "from": [10, -3], "to": [20, 3]}]}
+{"op": "cut", "sketch": "Slot", "depth": 6}
+{"op": "draft", "faces": [{"at": [15, -3, 7]}, {"at": [15, 3, 7]}], "neutral": {"feature": "Extrude1", "side": "end"}, "angle": 5}
+{"op": "circular_pattern", "features": ["Cut-Extrude1", "Draft1"], "axis": "z", "count": 4}
+{"op": "bodies"}
+```
+
+**A pattern or a mirror can be copied too**, as SolidWorks copies one: a mirror of
+`Mirror1` copies everything `Mirror1` has, its originals and their copies, across the
+new plane, and a pattern of a pattern repeats the whole pattern. Name the pattern or
+mirror in `features`, not what it copies (naming both copies the originals twice). A copy
+that lands where nothing can be made (a cut off the part, a flange with no edge to go on)
+is left out with a warning, as for any other copy.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 100]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "sketch", "name": "Seed", "on": {"feature": "Extrude1", "side": "end"}, "draw": [{"type": "circle", "center": [20, 15], "radius": 4}]}
+{"op": "cut", "sketch": "Seed", "end": "through_all"}
+{"op": "plane", "from": "right", "distance": 100, "name": "Across"}
+{"op": "plane", "from": "front", "distance": 50, "flip": true, "name": "Along"}
+{"op": "mirror", "name": "Pair", "features": ["Cut-Extrude1"], "plane": "Across"}
+{"op": "mirror", "name": "Four", "features": ["Pair"], "plane": "Along"}
+{"op": "linear_pattern", "name": "Middle row", "features": ["Pair"], "direction": "y", "spacing": 35, "count": 2}
+{"op": "bodies"}
+```
+
+Here `Four` makes two holes (the mirrors of the seed and of its copy), so the plate has
+four; `Middle row` copies both holes of `Pair` 35 along y, making six. Read the copies
+off `faces`: each copy's faces are named after the feature that made it.
 
 `count` and a grid's `count2` can follow parameters: use an expression when the
 number of copies changes with a part size. Expressions return a unitless whole number
@@ -169,6 +252,171 @@ expression and its evaluated value; a failed count appears in `failures`. Fix it
 parameter or `edit` the count, then check `bodies` again. Counts can differ between
 configurations with `edit`'s `configurations`, just like spacing or an angle. A numeric
 count clears its expression.
+
+**Up to a reference.** When a row must fill the part as it changes size (slots along a
+rail whose length differs between configurations), give the linear pattern `up_to`: a
+`{"plane": ...}` (a standard or reference plane, or a flat face) or a `{"point": ...}`
+(a vertex or reference point) across the direction, ahead of the seed. This is
+SolidWorks' "Up to reference". The copies span the distance along the direction from
+the seed's centre to the reference, less `up_to_offset`. The seed's centre is the middle
+of the box round its faces; `up_to_seed` measures from a plane or point on the seed
+instead. With `up_to_keeps` `"spacing"` (the default), `spacing` is kept and the count is
+as many copies as fit; one landing exactly at the end counts. With `"count"`, `count` is
+kept and the spacing spreads the copies evenly. `up_to_reverse` puts the last copy past
+the reference by the offset. The stored `count` (or `spacing`) is ignored while `up_to` is
+set; count the copies' faces in `faces` to see how many there are. A reference behind the
+seed fails with "flip the direction"; do what it says. One nearer than a spacing fails
+with "no room for a copy", as a count of 1 does: move the reference, or suppress the
+pattern. `"up_to": null` goes back to the
+count as given. Set `up_to` before (or with) the other `up_to_` fields: they fail without
+it. `up_to` is for the first direction only.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-50, -50], "to": [50, 50]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 4}
+{"op": "sketch", "name": "Seed", "on": "top", "draw": [{"type": "circle", "center": [15, 0], "radius": 1}]}
+{"op": "cut", "sketch": "Seed", "end": "mid_plane", "depth": 20}
+{"op": "plane", "from": "right", "distance": 40, "name": "End"}
+{"op": "linear_pattern", "features": ["Cut-Extrude1"], "direction": "x", "spacing": 5, "up_to": {"plane": "End"}, "up_to_offset": 2}
+{"op": "edit", "feature": "End", "distance": 31}
+{"op": "linear_pattern", "name": "Even", "features": ["Cut-Extrude1"], "direction": "y", "count": 4, "up_to": {"point": {"at": [50, 50, 0]}}, "up_to_offset": 5, "up_to_keeps": "count"}
+{"op": "faces"}
+```
+
+The first row has five holes with `End` at 40 and four once it is at 31; `Even` spreads
+four holes over the 45 mm from the seed to 5 short of the corner.
+
+## Moving and copying bodies
+
+`move_body` is SolidWorks' Move/Copy Body: it moves whole bodies, where the patterns
+copy features. Use it to put a body made in a convenient place (a screw drawn on its own
+axis) where it belongs, or to repeat a body that is not one feature.
+
+- `bodies`: a face of each body (any selector); none moves every body. A moved body keeps
+  its faces' names, so features after it still find what they picked.
+- It turns first, by `rx`, `ry`, `rz` degrees about the X, Y and Z axes through `center`
+  (the origin if absent; a reference point or a vertex), in that order, and then moves by
+  `dx`, `dy`, `dz`. Positive angles turn anticlockwise, looking down the axis towards the
+  origin. Check the result with `bodies`.
+- `"copy": true` leaves the bodies where they are and adds `copies` moved copies (default
+  1), the second moved twice as far, and so on. Each copy is a new body made by the move.
+- A sheet metal body that is moved is a plain solid afterwards (the feature warns): move
+  the sketches it is made from instead if it must keep its flat pattern.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 20]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "sketch", "on": "front", "name": "Pin", "draw": [{"type": "circle", "center": [10, 30], "radius": 3}]}
+{"op": "extrude", "sketch": "Pin", "depth": 12, "operation": "new_body"}
+{"op": "move_body", "bodies": [{"feature": "Extrude2", "side": "end"}], "rx": -90, "dz": 10}
+{"op": "move_body", "bodies": [{"feature": "Extrude1", "side": "end"}], "copy": true, "copies": 2, "dx": 50}
+{"op": "bodies"}
+```
+
+Here the pin, drawn along -Y, is turned to stand along +Z (a turn of -90 about X takes
+-Y to +Z) and lifted 10; the plate gets two copies, 50 and 100 along X.
+
+### Placing a body by mates
+
+A body that must stay against another (a screw in its nut, a pin in its hole) is placed
+by `mates`, SolidWorks' Move/Copy Body constraints, not by distances: the mates are
+solved at every rebuild, so the body follows when the part changes.
+
+- Each mate has a `type` (`coincident`, `concentric`, `parallel`, `perpendicular`,
+  `distance` with `distance`, `angle` with `angle`), `moved`, an end on a body the move
+  moves, and `to`, an end on another body or a reference plane. An end is `{"face": ...}`,
+  `{"edge": ...}` (a round edge is its axis), `{"vertex": ...}` or `{"plane": ...}`.
+- Pick `moved` before the move: as the body is drawn. Pick it by what made it (`feature`
+  and `side`) so the mate survives changes.
+- `rx` ... `dz` say where the solve starts: the body goes to the nearest place the mates
+  allow, and what they leave free (a screw's turn about its axis) stays as those put it.
+  Turn the body roughly the right way with them, or a mate may settle the wrong way round.
+- Two flat faces mate against each other (normals opposed); `"aligned": true` makes them
+  face the same way. A `distance` from a flat face of `to` is measured in front of it,
+  the way its normal points; `"flip": true` puts the moved end behind it.
+- A mate that can't hold with those before it is left out, and the feature warns naming
+  it: the body is where the others put it. Mates can't place copies.
+- A `distance` or `angle` mate's value is a dimension of the move called `D1@` the mate's
+  `name`, as SolidWorks calls it (`D1@Distance2`; a mate without a name is called after
+  its type and place, `Distance2` for the second). Change it with `set`, in some
+  configurations with `configurations`; `name_dimension` renames it by its field
+  (`mate2` for the second mate).
+
+```jsonl
+{"op": "set_parameter", "name": "t", "value": "5mm"}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 20]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": "t"}
+{"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [10, 10], "radius": 3}]}
+{"op": "extrude", "sketch": "Sketch2", "operation": "cut", "end": "through_all", "reverse": true}
+{"op": "sketch", "on": "front", "name": "Pin", "draw": [{"type": "circle", "center": [30, 30], "radius": 3}]}
+{"op": "extrude", "sketch": "Pin", "depth": 12, "operation": "new_body"}
+{"op": "move_body", "bodies": [{"feature": "Extrude2", "side": "end"}], "rx": -90, "mates": [{"type": "concentric", "moved": {"face": {"feature": "Extrude2", "side": "side"}}, "to": {"face": {"feature": "Cut-Extrude1", "side": "side"}}}, {"type": "distance", "distance": 2, "moved": {"face": {"feature": "Extrude2", "side": "start"}}, "to": {"face": {"feature": "Extrude1", "side": "end"}}}]}
+{"op": "set_parameter", "name": "t", "value": "8mm"}
+{"op": "add_configuration", "name": "Low"}
+{"op": "set", "name": "D1@Distance2", "value": 1, "configurations": "this"}
+{"op": "bodies"}
+```
+
+The pin stands in the hole with its end 2 above the plate; making the plate 8 thick lifts
+it with the top face, and in the configuration `Low` it is 1 above.
+
+## Another part's bodies
+
+`insert_part` puts the bodies of another part's file into this one: SolidWorks' Insert
+Part, and with `mirror` (a plane) its Mirror Part, the left-hand part made from the
+right-hand one. `file` is the other part's `.peet` file; a relative path is looked for
+from the working folder, then from this part's folder.
+
+```sh
+peet run bracket.jsonl --new -f bracket-rh.peet
+peet op '{"op": "insert_part", "file": "bracket-rh.peet", "mirror": "right", "name": "Bracket LH"}' --new -f bracket-lh.peet
+peet edit feature=Extrude1 depth=9 -f bracket-rh.peet    # change the original
+peet op '{"op": "update_links"}' -f bracket-lh.peet       # the mirror image follows
+```
+
+- The bodies are read when `file` is set, as the other part builds them, and kept in this
+  part: it still opens if the file is gone. `update_links` reads the file again (its
+  reply's `updated` names the features that changed).
+- Insert a part that builds without failures: one that doesn't is refused, with its
+  failures.
+- The inserted bodies have no fields but `file` and `mirror`: build on them with new
+  features, or move them with `move_body`.
+- Files on disk only: refused in the browser build.
+
+## Structural members (weldments)
+
+`structural_member` is SolidWorks' weldment structural member: a tube's or a beam's
+section (`profile`, a sketch) swept along every line of the `paths` sketches, each line a
+body of its own. Build a frame from lines, not from extrusions.
+
+- Draw the **profile** with its origin where the line should run through it (the middle
+  of a tube). It is turned square to each line by the smallest turn from its sketch plane:
+  draw it on a plane square to the first line and that member has it as drawn; lines that
+  run the same way get it the same way round. `rotate` turns it about every line.
+- Draw the **paths** as lines (construction lines are left out) in as many sketches as the
+  frame's planes need. Lines in other planes need a `plane` to sketch on. A frame in space
+  is one 3D sketch (`sketch3d`, see `peet skills sketching`), which `paths` takes as it
+  takes a sketch: its dimensions then drive every member.
+- Where two lines of one feature meet end to end at an angle, the members are mitred
+  (`corner`: `miter`, the default, or `plain` for square ends at the lines' ends).
+- Make each **group** a feature of its own: a ring, then the legs. A line that ends on a
+  member of an earlier structural member is trimmed to that member's outside (`trim`,
+  default true), as SolidWorks trims one group against another. Three lines of one
+  feature meeting at a point are not mitred: put them in different features.
+- Check with `bodies`: one body per line. "trimmed to nothing" means a line lies inside an
+  earlier member: leave it out, or give the feature `"trim": false`.
+
+```jsonl
+{"op": "sketch", "on": "right", "name": "SHS 40", "draw": [{"type": "rectangle", "from": [-20, -20], "to": [20, 20]}, {"type": "rectangle", "from": [-18, -18], "to": [18, 18]}]}
+{"op": "sketch", "on": "top", "name": "Frame", "draw": [{"type": "rectangle", "from": [0, 0], "to": [400, 300]}]}
+{"op": "structural_member", "profile": "SHS 40", "paths": ["Frame"]}
+{"op": "sketch", "on": "front", "name": "Legs", "draw": [{"type": "line", "from": [0, 0], "to": [0, -300]}, {"type": "line", "from": [400, 0], "to": [400, -300]}]}
+{"op": "structural_member", "profile": "SHS 40", "paths": ["Legs"]}
+{"op": "bodies"}
+```
+
+Here the frame's four members meet in mitres at its corners, and the two legs (drawn
+down from two corners on the front plane) start under the frame, at z = -20.
 
 ## Reference geometry
 

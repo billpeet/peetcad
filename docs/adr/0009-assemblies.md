@@ -47,13 +47,17 @@ components down to it), not bodies of the assembly's own; the document shows one
 per instance, the instances of one body sharing a view.
 
 **Sub-assemblies are rigid.** A sub-assembly is solved on its own and placed as one
-body in its parent. Flexible sub-assemblies are left for later.
+body in its parent. Flexible sub-assemblies are left for later. *Superseded in part
+(October 2026): rigid stays the default, and a sub-assembly can be solved as flexible,
+as SolidWorks does; see "Flexible sub-assemblies" below.*
 
 **A part is edited on its own, not in context.** Opening a component for editing shows
 the part alone. A part's features can't refer to its neighbours in the assembly.
 In-context references are where most of the complexity of assemblies in other systems
 comes from (circular updates, references that dangle when a component is replaced), and
-nothing in the phase needs them.
+nothing in the phase needs them. *Superseded in part (October 2026): a part's sketch can
+follow another component in an assembly, as SolidWorks' in-context references; see
+"In-context references" below. Editing is still of the part alone.*
 
 **Mates refer to geometry by instance and persistent reference.** A mate's ends are a
 component plus the `FaceRef` / `EdgeRef` / `VertexRef` a pick or a selector gives
@@ -227,7 +231,31 @@ assembly is opened again (there was no folder to watch).
   another.
 - **Which way round** two planes go (against each other, or the same way with `flip`)
   can't be told apart by equations that are well behaved at the solution, so a
-  component that is the wrong way round is turned over before the solve.
+  component that is the wrong way round is turned over before the solve. A mate's
+  `align` is SolidWorks' alignment: aligned, anti-aligned (two planes' default) or
+  closest (two axes' default: no turn, the solve keeps the nearer). Axes are turned
+  over the same way when an alignment is asked for. `flip_dimension` measures a
+  distance or angle the other way (SolidWorks' "flip dimension"). Both are model
+  schema 12; older files' `flip` reads as aligned.
+- **SolidWorks' other mates and ends** (model schema 12). An end with an empty path is
+  the assembly's own standard plane or origin, solved as a fixed component of its own;
+  an end can be a part's origin or a sketch's point, line, circle or arc (resolved in the
+  part's model at each solve, so it follows the sketch). A round edge coincident with a
+  plane lies in it. `Slot` (a pin on the line between a straight slot's end axes),
+  `LimitAngle` and `LimitDistance` (a residual of nothing within the range, and of how
+  far outside otherwise; such rows don't count against the freedom), and `Symmetric`
+  (the mirror image as a coincident mate: the middle of two ends on one component in the
+  plane, an end mirrored in its own component's plane, or mirrored in a plane that
+  doesn't move). An equation reads up to four components (`peet-solve`'s `MAX_SLOTS` is
+  24), for width mates whose pairs are on two components: a sum of the faces' places
+  along the first width face's normal.
+- **Path mates** (model schema 12, `MateKind::Path`): a point of one component on a chain of
+  another's straight and round edges or sketch lines, arcs and circles, joined end to end,
+  as SolidWorks' path mate has it: anywhere on it, at a length (from either end) or a
+  percentage along it; an axis of the point's component along the path (pitch and yaw,
+  "follow path") and another along a direction (roll, "up vector"). The equations are set
+  up at each solve for the piece the point is on (or goes to): on its line, bounded by its
+  ends, or on its circle, bounded by its arc. So a drag stops at a joint between pieces.
 - **Conflicts.** If a group's mates can't all hold, they are added one at a time in
   their order; each that can't be satisfied with those before it is flagged and left
   out, and the rest hold. A mate that can't be set up (a face that is gone, two ends on
@@ -382,6 +410,31 @@ which no released version writes, without another version number.
   not be made wider. Its solid, flat pattern and STEP file are unchanged (the Phase 5
   tests pass as they were).
 
+## Flexible sub-assemblies
+
+*Supersedes in part "Sub-assemblies are rigid" above.* PeetCAD follows SolidWorks, whose
+sub-assemblies are rigid unless set to "Solve as: Flexible"; the template library has
+hinges opened to another angle in their parent than in their own file (SolidWorks API:
+`IComponent2.Solving`).
+
+- `Component::flexible` (model schema 12) marks a sub-assembly flexible. For the
+  parent's solve it is taken apart into *units*: the sub-assembly with what is fixed in
+  it, and each component not fixed in it (taken apart in turn if it is itself flexible).
+  Its own mates between different units are solved with the parent's, first, so when
+  they can't all hold the hinge holds and the parent's mate fails. The solver is not
+  changed: a unit is a component to it under an id of its own, and the mates' ends are
+  rewritten to name it (`peet-model/src/flexible.rs`).
+- Where each moving component ends up is stored on the parent's component
+  (`Component::poses`, in the sub-assembly's coordinates), not in the shared definition,
+  so instances of one sub-assembly are posed independently and its file is unchanged.
+  Instances, mate geometry, reference planes and STEP export (a posed sub-assembly is a
+  product of its own) all read the poses; `Evaluation::component_frame` gives every
+  component's place at any depth.
+- Freedom counts the moving components; `components` lists them under `moving`, each
+  with its own freedom. `place` takes a path to one, to start it near its solution.
+- Not done: dragging a component inside a flexible sub-assembly (a drag pulls the
+  sub-assembly), and pattern copies of a flexible sub-assembly are placed rigid.
+
 ## Consequences
 
 - A machine whose graphics can't draw instanced geometry can't run the viewport (WebGL2
@@ -390,7 +443,8 @@ which no released version writes, without another version number.
   copies until linking exists.
 - A part can't be shaped by its neighbours (a hole placed from the mating part). It has
   to be dimensioned by shared parameter values kept in step by hand.
-- A mechanism inside a sub-assembly doesn't move in its parent.
+- A mechanism inside a sub-assembly doesn't move in its parent unless the sub-assembly
+  is made flexible.
 - Moving the solver's core is a refactoring of the most heavily tested numerical code in
   the project; its tests and benchmark must pass unchanged, and the drag benchmark must
   not slow down.
@@ -405,6 +459,221 @@ different layouts. Main's numbers stand (5 and 6 for configurations, 7 for splin
 everything of this phase is model schema 8, and schema 6 and 7 files are read as
 `ModelV7` (a model with configurations, without material, colour or assembly) and
 converted. Files written by this branch before the merge are not read: no released
-version wrote them. An assembly has no configurations of its own (each of its parts has
-its own), so the configuration operations and the configuration list are refused or
-hidden in an assembly, as the other part operations are.
+version wrote them. An assembly had no configurations of its own (each of its parts has
+its own), so the configuration operations and the configuration list were refused or
+hidden in an assembly, as the other part operations are. *Superseded (October 2026): see
+"Configurations in assemblies".*
+
+## Configurations in assemblies
+
+*Supersedes the last paragraph of "Merging with configurations".* PeetCAD follows
+SolidWorks, where each component names the configuration of its part it shows (24 of the
+template library's 202 instances use one other than the part's default) and an assembly
+has configurations of its own (8 of its assemblies: left and right hinged, a long and a
+short duct), each with its own component suppression, referenced configurations, fixed
+components and positions, and its own mate suppression and values.
+
+- **A component chooses a configuration of its part.** `Component::configuration` (model
+  schema 12) is one of the definition's model's configurations; `None` is whichever that
+  model has active. A definition is still one model: the engine builds it once for each
+  configuration its components show (`Assembly::configuration_of`, the engine's parts keyed
+  by definition and configuration), from `Model::with_configuration`, and writes back only
+  the build of the model's own active configuration. Everything that reads a component's
+  part reads it in that configuration (`Assembly::model_of`): mates' ends and the solve,
+  flexible sub-assemblies, equations reading and setting a component's dimension, the
+  bill of materials (a part in two configurations is two lines), mass, interference
+  (through the instances) and STEP export (a product per part and configuration). The
+  alternative, a definition per configuration (a copy of the part with another
+  configuration active), was the importer's stand-in: it stores the part twice, and an
+  edit to the part reaches only one copy.
+- **An assembly's configurations are the model's.** The list, the active one and the
+  parameters that differ are a part's ([`config`](../../crates/peet-model/src/config.rs)).
+  What an assembly adds is kept as a part keeps what differs: the components and mates
+  hold the active configuration, and `Assembly`'s `Varying` holds, for each component or
+  mate that differs, its state in every other configuration
+  (`peet-model/src/asm_config.rs`). A component's state is its suppression, referenced
+  configuration, being fixed, placement and poses; a mate's its suppression and its kind
+  with its values. Activating a configuration swaps them, as a part's feature flags are
+  swapped, so the rebuild, the queries and the exports see an ordinary assembly.
+- **Where a component is belongs to the configuration**, as in SolidWorks: the rebuild's
+  write-back of solved placements and poses, and `place`, change the active configuration
+  only. Otherwise a mate live in one configuration would move components in the others,
+  and switching back and forth would solve each from the other's placements.
+- Operations: `component_configuration`; `insert` with `configuration`; `configurations`
+  on `suppress`, `fix`, `place`, `component_configuration` (default the active
+  configuration, SolidWorks' "This configuration"), on `suppress` with a mate, and on
+  mate values (`edit_mate`, `set D1@MATE`), which change as a part's values do. The part
+  configuration operations now work in an assembly; `configurations` lists what differs.
+- **Equations differ per configuration** (SolidWorks' "This configuration"): `Varying`
+  also holds, for each equation (by what it sets) that differs, its expression in every
+  other configuration, or that it has none there. `set` with a component's address and
+  `set_suppression_expression` with a component take `configurations` (left out: all while
+  the equation is the same everywhere, the active one once it differs, as a mate's value).
+  A suppression equation of some configurations suppresses in the active one only (the
+  component's suppression is per configuration); one of all of them as before.
+- **Derived configurations**, for parts and assemblies: a configuration has a `parent`
+  (model schema 12), and a change made to a configuration is made to those derived from it
+  that have its value there (per field of a component's or a mate's state). Deleting a
+  parent deletes what is derived from it. A schema 12 part written before this is still
+  read (`ModelV12Early`).
+- `open_component` opens the part in the configuration the component shows; `save` stores
+  it back with the part's own active configuration. The application lists an assembly's
+  configurations as a part's (with Add Derived Configuration), and a component's
+  configuration is chosen in its properties.
+- A configuration-specific colour is a display state linked to configurations: see "Display
+  states".
+
+## Display states
+
+PeetCAD follows SolidWorks' display states: a named look of an assembly, each component
+shown or hidden, coloured and see-through (`peet-model/src/display_state.rs`, model
+schema 12).
+
+- **The components hold the display state shown**, as they hold the active configuration:
+  `Component::visible`, `color` and `transparency` are its look there, so drawing, picking
+  and every query see an ordinary assembly. Every other display state keeps the looks that
+  are not the default (shown, the part's colour, opaque); showing another swaps them.
+  `show`, `isolate`, `show_all`, `set_color` and the new `set_transparency` change the one
+  shown; with `display_states`, `show`, `set_color` and `set_transparency` change others.
+- **Linked or independent**, as SolidWorks' "Link display states to configurations":
+  linked, each display state belongs to a configuration and each configuration shows the one
+  it last showed (a configuration with none gets one when first shown); independent, every
+  configuration can show every one. Activating a configuration swaps the display state with
+  it (`Model::swap_display_states`); deleting a configuration deletes its display states.
+- **An assembly has none until one is added**, so assemblies made before keep their looks
+  as they are; after that a configuration (or, independent, the assembly) keeps at least
+  one, as SolidWorks does. Showing one is not an undo step, like showing a configuration.
+- Display states are an assembly's: SolidWorks' part display states hold body, feature and
+  face appearances, which PeetCAD's parts don't have (a part has one colour). The exporter
+  writes them (format 8) for a later look.
+- A display mode per component (wireframe, hidden lines) is not modelled: PeetCAD draws
+  every component shaded with edges.
+- A sub-assembly is drawn as its own document's display state shown has it (what is hidden
+  in it is hidden in the assembly too: `Instance::hidden`), where SolidWorks lets the
+  component choose the sub-assembly's display state (its referenced display state).
+- **Transparency is drawn blended**: the renderer draws see-through objects after the
+  opaque ones, farthest first (by the centre of their box), without writing depth, each
+  with its edges; within one object the triangles are not sorted. Picking looks through
+  them as SolidWorks does: in the pick pass the opaque objects' depths are put in the
+  nearer half of the depth range and the see-through ones' in the farther half, so what is
+  opaque behind a see-through component is picked, and a see-through one where nothing
+  opaque is; with Shift, whatever is nearest (`PickRequest::through_transparent`).
+- A file written by schema 12 before display states (no transparency, no display states)
+  is read as `ModelV12NoDisplayStates`.
+
+## Assembly features
+
+PeetCAD follows SolidWorks' assembly-level features (template library, October 2026).
+
+- **A component pattern's count and spacing take expressions** (model schema 12:
+  `PatternStep::count` and a circular pattern's `count` are a `Scalar`, a plain `u32`
+  before). SolidWorks names a component pattern's values as it names a linear pattern's:
+  the counts `D1` and `D2`, the spacings `D3` and `D4` (a circular pattern's angle `D3`);
+  `set D1@LocalLPattern1` takes a number or an expression, and the assembly's expressions
+  read them by those addresses. A count that is an expression is worked out at every
+  rebuild, after the equations, and the copies are made or removed to match
+  (`Assembly::sync_pattern_counts`); the count's `value` is the count the copies were
+  last made for. Gear Tray Assembly's disabled equations (`D1@LocalLPattern1 =
+  IIF("Height@Base@Gear tray<1>.Part" > 1100, 3, 2)`, `D3@LocalLPattern1 = (Height - 64)
+  / (D1 - 1)`) work out to SolidWorks' values when tried.
+- **An assembly cut** (`asm_cut::AssemblyCut`, `Assembly::cuts`) is SolidWorks' assembly
+  feature cut: an extruded cut with its own sketch, worked out after the mates and
+  patterns on the component *instances*, never on the parts (SolidWorks' "propagate
+  feature to parts" off, the only way the library uses it). An instance it cuts gets a
+  body of its own, which is drawn, weighed, checked for interference and exported (a
+  STEP product of its own); mates are solved on the parts' own bodies. Its scope is every
+  component it reaches, or the ones listed. The sketch lies on a plane of the assembly,
+  a flat face or plane of a component (followed), or a fixed plane; entities can be
+  converted from components' edges (`CutConversion`), kept where the edge is seen on the
+  plane at every rebuild, as SolidWorks' converted entities. A converted circle within
+  1e-4 of a radian of parallel to the sketch is taken as parallel: mated components are
+  square only to the solve's accuracy.
+- **Layout sketches and composite curves are not modelled**: the library's three layout
+  sketches (Escutcheon Surround Removable, Gland Plate Frame, Panel Mount Battery
+  Bracket) are empty 3D sketches nothing references, and Laptop Shelf Assembly's 33
+  composite curves have no definition (SolidWorks fails to give one), no parents and no
+  children.
+- **In-context features**: see the next section.
+
+## In-context references
+
+*Supersedes in part "A part is edited on its own, not in context".* PeetCAD follows
+SolidWorks' external references: 24 `InContextFeatHolder`s in 9 of the template library's
+assemblies (SolidWorks' update holders: one per part feature that refers to another
+component), the feature showing "->" in the part.
+
+- **A reference is a sketch projection** (`projection::Source::External`,
+  `peet-model/src/in_context.rs`, model schema 12): the *context* (the assembly it was
+  made in, by its file's name, as `context_key` compares them), the component that is the
+  part there (the instance it was made in, by path), what it follows (another component's
+  face, edge, vertex, plane, origin or sketch entity: a mate's `MateEnd`) and the geometry
+  it last had, in the part's coordinates (`Geom`: a point, line, circle, arc or plane).
+  The projected entity is fixed in the sketch, like any projection; relations and
+  dimensions tie the sketch to it, and it can be the profile's own edge (SolidWorks'
+  converted entity).
+- **The part is always built from the last geometry.** So the part alone, the part in
+  another assembly and another instance of the part keep their last values (SolidWorks'
+  out of context), and rebuilding a part never needs its assembly. The alternative, the
+  part's rebuild reaching into the assembly, would make a part's result depend on who
+  opened it.
+- **The context updates it.** In `Engine::assemble`, after the mates and patterns, each
+  top-level component's part's references whose context is this assembly (the engine's
+  `context`: the document's title, or a sub-assembly's link or name) and whose instance is
+  this component are worked out where the components now are (`in_context::update`), and
+  a part whose references moved gets the new values written into its definition. The
+  next round of `regenerate` rebuilds it and solves the mates again, up to six rounds:
+  SolidWorks solves mates, then in-context parts, and repeats as needed. A part is shared
+  by its instances, so the change reaches every instance and every assembly that uses it,
+  as a SolidWorks part document changes.
+- **Embedded or linked, per Definition.** An embedded part is the assembly's copy, changed
+  in place. A linked part's definition changes the same way, and its file is written when
+  the context assembly is saved (SolidWorks saves the parts an assembly changed with it).
+  `in_context`, `lock_references` and `break_references` write a linked file at once, as
+  `set` with a component's dimension does.
+- **Lock and break** as SolidWorks: locked keeps the last values in the context too
+  (`External::locked`); broken removes the reference and leaves the entity as plain fixed
+  geometry. Statuses (`Evaluation::external`): in context, out of context, locked,
+  dangling (what it follows is gone; the last values are kept).
+- **Save As** renames the context in the parts (`Model::rename_context`), as SolidWorks
+  keeps an assembly saved under a new name the context of its in-context parts.
+- Operations: `in_context` (`component`, `sketch` or `feature`, `from`, `entity`,
+  `construction`), `external_references`, `lock_references`, `break_references`.
+- **At any depth** (October 2026). A reference's `component` is a path from its context's
+  own components, so a part inside a sub-assembly can be made to follow in the top
+  assembly. `in_context::update` walks every part below each component (the sub-assembly's
+  placed models, where its solve puts them) and writes a moved reference into the part
+  through the definitions along the path (`change_at`), so the sub-assembly is rebuilt in
+  the next round. A reference made in the sub-assembly itself follows when the
+  sub-assembly's own engine rebuilds it, which the top assembly does first (its context is
+  the sub-assembly's file name, as before); the top's `Evaluation::external` takes the
+  sub-assembly's statuses (`Resolved::path`).
+- **Planes** (October 2026). `PlaneRef::External` is a plane that follows another
+  component's flat face or plane: a sketch's plane, a reference plane's base, an
+  extrusion's "up to" end, wherever a `PlaneRef` is (`FeatureKind::plane_refs`). Its
+  `last` is a `Geom::Plane` the rebuild uses as it is; the context updates it as a
+  sketch entity (`Holder::Plane` beside `Holder::Entity`), keeping the plane's own origin
+  and x axis on the face (`plane_like`): SolidWorks' sketch on a face depends on where the
+  face is, not on where on it its axes are. Breaking a plane leaves it `broken`, where it
+  is. SolidWorks' "offset from surface" is a plane offset from the followed one.
+- **The context's own planes and origin** can be followed (an empty target path), as
+  SolidWorks relates a part's sketch to the assembly's Front Plane (Escutcheon Door's
+  hinge holes).
+- **In the application**: Edit In Context (ribbon and the component's menu) keeps the
+  component highlighted among the others; a face, edge or corner picked on another
+  component can be converted into one of its sketches, or be a sketch's plane, an
+  extrusion's end or a plane's base, from the properties. The tree marks a part with
+  references "->", and its menu and properties list, lock, unlock and break them. The
+  part is not opened as a document of its own: its sketches are edited with Edit Part.
+  *Superseded in part (October 2026):* the part's sketches are made and edited in place,
+  as SolidWorks' Edit Part does. The sketcher works on a copy of the part's sketch, put
+  on its plane where the component is shown; a new one goes on a plane or face of the
+  part, or on another component's flat face, which its plane then follows. Clicking
+  another component's edge, face or corner where the sketch has nothing picks it, to
+  convert it or to make the selected entity follow it (the sketch so far is written to
+  the part, `in_context` applied, and the copy taken back). Finishing the sketch writes
+  it into the part (`set_part`), and the assembly rebuilds it. While a part is edited in
+  context the other components are drawn see-through (the renderer's blended
+  transparency; picking reaches the edited part through them first, Shift picks the
+  nearest), without changing the display state; a setting chooses transparent (the
+  default, as SolidWorks' "Force assembly transparency"), as the display state has them,
+  or opaque. `edit_sketch` takes `component` to do the same from a script.

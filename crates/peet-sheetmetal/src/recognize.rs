@@ -113,7 +113,37 @@ pub fn recognize(
     hint: &SheetSettings,
     owner: u32,
 ) -> Result<Recognized, SheetError> {
-    let (layout, fixed) = recognize_layout(solid, fixed, hint, owner)?;
+    recognize_at(solid, fixed, hint, owner, None)
+}
+
+/// [`recognize`], with the sheet `thickness` given rather than measured: the sheet hangs
+/// that thick from the fixed face into the solid, as SolidWorks' Convert to Sheet Metal
+/// makes it at the thickness it is given. Only a flat body (no bends) can be given one.
+pub fn recognize_at(
+    solid: &Solid,
+    fixed: Option<FaceId>,
+    hint: &SheetSettings,
+    owner: u32,
+    thickness: Option<f64>,
+) -> Result<Recognized, SheetError> {
+    let (mut layout, fixed) = recognize_layout(solid, fixed, hint, owner)?;
+    let measured = layout.settings.thickness;
+    let own = thickness.filter(|t| (t - measured).abs() > SAME_POINT);
+    if let Some(t) = own {
+        if !(t > SAME_POINT && t.is_finite()) {
+            return Err(msg("The thickness must be more than zero."));
+        }
+        if layout.pieces.len() != 1 {
+            return Err(msg(format!(
+                "The body has bends, so it can only be converted at the thickness it has ({measured:.3} mm): a thickness of its own can be given to a flat body."
+            )));
+        }
+        // The flat frame is on the bottom of the sheet: it moves so the top stays put.
+        let piece = &mut layout.pieces[0];
+        piece.frame.origin += piece.frame.z_axis() * (measured - t);
+        layout.settings.thickness = t;
+        layout.settings.check().map_err(msg)?;
+    }
     let placement = layout.pieces[0].frame;
     let (folded, body) = build(layout).map_err(|e| match e {
         SheetError::Overlap { .. } => msg(
@@ -122,7 +152,10 @@ pub fn recognize(
         SheetError::AcrossBend { .. } => msg(ACROSS_BEND),
         other => other,
     })?;
-    verify(solid, &folded)?;
+    // At a thickness of its own the sheet is not the solid any more.
+    if own.is_none() {
+        verify(solid, &folded)?;
+    }
     Ok(Recognized {
         solid: folded,
         body,
@@ -763,6 +796,7 @@ impl<'a> Recognizer<'a> {
             kind: PieceKind::Flange,
             outline: self.wall_outline(&base, &frame, 0, &mut tags)?,
             trims: Vec::new(),
+            adds: Vec::new(),
             frame,
         });
         for &f in &base {
@@ -906,6 +940,7 @@ impl<'a> Recognizer<'a> {
                     kind: PieceKind::Bend(bend),
                     outline: Area { loops },
                     trims: Vec::new(),
+                    adds: Vec::new(),
                     frame,
                 });
                 for &f in &geom.faces {
@@ -926,6 +961,7 @@ impl<'a> Recognizer<'a> {
                     kind: PieceKind::Flange,
                     outline: self.wall_outline(&children, &child_frame, child, &mut tags)?,
                     trims: Vec::new(),
+                    adds: Vec::new(),
                     frame: child_frame,
                 });
                 for &f in &children {
@@ -981,6 +1017,8 @@ impl<'a> Recognizer<'a> {
                 attachments: Vec::new(),
                 corners: Vec::new(),
                 forms: Vec::new(),
+                flat_bends: Vec::new(),
+                fixed: 0,
             },
             self.seed,
         ))

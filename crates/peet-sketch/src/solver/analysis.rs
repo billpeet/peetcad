@@ -366,9 +366,13 @@ pub(crate) fn analyze(st: &mut Structure, sketch: &Sketch, vals: &[f64], eqs: &[
     };
     for (&cid, (status, involved)) in &diags.map {
         constraints[cid as usize] = *status;
-        mark_over(sketch, cid, &mut over);
-        for &i in involved {
-            mark_over(sketch, i, &mut over);
+        // A redundant constraint holds and changes nothing: what it ties is as defined
+        // as the others make it. Only a conflict makes geometry over-defined.
+        if *status == ConstraintStatus::Conflicting {
+            mark_over(sketch, cid, &mut over);
+            for &i in involved {
+                mark_over(sketch, i, &mut over);
+            }
         }
         diagnoses.push(Diagnosis {
             constraint: ConstraintId(cid),

@@ -320,9 +320,15 @@ pub(crate) fn face(doc: &Document, sel: &FaceSel) -> Result<(usize, FaceId), Str
 pub(crate) fn face_ref(doc: &Document, sel: &FaceSel) -> Result<FaceRef, String> {
     match sel {
         FaceSel::Ref(r) => Ok(r.clone()),
-        FaceSel::Find(_) => {
+        FaceSel::Find(q) => {
             let (b, f) = face(doc, sel)?;
-            Ok(bodies(doc)[b].face_ref(f))
+            let mut r = bodies(doc)[b].face_ref(f);
+            // Picked at a point: the reference remembers it, to find the piece there if the
+            // face is cut in pieces later
+            if let Some(at) = q.at {
+                r.hint = mm3(at, &doc.model.parameters.units);
+            }
+            Ok(r)
         }
     }
 }
@@ -522,6 +528,13 @@ pub(crate) fn plane(doc: &Document, sel: &PlaneSel) -> Result<(PlaneRef, Plane),
             })?;
             Ok((PlaneRef::Face(face_ref(doc, f)?), at))
         }
+        PlaneSel::External(x) => match x.last {
+            peet_model::in_context::Geom::Plane(p) => Ok((PlaneRef::External(x.clone()), p)),
+            _ => Err(format!(
+                "{} is not flat: a plane is needed here.",
+                x.describe()
+            )),
+        },
         PlaneSel::Feature(f) => {
             let id = f.resolve(doc)?;
             match doc.evaluation().output(id) {

@@ -498,6 +498,7 @@ pub fn extrude_panel(
                         EndCondition::Blind,
                         EndCondition::Symmetric,
                         EndCondition::ThroughAll,
+                        EndCondition::ThroughNext,
                     ] {
                         let label = end.label();
                         if ui
@@ -786,6 +787,9 @@ pub fn reference_panel(
             | FeatureKind::Jog(_)
             | FeatureKind::MiterFlange(_)
             | FeatureKind::Corner(_)
+            | FeatureKind::BreakCorner(_)
+            | FeatureKind::Unfold(_)
+            | FeatureKind::Fold(_)
             | FeatureKind::Form(_)
             | FeatureKind::Pattern(_)
             | FeatureKind::Mirror(_)
@@ -797,7 +801,11 @@ pub fn reference_panel(
             | FeatureKind::Import(_)
             | FeatureKind::Sweep(_)
             | FeatureKind::Loft(_)
-            | FeatureKind::ConvertToSheet(_) => {}
+            | FeatureKind::ConvertToSheet(_)
+            | FeatureKind::MoveBody(_)
+            | FeatureKind::InsertPart(_)
+            | FeatureKind::StructuralMember(_)
+            | FeatureKind::Sketch3d(_) => {}
         });
     out
 }
@@ -1105,6 +1113,46 @@ pub fn edge_flange_panel(
                 ui.label("");
                 out.committed |= scalar_field(ui, "ef_radius", r, ScalarKind::Length, params);
                 ui.end_row();
+            }
+            ui.label("Bend").on_hover_text(
+                "How the flat length of this flange's bend is worked out. The body's bend model unless one is set here.",
+            );
+            let mut custom = e.bend.is_some();
+            if ui.checkbox(&mut custom, "Custom").changed() {
+                e.bend = custom.then(|| BendModelDef::Deduction(Scalar::new(2.0)));
+                out.committed = true;
+            }
+            ui.end_row();
+            if let Some(b) = &mut e.bend {
+                bend_model_rows(ui, b, params, &mut out);
+            }
+            ui.label("Relief").on_hover_text(
+                "What is cut where the flange is set back from an end of its edge. The body's unless one is chosen here.",
+            );
+            egui::ComboBox::from_id_salt("ef_relief")
+                .selected_text(e.relief.map_or("Body default", ReliefType::label))
+                .show_ui(ui, |ui| {
+                    ui.selectable_value(&mut e.relief, None, "Body default");
+                    for r in ReliefType::ALL {
+                        ui.selectable_value(&mut e.relief, Some(r), r.label());
+                    }
+                });
+            ui.end_row();
+            if e.relief != Some(ReliefType::Tear) {
+                ui.label("Relief ratio").on_hover_text(
+                    "The relief's width, and how far it reaches past the bend, as a multiple of the thickness.",
+                );
+                let mut custom = e.relief_ratio.is_some();
+                if ui.checkbox(&mut custom, "Custom").changed() {
+                    e.relief_ratio = custom.then(|| Scalar::new(0.5));
+                }
+                ui.end_row();
+                if let Some(r) = &mut e.relief_ratio {
+                    ui.label("");
+                    out.committed |=
+                        scalar_field(ui, "ef_relief_ratio", r, ScalarKind::Number, params);
+                    ui.end_row();
+                }
             }
         });
     ui.add_space(6.0);
@@ -1506,6 +1554,50 @@ pub fn miter_flange_panel(
     out
 }
 
+/// Break corner: how the corners are broken and by how much. The corners themselves are
+/// picked through the operation.
+pub(crate) fn break_corner_panel(
+    ui: &mut Ui,
+    doc: &Document,
+    b: &mut peet_model::BreakCornerFeature,
+) -> PanelResult {
+    let mut out = PanelResult::default();
+    let params = &doc.model.parameters;
+    egui::Grid::new("break_corner_props")
+        .num_columns(2)
+        .spacing([10.0, 6.0])
+        .show(ui, |ui| {
+            ui.label("Corners");
+            ui.label(match b.edges.len() {
+                1 => "1 corner".to_owned(),
+                n => format!("{n} corners"),
+            });
+            ui.end_row();
+            ui.label("Kind");
+            egui::ComboBox::from_id_salt("break_corner_kind")
+                .selected_text(b.kind.label())
+                .show_ui(ui, |ui| {
+                    for k in peet_sheetmetal::BreakKind::ALL {
+                        ui.selectable_value(&mut b.kind, k, k.label());
+                    }
+                });
+            ui.end_row();
+            ui.label(match b.kind {
+                peet_sheetmetal::BreakKind::Fillet => "Radius",
+                peet_sheetmetal::BreakKind::Chamfer => "Distance",
+            });
+            out.committed |= scalar_field(
+                ui,
+                "break_corner_size",
+                &mut b.size,
+                ScalarKind::Length,
+                params,
+            );
+            ui.end_row();
+        });
+    out
+}
+
 /// Corner treatment: faces, kind, gap and relief.
 pub fn corner_panel(
     ui: &mut Ui,
@@ -1552,6 +1644,9 @@ pub fn corner_panel(
                             CornerKind::Overlap => {
                                 "The earlier flange butts against the later one (a closed corner, the other way round)."
                             }
+                            CornerKind::Plain => {
+                                "The earlier flange ends where its own edge does; the later one stops short of it. Nothing is run on to close the corner."
+                            }
                             CornerKind::Open => {
                                 "Both flanges stop short of the corner."
                             }
@@ -1583,17 +1678,36 @@ pub fn corner_panel(
                             CornerRelief::Tear => {
                                 "Only what the two bends would share is removed."
                             }
+                            CornerRelief::Slanted => {
+                                "Nothing is cut from the face: each bend ends on a slant, from the face's corner to the end of its flange"
+                            }
+                            CornerRelief::Flush => {
+                                "Cut back to where the two flanges end, so each bend ends in line with its flange."
+                            }
+                            CornerRelief::Circular => {
+                                "A circle centred where the two flanges' ends meet in the flat pattern, cut from the face, the bends and the flanges."
+                            }
+                            CornerRelief::Square => {
+                                "A square centred where the two flanges' ends meet in the flat pattern, cut from the face, the bends and the flanges."
+                            }
                         };
                         ui.selectable_value(&mut c.relief, r, r.label())
                             .on_hover_text(tip);
                     }
                 });
             ui.end_row();
-            if c.relief == CornerRelief::Rectangular {
+            if matches!(
+                c.relief,
+                CornerRelief::Rectangular | CornerRelief::Circular | CornerRelief::Square
+            ) {
                 value_row(
                     ui,
                     "Relief size",
-                    "How far the relief reaches past the bends.",
+                    if c.relief == CornerRelief::Rectangular {
+                        "How far the relief reaches past the bends."
+                    } else {
+                        "How big the relief is across."
+                    },
                     "corner_relief_size",
                     &mut c.relief_size,
                     ScalarKind::Length,
@@ -1798,6 +1912,7 @@ pub fn pattern_panel(
                             spacing: first.spacing.clone(),
                             count: Scalar::new(2.0),
                             flip: false,
+                            up_to: None,
                         });
                     }
                     ui.end_row();

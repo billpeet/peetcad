@@ -10,7 +10,8 @@
 //! power    = postfix [ "^" unary ]          (right associative: 2^3^2 = 2^9)
 //! postfix  = number [unit] | "(" compare ")" [unit] | name "(" [compare {"," compare}] ")" | name
 //! number   = 12 | 12.5 | .5 | 1e3 | 2.5E-2
-//! name     = [A-Za-z_][A-Za-z0-9_]*
+//! name     = word [ "@" word ] | '"' (any text without '"') '"'
+//! word     = [A-Za-z_][A-Za-z0-9_]*
 //! unit     = (mm | cm | m | in | " | ft | deg | rad | °) [ "^" ["-"] digit ]
 //! ```
 //!
@@ -60,9 +61,15 @@
 //!
 //! # Names
 //!
-//! Names refer to dimensions of the sketch (`d1`, or a name the user gave it) and to
-//! [`Parameters`]; dimension names win when both exist. A dimension is a length or an
-//! angle; a parameter is whatever its expression gives ([`Parameter::kind`]).
+//! Names refer to dimensions of the sketch (`d1`, or a name the user gave it), to
+//! [`Parameters`], and to any dimension of the part by its address `NAME@FEATURE`
+//! (`Width@Sketch1`, `d1@Extrude1`), as SolidWorks names them; in that order when several
+//! match. A dimension is a length, an angle or (a pattern's count) a number; a parameter
+//! is whatever its expression gives ([`Parameter::kind`]).
+//!
+//! A name in double quotes may hold any text but a quote: `"Dia.@Sketch1"`,
+//! `"Bend Radius@Sheet-Metal"`. SolidWorks' equations quote every name, and after a
+//! number or a `)` the mark is inches (`2"`). Function names are not case sensitive.
 
 use std::f64::consts::PI;
 
@@ -567,6 +574,101 @@ pub fn check_name(name: &str) -> Result<(), ExprError> {
     }
 }
 
+/// Whether `name` can name a parameter: a plain word (see [`check_name`]), or, as
+/// SolidWorks' global variables are named, any other text without a double quote, without
+/// `@` (which joins a dimension's address) and without spaces round it (`Base Height`,
+/// `flange edge offset`). A name that is not a plain word is quoted in an expression:
+/// `"Base Height" / 2`.
+pub fn check_parameter_name(name: &str) -> Result<(), ExprError> {
+    if is_word(name) {
+        return check_name(name);
+    }
+    if name.trim().is_empty() || name != name.trim() {
+        return Err(ExprError::new(
+            "a parameter's name can't be empty or start or end with a space",
+        ));
+    }
+    if name.contains('"') || name.contains('@') {
+        return Err(ExprError::new(format!(
+            "'{name}' can't name a parameter: it has a double quote or an '@' (which joins a dimension's name to its feature's)"
+        )));
+    }
+    Ok(())
+}
+
+/// Whether `name` is a plain word, which an expression can use without quotes.
+pub fn is_word(name: &str) -> bool {
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+/// Whether `name` can name a dimension: any text without a double quote and without
+/// spaces round it, as in SolidWorks (`Width`, `Dia.`, `Hole Spacing`). One that is not a
+/// plain word is quoted in an expression (`"Dia.@Sketch1"`). With `whole`, the name may be
+/// a whole address (`D2@Sketch10`, one `@`), for a value whose SolidWorks name belongs to a
+/// feature that PeetCAD doesn't have on its own; otherwise it has no `@`.
+/// A component's name as SolidWorks writes it in an assembly's equations, as PeetCAD
+/// names the component: `Door<1>.Part` and `Door-1.Part` are `Door-1`, and
+/// `Hinge Assembly<3>.Assembly` is `Hinge Assembly-3`. Anything else is as it is.
+pub fn solidworks_component(name: &str) -> String {
+    let name = name.trim();
+    let lower = name.to_ascii_lowercase();
+    let name = [".part", ".assembly", ".sldprt", ".sldasm"]
+        .iter()
+        .find(|s| lower.ends_with(*s))
+        .map_or(name, |s| &name[..name.len() - s.len()]);
+    if let Some(open) = name.rfind('<')
+        && let Some(number) = name[open + 1..].strip_suffix('>')
+        && !number.is_empty()
+        && number.bytes().all(|b| b.is_ascii_digit())
+    {
+        return format!("{}-{number}", &name[..open]);
+    }
+    name.to_owned()
+}
+
+/// An address as PeetCAD writes it, from SolidWorks' form in an assembly's equations: the
+/// component it reaches into named as PeetCAD names it (`Height@Sketch1@Door<1>.Part` is
+/// `Height@Sketch1@Door-1`). See [`solidworks_component`].
+pub fn solidworks_address(address: &str) -> String {
+    match address.split_once('@') {
+        Some((name, rest)) => {
+            let rest: Vec<String> = rest.split('@').map(solidworks_component).collect();
+            format!("{name}@{}", rest.join("@"))
+        }
+        None => address.to_owned(),
+    }
+}
+
+pub fn check_dimension_name(name: &str, whole: bool) -> Result<(), ExprError> {
+    if name.is_empty() || name != name.trim() {
+        return Err(ExprError::new(
+            "a dimension's name can't be empty or start or end with a space",
+        ));
+    }
+    if name.contains('"') {
+        return Err(ExprError::new(format!(
+            "'{name}' can't name a dimension: it has a double quote"
+        )));
+    }
+    let ats = name.matches('@').count();
+    if ats > usize::from(whole) || (ats == 1 && (name.starts_with('@') || name.ends_with('@'))) {
+        return Err(ExprError::new(if whole {
+            format!(
+                "'{name}' can't name a dimension: it is a name, or a whole address NAME@FEATURE"
+            )
+        } else {
+            format!(
+                "'{name}' can't name a dimension: '@' joins a dimension's name to its feature's (NAME@FEATURE)"
+            )
+        }));
+    }
+    Ok(())
+}
+
 // ---- Lexer ----
 
 #[derive(Clone, Debug, PartialEq)]
@@ -583,6 +685,8 @@ enum Tok {
     Degree,
     /// `"` (inches)
     Inch,
+    /// A name in double quotes, which is never a function, a constant or a unit.
+    Quoted(String),
     End,
 }
 
@@ -638,13 +742,45 @@ fn lex(src: &str) -> Result<Vec<Token>, ExprError> {
                 .map_err(|_| ExprError::new(format!("invalid number '{text}' at column {col}")))?;
             Tok::Num(value)
         } else if c.is_ascii_alphabetic() || c == '_' {
-            while chars
-                .get(i)
-                .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+            let word = |i: &mut usize| {
+                while chars
+                    .get(*i)
+                    .is_some_and(|c| c.is_ascii_alphanumeric() || *c == '_')
+                {
+                    *i += 1;
+                }
+            };
+            word(&mut i);
+            // A dimension's address: `Width@Sketch1`.
+            if chars.get(i) == Some(&'@')
+                && chars
+                    .get(i + 1)
+                    .is_some_and(|c| c.is_ascii_alphabetic() || *c == '_')
             {
                 i += 1;
+                word(&mut i);
             }
             Tok::Ident(chars[start..i].iter().collect())
+        } else if c == '"'
+            && !matches!(
+                tokens.last().map(|t: &Token| &t.tok),
+                Some(Tok::Num(_) | Tok::RParen)
+            )
+        {
+            // A quoted name, as SolidWorks writes them: `"Width@Sketch1"`, `"Dia.@Sketch1"`,
+            // `"Thickness"`. After a number or a `)` the mark is inches.
+            let Some(len) = chars[i + 1..].iter().position(|c| *c == '"') else {
+                return Err(ExprError::new(format!(
+                    "the name quoted at column {col} has no closing '\"'"
+                )));
+            };
+            let name: String = chars[i + 1..i + 1 + len].iter().collect();
+            i += len + 2;
+            let name = name.trim();
+            if name.is_empty() {
+                return Err(ExprError::new(format!("empty quoted name at column {col}")));
+            }
+            Tok::Quoted(name.to_owned())
         } else {
             i += 1;
             match c {
@@ -787,7 +923,7 @@ impl Parser {
             Tok::End => {
                 ExprError::new(format!("unexpected end of expression, expected {expected}"))
             }
-            Tok::Ident(name) => ExprError::new(format!(
+            Tok::Ident(name) | Tok::Quoted(name) => ExprError::new(format!(
                 "unexpected name '{name}' at column {} — missing an operator? (units are mm, cm, m, in, ft, deg, rad)",
                 t.col
             )),
@@ -894,6 +1030,7 @@ impl Parser {
                 }
                 inner
             }
+            Tok::Quoted(name) => return Ok(Node::Name { name, col: t.col }),
             Tok::Ident(name) => match self.name_or_call(name, t.col)? {
                 // Constants (`pi`) take units like numbers do.
                 n @ Node::Num(_) => n,
@@ -948,7 +1085,8 @@ impl Parser {
             }
             return Ok(Node::Name { name, col });
         }
-        let Some(func) = function(&name) else {
+        // A function's name is not case sensitive, as in SolidWorks' equations (`IIF`, `INT`).
+        let Some(func) = function(&name).or_else(|| function(&name.to_ascii_lowercase())) else {
             let hint = suggest(&name, FUNCTIONS.iter().map(|(n, _)| *n))
                 .map(|s| format!(" — did you mean '{s}'?"))
                 .unwrap_or_default();
@@ -1694,9 +1832,76 @@ pub struct Parameters {
     /// values are displayed. Change them with [`Self::set_units`].
     #[serde(default)]
     pub units: Units,
+    /// The values of the part's dimensions by address, which every expression can read.
+    #[serde(skip)]
+    pub dimensions: DimensionValues,
+}
+
+/// The value of every dimension of a part by its address (`Width@Sketch1`, `d1@Extrude1`),
+/// which expressions read as they read parameters.
+///
+/// It is worked out from the part before each rebuild (by the model, which knows its
+/// features), so it is never saved and two tables that differ only in it are equal: it
+/// follows from the rest of the part.
+#[derive(Clone, Debug, Default)]
+pub struct DimensionValues(pub std::collections::BTreeMap<String, Quantity>);
+
+impl PartialEq for DimensionValues {
+    fn eq(&self, _: &Self) -> bool {
+        true
+    }
+}
+
+impl DimensionValues {
+    /// The value at an address. As in SolidWorks, the case of the letters doesn't matter
+    /// where only one address is the same in any case.
+    pub fn get(&self, address: &str) -> Option<Quantity> {
+        let find = |address: &str| {
+            if let Some(q) = self.0.get(address) {
+                return Some(*q);
+            }
+            let mut alike = self
+                .0
+                .iter()
+                .filter(|(a, _)| a.eq_ignore_ascii_case(address));
+            match (alike.next(), alike.next()) {
+                (Some((_, q)), None) => Some(*q),
+                _ => None,
+            }
+        };
+        find(address).or_else(|| {
+            let ours = solidworks_address(address);
+            (ours != address).then(|| find(&ours)).flatten()
+        })
+    }
+
+    /// Whether the two hold the same values (which `==` does not look at).
+    pub fn same(&self, other: &Self) -> bool {
+        self.0.len() == other.0.len()
+            && self.0.iter().zip(&other.0).all(|((a, x), (b, y))| {
+                a == b && x.dim == y.dim && x.value.to_bits() == y.value.to_bits()
+            })
+    }
 }
 
 impl Parameters {
+    /// What a name in an expression is worth outside a sketch: a parameter, or a dimension
+    /// by its address.
+    fn value_of(&self, name: &str) -> Option<Quantity> {
+        self.quantity(name).or_else(|| self.dimensions.get(name))
+    }
+
+    /// A name that is not a parameter, as an expression outside a sketch sees it.
+    fn external(&self, name: &str) -> External {
+        match self.dimensions.get(name) {
+            Some(q) if q.value.is_finite() => External::Value(q),
+            Some(_) => {
+                External::Failed("is a dimension whose value can't be worked out".to_owned())
+            }
+            None => External::Unknown,
+        }
+    }
+
     /// The parameter's value in base units (mm, degrees or the plain number), or `None` if
     /// it doesn't exist or failed to evaluate.
     pub fn get(&self, name: &str) -> Option<f64> {
@@ -1716,7 +1921,7 @@ impl Parameters {
     /// units. The table is left unchanged if the new expression fails, or if it would
     /// break another parameter that evaluated fine before.
     pub fn set(&mut self, name: &str, expression: &str) -> Result<f64, ExprError> {
-        check_name(name)?;
+        check_parameter_name(name)?;
         Expr::parse(expression)?;
         let before = self.clone();
         let expression = expression.trim().to_owned();
@@ -1770,11 +1975,16 @@ impl Parameters {
                 q.describe(&units)
             ))),
         };
+        let candidates = || {
+            std::iter::once("pi".to_owned())
+                .chain(self.dimensions.0.keys().cloned())
+                .collect()
+        };
         let results = Graph::run(
             &names,
             &exprs,
-            &|_| External::Unknown,
-            &|| vec!["pi".to_owned()],
+            &|name| self.external(name),
+            &candidates,
             &check,
             units,
         );
@@ -1807,18 +2017,25 @@ impl Parameters {
                         "'{name}' at column {col} is a parameter with an error"
                     )));
                 }
-                None => {
-                    let candidates: Vec<&str> = self
-                        .entries
-                        .iter()
-                        .map(|p| p.name.as_str())
-                        .chain(std::iter::once("pi"))
-                        .collect();
-                    return Err(unknown_name(name, col, &candidates));
-                }
+                None => match self.external(name) {
+                    External::Value(_) => {}
+                    External::Failed(why) => {
+                        return Err(ExprError::new(format!("'{name}' at column {col} {why}")));
+                    }
+                    External::Unknown => {
+                        let candidates: Vec<&str> = self
+                            .entries
+                            .iter()
+                            .map(|p| p.name.as_str())
+                            .chain(std::iter::once("pi"))
+                            .chain(self.dimensions.0.keys().map(String::as_str))
+                            .collect();
+                        return Err(unknown_name(name, col, &candidates));
+                    }
+                },
             }
         }
-        expr.eval_quantity(&self.units, &|name| self.quantity(name))
+        expr.eval_quantity(&self.units, &|name| self.value_of(name))
     }
 
     /// [`Self::evaluate_expression`] where a `kind` is expected: the value in base units
@@ -1930,7 +2147,7 @@ fn evaluate_dimensions(
                 Some(q) => External::Value(q),
                 None => External::Failed("is a parameter with an error".to_owned()),
             },
-            None => External::Unknown,
+            None => params.external(name),
         }
     };
     let candidates = || {
@@ -1939,6 +2156,7 @@ fn evaluate_dimensions(
             .map(|(_, n, _)| (*n).to_owned())
             .chain(params.entries.iter().map(|p| p.name.clone()))
             .chain(std::iter::once("pi".to_owned()))
+            .chain(params.dimensions.0.keys().cloned())
             .collect()
     };
     let check = |i: usize, q: Quantity| dimension_value(sketch, ids[i], q, &units);
@@ -2010,6 +2228,25 @@ pub fn set_dimension_input(
     d.value = value;
     d.expression = expression;
     Ok(value)
+}
+
+/// Every dimension of the sketch with its value once its expression, if it has one, is
+/// worked out against `params` (in mm, degrees or the plain number). One whose expression
+/// fails keeps the value it has.
+pub fn dimension_values(sketch: &Sketch, params: &Parameters) -> Vec<(ConstraintId, Quantity)> {
+    let evaluated = evaluate_dimensions(sketch, params, None);
+    sketch
+        .constraints()
+        .filter_map(|(id, c)| {
+            let d = c.dimension.as_ref()?;
+            let value = evaluated
+                .iter()
+                .find(|(e, _)| *e == id)
+                .and_then(|(_, r)| r.as_ref().ok().copied())
+                .unwrap_or(d.value);
+            Some((id, Quantity::new(value, dimension_kind(sketch, id))))
+        })
+        .collect()
 }
 
 /// Re-evaluates every dimension that has an expression, in dependency order (dimensions
@@ -2553,8 +2790,14 @@ mod tests {
         );
         assert_eq!(err("sin(1"), "missing ')' to close '(' at column 4");
         // Units follow a value, and only one of them.
-        assert_eq!(err("\"5"), "unexpected '\"' at column 1");
-        assert_eq!(err("5mm\""), "unexpected '\"' at column 4");
+        assert_eq!(
+            err("\"5"),
+            "the name quoted at column 1 has no closing '\"'"
+        );
+        assert_eq!(
+            err("5mm\""),
+            "the name quoted at column 4 has no closing '\"'"
+        );
         assert!(err("5 mm in").starts_with("unexpected name 'in' at column 6"));
         assert_eq!(
             err("2mm^"),
@@ -2574,6 +2817,138 @@ mod tests {
         assert_eq!(e.message, "unknown name 'a' at column 1");
         assert_eq!(qerr("len / (2mm - 2mm)"), "division by zero at column 5");
         assert_eq!(qerr("nope * 2mm"), "unknown name 'nope' at column 1");
+    }
+
+    #[test]
+    fn parameters_named_as_solidworks_global_variables() {
+        let mut p = Parameters::default();
+        // A name with spaces and other marks, quoted in expressions as SolidWorks quotes it
+        p.set("Base Height", "100mm").unwrap();
+        p.set("50.00mm-", "50").unwrap();
+        p.set("half", "\"Base Height\" / 2 + \"50.00mm-\"").unwrap();
+        assert_eq!(p.get("half"), Some(100.0));
+        // A plain word works either way
+        p.set("width", "20mm").unwrap();
+        p.set("both", "width + \"width\"").unwrap();
+        assert_eq!(p.get("both"), Some(40.0));
+        for bad in ["", " Base", "Base ", "a\"b", "Width@Sketch1", "sin"] {
+            assert!(p.set(bad, "1").is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn dimension_addresses_are_found_in_any_case() {
+        let mut p = Parameters::default();
+        p.dimensions
+            .0
+            .insert("width@Sketch1".to_owned(), Quantity::length(400.0));
+        assert_eq!(
+            p.evaluate_expression("\"Width@Sketch1\"").unwrap().value,
+            400.0
+        );
+        // Not where two differ only in case
+        p.dimensions
+            .0
+            .insert("WIDTH@Sketch1".to_owned(), Quantity::length(500.0));
+        assert!(p.evaluate_expression("\"Width@Sketch1\"").is_err());
+        assert_eq!(
+            p.evaluate_expression("\"WIDTH@Sketch1\"").unwrap().value,
+            500.0
+        );
+    }
+
+    #[test]
+    fn solidworks_component_addresses() {
+        assert_eq!(solidworks_component("Door<1>.Part"), "Door-1");
+        assert_eq!(solidworks_component("Door-1.Part"), "Door-1");
+        assert_eq!(
+            solidworks_component("Hinge Assembly<3>.Assembly"),
+            "Hinge Assembly-3"
+        );
+        assert_eq!(solidworks_component("Door-1"), "Door-1");
+        assert_eq!(
+            solidworks_address("Height@Sketch1@Door<1>.Part"),
+            "Height@Sketch1@Door-1"
+        );
+        assert_eq!(solidworks_address("RD1@Annotations"), "RD1@Annotations");
+        let mut p = Parameters::default();
+        p.dimensions
+            .0
+            .insert("Height@Sketch1@Door-1".to_owned(), Quantity::length(1600.0));
+        // SolidWorks' forms read what PeetCAD's does.
+        for name in [
+            "\"Height@Sketch1@Door<1>.Part\"",
+            "\"Height@Sketch1@Door-1.Part\"",
+        ] {
+            assert_eq!(p.evaluate_expression(name).unwrap().value, 1600.0);
+        }
+    }
+
+    #[test]
+    fn solidworks_names() {
+        // Quoted names hold any text; bare addresses are word@word.
+        let e = Expr::parse("\"Dia.@Sketch1\" / 4 + \"Thickness\" + Width@Sketch2").unwrap();
+        assert_eq!(
+            e.names(),
+            vec!["Dia.@Sketch1", "Thickness", "Width@Sketch2"]
+        );
+        let e = Expr::parse("\"Bend Radius@Sheet-Metal\" * 2\"").unwrap();
+        assert_eq!(e.names(), vec!["Bend Radius@Sheet-Metal"]);
+        // After a number or a ')' the mark is still inches.
+        assert_eq!(ev("(1 + 1)\""), 50.8);
+        assert!(
+            Expr::parse("\"open")
+                .unwrap_err()
+                .message
+                .contains("closing")
+        );
+        assert!(Expr::parse("\"  \"").is_err());
+        // A quoted name is never a function or a constant.
+        assert_eq!(Expr::parse("\"pi\"").unwrap().names(), vec!["pi"]);
+        // Functions are not case sensitive, as in SolidWorks.
+        assert_eq!(ev("IIF(1 > 2, 3, 4) + INT(2.7)"), 6.0);
+        assert_eq!(
+            Expr::parse("IIF").unwrap().names(),
+            vec!["IIF"],
+            "a name, not a function"
+        );
+    }
+
+    #[test]
+    fn dimensions_by_address() {
+        let mut p = Parameters::default();
+        p.dimensions
+            .0
+            .insert("Width@Sketch1".to_owned(), Quantity::length(400.0));
+        p.dimensions
+            .0
+            .insert("D1@LPattern2".to_owned(), Quantity::number(4.0));
+        p.set("half", "\"Width@Sketch1\" / 2").unwrap();
+        assert_eq!(p.get("half"), Some(200.0));
+        let q = p
+            .evaluate_expression("INT((\"Width@Sketch1\" - 25) / 175mm + 0.999999) + D1@LPattern2")
+            .unwrap();
+        assert_eq!((q.value, q.dim), (7.0, Dim::NONE));
+        let e = p.evaluate_expression("\"Height@Sketch1\"").unwrap_err();
+        assert!(e.message.contains("unknown name 'Height@Sketch1'"), "{e:?}");
+        // Dimension values are not part of what makes two tables the same.
+        assert_eq!(p.clone(), {
+            let mut o = p.clone();
+            o.dimensions = DimensionValues::default();
+            o
+        });
+    }
+
+    #[test]
+    fn dimension_names() {
+        assert!(check_dimension_name("Dia.", false).is_ok());
+        assert!(check_dimension_name("Hole Spacing", false).is_ok());
+        assert!(check_dimension_name("D2@Sketch10", false).is_err());
+        assert!(check_dimension_name("D2@Sketch10", true).is_ok());
+        assert!(check_dimension_name("a@b@c", true).is_err());
+        assert!(check_dimension_name("@b", true).is_err());
+        assert!(check_dimension_name(" x", false).is_err());
+        assert!(check_dimension_name("a\"b", false).is_err());
     }
 
     #[test]
@@ -2715,7 +3090,11 @@ mod tests {
         let mut p = Parameters::default();
         p.set("width", "20").unwrap();
         assert!(p.set("sin", "1").is_err());
-        assert!(p.set("2x", "1").is_err());
+        assert!(p.set("a@b", "1").is_err());
+        // Not a plain word, so quoted in expressions, as SolidWorks allows
+        p.set("2x", "1").unwrap();
+        assert_eq!(p.evaluate_expression("\"2x\" * 3").unwrap().value, 3.0);
+        p.remove("2x");
         let e = p.set("h", "widht / 2").unwrap_err();
         assert_eq!(
             e.message,

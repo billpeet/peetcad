@@ -24,7 +24,7 @@
 
 use std::sync::Arc;
 
-use peet_sheetmetal::{BendModel, ReliefType, SheetSettings, recognize};
+use peet_sheetmetal::{BendModel, ReliefType, SheetSettings, recognize_at};
 use peet_sketch::expr::Parameters;
 use serde::{Deserialize, Serialize};
 
@@ -46,6 +46,10 @@ pub struct ConvertToSheetFeature {
     /// Reliefs for flanges added to the body later.
     pub relief: ReliefType,
     pub relief_ratio: Scalar,
+    /// The sheet's thickness, from the fixed face into the solid, as SolidWorks gives its
+    /// conversion one. `None`: the solid's own wall thickness. Only a flat body can be
+    /// given another.
+    pub thickness: Option<Scalar>,
 }
 
 impl ConvertToSheetFeature {
@@ -56,6 +60,7 @@ impl ConvertToSheetFeature {
             model: d.model,
             relief: d.relief,
             relief_ratio: d.relief_ratio,
+            thickness: None,
         }
     }
 
@@ -64,7 +69,9 @@ impl ConvertToSheetFeature {
         let model = match &self.model {
             BendModelDef::KFactor(v) | BendModelDef::Allowance(v) | BendModelDef::Deduction(v) => v,
         };
-        vec![model, &self.relief_ratio]
+        let mut out = vec![model, &self.relief_ratio];
+        out.extend(&self.thickness);
+        out
     }
 }
 
@@ -141,7 +148,13 @@ pub(crate) fn apply_convert(
                 .to_owned(),
         ));
     }
-    let found = recognize(&body.solid, fixed, settings, feature.0)
+    let thickness = def
+        .thickness
+        .as_ref()
+        .map(|t| t.evaluate(ScalarKind::Length, &model.parameters))
+        .transpose()
+        .map_err(|m| FeatureError(format!("Thickness: {m}.")))?;
+    let found = recognize_at(&body.solid, fixed, settings, feature.0, thickness)
         .map_err(|e| FeatureError(e.message(|o| model.name_of(FeatureId(o)).to_owned())))?;
     let mut out = bodies.to_vec();
     out[index] = Arc::new(Body {

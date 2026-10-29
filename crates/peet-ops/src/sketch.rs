@@ -1,7 +1,7 @@
 //! Drawing in a sketch: the items of a `draw` list.
 //!
 //! In JSON each item is an object with a `type`: geometry (`point`, `line`, `polyline`,
-//! `circle`, `arc`, `spline`, `rectangle`, `center_rectangle`, `slot`, `polygon`), a relation
+//! `circle`, `arc`, `spline`, `rectangle`, `center_rectangle`, `slot`, `polygon`, `text`), a relation
 //! (`coincident`, `horizontal`, `vertical`, `parallel`, `perpendicular`, `tangent`,
 //! `equal`, `concentric`, `midpoint`, `symmetric`, `fix`), a dimension (`distance`,
 //! `length`, `horizontal_distance`, `vertical_distance`, `radius`, `diameter`, `angle`) or
@@ -12,18 +12,23 @@
 //! label with `as`, and later items refer to entities by label, by id (as replies and the
 //! `feature` query give them) or by a part of one: `"a.start"`, `"a.end"`, `"c.center"`,
 //! `"r.bottom"`, `"r.top.end"`, `"s.2"` (a spline's fit point by number, from 0),
-//! `"origin"`.
+//! `"t.point"` (a text's point), `"origin"`.
 
 use std::collections::HashMap;
 
 use peet_document::Document;
 use peet_sketch::expr;
+use peet_sketch::expr::Units;
+use peet_sketch::text::{SketchText, TextAlign};
 use peet_sketch::{
-    ConstraintId, ConstraintKind, EntityId, EntityKind, Geometry, Sketch, ops, shapes,
+    Along, ArcSide, ConstraintId, ConstraintKind, EntityId, EntityKind, Geometry, Sketch, ops,
+    shapes,
 };
 use serde_json::{Map, Value, json};
 
-use crate::args::{Args, boolean, coordinates, integer, list, mm2, number, text};
+use crate::args::{
+    Args, boolean, coordinates, integer, length_out, list, mm2, number, point2_out, round, text,
+};
 use crate::value::Input;
 
 /// A sketch entity: its id, or a path from a label or an id to a part of it
@@ -76,6 +81,7 @@ pub enum Relation {
     Midpoint,
     Symmetric,
     Fix,
+    Patterned,
 }
 
 /// What a dimension measures.
@@ -89,9 +95,10 @@ pub enum Measure {
     Radius,
     Diameter,
     Angle,
+    Offset,
 }
 
-const RELATIONS: [(Relation, &str, &str); 13] = [
+const RELATIONS: [(Relation, &str, &str); 14] = [
     (
         Relation::Coincident,
         "coincident",
@@ -122,20 +129,25 @@ const RELATIONS: [(Relation, &str, &str); 13] = [
         "coradial",
         "two circles or arcs with the same centre and radius",
     ),
-    (Relation::Midpoint, "midpoint", "a point and a line"),
+    (Relation::Midpoint, "midpoint", "a point and a line or arc"),
     (
         Relation::Symmetric,
         "symmetric",
         "two points and the line they mirror across",
     ),
     (Relation::Fix, "fix", "an entity, held where it is"),
+    (
+        Relation::Patterned,
+        "patterned",
+        "the seed and a copy of it in a linear pattern, then the pattern's first copy (left out when the copy is the first): points, lines or circles",
+    ),
 ];
 
-const MEASURES: [(Measure, &str, &str); 8] = [
+const MEASURES: [(Measure, &str, &str); 9] = [
     (
         Measure::Distance,
         "distance",
-        "two points, or a point and a line",
+        "two points, or a point and a line; with `sides`, points, circles or arcs, or a line and a circle or arc, to a circle's near or far side",
     ),
     (
         Measure::DoubledDistance,
@@ -146,18 +158,27 @@ const MEASURES: [(Measure, &str, &str); 8] = [
     (
         Measure::HorizontalDistance,
         "horizontal_distance",
-        "two points",
+        "two points; with `sides`, points, circles or arcs",
     ),
-    (Measure::VerticalDistance, "vertical_distance", "two points"),
+    (
+        Measure::VerticalDistance,
+        "vertical_distance",
+        "two points; with `sides`, points, circles or arcs",
+    ),
     (Measure::Radius, "radius", "a circle or arc"),
     (Measure::Diameter, "diameter", "a circle or arc"),
     (Measure::Angle, "angle", "two lines"),
+    (
+        Measure::Offset,
+        "offset_distance",
+        "a curve offset from another: two lines (parallel, the value apart) or two circles or arcs (concentric, radii the value apart)",
+    ),
 ];
 
-const GEOMETRY: [(&str, &str); 11] = [
+const GEOMETRY: [(&str, &str); 12] = [
     (
         "project",
-        "exactly one of edge, vertex, plane, face; convert: use the projected edge in profiles",
+        "exactly one of edge, vertex, plane, face, or sketch with entity (an earlier sketch's entity, by its id there); convert: use the projected edge in profiles",
     ),
     ("point", "at"),
     ("line", "from, to"),
@@ -185,6 +206,10 @@ const GEOMETRY: [(&str, &str); 11] = [
         "from, to, radius: the two arc centres and half the width",
     ),
     ("polygon", "center, vertex, sides"),
+    (
+        "text",
+        "at, string, height, font, angle, width, spacing, align: glyph outlines that features          cut or extrude; part point (where it is)",
+    ),
 ];
 
 const EDITS: [(&str, &str); 8] = [
@@ -224,6 +249,11 @@ pub enum ProjectionSel {
     Vertex(crate::value::VertexSel),
     Plane(crate::value::PlaneSel),
     Face(crate::value::FaceSel),
+    /// An entity of another, earlier sketch, by its id there.
+    SketchEntity {
+        sketch: crate::value::FeatureSel,
+        entity: EntityId,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -281,6 +311,12 @@ pub enum Draw {
         vertex: [f64; 2],
         sides: u32,
     },
+    /// A text with its point at `at`. Part: `point`.
+    Text {
+        at: [f64; 2],
+        string: String,
+        style: TextStyle,
+    },
     Relation {
         kind: Relation,
         of: Vec<Ent>,
@@ -294,6 +330,8 @@ pub enum Draw {
         name: Option<String>,
         /// A reference dimension: it reports, and doesn't drive.
         driven: bool,
+        /// For a distance to a circle's side: where on each end it is measured.
+        sides: Option<[ArcSide; 2]>,
     },
     Fillet {
         corner: Ent,
@@ -370,6 +408,7 @@ impl Draw {
             Self::CenterRectangle { .. } => "center_rectangle",
             Self::Slot { .. } => "slot",
             Self::Polygon { .. } => "polygon",
+            Self::Text { .. } => "text",
             Self::Relation { kind, .. } => RELATIONS
                 .iter()
                 .find(|(k, ..)| k == kind)
@@ -413,6 +452,7 @@ impl DrawItem {
                 value: a.parsed("value", Input::parse)?,
                 name: a.string("name")?,
                 driven: a.flag("driven", false)?,
+                sides: a.parsed("sides", parse_sides)?,
             }
         } else {
             match kind {
@@ -421,14 +461,22 @@ impl DrawItem {
                     let vertex = a.parsed("vertex", crate::value::VertexSel::parse)?;
                     let plane = a.parsed("plane", crate::value::PlaneSel::parse)?;
                     let face = a.parsed("face", crate::value::FaceSel::parse)?;
-                    let source = match (edge, vertex, plane, face) {
-                        (Some(e), None, None, None) => ProjectionSel::Edge(e),
-                        (None, Some(v), None, None) => ProjectionSel::Vertex(v),
-                        (None, None, Some(p), None) => ProjectionSel::Plane(p),
-                        (None, None, None, Some(f)) => ProjectionSel::Face(f),
+                    let sketch = a.parsed("sketch", crate::value::FeatureSel::parse)?;
+                    let entity = a.parsed("entity", integer)?;
+                    let source = match (edge, vertex, plane, face, sketch) {
+                        (Some(e), None, None, None, None) => ProjectionSel::Edge(e),
+                        (None, Some(v), None, None, None) => ProjectionSel::Vertex(v),
+                        (None, None, Some(p), None, None) => ProjectionSel::Plane(p),
+                        (None, None, None, Some(f), None) => ProjectionSel::Face(f),
+                        (None, None, None, None, Some(sketch)) => ProjectionSel::SketchEntity {
+                            sketch,
+                            entity: EntityId(entity.ok_or(
+                                "project from another sketch needs the entity's id there in 'entity'",
+                            )?),
+                        },
                         _ => {
                             return Err(
-                                "project needs exactly one of edge, vertex, plane or face".into()
+                                "project needs exactly one of edge, vertex, plane, face or sketch (with entity)".into()
                             );
                         }
                     };
@@ -478,6 +526,11 @@ impl DrawItem {
                     center: a.required("center", p2)?,
                     vertex: a.required("vertex", p2)?,
                     sides: a.required("sides", integer)?,
+                },
+                "text" => Draw::Text {
+                    at: a.required("at", p2)?,
+                    string: a.required("string", |v| text(v).map(str::to_owned))?,
+                    style: TextStyle::parse(a)?,
                 },
                 "fillet" => Draw::Fillet {
                     corner: a.required("corner", Ent::parse)?,
@@ -638,6 +691,10 @@ fn resolve(
             "start" => sketch.endpoints(current).map(|e| e.0),
             "end" => sketch.endpoints(current).map(|e| e.1),
             "center" => sketch.center(current),
+            "point" => match &sketch.entity(current).map(|e| &e.geometry) {
+                Some(Geometry::Text { anchor, .. }) => Some(*anchor),
+                _ => None,
+            },
             // A spline's fit point, by its number.
             _ => part.parse::<usize>().ok().and_then(|i| {
                 sketch
@@ -683,6 +740,7 @@ fn entity_out(sketch: &Sketch, id: EntityId) -> Value {
             "id": id.0, "type": "spline", "closed": closed,
             "points": points.iter().map(|p| p.0).collect::<Vec<u32>>(),
         }),
+        Geometry::Text { anchor, .. } => json!({ "id": id.0, "type": "text", "point": anchor.0 }),
     }
 }
 
@@ -716,13 +774,59 @@ fn relation(sketch: &Sketch, kind: Relation, of: &[EntityId]) -> Result<Constrai
         (Relation::Midpoint, &[a, b]) => K::Midpoint { point: b, line: a },
         (Relation::Symmetric, &[a, b, axis]) => K::Symmetric { a, b, axis },
         (Relation::Symmetric, _) => return wrong("two points and a line"),
+        (Relation::Patterned, &[seed, copy]) => K::Patterned {
+            seed,
+            copy,
+            first: copy,
+        },
+        (Relation::Patterned, &[seed, copy, first]) => K::Patterned { seed, copy, first },
+        (Relation::Patterned, _) => {
+            return wrong("the seed and a copy, then the first copy if that is another");
+        }
         (Relation::Fix, _) => return wrong("one entity"),
         _ => return wrong("two entities"),
     })
 }
 
-fn measure(kind: Measure, of: &[EntityId]) -> Result<ConstraintKind, String> {
+/// `sides`: two of "center", "near" and "far" (SolidWorks' Min and Max), one for each end.
+fn parse_sides(v: &Value) -> Result<[ArcSide; 2], String> {
+    let words = list(v)?;
+    let side = |w: &Value| {
+        text(w).and_then(|t| {
+            ArcSide::from_word(t)
+                .ok_or_else(|| format!("'{t}' is not a side: give \"center\", \"near\" or \"far\""))
+        })
+    };
+    match words {
+        [a, b] => Ok([side(a)?, side(b)?]),
+        _ => Err(
+            "sides takes two, one for each end in 'of': \"center\", \"near\" or \"far\"".to_owned(),
+        ),
+    }
+}
+
+fn measure(
+    kind: Measure,
+    of: &[EntityId],
+    sides: Option<[ArcSide; 2]>,
+) -> Result<ConstraintKind, String> {
     use ConstraintKind as K;
+    if let Some(sides) = sides {
+        let along = match kind {
+            Measure::Distance => Along::Straight,
+            Measure::HorizontalDistance => Along::Horizontal,
+            Measure::VerticalDistance => Along::Vertical,
+            _ => {
+                return Err(
+                    "sides is for distance, horizontal_distance and vertical_distance".to_owned(),
+                );
+            }
+        };
+        let &[a, b] = of else {
+            return Err("it takes two entities in 'of'".to_owned());
+        };
+        return Ok(K::SideDistance { a, b, sides, along });
+    }
     Ok(match (kind, of) {
         (Measure::Distance, &[a, b]) => K::Distance(a, b),
         (Measure::DoubledDistance, &[a, b]) => K::DoubledDistance(a, b),
@@ -732,11 +836,161 @@ fn measure(kind: Measure, of: &[EntityId]) -> Result<ConstraintKind, String> {
         (Measure::Radius, &[a]) => K::Radius(a),
         (Measure::Diameter, &[a]) => K::Diameter(a),
         (Measure::Angle, &[a, b]) => K::Angle(a, b),
+        (Measure::Offset, &[a, b]) => K::Offset(a, b),
         (Measure::Length | Measure::Radius | Measure::Diameter, _) => {
             return Err("it takes one entity in 'of'".to_owned());
         }
         _ => return Err("it takes two entities in 'of'".to_owned()),
     })
+}
+
+/// A text's style as an operation gives it. A field left out keeps what the text has (a
+/// new text: Century Gothic, 5 mm high, level, aligned left).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct TextStyle {
+    pub font: Option<String>,
+    /// The height of a capital letter, in document units.
+    pub height: Option<f64>,
+    /// Degrees, counter-clockwise from the sketch's x axis.
+    pub angle: Option<f64>,
+    pub width: Option<f64>,
+    pub spacing: Option<f64>,
+    pub align: Option<TextAlign>,
+}
+
+impl TextStyle {
+    pub(crate) fn parse(a: &mut Args) -> Result<Self, String> {
+        Ok(Self {
+            font: a.string("font")?,
+            height: a.parsed("height", number)?,
+            angle: a.parsed("angle", number)?,
+            width: a.parsed("width", number)?,
+            spacing: a.parsed("spacing", number)?,
+            align: a.parsed("align", |v| {
+                TextAlign::parse(text(v)?)
+                    .ok_or_else(|| format!("{v} is not left, center or right"))
+            })?,
+        })
+    }
+
+    fn apply(&self, t: &mut SketchText, units: &Units) {
+        if let Some(f) = &self.font {
+            t.font.clone_from(f);
+        }
+        if let Some(h) = self.height {
+            t.height = units.to_mm(h);
+        }
+        if let Some(a) = self.angle {
+            t.angle = a.to_radians();
+        }
+        if let Some(w) = self.width {
+            t.width = w;
+        }
+        if let Some(s) = self.spacing {
+            t.spacing = s;
+        }
+        if let Some(a) = self.align {
+            t.align = a;
+        }
+    }
+
+    fn is_empty(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
+/// A text as replies and the `feature` query give it: its string, style, point and the
+/// box around its outline.
+pub(crate) fn text_out(sketch: &Sketch, id: EntityId, units: &Units) -> Value {
+    let (Some(t), Some(Geometry::Text { anchor, .. })) =
+        (sketch.text(id), sketch.entity(id).map(|e| &e.geometry))
+    else {
+        return json!({ "id": id.0 });
+    };
+    let mut lo = peet_math::DVec2::splat(f64::INFINITY);
+    let mut hi = -lo;
+    for c in sketch.text_curves(id) {
+        let (a, b) = c.bounds();
+        lo = lo.min(a);
+        hi = hi.max(b);
+    }
+    let mut out = json!({
+        "id": id.0, "type": "text", "string": t.string, "font": t.font,
+        "height": length_out(t.height, units), "angle": round(t.angle.to_degrees()),
+        "width": round(t.width), "spacing": round(t.spacing), "align": t.align.word(),
+        "point": anchor.0, "at": point2_out(sketch.point(*anchor), units),
+        "curves": t.outline.len(),
+    });
+    if t.drawn_in != t.font {
+        out["drawn_in"] = json!(t.drawn_in);
+    }
+    if lo.is_finite() {
+        out["bounds"] = json!([point2_out(lo, units), point2_out(hi, units)]);
+    }
+    out
+}
+
+/// Changes a text's string or style and draws it again (`set_text`). `which` is the text's
+/// entity id; without one, the sketch's only text.
+pub(crate) fn set_text(
+    sketch: &mut Sketch,
+    which: Option<u32>,
+    string: Option<&str>,
+    style: &TextStyle,
+    units: &Units,
+) -> Result<Value, String> {
+    let texts: Vec<EntityId> = sketch
+        .entities()
+        .filter(|(_, e)| e.kind() == EntityKind::Text)
+        .map(|(id, _)| id)
+        .collect();
+    let id = match which {
+        Some(n) if texts.contains(&EntityId(n)) => EntityId(n),
+        Some(n) => {
+            return Err(format!(
+                "Entity {n} is not a text of the sketch. Its texts are: {}.",
+                list_ids(&texts)
+            ));
+        }
+        None => match texts[..] {
+            [only] => only,
+            [] => return Err("The sketch has no text.".to_owned()),
+            _ => {
+                return Err(format!(
+                    "The sketch has more than one text: say which with 'text' ({}).",
+                    list_ids(&texts)
+                ));
+            }
+        },
+    };
+    if string.is_none() && style.is_empty() {
+        return Err(
+            "Give a 'string', or a style to change (font, height, angle, width, spacing, align)."
+                .to_owned(),
+        );
+    }
+    let mut t = sketch.text(id).cloned().expect("a text");
+    if let Some(s) = string {
+        s.clone_into(&mut t.string);
+    }
+    style.apply(&mut t, units);
+    let warning = t.layout()?;
+    *sketch.text_mut(id).expect("a text") = t;
+    let mut out = text_out(sketch, id, units);
+    if let Some(w) = warning {
+        out["warning"] = json!(w);
+    }
+    Ok(out)
+}
+
+fn list_ids(ids: &[EntityId]) -> String {
+    if ids.is_empty() {
+        return "(none)".to_owned();
+    }
+    ids.iter()
+        .map(|i| i.0.to_string())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Sets a dimension's value from a number (document units, or degrees) or an expression.
@@ -842,6 +1096,29 @@ fn one(
                         Shape::Point(plane.to_plane_coords(r.hint)),
                     )
                 }
+                ProjectionSel::SketchEntity {
+                    sketch: other,
+                    entity,
+                } => {
+                    let other = other.resolve(doc)?;
+                    let from = doc
+                        .model
+                        .sketch(other)
+                        .ok_or_else(|| format!("{} is not a sketch.", doc.model.name_of(other)))?;
+                    let shape = peet_model::projection::project_sketch_entity(
+                        &from.sketch,
+                        from.placement,
+                        *entity,
+                        plane,
+                    )?;
+                    (
+                        Source::SketchEntity {
+                            sketch: other,
+                            entity: *entity,
+                        },
+                        shape,
+                    )
+                }
                 ProjectionSel::Plane(p) => {
                     if *convert {
                         return Err(
@@ -870,6 +1147,18 @@ fn one(
             let id = sketch
                 .add_spline(&through, *closed)
                 .map_err(|e| e.to_string())?;
+            Some(Named::Entity(id))
+        }
+        Draw::Text { at, string, style } => {
+            let mut t = SketchText::new(string);
+            style.apply(&mut t, units);
+            if let Some(warning) = t.layout()? {
+                reply.insert("warning".to_owned(), json!(warning));
+            }
+            let id = sketch.add_text(p(at), t);
+            if let Value::Object(m) = text_out(sketch, id, units) {
+                reply.extend(m);
+            }
             Some(Named::Entity(id))
         }
         Draw::Polyline { points, closed } => {
@@ -981,15 +1270,16 @@ fn one(
             value,
             name,
             driven,
+            sides,
         } => {
             let of = resolve_all(sketch, labels, of)?;
-            let k = measure(*kind, &of)?;
+            let k = measure(*kind, &of, *sides)?;
             let measured = sketch.measure(&k).unwrap_or(0.0);
             let id = sketch
                 .add_dimension(k, measured)
                 .map_err(|e| e.to_string())?;
             if let Some(name) = name {
-                expr::check_name(name).map_err(|e| e.message)?;
+                expr::check_dimension_name(name, false).map_err(|e| e.message)?;
                 if sketch.dimension_by_name(name).is_some() {
                     return Err(format!("the sketch already has a dimension '{name}'"));
                 }

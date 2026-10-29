@@ -243,8 +243,13 @@ impl Solid {
                 }
             }
         }
+        // A sphere's or a torus's face reaches as far as the points of it that bulge out
+        // furthest; any other face only as far as its edges (or within a margin of it).
+        let edges = b;
         for face in self.face_ids() {
-            b = b.union(&crate::validate::measure::bulge_bounds(self, face));
+            let reach = crate::validate::measure::ring_face_reach(self, face, &edges)
+                .unwrap_or_else(|| crate::validate::measure::bulge_bounds(self, face));
+            b = b.union(&reach);
         }
         b
     }

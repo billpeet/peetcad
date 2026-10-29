@@ -16,7 +16,7 @@ use peet_sketch::Sketch;
 use crate::assembly::{ComponentChange, InsertSource, Placing};
 use crate::fields::{FeatureArgs, SketchPlane, input_of};
 use crate::host::Host;
-use crate::mate::{MateChange, MateEndSel, MateType};
+use crate::mate::{MateChange, MateEndSel, MateType, WidthModeSel};
 use crate::op::{DatumSel, New, Op, Place, RollTo};
 use crate::value::{Configs, FeatureSel, Input};
 use crate::{Undo, apply_with};
@@ -117,9 +117,24 @@ pub fn diff_scoped(
                     });
                 }
             }
-            let component = |c: &peet_model::Component, change| Op::Component {
-                component: c.id.into(),
-                change,
+            // In the assembly's active configuration where the component differs between
+            // them, in all of them where it doesn't. (What is the same in every
+            // configuration, its name and its look, takes no configurations.)
+            let component = |c: &peet_model::Component, change: ComponentChange| {
+                let per_configuration = matches!(
+                    change,
+                    ComponentChange::Suppress(_)
+                        | ComponentChange::Fix(_)
+                        | ComponentChange::Place(_)
+                        | ComponentChange::PlaceInner(..)
+                        | ComponentChange::Configuration(_)
+                );
+                Op::Component {
+                    component: c.id.into(),
+                    change,
+                    configurations: (per_configuration && old.configurations().len() > 1)
+                        .then(|| as_set_directly(old.component_differs(c.id))),
+                }
             };
             // The patterns that are gone, first: their copies go with them.
             let edit_pattern =
@@ -157,6 +172,10 @@ pub fn diff_scoped(
                     fixed: Some(c.fixed),
                     link: false,
                     absolute: false,
+                    configuration: c
+                        .configuration
+                        .and_then(|id| part.model.configuration(id))
+                        .map(|x| x.name.clone()),
                 });
                 if c.suppressed {
                     ops.push(component(c, ComponentChange::Suppress(true)));
@@ -166,6 +185,12 @@ pub fn diff_scoped(
                 }
                 if c.color.is_some() {
                     ops.push(component(c, ComponentChange::Color(c.color)));
+                }
+                if c.transparency > 0.0 {
+                    ops.push(component(c, ComponentChange::Transparency(c.transparency)));
+                }
+                if c.flexible {
+                    ops.push(component(c, ComponentChange::Flexible(true)));
                 }
             }
             for c in after.components() {
@@ -194,6 +219,9 @@ pub fn diff_scoped(
                 if o.fixed != c.fixed && c.pattern.is_none() {
                     ops.push(component(c, ComponentChange::Fix(c.fixed)));
                 }
+                if o.flexible != c.flexible && c.pattern.is_none() {
+                    ops.push(component(c, ComponentChange::Flexible(c.flexible)));
+                }
                 if o.suppressed != c.suppressed {
                     ops.push(component(c, ComponentChange::Suppress(c.suppressed)));
                 }
@@ -202,6 +230,27 @@ pub fn diff_scoped(
                 }
                 if o.color != c.color {
                     ops.push(component(c, ComponentChange::Color(c.color)));
+                }
+                if o.transparency != c.transparency {
+                    ops.push(component(c, ComponentChange::Transparency(c.transparency)));
+                }
+                if o.configuration != c.configuration {
+                    let name = match c.configuration {
+                        None => None,
+                        Some(id) => Some(
+                            after
+                                .definition(c.definition)
+                                .and_then(|d| d.model.configuration(id))
+                                .map(|x| x.name.clone())
+                                .ok_or_else(|| {
+                                    format!(
+                                        "{} shows a configuration its part doesn't have",
+                                        c.name
+                                    )
+                                })?,
+                        ),
+                    };
+                    ops.push(component(c, ComponentChange::Configuration(name)));
                 }
             }
             // The patterns: new ones (which make their copies), and changed ones.
@@ -280,16 +329,63 @@ pub fn diff_scoped(
         }
         _ => {}
     }
+    if let (Some(_), Some(after)) = (old.assembly(), new.assembly()) {
+        // Display states are changed by operations (add_display_state, display_state, …),
+        // and a component's look in one that is not shown by show, set_color and
+        // set_transparency with display_states. What a deleted component took with it
+        // needs none.
+        let states = |m: &Model| {
+            let list: Vec<_> = m
+                .all_display_states()
+                .into_iter()
+                .map(|s| {
+                    let looks: Vec<_> = s
+                        .stored_looks()
+                        .filter(|(c, _)| after.component(*c).is_some())
+                        .collect();
+                    (s.id, s.name.clone(), s.configuration, s.active, looks)
+                })
+                .collect();
+            (m.display_states_linked(), list)
+        };
+        if states(old) != states(new) {
+            return Err(
+                "the assembly's display states were changed directly: add_display_state, display_state, rename, delete and link_display_states change them, and show, set_color and set_transparency with display_states a component's look in one"
+                    .to_owned(),
+            );
+        }
+    }
+    if let (Some(before), Some(after)) = (old.assembly(), new.assembly()) {
+        let references =
+            |a: &peet_model::Assembly| -> Vec<(String, peet_model::MateEnd, peet_model::MateEnd)> {
+                a.references()
+                    .map(|r| (r.name.clone(), r.a.clone(), r.b.clone()))
+                    .collect()
+            };
+        if before.equations() != after.equations() || references(before) != references(after) {
+            return Err(
+                "the assembly's equations or reference dimensions were changed directly: 'set', 'set_suppression_expression' and 'reference_dimension' change them"
+                    .to_owned(),
+            );
+        }
+    }
     if let (Some(before), Some(after)) = (old.assembly(), new.assembly()) {
         use peet_model::MateKind;
+        let width_mode = |mode: &peet_model::WidthMode| match mode {
+            peet_model::WidthMode::Centered => WidthModeSel::Centered,
+            peet_model::WidthMode::Free => WidthModeSel::Free,
+            peet_model::WidthMode::Dimension(s) => WidthModeSel::Dimension(input_of(s)),
+            peet_model::WidthMode::Percent(s) => WidthModeSel::Percent(input_of(s)),
+        };
         let edit = |m: &peet_model::Mate, change| Op::EditMate {
             mate: m.id.into(),
             change,
+            configurations: None,
         };
         for m in before.mates() {
             // A deleted component's mates went with it.
-            let with_component = [&m.a, &m.b]
-                .iter()
+            let with_component = m
+                .ends()
                 .any(|e| e.component().is_some_and(|c| after.component(c).is_none()));
             if after.mate(m.id).is_none() && !with_component {
                 ops.push(edit(m, MateChange::Delete));
@@ -309,15 +405,45 @@ pub fn diff_scoped(
                     MateKind::Distance(s) => MateType::Distance(input_of(s)),
                     MateKind::Angle(s) => MateType::Angle(input_of(s)),
                     MateKind::Fasten(relative) => MateType::Fasten(Some(*relative)),
+                    MateKind::Width { a2, b2, mode } => MateType::Width {
+                        a2: Box::new(MateEndSel::Ref(a2.clone())),
+                        b2: b2.as_ref().map(|e| Box::new(MateEndSel::Ref(e.clone()))),
+                        mode: width_mode(mode),
+                    },
+                    MateKind::Slot { mode } => MateType::Slot(width_mode(mode)),
+                    MateKind::LimitAngle { min, max } => MateType::LimitAngle {
+                        min: input_of(min),
+                        max: input_of(max),
+                    },
+                    MateKind::LimitDistance { min, max } => MateType::LimitDistance {
+                        min: input_of(min),
+                        max: input_of(max),
+                    },
+                    MateKind::Symmetric { plane } => {
+                        MateType::Symmetric(Box::new(MateEndSel::Ref(plane.clone())))
+                    }
+                    MateKind::Path {
+                        more,
+                        along,
+                        follow,
+                        roll,
+                    } => MateType::Path {
+                        more: more.iter().map(|e| MateEndSel::Ref(e.clone())).collect(),
+                        along: width_mode(along),
+                        follow: *follow,
+                        roll: roll
+                            .as_ref()
+                            .map(|r| (r.axis, Box::new(MateEndSel::Ref(r.up.clone())))),
+                    },
                 },
                 a: MateEndSel::Ref(m.a.clone()),
                 b: MateEndSel::Ref(m.b.clone()),
-                flip: Some(m.flip),
+                flip: None,
+                align: m.align,
+                flip_dimension: m.flip_dimension.then_some(true),
+                suppressed: m.suppressed,
                 name: Some(m.name.clone()),
             });
-            if m.suppressed {
-                ops.push(edit(m, MateChange::Suppress(true)));
-            }
         }
         for m in after.mates() {
             let Some(o) = before.mate(m.id) else {
@@ -336,6 +462,49 @@ pub fn diff_scoped(
                 (a, b) if a == b => None,
                 (MateKind::Distance(_), MateKind::Distance(s))
                 | (MateKind::Angle(_), MateKind::Angle(s)) => Some(input_of(s)),
+                (
+                    MateKind::Width {
+                        a2: old_a2,
+                        b2: old_b2,
+                        ..
+                    },
+                    MateKind::Width { a2, b2, mode },
+                ) if old_a2 == a2 && old_b2 == b2 => {
+                    ops.push(edit(m, MateChange::Width(width_mode(mode))));
+                    None
+                }
+                (MateKind::Slot { .. }, MateKind::Slot { mode }) => {
+                    ops.push(edit(m, MateChange::Width(width_mode(mode))));
+                    None
+                }
+                (
+                    MateKind::Path {
+                        more: old_more,
+                        follow: old_follow,
+                        roll: old_roll,
+                        ..
+                    },
+                    MateKind::Path {
+                        more,
+                        along,
+                        follow,
+                        roll,
+                    },
+                ) if old_more == more && old_follow == follow && old_roll == roll => {
+                    ops.push(edit(m, MateChange::Width(width_mode(along))));
+                    None
+                }
+                (MateKind::LimitAngle { .. }, MateKind::LimitAngle { min, max })
+                | (MateKind::LimitDistance { .. }, MateKind::LimitDistance { min, max }) => {
+                    ops.push(edit(
+                        m,
+                        MateChange::Limits {
+                            min: Some(input_of(min)),
+                            max: Some(input_of(max)),
+                        },
+                    ));
+                    None
+                }
                 _ => {
                     return Err(format!(
                         "{} was made another kind of mate, which no operation does",
@@ -343,17 +512,27 @@ pub fn diff_scoped(
                     ));
                 }
             };
-            if value.is_some() || o.flip != m.flip {
+            let turned = o.align != m.align;
+            let measured = o.flip_dimension != m.flip_dimension;
+            if value.is_some() || turned || measured {
                 ops.push(edit(
                     m,
                     MateChange::Edit {
                         value,
-                        flip: (o.flip != m.flip).then_some(m.flip),
+                        // Back to the default is `flip: false`.
+                        flip: (turned && m.align.is_none()).then_some(false),
+                        align: m.align.filter(|_| turned),
+                        flip_dimension: measured.then_some(m.flip_dimension),
                     },
                 ));
             }
             if o.suppressed != m.suppressed {
-                ops.push(edit(m, MateChange::Suppress(m.suppressed)));
+                ops.push(Op::EditMate {
+                    mate: m.id.into(),
+                    change: MateChange::Suppress(m.suppressed),
+                    configurations: (old.configurations().len() > 1)
+                        .then(|| as_set_directly(old.mate_differs(m.id))),
+                });
             }
         }
     }
@@ -633,6 +812,22 @@ pub fn diff_scoped(
         }
     }
 
+    // A solved placement belongs to the new mates. Applying it while the old mates
+    // still hold pulls the component back and changes the next solve's starting pose.
+    if ops
+        .iter()
+        .any(|op| matches!(op, Op::Mate { .. } | Op::EditMate { .. }))
+    {
+        ops.sort_by_key(|op| {
+            matches!(
+                op,
+                Op::Component {
+                    change: ComponentChange::Place(_),
+                    ..
+                }
+            )
+        });
+    }
     Ok(ops)
 }
 

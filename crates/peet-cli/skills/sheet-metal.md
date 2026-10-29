@@ -24,7 +24,8 @@ features. It always has an exact **flat pattern**, which is what the DXF export 
 - From a **closed** sketch: a flat plate, `thickness` thick, on the sketch plane.
 - From an **open** chain of connected lines: a bent profile, with a bend at every
   corner, extruded by `depth`.
-- `thickness`, `radius` (the default inner bend radius) and `bend` (`{"k_factor":
+- `thickness`, `radius` (the default inner bend radius; 0 is a sharp bend, as in
+  SolidWorks) and `bend` (`{"k_factor":
   0.44}`, or an `allowance` or `deduction`) apply to the whole body. Defaults: 1.5 mm,
   1.5 mm, K 0.44. Or take them from the material tables: `peet materials`, then
   `{"op": "apply_material", "material": ..., "gauge": ...}`. That also makes it the
@@ -34,6 +35,36 @@ features. It always has an exact **flat pattern**, which is what the DXF export 
   doesn't tear. `relief`: `rectangular` (the default), `obround` or `tear` (no cut: the
   sheet is slit). `relief_ratio`: its width, and how far it reaches past the bend, as a
   multiple of the thickness (default 0.5).
+
+## Tabs
+
+A tab adds a flat piece to a sheet metal body: a closed sketch on a flat face of the
+sheet (or on a plane in that face's plane), `base_flange` with `tab: true`. It is part of
+that face's flange, with the body's thickness (its own `thickness`, `radius`, `reverse`
+are ignored), so it folds and unfolds with it. It is what SolidWorks' base flange makes
+on a part that has sheet metal already ("Tab1").
+
+- The sketch must touch the sheet: overlap the face or share an edge with it. One that
+  touches nothing fails ("A tab adds to a sheet metal body ..."): move the sketch, or
+  leave out `tab` for a body of its own.
+- It fills in what earlier cuts took: a tab drawn across a slot bridges it. Later cuts
+  cut it like the rest of the face.
+- An inside corner it makes with the sheet takes a `break_corner` like any other.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [300, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "sketch", "name": "Slot", "on": {"feature": "Base-Flange1", "side": "top"}, "draw": [{"type": "rectangle", "from": [20, 20], "to": [280, 40]}]}
+{"op": "sheet_cut", "sketch": "Slot"}
+{"op": "sketch", "name": "Bridge", "on": {"at": [0, 0, 2], "normal": [0, 0, 1]}, "draw": [{"type": "rectangle", "from": [40, 20], "to": [60, 40]}]}
+{"op": "base_flange", "name": "Tab1", "sketch": "Bridge", "tab": true}
+{"op": "break_corner", "name": "Round", "size": 3, "edges": [{"between": [[60, 20, 0], [60, 20, 2]]}, {"between": [[60, 40, 0], [60, 40, 2]]}]}
+{"op": "linear_pattern", "features": ["Tab1", "Round"], "direction": "x", "spacing": 100, "count": 3}
+{"op": "bodies"}
+```
+
+The slot is cut first and bridged three times: the tab, then two copies of it and of its
+rounded corners.
 
 ## From a solid
 
@@ -54,6 +85,17 @@ flat pattern and takes flanges. Use it on a shelled solid or on a body from
   largest flat face of the only body.
 - The thickness and the bend radii are read from the solid; `bend` (K-factor, allowance
   or deduction) says how its bends unfold.
+- `thickness` makes a flat body sheet of another thickness, hanging from `face` into the
+  solid, as SolidWorks' Convert to Sheet Metal does with the thickness it is given (a
+  3 mm plate converted at 2 mm keeps its top face and loses a millimetre underneath). A
+  body with bends can only be converted at the thickness it has.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [70, 210]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 3}
+{"op": "convert_to_sheet", "face": {"normal": [0, 0, 1]}, "thickness": 2}
+{"op": "bodies"}
+```
 - A solid that is not one thickness, or whose bends are sharp corners, fails to build
   and says what it found: fix the solid, or model the part with `base_flange` and
   flanges.
@@ -101,13 +143,150 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
   are numbered: `Wall1`, `Wall2`, …
 - `length` is measured on the **outside**, from the outer corner to the flange's end.
   `position` says where the bend sits relative to the edge (`material_inside`,
-  `material_outside`, `bend_outside`).
+  `material_outside`, `bend_outside`). They mean what they mean in SolidWorks: at an
+  angle other than 90, a `material_inside` flange's outer face goes through the edge on
+  the far face of the sheet, so a shallow flange is set well back from the edge.
+- `position_offset` sets the whole flange out from its edge (SolidWorks' "Offset" in a
+  flange's position): the sheet runs on flat that far past the edge before the bend.
+  Negative sets it in. It adds to `position`, so a `bend_outside` flange set out 7 bends
+  7 beyond where it otherwise would.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "edge_flange", "length": 20, "position": "bend_outside", "position_offset": 7, "edge": {"between": [[0, 60, 2], [100, 60, 2]]}}
+```
+
+- `up_to` runs a flange up to a point in place of its `length` (SolidWorks' "Up To
+  Vertex"): a vertex selector (`{"at": [x, y, z]}`), a reference point's name or
+  `"origin"`. The flange's end goes through the point, square to the flange, and follows
+  it when the part changes; `length` is kept but not used (`null` goes back to it). The
+  point need not be on the flange: here the side ends level with the top of the wall.
+  "The point it runs up to is behind the flange's bend" means it is on the other side
+  of the bend: flip the flange or pick another point.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "edge_flange", "name": "Wall", "length": 30, "edge": {"between": [[0, 0, 2], [100, 0, 2]]}}
+{"op": "edge_flange", "name": "Side", "length": 10, "up_to": {"at": [100, 0, 30]}, "edge": {"at": [100, 30, 2]}}
+{"op": "bodies"}
+```
+
+- `outline` shapes a flange to a sketch of its own, as SolidWorks' "Edit Flange
+  Profile" does: a trapezoid, a tab with a round top, a flange wider at its tip. Draw it
+  first, on a plane turned about the flange's edge by the flange's angle (from the face
+  the edge is on, `about` the edge), with its foot along the edge. The flange is then as
+  wide as the sketch's region along the edge and as long as it reaches, which overrides
+  `length`, `offset_start` and `offset_end`. Everything outside the region, from its
+  foot out, is cut from the flange and its bend. It follows the sketch: change a
+  dimension and the flange changes.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "plane", "from": {"feature": "Base-Flange1", "side": "top"}, "about": {"between": [[0, 60, 2], [100, 60, 2]]}, "angle": 90, "name": "Lip plane"}
+{"op": "sketch", "name": "Lip shape", "on": "Lip plane", "draw": [{"type": "polyline", "closed": true, "points": [[10, 62], [90, 62], [70, 32], [30, 32]]}]}
+{"op": "edge_flange", "name": "Lip", "length": 10, "outline": "Lip shape", "edge": {"between": [[0, 60, 2], [100, 60, 2]]}}
+```
+
+  Look at the plane before drawing (`{"op": "sketch", "on": "Lip plane", "draw": []}`
+  replies with its `origin`, `x` and `y`). Here x runs along the edge and y down the
+  flange from 62 above the sheet, so the trapezoid is 80 wide at the bend and 40 wide 30
+  up.
 - `offset_start` and `offset_end` set a flange back from the two ends of its edge, with
   a relief at each end: a wall on a 180 edge with both offsets 5 has a bend 170 long
   (`bend_table` gives each bend's `length`). Where two flanges are set back a little
   from the same corner, their reliefs cut the corner of the sheet off: the corner is
   notched, which is normal. Flanges that run right to a corner (no offset) get a butt
   corner with a small gap; `corner` changes how those are treated.
+- The reliefs at a set-back flange's ends are the body's (the base flange's `relief`
+  and `relief_ratio`) unless the edge flange has its own: `"relief": "tear"` cuts
+  nothing, which is right when the bend takes little of the sheet (`material_outside`)
+  and the body's rectangular relief would only notch it; `"relief_ratio": 1` makes the
+  slot one thickness wide and deep past the bend. `null` goes back to the body's. Hems
+  and miter flanges always use the body's. A flange whose bend is wholly outside the
+  sheet (`bend_outside`, or set out by `position_offset`) gets no relief at all, as in
+  SolidWorks: it takes nothing from the sheet.
+- A flange whose edge ends where its face goes on (round an inside corner, or on in a
+  curve) gets a relief past that end of the edge as well, even without an offset: the
+  bend would tear the sheet beside it otherwise. SolidWorks makes the same one.
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "polyline", "closed": true, "points": [[0, 0], [100, 0], [100, 40], [40, 40], [40, 80], [0, 80]]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
+  {"op": "edge_flange", "name": "Lip", "length": 20, "edges": [{"between": [[100, 40, 2], [40, 40, 2]]}]}
+  {"op": "bodies"}
+  ```
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 150]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
+  {"op": "edge_flange", "name": "Lip", "length": 25, "position": "material_outside", "offset_start": 40, "offset_end": 40, "relief": "tear", "edges": [{"between": [[0, 0, 2], [200, 0, 2]]}]}
+  {"op": "edge_flange", "name": "Tab", "length": 25, "offset_start": 60, "offset_end": 60, "relief": "obround", "relief_ratio": 1, "edges": [{"between": [[200, 150, 2], [0, 150, 2]]}]}
+  {"op": "bodies"}
+  ```
+- A flange on an edge that runs to a corner of its face **sharper than square** (a
+  triangle's side), with its bend inside the sheet (`material_inside`,
+  `material_outside`): the face is narrower where the bend starts than the edge is
+  long, and the bend ends on a slant from the face's corner to the end of its flange,
+  as SolidWorks' does. Nothing to set; the bend's ends are freeform faces.
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "polyline", "closed": true, "points": [[0, 0], [100, 0], [0, 100]]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+  {"op": "edge_flange", "name": "Lip", "length": 20, "position": "material_outside", "relief": "tear", "edges": [{"between": [[100, 0, 2], [0, 100, 2]]}]}
+  {"op": "bodies"}
+  ```
+- A lip on a wall's **side edge**, which runs down to the bend the wall hangs from: with
+  its bend inside the sheet, the strip that bend takes from the wall runs on through the
+  wall's bend, which is cut away there, as SolidWorks does. Nothing to set; the wall's
+  bend starts the lip's setback (radius + thickness) in from the side.
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+  {"op": "edge_flange", "name": "Wall", "length": 30, "edge": {"between": [[0, 0, 2], [100, 0, 2]]}}
+  {"op": "edge_flange", "name": "Lip", "length": 15, "edge": {"at": [0, 2, 20]}}
+  {"op": "bodies"}
+  ```
+- An edge flange's bend is worked out as the body's are unless it has a `bend` of its
+  own (`{"deduction": 3.5}`, or `k_factor` or `allowance`): for the one bend the press
+  brake makes differently, such as a bend at another angle. The folded part is the
+  same; the blank is that much longer or shorter. `null` goes back to the body's. "The
+  bend allowance works out at ... it must be greater than zero" on one flange means
+  the body's deduction is too big for that flange's angle or radius: give it its own.
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 150]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2, "bend": {"deduction": 3.3}}
+  {"op": "edge_flange", "name": "Hood", "length": 60, "angle": 105, "bend": {"deduction": 3.5}, "edges": [{"between": [[0, 0, 2], [200, 0, 2]]}]}
+  {"op": "bend_table"}
+  ```
+- The bends of a base flange from an open profile take `bends`: a bend model or `null`
+  for each, in order along the profile, as SolidWorks' sketched bends can have their
+  own. Give a shallow bend a smaller deduction when "Corner N: The bend allowance works
+  out at ..." says the body's is too big for it.
+
+  ```jsonl
+  {"op": "sketch", "on": "front", "draw": [{"type": "polyline", "points": [[0, 0], [100, 0], [200, 20], [200, 40]]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.1, "bend": {"deduction": 2.5}, "depth": 50, "bends": [{"deduction": 0.1}, null]}
+  {"op": "bend_table"}
+  ```
+- A **negative** offset runs an edge flange or a hem past that end of its edge, for one
+  wider than the sheet it is bent from: `"offset_end": -12` ends it 12 beyond the
+  edge. The bend stays on the edge and the flange overhangs it, with no relief. The
+  start of an edge is the end from which the sheet is on your left, looking down on
+  the sheet's top face (the order of a `between` does not change it); if in doubt, try
+  one end and look at `bodies` (`min`, `max`) to see which way it went. The overhang must not
+  land on another flange: "The sheet overlaps itself" means it does.
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 150]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 1.5, "radius": 2}
+  {"op": "edge_flange", "name": "Wide", "length": 20, "offset_start": -12, "offset_end": 5, "edges": [{"between": [[200, 150, 1.5], [0, 150, 1.5]]}]}
+  {"op": "bodies"}
+  ```
 - `hem`: `kind` is `closed` (folded flat, the default), `open` (folded leaving `gap`),
   `teardrop` or `rolled` (these use `radius` and `angle`); `length` is the hem's length;
   `inside` (default true) keeps the fold's outside flush with the original edge, so the
@@ -122,13 +301,276 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
   (`peet edges`). The edges of one `edges` list are all found before any flange is
   added, so original corners always work there.
 - `miter_flange` runs a sketched profile along several edges of one face;
-  `sketched_bend` and `jog` bend a flat face along sketched lines; `corner` sets how
-  flanges meet.
+  `sketched_bend` and `jog` bend a flat face along sketched lines.
+
+## Corners
+
+Where two flanges run to the same corner of a face, one of them has to give way and
+the two bends can't both have the corner of the flat pattern. Left alone, the earlier
+flange runs to the corner, the later one stops 0.1 short of it (a butt corner), and a
+rectangle is cut out of the blank where the bends meet. `corner` changes that: add it
+after the flanges it is about.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [120, 80]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
+{"op": "edge_flange", "name": "Wall", "length": 25, "edges": [{"between": [[0, 0, 2], [120, 0, 2]]}, {"between": [[120, 0, 2], [120, 80, 2]]}, {"between": [[120, 80, 2], [0, 80, 2]]}, {"between": [[0, 80, 2], [0, 0, 2]]}]}
+{"op": "corner", "kind": "open", "gap": 0.7, "relief": "flush"}
+{"op": "bend_table"}
+```
+
+- `kind`: `butt` (the earlier flange runs to the corner), `overlap` (the later one does),
+  `open` (neither does: both stop short of the other's inside face) or `plain` (nothing
+  is made longer to close the corner: the earlier flange ends where its own edge does
+  and the later one stops short of it). `plain` differs from `butt` when the later
+  flange stands outside its edge (`material_outside`, `bend_outside`): a butt corner
+  runs the earlier flange on to meet it, a plain one doesn't.
+- `gap` is how far a flange that stops short stays from the other's inside face. In an
+  `open` corner it is measured from the flange's own inside face, so where the face's
+  corner is not square the flange's outside face comes a little nearer the other
+  flange (or stays a little further off).
+- `relief` is what is cut from the blank where the two bends meet: `rectangular` (a
+  rectangle reaching `relief_size` past the bends), `tear` (only what the bends would
+  share), `flush` (back to where the flanges end, so each bend ends in line with its
+  flange and the blank has one inside corner there, with no notch) or `slanted`
+  (nothing is cut from the face: each bend ends on the line from the face's corner to
+  the end of its flange, so the bends' ends are freeform faces and the blank has two
+  short slanted edges at each corner).
+- **To match a part made in SolidWorks:** for the corners of one of its flange features
+  on several edges, `open` with `flush` and its gap divided by 1.414 (SolidWorks
+  measures the gap between the two flanges corner to corner, and both stop short; at a
+  corner of the face that is not square, its gap times the cosine of half the face's
+  angle there, one `corner` for each gap); for
+  a corner between two of its flange features, `plain` with the bend radius as the gap.
+  The blank is then the same, edge for edge. SolidWorks' folded part is not quite its
+  blank folded: there the bends end on a slant and the face keeps its corner. `slanted`
+  in place of `flush` gives that solid (the same area, the volume within 0.003%), with
+  a blank that has the slants in it:
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [120, 80]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
+  {"op": "edge_flange", "name": "Wall", "length": 25, "edges": [{"between": [[0, 0, 2], [120, 0, 2]]}, {"between": [[120, 0, 2], [120, 80, 2]]}, {"between": [[120, 80, 2], [0, 80, 2]]}, {"between": [[0, 80, 2], [0, 0, 2]]}]}
+  {"op": "corner", "kind": "open", "gap": 0.7, "relief": "slanted"}
+  {"op": "bodies"}
+  ```
+- `flush` is never less than a tear, so with a gap smaller than the bend radius the
+  bends still end before their flanges do.
+- `circular` and `square` are SolidWorks' corner relief feature: a circle, or a square
+  with its sides along the two edges, `relief_size` across, centred where the two
+  flanges' ends meet in the blank, cut from the face, both bends and both flanges. They
+  change only the relief, so give the corner the `kind` and `gap` it had. Use one where
+  the part needs a drilled or punched hole at each corner. Outside the shape the blank
+  is cut as `flush` cuts it, so no bend runs past its flange. To bring a SolidWorks
+  Corner Relief over, apply it to the same corners after the flange's own `corner`:
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [120, 80]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
+  {"op": "edge_flange", "name": "Wall", "length": 25, "edges": [{"between": [[0, 0, 2], [120, 0, 2]]}, {"between": [[120, 0, 2], [120, 80, 2]]}, {"between": [[120, 80, 2], [0, 80, 2]]}, {"between": [[0, 80, 2], [0, 0, 2]]}]}
+  {"op": "corner", "kind": "open", "gap": 0.7, "relief": "slanted"}
+  {"op": "corner", "name": "Corner Relief1", "kind": "open", "gap": 0.7, "relief": "circular", "relief_size": 6}
+  {"op": "bodies"}
+  ```
+- **Flanges round a bend.** Flanges on edges of two faces that a bend joins, in line
+  across it (the lips along the side of a channel or a U), each running to the bend,
+  meet in one plane: they are mitred there by themselves, as SolidWorks mitres them, the
+  mitre running on across each flange's bend. The `gap` (0.1 by default) is split
+  either side of the line that halves the corner. To set it, give `corner` a mitre's face
+  (the slanted end face of one of the flanges, from `faces`); `kind` and `relief` don't
+  apply there, and that face picks no other corner. For a SolidWorks flange feature on
+  such edges, its own gap, undivided:
+
+  ```jsonl
+  {"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+  {"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 0.2}
+  {"op": "edge_flange", "name": "Web", "length": 30, "edges": [{"between": [[0, 0, 2], [100, 0, 2]]}]}
+  {"op": "edge_flange", "name": "Side", "length": 20, "edges": [{"between": [[0, 60, 2], [0, 2.2, 2]]}, {"between": [[0, 2, 2.2], [0, 2, 30]]}]}
+  {"op": "corner", "faces": [{"at": [1, 11.170711, 11.1], "normal": [0, -0.707107, 0.707107]}], "gap": 1}
+  {"op": "bodies"}
+  ```
+- Without `faces` it is every corner the part has when it is applied; corners made by
+  flanges added later keep the default. `faces` picks corners: the end face of a flange
+  at a corner picks that corner, a flange's top or bottom face picks the corners at both
+  its ends.
+- "The part has no corners where two flanges meet": the flanges are set back from the
+  corner (an `offset_start` or `offset_end`), or are on different faces that no bend
+  joins. Nothing to do.
+
+## Breaking corners
+
+`break_corner` rounds or chamfers corners of the sheet's outline: of the plate, of a
+flange, of a cutout's edge with the outside. It works in the flat pattern, so the body
+stays sheet metal (`fillet` and `chamfer` turn it into a plain solid).
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 150]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Wall", "length": 40, "offset_start": 20, "offset_end": 20, "edges": [{"between": [[0, 0, 2], [200, 0, 2]]}]}
+{"op": "break_corner", "name": "Rounds", "size": 10, "edges": [{"between": [[0, 150, 0], [0, 150, 2]]}, {"between": [[200, 150, 0], [200, 150, 2]]}]}
+{"op": "break_corner", "name": "Nips", "kind": "chamfer", "size": 3, "edges": [{"at": [20, 1, 40]}, {"at": [180, 1, 40]}]}
+{"op": "bodies"}
+```
+
+- `edges` are the corners: each the short edge **through the sheet** where two sides
+  of a flat face meet, one sheet thickness long. `between` its two ends, or `at`
+  its middle, not an end, where other edges meet it (`peet edges` lists them; a corner edge has both ends at one place on
+  the face, a thickness apart). An edge along a face is not a corner.
+- `kind`: `fillet` (the default; `size` is the radius) or `chamfer` (`size` is the
+  distance along each side). A chamfer needs two straight sides; a fillet also rounds
+  a corner between a straight side and an arc, or two arcs (where a cut's round end
+  meets a straight edge): the round touches both, as SolidWorks' fillet does.
+- An outside corner loses sheet; an inside corner (of a notch, an L or a cutout) gains
+  it, as a fillet there does in SolidWorks. A cut made later still cuts the round. A
+  corner next to a bend is not a corner of a flat face: break the flange's far
+  corners, or cut the shape with `sheet_cut`.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "polyline", "closed": true, "points": [[0, 0], [100, 0], [100, 30], [50, 30], [50, 60], [0, 60]]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "break_corner", "size": 5, "edges": [{"between": [[50, 30, 0], [50, 30, 2]]}, {"between": [[100, 0, 0], [100, 0, 2]]}]}
+```
+
+A cutout's inside corners, and the corners where a slot's round end meets the plate's
+edge:
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 100]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "sketch", "on": {"at": [100, 50, 2], "normal": [0, 0, 1]}, "name": "Window", "draw": [{"type": "rectangle", "from": [20, 20], "to": [80, 80]}]}
+{"op": "sheet_cut", "sketch": "Window"}
+{"op": "break_corner", "name": "Window rounds", "size": 5, "edges": [{"between": [[20, 20, 0], [20, 20, 2]]}, {"between": [[80, 80, 0], [80, 80, 2]]}]}
+{"op": "sketch", "on": {"at": [100, 50, 2], "normal": [0, 0, 1]}, "name": "Slot", "draw": [{"type": "slot", "from": [130, 95], "to": [170, 95], "radius": 10}]}
+{"op": "sheet_cut", "sketch": "Slot"}
+{"op": "break_corner", "name": "Slot rounds", "size": 3, "edges": [{"at": [121.339746, 100, 1]}, {"at": [178.660254, 100, 1]}]}
+{"op": "bodies"}
+```
+- "The corner's sides are too short" gives the largest size that fits there. Two
+  corners at the ends of one side share it: their sizes together can't exceed it.
+- It follows the part: a flange made longer takes its broken corners with it.
+- **Every corner of a face:** `faces` (flat faces of the sheet, with `edges` empty or
+  not) breaks each corner of each face, as SolidWorks' break corner on a face does. The
+  corners are found again at each rebuild, so a notch cut later, or one that another
+  configuration moves, gets its corners broken where it is. Edges through the sheet at
+  the face's corners that are not between two sides (where a bend starts) are left. It
+  fails only if the faces have no corner at all.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [120, 80]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "sketch", "on": {"at": [60, 40, 2], "normal": [0, 0, 1]}, "name": "Notch", "draw": [{"type": "rectangle", "from": [50, 70], "to": [70, 90]}]}
+{"op": "sheet_cut", "sketch": "Notch"}
+{"op": "break_corner", "name": "All round", "size": 4, "edges": [], "faces": [{"at": [10, 10, 2], "normal": [0, 0, 1]}]}
+{"op": "bodies"}
+```
 
 ## Cuts and forms
 
 - Use **`sheet_cut`**, with the sketch on a flat face of the sheet. It cuts in the flat
   pattern, so it can run across bends, and the body stays sheet metal.
+- It cuts every flange that has a face in the sketch's plane, not only the one the
+  sketch is on: holes drawn over two tabs or two lips that lie in one plane go through
+  both, in one `sheet_cut`. Each shape cuts only the flange it is over, so a hole over
+  the far lip of a hat section does not also land on the base.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-50, -75], "to": [50, 75]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Walls", "length": 40, "edges": [{"between": [[-50, -75, 2], [-50, 75, 2]]}, {"between": [[50, 75, 2], [50, -75, 2]]}]}
+{"op": "edge_flange", "name": "Lips", "length": 20, "edges": [{"between": [[-50, -75, 40], [-50, 75, 40]]}, {"between": [[50, 75, 40], [50, -75, 40]]}]}
+{"op": "sketch", "name": "Holes", "on": {"at": [-60, 0, 40], "normal": [0, 0, 1]}, "draw": [{"type": "circle", "center": [-60, 55], "radius": 3.5}, {"type": "circle", "center": [-60, -55], "radius": 3.5}, {"type": "circle", "center": [60, 55], "radius": 3.5}, {"type": "circle", "center": [60, -55], "radius": 3.5}]}
+{"op": "sheet_cut", "sketch": "Holes"}
+{"op": "mass"}
+```
+- **A cut through more than its own sheet**, as SolidWorks' cut-extrude goes: `end`
+  `through_all`, or `blind` with a `depth` from the sketch's face. It goes into the
+  sheet from that face (`reverse` the other way, `both` both ways) and cuts every flange
+  in its reach: one parallel to the sketch if the reach takes in its whole thickness,
+  and one square to it where the sketch's outline crosses it, on across the bend at its
+  end if the reach goes past it. That is how to notch the ends of a channel's sides from
+  its base, or put one hole through both sides of a U. Flanges at other angles are left.
+  The default `end` is `sheet`: its own sheet and the flanges in its sketch's plane.
+- With an `end`, the sketch's own sheet is cut only if the reach goes into it: `reverse`
+  alone cuts the flanges on the far side of the sketch's face and leaves the sheet the
+  sketch is on whole. To cut that sheet too, use `both`.
+- With an `end`, an outline drawn past the flange's edge over a bend ends in the bend
+  where the straight cut leaves the sheet's far face, square to the sheet there, as
+  SolidWorks' normal cut does: 1 mm past a bend's start, on the inside of a 90° bend of
+  radius R and thickness t, takes the bend up to asin(1 / (R + t)). Without an `end`, the
+  outline is carried on across the bend in the flat pattern as drawn.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Side", "length": 20, "edges": [{"between": [[0, 0, 2], [100, 0, 2]]}, {"between": [[100, 60, 2], [0, 60, 2]]}]}
+{"op": "sketch", "name": "Notch", "on": {"at": [50, 30, 2], "normal": [0, 0, 1]}, "draw": [{"type": "rectangle", "from": [-5, -5], "to": [10, 65]}]}
+{"op": "sheet_cut", "sketch": "Notch", "end": "through_all", "both": true}
+{"op": "sketch", "name": "Gap", "on": {"at": [50, 30, 2], "normal": [0, 0, 1]}, "draw": [{"type": "rectangle", "from": [40, 10], "to": [60, 58]}]}
+{"op": "sheet_cut", "sketch": "Gap", "end": "blind", "depth": 10}
+```
+
+- **A cut sketched off the sheet's faces**, as SolidWorks' cut-extrude can be: on a plane
+  (`plane` first, where the cut starts), or on the sheet's edge, the face along a flange's
+  end that is as wide as the sheet is thick. Give it an `end` (`blind` with `depth`, or
+  `through_all`): it goes in against the sketch's normal (into the face, for an edge face;
+  `reverse` the other way) and cuts what its reach takes in, as above. A rectangle drawn
+  on a flange's end face and cut `blind` notches the flange edge-on, as deep as `depth`;
+  `through_all` takes the flange and its bend away there. With the default `end` it cuts
+  only flanges with a face in the sketch's plane, and fails if there are none.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Side", "length": 20, "edge": {"between": [[0, 0, 2], [100, 0, 2]]}}
+{"op": "sketch", "name": "Slot", "on": {"at": [50, 1, 20], "normal": [0, 0, 1]}, "draw": [{"type": "rectangle", "from": [40, -5], "to": [60, 5]}]}
+{"op": "sheet_cut", "sketch": "Slot", "end": "blind", "depth": 8}
+{"op": "plane", "from": "right", "distance": 90, "name": "End cut"}
+{"op": "sketch", "name": "Trim", "on": "End cut", "draw": [{"type": "rectangle", "from": [-5, -5], "to": [70, 30]}]}
+{"op": "sheet_cut", "sketch": "Trim", "end": "through_all", "reverse": true}
+```
+
+- **Mirrors and patterns of flanges.** `mirror`, `linear_pattern` and
+  `circular_pattern` copy an `edge_flange` as SolidWorks does: each copy is the same
+  flange on the edge the motion takes the original's edge to, bent the way the motion
+  takes its bend. A mirror turns the edge round, so the copy's set-backs are the other
+  way round and it lies across from the original. A copy whose edge is not an edge of
+  the sheet (the edge it would go on has a flange already, or is not there) is left out
+  with a warning.
+- A `miter_flange` is copied the same way: its profile along the edges the motion takes
+  its edges to, in the other order for a mirror (so `offset_start` and `offset_end`
+  change ends). Every one of those edges must be an edge of the sheet. A tab's copy is
+  its sketch moved, added to the flange whose face the moved sketch is on; a
+  `break_corner`'s copy rounds (or adds to) the corner the motion takes the original's
+  to. Copy a break corner with the tab or flange whose corners it breaks, after it in
+  `features` order (copies are made in model order, so a corner of a copied tab is there
+  when the corner is copied).
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "edge_flange", "name": "Lip", "length": 20, "offset_start": 10, "offset_end": 60, "edge": {"between": [[0, 60, 2], [100, 60, 2]]}}
+{"op": "plane", "from": "front", "distance": 30, "flip": true, "name": "Middle"}
+{"op": "mirror", "features": ["Lip"], "plane": "Middle"}
+```
+
+A gutter (a mitre flange) mirrored to the other end of a plate:
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [200, 100]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2}
+{"op": "sketch", "name": "Profile", "on": {"at": [100, 0, 1], "normal": [0, -1, 0]}, "draw": [{"type": "polyline", "points": [[0, 0], [0, 20], [8, 20]]}]}
+{"op": "miter_flange", "name": "Gutter", "sketch": "Profile", "edges": [{"between": [[0, 0, 2], [0, 100, 2]]}], "offset_start": 5}
+{"op": "plane", "from": "right", "distance": 100, "name": "Middle"}
+{"op": "mirror", "name": "Other gutter", "features": ["Gutter"], "plane": "Middle"}
+{"op": "bend_table"}
+```
+
+- **A cut across a bend:** draw it on the flat face as it lies in the blank, running
+  past the face's edge. Past that edge the sketch is over the bend and then the flange,
+  laid flat: a point `d` beyond the bend line in the sketch is `d` along the sheet in the
+  folded part. Any shape can cross: a round hole on a bend comes out as a hole whose rim
+  winds round the bend. `bend_table` and `flat_pattern` show the blank, where the cut is
+  as drawn.
 - `cut` and `extrude` on a sheet metal body turn it into a plain solid with no flat
   pattern: the feature's status is `warning` and says so. If that happened, `delete` it
   and use `sheet_cut`.
@@ -145,6 +587,50 @@ X and y along its Z, so `[80, 12]` to `[100, 20]` is x 80 to 100, z 12 to 20.
 - A face selector for the sketch: `{"feature": "Base-Flange1", "side": "top"}` matches
   the plate's top face. Once flanges exist they have `top` faces of their own (made by
   the flange features), so name the feature that made the face you want.
+
+## Unfold and fold
+
+`unfold` lays bends flat and `fold` folds them back, as SolidWorks' Unfold and Fold do.
+Between the two, features are made on the part as it lies, partly or wholly flat, and the
+fold carries them back round the bends. Use the pair to cut something that is drawn flat
+but must also be right with the bends folded (in a configuration that suppresses the
+pair), or to mirror a SolidWorks part that has them. A plain cut across a bend needs
+neither: `sheet_cut` draws over the blank already.
+
+- `fixed`: a flange's `top` or `bottom` face, which stays where it is. A bend's face or
+  an edge face is refused. Left out: the largest flat face of the only sheet metal body.
+- `bends`: a face of each bend to lay flat (`{"feature": "Wall1", "side": "bend", ...}`;
+  `peet faces` lists them). Leave it out to lay every bend flat. A face that is not a
+  bend's is refused.
+- `fold` takes `bends` the same way; left out, it folds every bend laid flat, the
+  unfold's fixed face staying put. It fails if no bend is flat (no unfold before it).
+- Between them, sketch on the fixed face and use `sheet_cut` with an `end`: it cuts
+  straight through the part as it lies, the flat flanges as flat sheet and the bends still
+  folded as `end` cuts them. Suppress the `unfold` and the `fold` together (in a
+  configuration) and the same cut goes straight through the folded part instead.
+- Add flanges before the unfold, not between it and the fold.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-50, -40], "to": [50, 40]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Walls", "length": 20, "edges": [{"between": [[-50, -40, 0], [50, -40, 0]]}, {"between": [[50, 40, 0], [-50, 40, 0]]}]}
+{"op": "unfold", "fixed": {"feature": "Base-Flange1", "side": "top"}}
+{"op": "bodies"}
+{"op": "sketch", "name": "Slot", "on": {"at": [0, 0, 2], "normal": [0, 0, 1]}, "draw": [{"type": "rectangle", "from": [-5, 30], "to": [5, 50]}]}
+{"op": "sheet_cut", "sketch": "Slot", "end": "through_all"}
+{"op": "fold"}
+{"op": "mass"}
+{"op": "add_configuration", "name": "Folded cut"}
+{"op": "suppress", "feature": "Fold1", "on": true}
+{"op": "suppress", "feature": "Unfold1", "on": true}
+{"op": "mass"}
+```
+
+The walls hang down from the plate. While unfolded, `bodies` shows the part flat (z
+from 0 to 2): the slot runs 20 mm from the plate across the flat bend into the wall, and
+folded it is a slot that turns down the wall. In `Folded cut` the same cut goes straight
+down through the folded part: it notches the wall over its whole height, and takes more
+(about 540 mm³ against 400). Suppress the fold first: a fold with nothing laid flat fails.
 
 ## Flat pattern and export
 

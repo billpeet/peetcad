@@ -969,6 +969,39 @@ fn inch_box_with_reversed_edges_and_unmarked_bounds() {
 }
 
 #[test]
+fn closed_shells_of_a_surface_model_are_solids() {
+    // As SolidWorks writes a part with imported bodies: its solids' shells in a surface
+    // model, beside the open shells of surfaces.
+    let mut w = Step::default();
+    let faces = box_faces(
+        &mut w,
+        DVec3::ZERO,
+        v3(1.0, 2.0, 3.0),
+        false,
+        false,
+        NO_HOLES,
+    );
+    let closed = w.shell(&faces);
+    let lid = box_faces(
+        &mut w,
+        v3(5.0, 0.0, 0.0),
+        v3(6.0, 1.0, 1.0),
+        false,
+        false,
+        NO_HOLES,
+    );
+    let open = w.add(format!("OPEN_SHELL('',(#{}))", lid[0]));
+    let model = w.add(format!(
+        "SHELL_BASED_SURFACE_MODEL('Meter',(#{closed},#{open}))"
+    ));
+    let imported = import(&w.part(&[model], UnitStyle::Millimetres));
+    assert_eq!(imported.bodies.len(), 1);
+    assert_close(measure::volume(&imported.bodies[0].solid), 6.0);
+    assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
+    assert!(imported.warnings[0].contains("surface bod"));
+}
+
+#[test]
 fn file_without_units_is_taken_as_millimetres() {
     let mut w = Step::default();
     let faces = box_faces(
@@ -988,6 +1021,137 @@ fn file_without_units_is_taken_as_millimetres() {
         imported.warnings[0].contains("millimetres"),
         "{:?}",
         imported.warnings
+    );
+}
+
+/// A 1 × 2 × 3 box whose edge from the origin along +Y is a cubic that bows `sag` below
+/// the bottom face in its middle (staying in the face x = 0), as SolidWorks writes a
+/// tolerant edge.
+fn box_with_a_sagging_edge(sag: f64) -> String {
+    let mut w = Step::default();
+    let faces = box_faces(
+        &mut w,
+        DVec3::ZERO,
+        v3(1.0, 2.0, 3.0),
+        false,
+        false,
+        NO_HOLES,
+    );
+    // A cubic Bézier's middle is 3/4 of the way out to its inner control points.
+    let out = -4.0 / 3.0 * sag;
+    let points: Vec<u32> = [
+        v3(0.0, 0.0, 0.0),
+        v3(0.0, 2.0 / 3.0, out),
+        v3(0.0, 4.0 / 3.0, out),
+        v3(0.0, 2.0, 0.0),
+    ]
+    .into_iter()
+    .map(|p| w.point(p))
+    .collect();
+    let spline = format!(
+        "B_SPLINE_CURVE_WITH_KNOTS('',3,{},.UNSPECIFIED.,.F.,.F.,(4,4),(0.,1.),.UNSPECIFIED.)",
+        refs(&points)
+    );
+    let brep = w.solid("Tolerant", &faces);
+    let text = w.part(&[brep], UnitStyle::Millimetres);
+    // The first line written is that edge's.
+    let at = text.find("LINE('',").expect("a line");
+    let end = at + text[at..].find(" ;").expect("the line's end");
+    format!("{}{spline}{}", &text[..at], &text[end..])
+}
+
+#[test]
+fn edge_a_little_off_its_face_is_moved_onto_it() {
+    let sag = 4e-4;
+    let imported = import(&box_with_a_sagging_edge(sag));
+    assert_eq!(imported.warnings.len(), 1, "{:?}", imported.warnings);
+    let warning = &imported.warnings[0];
+    assert!(
+        warning.starts_with("1 edge of the body \"Tolerant\" lay up to 4.0e-4 mm off its faces")
+            && warning.contains("moved onto them"),
+        "{warning}"
+    );
+    let s = &imported.bodies[0].solid;
+    assert_eq!(tuple(valid(s)), (8, 12, 6, 0, 1, 0));
+    assert!((measure::volume(s) - 6.0).abs() < 1e-6);
+    // The edge now lies on both its faces all along, not just where validation looks.
+    let healed = s
+        .edges
+        .iter()
+        .find(|e| matches!(e.curve, Curve3::Nurbs(_)))
+        .expect("the healed edge");
+    for k in 0..=64 {
+        let p = healed.point_at_fraction(f64::from(k) / 64.0);
+        assert!(p.x.abs() < 1e-5 && p.z.abs() < 1e-5, "{p:?}");
+    }
+}
+
+#[test]
+fn edge_further_off_its_faces_is_moved_onto_them_where_they_meet() {
+    // A tenth of a millimetre is more than a tolerant edge is healed by, but the faces
+    // still meet along the edge, so it is given a curve where they do.
+    let imported = import(&box_with_a_sagging_edge(0.1));
+    assert!(
+        imported
+            .warnings
+            .iter()
+            .any(|w| w.starts_with("1 edge of the body \"Tolerant\" lay up to 1.0e-1 mm")),
+        "{:?}",
+        imported.warnings
+    );
+    let s = &imported.bodies[0].solid;
+    assert_eq!(tuple(valid(s)), (8, 12, 6, 0, 1, 0));
+    assert!((measure::volume(s) - 6.0).abs() < 1e-6);
+}
+
+/// Three bodies of a SolidWorks STEP file (ABB Flow Meter) that SolidWorks imported from
+/// another program, with tolerances of up to a millimetre: a 4 × 0.7 × 0.5 mm block
+/// whose 0.5 mm end face was squeezed out (its two long edges top and bottom are one
+/// edge, its corners one vertex each), a bracket whose 0.3 mm fillets in a slot were
+/// squeezed into vertices, and a knob whose faces don't close up.
+#[test]
+fn tolerant_bodies_are_repaired_or_left_out() {
+    let path = format!(
+        "{}/tests/fixtures/tolerant_bodies.step",
+        env!("CARGO_MANIFEST_DIR")
+    );
+    let text = std::fs::read_to_string(path).unwrap();
+    let imported = import(&text);
+    let warnings = imported.warnings.join("\n");
+    assert_eq!(imported.bodies.len(), 2, "{warnings}");
+    // The block gets its end face back: split where the faces round it don't meet.
+    let block = &imported.bodies[0].solid;
+    valid(block);
+    let volume = measure::volume(block);
+    assert!((volume - 1.3937).abs() < 1e-3, "{volume}");
+    assert!(
+        warnings.contains("split where the faces round them don't meet"),
+        "{warnings}"
+    );
+    // The bracket's slot gets sharp corners where its walls and roof meet: 14 × 4.5 mm
+    // out of a 17 × 6 mm block with two 1 mm round edges, 12 mm long.
+    let bracket = &imported.bodies[1].solid;
+    valid(bracket);
+    let exact = 12.0 * (17.0 * 6.0 - 2.0 * (1.0 - PI / 4.0) - 14.0 * 4.5);
+    let volume = measure::volume(bracket);
+    assert!((volume - exact).abs() < 2e-3, "{volume} against {exact}");
+    assert!(
+        warnings.contains("4 vertices moved to where the faces round them meet"),
+        "{warnings}"
+    );
+    // The knob can't be made a solid: it is left out, and said so.
+    assert!(
+        warnings.contains("was left out, and the rest imported without it"),
+        "{warnings}"
+    );
+}
+
+#[test]
+fn edge_far_off_its_face_is_still_refused() {
+    let message = import_error(&box_with_a_sagging_edge(2.0));
+    assert!(
+        message.contains("\"Tolerant\"") && message.contains("leaves the surface of face"),
+        "{message}"
     );
 }
 

@@ -374,8 +374,10 @@ fn cut_across_a_bend() {
 }
 
 #[test]
-fn round_hole_across_a_bend_is_refused() {
-    let mut layout = plate_layout(settings(0.44));
+fn cuts_through_a_whole_bend_leave_its_strips() {
+    // Two cuts that each take the bend away over its whole width leave it in three
+    // strips. Each still joins the plate to the flange: none is scrap.
+    let mut layout = plate_layout(settings(0.5));
     layout
         .add_edge_flange(
             2,
@@ -383,7 +385,67 @@ fn round_hole_across_a_bend_is_refused() {
             &flange(25.0, FlangePosition::MaterialInside),
         )
         .unwrap();
-    layout.add_cut(Area {
+    let bend = layout
+        .pieces
+        .iter()
+        .find(|p| !p.is_flange())
+        .expect("the bend");
+    let ys: Vec<f64> = bend
+        .outline
+        .edges()
+        .flat_map(|e| [e.curve.start().y, e.curve.end().y])
+        .collect();
+    let (y0, y1) = ys
+        .iter()
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &y| {
+            (a.min(y), b.max(y))
+        });
+    let (_, full) = built(layout.clone());
+    for (k, x) in [20.0, 60.0].into_iter().enumerate() {
+        layout.add_cut(Area::polygon(
+            &[
+                DVec2::new(x, y0),
+                DVec2::new(x + 10.0, y0),
+                DVec2::new(x + 10.0, y1),
+                DVec2::new(x, y1),
+            ],
+            |i| CurveTag::Sketch {
+                owner: 3 + k as u32,
+                entity: i as u32,
+            },
+        ));
+    }
+    let (solid, body) = built(layout);
+    assert_close(
+        flat_area(&full) - flat_area(&body),
+        2.0 * 10.0 * (y1 - y0),
+        1e-6,
+    );
+    let flat = measure::volume(&body.flat);
+    assert_close(measure::volume(&solid), flat, flat * 2e-5);
+    assert_eq!(body.bend_lines[0].segments.len(), 3);
+}
+
+/// A plate with a flange on its top edge and `cut` made after it, at K = 0.5.
+fn cut_across_the_bend(cut: Area) -> (Solid, SheetBody) {
+    let mut layout = plate_layout(settings(0.5));
+    layout
+        .add_edge_flange(
+            2,
+            &top_edge(true),
+            &flange(25.0, FlangePosition::MaterialInside),
+        )
+        .unwrap();
+    layout.add_cut(cut);
+    built(layout)
+}
+
+#[test]
+fn round_hole_across_a_bend() {
+    // A hole that straddles the bend line: part of its rim is on the plate, part on the
+    // bend and part on the flange. On the bend the rim is neither a line nor a circle
+    // once folded, and its wall is not flat.
+    let hole = Area {
         loops: vec![vec![Edge2 {
             curve: Curve::Circle {
                 center: DVec2::new(30.0, H - 3.0),
@@ -395,14 +457,217 @@ fn round_hole_across_a_bend_is_refused() {
                 entity: 1,
             },
         }]],
-    });
-    let err = build(layout).unwrap_err();
+    };
+    let (solid, body) = cut_across_the_bend(hole);
+    // With K = 0.5 the neutral axis is the mid-surface, so folding keeps the volume: the
+    // folded part has what the blank has, hole and all.
+    let flat = measure::volume(&body.flat);
+    assert_close(measure::volume(&solid), flat, flat * 2e-5);
+    // The blank has the hole whole.
+    let holes: Vec<_> = body.outline.iter().filter(|l| !l.outer).collect();
+    assert_eq!(holes.len(), 1);
+    // And some of the folded part's edges are freeform now.
     assert!(
-        matches!(err, SheetError::AcrossBend { curved: true, tag, .. } if tag.owner() == 9),
-        "{err:?}"
+        solid
+            .edges
+            .iter()
+            .any(|e| matches!(e.curve, peet_kernel::geom::Curve3::Nurbs(_)))
     );
-    let msg = err.message(|o| format!("F{o}"));
-    assert!(msg.contains("F9") && msg.contains("F2"), "{msg}");
+}
+
+#[test]
+fn slanted_cut_across_a_bend() {
+    // A triangle with one corner on the plate and a side on the flange: two of its sides
+    // cross the bend on a slant.
+    let tag = |entity| CurveTag::Sketch { owner: 9, entity };
+    let (a, b, c) = (
+        DVec2::new(30.0, H - 8.0),
+        DVec2::new(44.0, H + 12.0),
+        DVec2::new(20.0, H + 12.0),
+    );
+    let triangle = Area {
+        loops: vec![vec![
+            Edge2::line(a, b, tag(1)),
+            Edge2::line(b, c, tag(2)),
+            Edge2::line(c, a, tag(3)),
+        ]],
+    };
+    let (solid, body) = cut_across_the_bend(triangle);
+    let flat = measure::volume(&body.flat);
+    assert_close(measure::volume(&solid), flat, flat * 2e-5);
+    assert_eq!(body.outline.iter().filter(|l| !l.outer).count(), 1);
+}
+
+#[test]
+fn flange_past_the_end_of_its_edge() {
+    // Set back 5 from the start of its edge and running 10 past the end: the bend is on
+    // the edge, from 5 to its end, and the flange is 10 wider than that.
+    let mut layout = plate_layout(settings(0.5));
+    let mut spec = flange(25.0, FlangePosition::MaterialInside);
+    spec.offsets = [5.0, -10.0];
+    layout.add_edge_flange(2, &top_edge(true), &spec).unwrap();
+    let (solid, body) = built(layout);
+    let b = bounds(&solid);
+    // The top edge runs from x = W to x = 0, so its end is at x = 0.
+    assert_close(b.min.x, -10.0, 1e-9);
+    assert_close(b.max.x, W, 1e-9);
+    assert_eq!(body.bend_lines.len(), 1);
+    // One blank, and folding keeps its volume (K = 0.5).
+    assert_eq!(body.outline.iter().filter(|l| l.outer).count(), 1);
+    let flat = measure::volume(&body.flat);
+    assert_close(measure::volume(&solid), flat, flat * 1e-9);
+    // The flange is the edge's length less the set-back plus the overrun; the bend is
+    // only the part on the edge.
+    let flanges: Vec<usize> = (0..body.layout.pieces.len())
+        .filter(|&i| body.layout.pieces[i].is_flange() && i > 0)
+        .collect();
+    let width = |i: usize| {
+        let p = piece_bounds(&solid, &body, i);
+        p.max.x - p.min.x
+    };
+    assert_close(width(flanges[0]), W - 5.0 + 10.0, 1e-9);
+}
+
+#[test]
+fn a_bend_ends_on_a_slant_at_a_sharp_corner() {
+    // A right triangle with a flange on its long side, material outside: the bend starts
+    // inside the sheet, where the triangle is narrower than the side is long. Its ends
+    // run from the triangle's corners there to the ends of the flange, as SolidWorks
+    // makes them: the blank has no step at the ends of the bend, and folding keeps its
+    // volume (K = 0.5).
+    let mut sk = Sketch::new();
+    let pts = [DVec2::ZERO, DVec2::new(100.0, 0.0), DVec2::new(0.0, 100.0)];
+    for i in 0..3 {
+        sk.add_line(pts[i], pts[(i + 1) % 3]);
+    }
+    let regions = find_regions(&sk).regions;
+    let mut layout = Layout::plate(settings(0.5), 1, &Plane::TOP, &regions, false).unwrap();
+    let site = EdgeSite {
+        piece: 0,
+        a: pts[1],
+        b: pts[2],
+        top: true,
+    };
+    let own = FlangeOwn {
+        relief: Some((ReliefType::Tear, 0.5)),
+        ..Default::default()
+    };
+    layout
+        .add_edge_flange_with(
+            2,
+            &site,
+            &flange(20.0, FlangePosition::MaterialOutside),
+            own,
+        )
+        .unwrap();
+    let (solid, body) = built(layout);
+    let slanted = solid
+        .faces
+        .iter()
+        .filter(|f| matches!(f.surface, peet_kernel::geom::Surface::Nurbs(_)))
+        .count();
+    assert_eq!(slanted, 2);
+    // The blank's outline: the triangle's two short sides, two slanted bend ends and the
+    // flange's three sides; nothing else.
+    assert_eq!(body.outline.len(), 1);
+    assert_eq!(body.outline[0].edges.len(), 7);
+    assert_close(
+        measure::volume(&solid),
+        measure::volume(&body.flat),
+        2e-5 * measure::volume(&body.flat),
+    );
+}
+
+#[test]
+fn a_flange_with_its_own_relief() {
+    // Set back 10 from both ends, material outside, so that the bend takes a strip of
+    // the plate. With the body's rectangular relief the plate is notched at each end of
+    // the bend; with a tear relief of the flange's own nothing is cut from it, and with a
+    // ratio of its own the notches are that much bigger. Bend outside, the bend takes
+    // nothing from the plate and no relief is cut, as in SolidWorks.
+    let area = |relief: Option<(ReliefType, f64)>, position: FlangePosition| {
+        let mut layout = plate_layout(settings(0.44));
+        let mut spec = flange(25.0, position);
+        spec.offsets = [10.0, 10.0];
+        layout
+            .add_edge_flange_with(
+                2,
+                &top_edge(true),
+                &spec,
+                FlangeOwn {
+                    relief,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        let (_, body) = built(layout);
+        flat_area(&body)
+    };
+    let s = settings(0.44);
+    let ratio = s.relief_ratio;
+    let trim = BendValues::new(s.model, FRAC_PI_2, R, T)
+        .unwrap()
+        .inside_setback();
+    let inside = FlangePosition::MaterialOutside;
+    let body_default = area(None, inside);
+    let tear = area(Some((ReliefType::Tear, ratio)), inside);
+    let wide = area(Some((ReliefType::Rectangular, 2.0 * ratio)), inside);
+    // Two notches, each ratio·t wide and ratio·t past the strip the bend takes.
+    assert_close(
+        tear - body_default,
+        2.0 * (ratio * T) * (trim + ratio * T),
+        1e-9,
+    );
+    assert_close(
+        tear - wide,
+        2.0 * (2.0 * ratio * T) * (trim + 2.0 * ratio * T),
+        1e-9,
+    );
+    let outside = FlangePosition::BendOutside;
+    assert_close(
+        area(None, outside),
+        area(Some((ReliefType::Tear, ratio)), outside),
+        1e-9,
+    );
+    let mut layout = plate_layout(settings(0.44));
+    let spec = flange(25.0, FlangePosition::BendOutside);
+    let own = FlangeOwn {
+        relief: Some((ReliefType::Tear, 0.0)),
+        ..Default::default()
+    };
+    let e = layout
+        .add_edge_flange_with(2, &top_edge(true), &spec, own)
+        .unwrap_err();
+    assert!(e.contains("ratio"), "{e}");
+}
+
+#[test]
+fn a_flange_with_its_own_bend_model() {
+    // The body's bends are worked out with a K-factor. A flange with a bend deduction of
+    // its own folds to the same part, from a blank that much shorter or longer.
+    let size = |model: Option<BendModel>| {
+        let mut layout = plate_layout(settings(0.44));
+        let spec = flange(25.0, FlangePosition::MaterialInside);
+        let own = FlangeOwn {
+            model,
+            ..Default::default()
+        };
+        layout
+            .add_edge_flange_with(2, &top_edge(true), &spec, own)
+            .unwrap();
+        let (solid, body) = built(layout);
+        let allowance = body.layout.bends().next().unwrap().1.values.allowance;
+        (bounds(&solid), allowance)
+    };
+    let (plain, by_k) = size(None);
+    let deduction = 2.0 * (R + T) - by_k;
+    let (same, a) = size(Some(BendModel::Deduction(deduction)));
+    assert_close(a, by_k, 1e-12);
+    let (other, b) = size(Some(BendModel::Deduction(deduction - 0.5)));
+    assert_close(b, by_k + 0.5, 1e-12);
+    for folded in [same, other] {
+        assert!(folded.min.distance(plain.min) < 1e-9 && folded.max.distance(plain.max) < 1e-9);
+    }
 }
 
 #[test]
@@ -1160,9 +1425,134 @@ fn corner_kinds() {
                     assert_close(bottom.max.x, W - T - gap, 1e-9);
                     assert_close(right.min.y, T + gap, 1e-9);
                 }
+                // With the flanges inside the edges a plain corner is a butt corner.
+                CornerKind::Plain => {
+                    assert_close(bottom.max.x, W, 1e-9);
+                    assert_close(right.min.y, T + gap, 1e-9);
+                }
             }
         }
     }
+}
+
+#[test]
+fn flush_corner_relief_ends_with_the_flanges() {
+    // Open corners with a flush relief: each bend ends in line with its flange, so the
+    // blank is a plain cross, twelve straight edges, with one inside corner at each corner
+    // of the plate. A rectangular relief notches each corner further in. The gap is wider
+    // than the bend radius: a flush relief is never less than a tear, which reaches past
+    // the bends, so with a narrower gap the bends would end before their flanges do.
+    let gap = R + 0.5;
+    let blank = |relief: CornerRelief| {
+        let mut layout = closed_box(settings(0.44), FlangePosition::MaterialInside, 20.0);
+        for c in &mut layout.corners {
+            c.spec = CornerSpec {
+                kind: CornerKind::Open,
+                gap,
+                relief,
+                relief_size: 1.0,
+            };
+        }
+        let (solid, body) = built(layout);
+        let flanges = box_flanges(&body);
+        let bottom = piece_bounds(&solid, &body, flanges[0]);
+        let right = piece_bounds(&solid, &body, flanges[1]);
+        // The flanges are where an open corner puts them, whatever the relief.
+        assert_close(bottom.max.x, W - T - gap, 1e-9);
+        assert_close(right.min.y, T + gap, 1e-9);
+        let outer: Vec<_> = body.outline.iter().filter(|l| l.outer).collect();
+        assert_eq!(outer.len(), 1);
+        (outer[0].edges.len(), flat_area(&body))
+    };
+    let (flush_edges, flush_area) = blank(CornerRelief::Flush);
+    let (square_edges, square_area) = blank(CornerRelief::Rectangular);
+    assert_eq!(flush_edges, 12);
+    assert!(square_edges > flush_edges);
+    // A flush relief keeps what a rectangular one cuts from the plate and the bends.
+    assert!(flush_area > square_area);
+}
+
+#[test]
+fn slanted_corner_relief_keeps_the_face() {
+    // Open corners with a slanted relief: nothing is cut from the plate, and each bend
+    // ends on the line from the plate's corner to the end of its flange. So the blank has
+    // more in it than with a flush relief, and folding keeps its volume (K = 0.5).
+    let gap = R + 0.5;
+    let blank = |relief: CornerRelief| {
+        let mut layout = closed_box(settings(0.5), FlangePosition::MaterialInside, 20.0);
+        for c in &mut layout.corners {
+            c.spec = CornerSpec {
+                kind: CornerKind::Open,
+                gap,
+                relief,
+                relief_size: 1.0,
+            };
+        }
+        let (solid, body) = built(layout);
+        let flanges = box_flanges(&body);
+        let bottom = piece_bounds(&solid, &body, flanges[0]);
+        assert_close(bottom.max.x, W - T - gap, 1e-9);
+        let outer: Vec<_> = body.outline.iter().filter(|l| l.outer).collect();
+        assert_eq!(outer.len(), 1);
+        let flat = measure::volume(&body.flat);
+        assert_close(measure::volume(&solid), flat, flat * 2e-5);
+        (outer[0].edges.len(), flat_area(&body))
+    };
+    let (slanted_edges, slanted_area) = blank(CornerRelief::Slanted);
+    let (flush_edges, flush_area) = blank(CornerRelief::Flush);
+    // Each corner of the cross has two slanted edges where a flush one has a notch.
+    assert_eq!(flush_edges, 12);
+    assert_eq!(slanted_edges, 20);
+    assert!(slanted_area > flush_area);
+}
+
+#[test]
+fn circular_and_square_reliefs_are_centred_where_the_flanges_end() {
+    // Open corners, the flanges stopping well short of the corner: a flush relief cuts the
+    // blank back to the corner of the two flanges' ends. A circular or square relief is
+    // centred there, so it takes three quarters of its shape more from the face, the
+    // bends and the flanges at each of the four corners. Folding keeps the volume.
+    let gap = R + T + 4.0;
+    let size = 4.0;
+    let blank = |relief: CornerRelief| {
+        let mut layout = closed_box(settings(0.5), FlangePosition::MaterialInside, 20.0);
+        for c in &mut layout.corners {
+            c.spec = CornerSpec {
+                kind: CornerKind::Open,
+                gap,
+                relief,
+                relief_size: size,
+            };
+        }
+        let (solid, body) = built(layout);
+        let flat = measure::volume(&body.flat);
+        assert_close(measure::volume(&solid), flat, flat * 2e-5);
+        flat_area(&body)
+    };
+    let flush = blank(CornerRelief::Flush);
+    let square = blank(CornerRelief::Square);
+    let circular = blank(CornerRelief::Circular);
+    assert_close(flush - square, 4.0 * 0.75 * size * size, 1e-6);
+    let disc = std::f64::consts::PI * size * size / 4.0;
+    assert_close(flush - circular, 4.0 * 0.75 * disc, 1e-3);
+}
+
+#[test]
+fn a_plain_corner_runs_nothing_on() {
+    // Bend outside: the flanges stand R + t outside the plate. A butt corner runs the
+    // earlier flange on to the later one's outer face; a plain corner leaves it ending
+    // where its own edge does, at the plate's corner.
+    let mut layout = closed_box(settings(0.44), FlangePosition::BendOutside, 20.0);
+    for c in &mut layout.corners {
+        c.spec.kind = CornerKind::Plain;
+    }
+    let (solid, body) = built(layout);
+    let flanges = box_flanges(&body);
+    let bottom = piece_bounds(&solid, &body, flanges[0]);
+    let right = piece_bounds(&solid, &body, flanges[1]);
+    assert_close(bottom.max.x, W, 1e-9);
+    assert_close(bottom.min.x, 0.0, 1e-9);
+    assert!(overlap(&bottom, &right) < 1e-9);
 }
 
 #[test]
@@ -1562,4 +1952,466 @@ fn sketched_bend_carries_forms() {
     let line = [DVec2::new(70.0, 0.0), DVec2::new(70.0, H)];
     let err = through.add_sketched_bend(2, 0, 0, line, &spec).unwrap_err();
     assert!(err.contains("dimple"), "{err}");
+}
+
+#[test]
+fn cut_that_grazes_an_edge() {
+    // A cut that reaches three microns into the plate across its bottom edge, as an imported
+    // cut drawn a hair off the edge it was meant to stop at does (P34). Its two sides inside
+    // the plate are a few microns long, and the walls through the sheet along them would
+    // enclose no area: they are left out and the notch with them.
+    let mut layout = plate_layout(settings(0.5));
+    layout.add_cut(Area::polygon(
+        &[
+            DVec2::new(45.0, -5.0),
+            DVec2::new(55.0, -5.0),
+            DVec2::new(50.0, 3e-6),
+        ],
+        |i| CurveTag::Sketch {
+            owner: 3,
+            entity: i as u32,
+        },
+    ));
+    let (solid, body) = built(layout);
+    assert_close(measure::volume(&solid), W * H * T, 1e-6);
+    assert_eq!(body.outline.len(), 1);
+}
+
+#[test]
+fn material_inside_at_an_angle() {
+    // SolidWorks' material inside at an angle: the flange's outer face goes through the
+    // original edge on the far face of the sheet. Bend outside starts the bend at the
+    // edge, so the two differ by the outside setback and t / tan(angle) along the face.
+    for angle in [30.0_f64, 60.0, 90.0, 120.0] {
+        let max_y = |position| {
+            let mut layout = plate_layout(settings(0.44));
+            let mut spec = flange(20.0, position);
+            spec.angle = angle;
+            layout.add_edge_flange(2, &top_edge(true), &spec).unwrap();
+            bounds(&built(layout).0).max.y
+        };
+        let a = angle.to_radians();
+        let expected = (R + T) * (a / 2.0).tan() + T / a.tan();
+        assert_close(
+            max_y(FlangePosition::BendOutside) - max_y(FlangePosition::MaterialInside),
+            expected,
+            1e-6,
+        );
+    }
+}
+
+#[test]
+fn a_flange_set_out_from_its_edge() {
+    // SolidWorks' position offset: the sheet runs on flat past the edge before the bend.
+    for (position, y_max) in [
+        (FlangePosition::MaterialInside, H),
+        (FlangePosition::BendOutside, H + R + T),
+    ] {
+        for set_out in [0.0, 7.0, -3.0] {
+            let mut layout = plate_layout(settings(0.5));
+            let own = FlangeOwn {
+                set_out,
+                ..Default::default()
+            };
+            layout
+                .add_edge_flange_with(2, &top_edge(true), &flange(15.0, position), own)
+                .unwrap();
+            let (solid, body) = built(layout);
+            assert_close(bounds(&solid).max.y, y_max + set_out, 1e-9);
+            // K = 0.5 keeps the volume: the blank is the folded part laid flat.
+            assert_close(measure::volume(&solid), measure::volume(&body.flat), 1e-6);
+        }
+    }
+}
+
+#[test]
+fn a_sharp_bend() {
+    // A bend radius of 0, as SolidWorks allows: the body is built, and its blank is the
+    // one a radius of 0 gives, to well within a micron.
+    let mut s = settings(0.5);
+    s.radius = 0.0;
+    let mut layout = plate_layout(s);
+    layout
+        .add_edge_flange(
+            2,
+            &top_edge(true),
+            &flange(20.0, FlangePosition::MaterialInside),
+        )
+        .unwrap();
+    let (_, body) = built(layout);
+    let v = BendValues::new(BendModel::KFactor(0.5), FRAC_PI_2, 0.0, T).unwrap();
+    let blank = (body.flat_bounds().1 - body.flat_bounds().0).y;
+    assert_close(
+        blank,
+        H - v.outside_setback() + v.allowance + 20.0 - v.outside_setback(),
+        1e-6,
+    );
+    assert_close(v.outside_setback(), T, 1e-3);
+}
+
+#[test]
+fn a_flange_shaped_to_an_outline() {
+    // SolidWorks' flange profile: a trapezoid on the flange's plane, 80 wide at the edge
+    // and 40 wide at the top, 30 up. The flange is made that wide and that long and cut to
+    // it, and the bend below stays whole where the outline's foot is.
+    let mut layout = plate_layout(settings(0.5));
+    let world = [
+        DVec3::new(10.0, H, 0.0),
+        DVec3::new(90.0, H, 0.0),
+        DVec3::new(70.0, H, 30.0),
+        DVec3::new(30.0, H, 30.0),
+    ];
+    let outline = |frame: &peet_math::Frame| {
+        let flat: Vec<DVec2> = world
+            .iter()
+            .map(|p| frame.to_local(*p).truncate())
+            .collect();
+        Area::polygon(&flat, |i| CurveTag::Sketch {
+            owner: 9,
+            entity: i as u32,
+        })
+    };
+    layout
+        .add_edge_flange_outlined(
+            2,
+            0,
+            &top_edge(true),
+            &flange(10.0, FlangePosition::MaterialInside),
+            FlangeOwn::default(),
+            &outline,
+        )
+        .unwrap();
+    let (solid, body) = built(layout);
+    let b = bounds(&solid);
+    assert_close(b.max.z, 30.0, 1e-6);
+    // The top is the outline's: 40 wide, from 30 to 70
+    let top: Vec<f64> = solid
+        .vertices
+        .iter()
+        .filter(|v| v.point.z > 30.0 - 1e-6)
+        .map(|v| v.point.x)
+        .collect();
+    assert!(!top.is_empty());
+    let (lo, hi) = top
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+    assert_close(lo, 30.0, 1e-6);
+    assert_close(hi, 70.0, 1e-6);
+    // K = 0.5 keeps the volume: the blank is the folded part laid flat.
+    assert_close(measure::volume(&solid), measure::volume(&body.flat), 1e-3);
+}
+
+#[test]
+fn an_outline_to_the_corner_meets_the_flange_there() {
+    // A wall outside the right edge takes the radius off the plate's top edge, which then
+    // runs from x = 0 to W - R. A flange on it shaped to an outline that reaches the end of
+    // that edge is carried on to the corner and meets the wall there, as one without an
+    // outline does, and ends where the outline does (Louvre Filter Bracket).
+    let mut layout = plate_layout(settings(0.5));
+    layout
+        .add_edge_flange(
+            2,
+            &EdgeSite {
+                piece: 0,
+                a: DVec2::new(W, 0.0),
+                b: DVec2::new(W, H),
+                top: true,
+            },
+            &flange(20.0, FlangePosition::MaterialOutside),
+        )
+        .unwrap();
+    let world = [
+        DVec3::new(10.0, H, 0.0),
+        DVec3::new(W - R, H, 0.0),
+        DVec3::new(W - R, H, 20.0),
+        DVec3::new(10.0, H, 20.0),
+    ];
+    let outline = |frame: &peet_math::Frame| {
+        let flat: Vec<DVec2> = world
+            .iter()
+            .map(|p| frame.to_local(*p).truncate())
+            .collect();
+        Area::polygon(&flat, |i| CurveTag::Sketch {
+            owner: 9,
+            entity: i as u32,
+        })
+    };
+    let site = EdgeSite {
+        piece: 0,
+        a: DVec2::new(W - R, H),
+        b: DVec2::new(0.0, H),
+        top: true,
+    };
+    layout
+        .add_edge_flange_outlined(
+            3,
+            0,
+            &site,
+            &flange(20.0, FlangePosition::MaterialInside),
+            FlangeOwn::default(),
+            &outline,
+        )
+        .unwrap();
+    assert_eq!(layout.corners.len(), 1);
+    let (solid, body) = built(layout);
+    let lip = body.layout.attachments[1].pieces[1];
+    let b = piece_bounds(&solid, &body, lip);
+    // To the outline, not set back from the edge's end by the radius again
+    assert_close(b.max.x, W - R, 1e-6);
+    assert_close(b.min.x, 10.0, 1e-6);
+}
+
+#[test]
+fn a_lip_on_a_wall_cuts_through_the_walls_bend() {
+    // A lip on the side edge of a wall, which runs down to the wall's bend: the strip the
+    // lip's bend takes from the wall runs on through the wall's bend, which SolidWorks
+    // cuts away there.
+    let mut layout = plate_layout(settings(0.44));
+    layout
+        .add_edge_flange(
+            2,
+            &top_edge(true),
+            &flange(30.0, FlangePosition::MaterialInside),
+        )
+        .unwrap();
+    let (solid, body) = built(layout.clone());
+    let wall = layout.attachments[0].pieces[1];
+    let site = solid
+        .edge_ids()
+        .filter_map(|e| body.edge_site(&solid, e).ok())
+        .find(|s| {
+            let fl = &body.layout.pieces[wall];
+            let (p, q) = (
+                fl.frame.to_world(s.a.extend(0.0)),
+                fl.frame.to_world(s.b.extend(0.0)),
+            );
+            s.piece == wall
+                && close(p.x, 0.0, 1e-9)
+                && close(q.x, 0.0, 1e-9)
+                && (p.z - q.z).abs() > 1.0
+        })
+        .expect("the wall's side edge");
+    let before = measure::volume(&solid);
+    layout
+        .add_edge_flange(3, &site, &flange(10.0, FlangePosition::MaterialInside))
+        .unwrap();
+    let (solid, body) = built(layout);
+    // The wall's bend now starts where the lip's bend ends, R + T in from the side
+    let bend = body.layout.attachments[0].pieces[0];
+    assert_close(piece_bounds(&solid, &body, bend).min.x, R + T, 1e-6);
+    // What the lip adds, less the end of the wall's bend it took away
+    let section = PI / 4.0 * ((R + T).powi(2) - R * R);
+    let wall_height = 30.0 - (R + T);
+    let lip = wall_height * ((10.0 - (R + T)) * T + section);
+    let taken = wall_height * (R + T) * T + (R + T) * section;
+    assert_close(measure::volume(&solid), before + lip - taken, 1e-3);
+}
+
+#[test]
+fn a_profile_bend_with_its_own_model() {
+    // SolidWorks' sketched bends can each have a deduction of their own: a shallow bend
+    // whose body deduction would make its allowance negative takes a smaller one.
+    let mut s = settings(0.5);
+    s.model = BendModel::Deduction(3.65);
+    s.radius = 0.1;
+    let chain = [
+        ChainLine {
+            entity: 1,
+            a: DVec2::new(0.0, 0.0),
+            b: DVec2::new(100.0, 0.0),
+        },
+        ChainLine {
+            entity: 2,
+            a: DVec2::new(100.0, 0.0),
+            b: DVec2::new(200.0, 20.0),
+        },
+    ];
+    let plane = Plane::front();
+    let err = Layout::open_profile(s, 1, &plane, &chain, [0.0, 50.0], false).unwrap_err();
+    assert!(err.contains("Corner 1"), "{err}");
+    let layout = Layout::open_profile_with(
+        s,
+        1,
+        &plane,
+        &chain,
+        [0.0, 50.0],
+        false,
+        &[Some(BendModel::Deduction(0.1))],
+    )
+    .unwrap();
+    let bend = layout.bends().next().unwrap().1;
+    assert_close(
+        bend.values.allowance,
+        2.0 * bend.values.outside_setback() - 0.1,
+        1e-9,
+    );
+    built(layout);
+}
+
+#[test]
+fn a_flange_up_to_a_point() {
+    // SolidWorks' "up to vertex": the flange's end goes through the point, square to the
+    // flange, whatever length it was given to start from.
+    for (angle, start) in [(90.0_f64, 10.0), (105.0, 40.0), (60.0, 25.0)] {
+        let mut layout = plate_layout(settings(0.5));
+        let mut spec = flange(start, FlangePosition::MaterialInside);
+        spec.angle = angle;
+        let point = DVec3::new(50.0, H + 5.0, 37.0);
+        let length = layout
+            .edge_flange_length_to(2, 0, &top_edge(true), &spec, FlangeOwn::default(), point)
+            .unwrap();
+        spec.length = length;
+        layout.add_edge_flange(2, &top_edge(true), &spec).unwrap();
+        // It reads back as laid out
+        assert_close(layout.edge_flange_length(0).unwrap(), length, 1e-9);
+        let (solid, _) = built(layout);
+        let a = angle.to_radians();
+        let along = DVec3::new(0.0, a.cos(), a.sin());
+        let end = solid
+            .vertices
+            .iter()
+            .map(|v| v.point.dot(along))
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert_close(end, point.dot(along), 1e-6);
+    }
+    // A point behind the bend is refused
+    let layout = plate_layout(settings(0.5));
+    let err = layout
+        .edge_flange_length_to(
+            2,
+            0,
+            &top_edge(true),
+            &flange(10.0, FlangePosition::MaterialInside),
+            FlangeOwn::default(),
+            DVec3::new(50.0, H, 0.5),
+        )
+        .unwrap_err();
+    assert!(err.contains("behind the flange's bend"), "{err}");
+}
+
+#[test]
+fn a_flange_beside_a_cut_may_share_a_sliver() {
+    // A cut takes a strip 3 wide off the plate's side, its end drawn a few microns off
+    // square, and a flange goes on the edge it leaves, outwards. In the flat pattern the
+    // flange's end runs a few microns into the sheet beyond the cut, as SolidWorks' does:
+    // that sliver stays with the plate rather than counting as an overlap.
+    let tag = |i: usize| CurveTag::Sketch {
+        owner: 9,
+        entity: i as u32,
+    };
+    let cut = |end: [f64; 2]| {
+        Area::polygon(
+            &[
+                DVec2::new(W - 3.0, -1.0),
+                DVec2::new(W + 1.0, -1.0),
+                DVec2::new(W + 1.0, end[1]),
+                DVec2::new(W, end[1]),
+                DVec2::new(W - 3.0, end[0]),
+            ],
+            tag,
+        )
+    };
+    let site = |end: f64| EdgeSite {
+        piece: 0,
+        a: DVec2::new(W - 3.0, 0.0),
+        b: DVec2::new(W - 3.0, end),
+        top: true,
+    };
+    let mut layout = plate_layout(settings(0.5));
+    layout.add_cut(cut([40.004, 40.0]));
+    layout
+        .add_edge_flange(
+            2,
+            &site(40.004),
+            &flange(10.0, FlangePosition::MaterialInside),
+        )
+        .unwrap();
+    built(layout);
+    // A real overlap is still refused
+    let mut long = plate_layout(settings(0.5));
+    long.add_cut(cut([41.0, 39.0]));
+    long.add_edge_flange(
+        2,
+        &site(41.0),
+        &flange(10.0, FlangePosition::MaterialInside),
+    )
+    .unwrap();
+    assert!(matches!(build(long), Err(SheetError::Overlap { .. })));
+}
+
+fn slot_across_the_bend() -> Area {
+    Area::polygon(
+        &[
+            DVec2::new(40.0, 45.0),
+            DVec2::new(50.0, 45.0),
+            DVec2::new(50.0, 70.0),
+            DVec2::new(40.0, 70.0),
+        ],
+        |i| CurveTag::Sketch {
+            owner: 3,
+            entity: i as u32,
+        },
+    )
+}
+
+#[test]
+fn unfold_lays_bends_flat_and_fold_carries_a_cut_back() {
+    let mut layout = plate_layout(settings(0.5));
+    layout
+        .add_edge_flange(
+            2,
+            &top_edge(true),
+            &flange(25.0, FlangePosition::MaterialInside),
+        )
+        .unwrap();
+    let (folded, _) = built(layout.clone());
+    let mut flat = layout.clone();
+    flat.unfold(0, &[]).unwrap();
+    let (solid, body) = built(flat.clone());
+    // Flat: one thickness deep, as long as the blank, the plate where it was
+    let b = bounds(&solid);
+    assert_close(b.min.z, 0.0, 1e-9);
+    assert_close(b.max.z, T, 1e-9);
+    let (lo, hi) = body.flat_bounds();
+    assert_close(b.max.y - b.min.y, hi.y - lo.y, 1e-9);
+    assert_close(b.min.y, 0.0, 1e-9);
+    assert_close(measure::volume(&solid), measure::volume(&folded), 1e-6);
+    // A slot across the flat bend, then folded again: as if cut in the flat pattern
+    flat.add_cut(slot_across_the_bend());
+    flat.fold(&[]);
+    assert!(flat.flat_bends.is_empty());
+    let (again, _) = built(flat);
+    layout.add_cut(slot_across_the_bend());
+    let (direct, _) = built(layout);
+    assert_close(measure::volume(&again), measure::volume(&direct), 1e-6);
+    let (a, d) = (bounds(&again), bounds(&direct));
+    assert!(a.min.abs_diff_eq(d.min, 1e-9) && a.max.abs_diff_eq(d.max, 1e-9));
+}
+
+#[test]
+fn unfold_keeps_the_fixed_flange_where_it_is() {
+    let mut layout = plate_layout(settings(0.5));
+    layout
+        .add_edge_flange(
+            2,
+            &top_edge(true),
+            &flange(25.0, FlangePosition::MaterialInside),
+        )
+        .unwrap();
+    // Fixed on the flange: the plate turns into the flange's plane
+    let (wall, bend) = (2, 1);
+    let mut flat = layout.clone();
+    let before = flat.pieces[wall].frame;
+    flat.unfold(wall, &[bend]).unwrap();
+    assert_eq!(flat.pieces[wall].frame, before);
+    let (solid, _) = built(flat.clone());
+    let b = bounds(&solid);
+    assert!(b.max.z - b.min.z > H, "{b:?}");
+    assert!(b.max.y - b.min.y < T + 1e-6, "{b:?}");
+    flat.fold(&[bend]);
+    let (again, _) = built(flat);
+    let (direct, _) = built(layout);
+    let (a, d) = (bounds(&again), bounds(&direct));
+    assert!(a.min.abs_diff_eq(d.min, 1e-9) && a.max.abs_diff_eq(d.max, 1e-9));
+    assert!(plate_layout(settings(0.5)).unfold(0, &[3]).is_err());
 }

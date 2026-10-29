@@ -25,7 +25,7 @@ pub use problem::{CONVERGED, Options, Outcome, Problem, SKIP, Space, TARGET, max
 pub const NONE: u32 = u32::MAX;
 
 /// Most slots one equation can read.
-pub const MAX_SLOTS: usize = 12;
+pub const MAX_SLOTS: usize = 24;
 
 /// One residual equation over the value array.
 pub trait Equation {

@@ -8,11 +8,12 @@ use egui::{RichText, Ui};
 use peet_math::{DQuat, DVec3};
 use peet_model::{
     CompId, ExplodeId, MateEnd, MateGeom, MateId, MateKind, PatternId, PatternKind, PatternLine,
-    PatternStep, Scalar, ScalarKind, Status,
+    PatternStep, Scalar, ScalarKind, Status, WidthMode,
 };
 use peet_ops::{
     CompSel, ComponentChange, ExplodeChange, Input, InsertSource, MateChange, MateEndSel, MateType,
     Op, PatternChange, PatternLineSel, PatternSpec, PatternStepSpec, Placing, Point3, Source,
+    WidthModeSel,
 };
 
 use crate::bodies::GeomRef;
@@ -27,6 +28,8 @@ use crate::features_ui::{ERROR, WARNING};
 const MOVE_KEY: u64 = 0x636f_6d70_6d6f_7665;
 /// The same for a component's colour and for an explode step's distance.
 const COLOR_KEY: u64 = 0x636f_6d70_636f_6c72;
+/// The steps of one drag of a component's transparency are one undo step.
+const TRANSPARENCY_KEY: u64 = 0x636f_6d70_7472_616e;
 const EXPLODE_KEY: u64 = 0x6578_706c_6f64_6562;
 const PATTERN_KEY: u64 = 0x636f_6d70_7061_7474;
 /// How long the assembly takes to come apart and go together again, in seconds.
@@ -169,6 +172,10 @@ enum TreeAction {
     ChangeExplode(ExplodeId, ExplodeChange),
     SelectPattern(PatternId),
     DeletePattern(PatternId),
+    /// Edit the component's part in the context of the assembly.
+    InContext(CompId),
+    /// Lock, unlock (`Some`) or break (`None`) its part's in-context references.
+    References(CompId, Option<bool>),
 }
 
 /// What to say about how a component can still move.
@@ -210,6 +217,7 @@ pub(super) fn works_in_assembly(cmd: CommandId) -> bool {
                     | "bom"
                     | "mass"
                     | "open_component"
+                    | "in_context"
                     | "delete"
                     | "suppress"
                     | "mate"
@@ -228,6 +236,7 @@ pub(super) fn needs_assembly(cmd: CommandId) -> bool {
             | CommandId::InterferenceCheck
             | CommandId::BillOfMaterials
             | CommandId::EditComponent
+            | CommandId::EditInContext
             | CommandId::MateCoincident
             | CommandId::MateConcentric
             | CommandId::MateParallel
@@ -298,7 +307,7 @@ impl PeetApp {
                         direction: DVec3::X,
                     },
                     spacing: Input::Base(spacing),
-                    count: 3,
+                    count: 3.into(),
                     flip: false,
                 },
                 second: None,
@@ -326,7 +335,7 @@ impl PeetApp {
             kind: PatternSpec::Circular {
                 axis: PatternLineSel::Geom(MateEndSel::Ref(b)),
                 angle: None,
-                count: 4,
+                count: 4.into(),
                 flip: false,
             },
             name: None,
@@ -429,8 +438,19 @@ impl PeetApp {
             }
             *done |= r.drag_stopped() || r.lost_focus();
         };
-        let count_ui = |ui: &mut Ui, count: &mut u32| {
-            ui.add(egui::DragValue::new(count).range(1..=200).speed(0.1));
+        let count_ui = |ui: &mut Ui, count: &mut Scalar| {
+            // A count from an expression is set by the expression (`set` D1@PATTERN).
+            if let Some(e) = &count.expression {
+                ui.label(format!("{} = {e}", peet_model::pattern_count(count)));
+                return;
+            }
+            let mut n = peet_model::pattern_count(count);
+            if ui
+                .add(egui::DragValue::new(&mut n).range(1..=200).speed(0.1))
+                .changed()
+            {
+                count.value = f64::from(n);
+            }
         };
         let step_ui = |ui: &mut Ui, s: &mut PatternStep, salt: &str, done: &mut bool| {
             ui.label("Direction");
@@ -471,7 +491,7 @@ impl PeetApp {
                                     direction: DVec3::Y,
                                 },
                                 spacing: first.spacing.clone(),
-                                count: 2,
+                                count: Scalar::new(2.0),
                                 flip: false,
                             });
                         }
@@ -756,7 +776,7 @@ impl PeetApp {
 
     /// What is selected as the end of a mate: a face, an edge or a corner, with the
     /// component it is on.
-    fn mate_end(&self, geom: GeomRef) -> Option<MateEnd> {
+    pub(super) fn mate_end(&self, geom: GeomRef) -> Option<MateEnd> {
         let placed = self.doc.placed.get(geom.body())?;
         if placed.path.is_empty() {
             return None;
@@ -804,6 +824,9 @@ impl PeetApp {
             a: MateEndSel::Ref(a),
             b: MateEndSel::Ref(b),
             flip: None,
+            align: None,
+            flip_dimension: None,
+            suppressed: false,
             name: None,
         });
         if !reply.ok {
@@ -827,6 +850,7 @@ impl PeetApp {
         let reply = self.perform(Op::EditMate {
             mate: id.into(),
             change,
+            configurations: None,
         });
         if reply.ok && deleted && self.selected_mate == Some(id) {
             self.selected_mate = None;
@@ -1279,6 +1303,7 @@ impl PeetApp {
             fixed: None,
             link: self.inserting_linked,
             absolute: false,
+            configuration: None,
         });
         if reply.ok {
             let id = reply.json["component"]["id"]
@@ -1302,6 +1327,8 @@ impl PeetApp {
     }
 
     fn open_component(&mut self, id: CompId) {
+        // A sketch edited in context goes into its part first.
+        self.close_sketch();
         let reply = self.perform(Op::OpenComponent {
             component: CompSel::Id(id),
         });
@@ -1318,6 +1345,7 @@ impl PeetApp {
         let reply = self.perform(Op::Component {
             component: CompSel::Id(id),
             change,
+            configurations: None,
         });
         if reply.ok && deleted && self.selected_component == Some(id) {
             self.selected_component = None;
@@ -1346,12 +1374,23 @@ impl PeetApp {
         let any_hidden = assembly.components().any(|c| !c.visible);
         let selected_explode = self.selected_explode();
         let selected_pattern = self.selected_pattern();
+        // The components whose part has in-context references ("->" in the tree).
+        let references: Vec<CompId> = assembly
+            .components()
+            .filter(|c| {
+                assembly
+                    .definition_of(c.id)
+                    .is_some_and(|d| !d.model.external_references().is_empty())
+            })
+            .map(|c| c.id)
+            .collect();
+        let editing = self.in_context_component();
         for c in assembly.components() {
             let status = self.doc.evaluation().component_status(c.id);
             // As in other CAD systems: (f) fixed, (-) can still move.
             let freedom = self.doc.evaluation().component_freedom(c.id);
             let mut text = RichText::new(format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 if c.fixed {
                     "(f) "
                 } else if freedom.is_some_and(|f| f > 0) {
@@ -1360,6 +1399,13 @@ impl PeetApp {
                     ""
                 },
                 c.name,
+                if editing == Some(c.id) {
+                    "  (editing in context)"
+                } else if references.contains(&c.id) {
+                    " ->"
+                } else {
+                    ""
+                },
                 match (c.visible, c.pattern.is_some()) {
                     (true, false) => "",
                     (true, true) => "  (pattern)",
@@ -1397,6 +1443,19 @@ impl PeetApp {
                     }
                 };
                 pick(ui, "Edit Part", TreeAction::Open(c.id));
+                pick(ui, "Edit In Context", TreeAction::InContext(c.id));
+                if references.contains(&c.id) {
+                    ui.menu_button("External References", |ui| {
+                        for (label, action) in [
+                            ("List", TreeAction::Select(c.id)),
+                            ("Lock", TreeAction::References(c.id, Some(true))),
+                            ("Unlock", TreeAction::References(c.id, Some(false))),
+                            ("Break", TreeAction::References(c.id, None)),
+                        ] {
+                            pick(ui, label, action);
+                        }
+                    });
+                }
                 ui.separator();
                 let change = |change| TreeAction::Change(c.id, change);
                 pick(
@@ -1458,14 +1517,18 @@ impl PeetApp {
                         ui.close();
                     }
                 };
-                pick(
-                    ui,
-                    "Flip",
-                    MateChange::Edit {
-                        value: None,
-                        flip: Some(!m.flip),
-                    },
-                );
+                if !matches!(m.kind, MateKind::Width { .. }) {
+                    pick(
+                        ui,
+                        "Flip",
+                        MateChange::Edit {
+                            value: None,
+                            flip: Some(!m.flip()),
+                            align: None,
+                            flip_dimension: None,
+                        },
+                    );
+                }
                 pick(
                     ui,
                     if m.suppressed {
@@ -1571,6 +1634,12 @@ impl PeetApp {
                     self.selected_geom.clear();
                 }
                 TreeAction::Open(id) => self.open_component(id),
+                TreeAction::InContext(id) => {
+                    self.in_context = None;
+                    self.selected_component = Some(id);
+                    self.edit_in_context();
+                }
+                TreeAction::References(id, lock) => self.change_references(id, lock),
                 TreeAction::Change(id, change) => self.change_component(id, change),
             }
         }
@@ -1594,12 +1663,23 @@ impl PeetApp {
                     Some(MateGeom::Face(_)) => "A face",
                     Some(MateGeom::Edge(_)) => "An edge",
                     Some(MateGeom::Vertex(_)) => "A corner",
+                    Some(MateGeom::Plane(_)) => "A reference plane",
+                    Some(MateGeom::Origin) => "The origin",
+                    Some(MateGeom::Sketch(_)) => "A sketch entity",
                     None => "The whole",
                 },
-                end.component().map_or("?", |c| assembly.name_of(c))
+                end.component()
+                    .map_or("the assembly", |c| assembly.name_of(c))
             )
         };
-        let (first, second) = (end(&mate.a), end(&mate.b));
+        let (first, second) = match &mate.kind {
+            MateKind::Width { a2, b2, .. } => (
+                format!("{}; {}", end(&mate.a), end(a2)),
+                b2.as_ref()
+                    .map_or_else(|| end(&mate.b), |e| format!("{}; {}", end(&mate.b), end(e))),
+            ),
+            _ => (end(&mate.a), end(&mate.b)),
+        };
         // The value in what the user sees: document units, or degrees.
         let params = &self.doc.model.parameters;
         let mut value = match &mate.kind {
@@ -1611,10 +1691,31 @@ impl PeetApp {
                 .evaluate(ScalarKind::Angle, params)
                 .ok()
                 .map(|deg| (deg, "°".to_owned())),
+            MateKind::Width {
+                mode: WidthMode::Dimension(s),
+                ..
+            } => s
+                .evaluate(ScalarKind::Length, params)
+                .ok()
+                .map(|mm| (units.from_mm(mm), format!(" {}", units.length.suffix()))),
+            MateKind::Width {
+                mode: WidthMode::Percent(s),
+                ..
+            } => s
+                .evaluate(ScalarKind::Number, params)
+                .ok()
+                .map(|v| (v, "%".to_owned())),
             _ => None,
         };
+        let mut width_mode = match &mate.kind {
+            MateKind::Width { mode, .. } => Some(mode.word().to_owned()),
+            _ => None,
+        };
+        let was_mode = width_mode.clone();
         let was = value.as_ref().map(|v| v.0);
-        let mut flip = mate.flip;
+        let mut flip = mate.flip();
+        let mut flip_dimension = mate.flip_dimension;
+        let measured = matches!(mate.kind, MateKind::Distance(_) | MateKind::Angle(_));
         ui.strong(&mate.name);
         egui::Grid::new("mate_props")
             .num_columns(2)
@@ -1629,8 +1730,28 @@ impl PeetApp {
                     ui.label(&second);
                 });
                 ui.end_row();
+                if let Some(mode) = &mut width_mode {
+                    ui.label("Mode");
+                    egui::ComboBox::from_id_salt("width_mode")
+                        .selected_text(mode.as_str())
+                        .show_ui(ui, |ui| {
+                            for name in ["centered", "free", "dimension", "percent"] {
+                                ui.selectable_value(mode, name.to_owned(), name);
+                            }
+                        });
+                    ui.end_row();
+                    if Some(&*mode) != was_mode.as_ref() {
+                        value = match mode.as_str() {
+                            "dimension" => Some((0.0, format!(" {}", units.length.suffix()))),
+                            "percent" => Some((50.0, "%".to_owned())),
+                            _ => None,
+                        };
+                    }
+                }
                 if let Some((v, suffix)) = &mut value {
-                    ui.label(if matches!(mate.kind, MateKind::Angle(_)) {
+                    ui.label(if width_mode.as_deref() == Some("percent") {
+                        "Percent"
+                    } else if matches!(mate.kind, MateKind::Angle(_)) {
                         "Angle"
                     } else {
                         "Distance"
@@ -1643,11 +1764,20 @@ impl PeetApp {
                     );
                     ui.end_row();
                 }
-                ui.label("Flip").on_hover_text(
-                    "Two flat faces are put against each other. Flipped, they look the same way: two side faces flush.",
-                );
-                ui.checkbox(&mut flip, "");
-                ui.end_row();
+                if width_mode.is_none() {
+                    ui.label("Flip").on_hover_text(
+                        "Two flat faces are put against each other. Flipped, they look the same way: two side faces flush.",
+                    );
+                    ui.checkbox(&mut flip, "");
+                    ui.end_row();
+                }
+                if measured {
+                    ui.label("Flip dimension").on_hover_text(
+                        "The distance or angle measured the other way: from a flat face, the other end goes behind it instead of in front of it.",
+                    );
+                    ui.checkbox(&mut flip_dimension, "");
+                    ui.end_row();
+                }
             });
         if let Some(message) = status.as_ref().and_then(Status::message) {
             ui.add_space(6.0);
@@ -1657,12 +1787,29 @@ impl PeetApp {
             });
         }
         let new = value.map(|v| v.0).filter(|v| Some(*v) != was);
-        if new.is_some() || flip != mate.flip {
+        if let Some(mode) = width_mode {
+            if Some(&mode) != was_mode.as_ref() || new.is_some() {
+                let mode = match mode.as_str() {
+                    "free" => WidthModeSel::Free,
+                    "dimension" => {
+                        WidthModeSel::Dimension(Input::Number(new.or(was).unwrap_or(0.0)))
+                    }
+                    "percent" => WidthModeSel::Percent(Input::Number(new.or(was).unwrap_or(50.0))),
+                    _ => WidthModeSel::Centered,
+                };
+                self.change_mate(id, MateChange::Width(mode));
+            }
+            return;
+        }
+        if new.is_some() || flip != mate.flip() || flip_dimension != mate.flip_dimension {
             self.change_mate(
                 id,
                 MateChange::Edit {
                     value: new.map(Input::Number),
-                    flip: (flip != mate.flip).then_some(flip),
+                    flip: (flip != mate.flip()).then_some(flip),
+                    align: None,
+                    flip_dimension: (flip_dimension != mate.flip_dimension)
+                        .then_some(flip_dimension),
                 },
             );
         }
@@ -1685,6 +1832,22 @@ impl PeetApp {
             .and_then(|d| d.link.as_ref())
             .map(|l| l.path.clone());
         let mut unlink = false;
+        // The configuration of its part (or sub-assembly) it shows, and the others it could.
+        let configurations: Vec<String> = assembly
+            .definition(c.definition)
+            .map(|d| {
+                d.model
+                    .configurations()
+                    .iter()
+                    .map(|x| x.name.clone())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let shown = assembly
+            .configuration_name(&c)
+            .unwrap_or_default()
+            .to_owned();
+        let mut show = shown.clone();
         let units = self.doc.model.parameters.units;
         let status = self.doc.evaluation().component_status(id).cloned();
         let freedom = freedom_text(c.fixed, self.doc.evaluation().component_freedom(id));
@@ -1696,6 +1859,11 @@ impl PeetApp {
         };
         let mut origin = c.placement.origin.to_array().map(|v| units.from_mm(v));
         let mut fixed = c.fixed;
+        let mut flexible = c.flexible;
+        // Only a sub-assembly can be solved as flexible.
+        let sub_assembly = assembly
+            .definition(c.definition)
+            .is_some_and(|d| d.model.is_assembly());
         // A copy a pattern made is where the pattern puts it.
         let by_pattern = assembly.pattern_of(id).map(|p| p.name.clone());
         let own = by_pattern.is_none();
@@ -1707,6 +1875,14 @@ impl PeetApp {
             .unwrap_or([150, 160, 175]);
         let mut own_color = c.color.is_some();
         let mut rgb = c.color.unwrap_or(part_color);
+        // In per cent, as SolidWorks' appearance shows it.
+        let mut transparency = f64::from(c.transparency) * 100.0;
+        let mut transparency_done = false;
+        let display_state = self
+            .doc
+            .model
+            .active_display_state()
+            .map(|s| s.name.clone());
         let mut moved = false;
         let mut move_done = false;
         let mut turn = None;
@@ -1737,6 +1913,19 @@ impl PeetApp {
                         .clicked();
                 });
                 ui.end_row();
+                if configurations.len() > 1 {
+                    ui.label("Configuration").on_hover_text(
+                        "The configuration of its part this component shows (SolidWorks' referenced configuration). Other components of the part can show others. It is set in the assembly's active configuration.",
+                    );
+                    egui::ComboBox::from_id_salt(("component_configuration", id.0))
+                        .selected_text(&show)
+                        .show_ui(ui, |ui| {
+                            for name in &configurations {
+                                ui.selectable_value(&mut show, name.clone(), name);
+                            }
+                        });
+                    ui.end_row();
+                }
                 if let Some(path) = &link {
                     ui.label("Linked to").on_hover_text(
                         "The part is read from this file whenever the assembly is opened.",
@@ -1787,6 +1976,13 @@ impl PeetApp {
                 );
                 ui.add_enabled(own, egui::Checkbox::new(&mut fixed, ""));
                 ui.end_row();
+                if sub_assembly {
+                    ui.label("Flexible").on_hover_text(
+                        "Solve the sub-assembly's own mates in this assembly, as SolidWorks' \"Solve as: Flexible\": what is not fixed in it moves as this assembly's mates put it (a hinge opens). Off: rigid, as its own file has it.",
+                    );
+                    ui.add_enabled(own, egui::Checkbox::new(&mut flexible, ""));
+                    ui.end_row();
+                }
                 ui.label("Shown").on_hover_text(
                     "A hidden component is not drawn, but is still part of the assembly: counted, weighed and exported.",
                 );
@@ -1802,6 +1998,23 @@ impl PeetApp {
                     }
                 });
                 ui.end_row();
+                ui.label("Transparency").on_hover_text(
+                    "How much of what is behind the component shows through it: 0% opaque, 100% not seen at all. A click on a see-through component picks what is behind it; Shift-click picks the component.",
+                );
+                let r = ui.add(
+                    egui::Slider::new(&mut transparency, 0.0..=100.0)
+                        .suffix("%")
+                        .max_decimals(0),
+                );
+                transparency_done = r.drag_stopped() || r.lost_focus();
+                ui.end_row();
+                if let Some(state) = &display_state {
+                    ui.label("Display state").on_hover_text(
+                        "Whether it is shown, its colour and its transparency are set in the display state shown (the Display States list).",
+                    );
+                    ui.label(state);
+                    ui.end_row();
+                }
                 if let Some(text) = &freedom {
                     ui.label("Freedom").on_hover_text(
                         "How many ways the component can still move, by itself or along with what it is mated to.",
@@ -1843,8 +2056,14 @@ impl PeetApp {
                 .normalize();
             self.change_component(id, ComponentChange::Place(Placing::Frame(frame)));
         }
+        if show != shown {
+            self.change_component(id, ComponentChange::Configuration(Some(show)));
+        }
         if fixed != c.fixed {
             self.change_component(id, ComponentChange::Fix(fixed));
+        }
+        if flexible != c.flexible {
+            self.change_component(id, ComponentChange::Flexible(flexible));
         }
         if visible != c.visible {
             self.change_component(id, ComponentChange::Show(visible));
@@ -1862,12 +2081,29 @@ impl PeetApp {
                 },
             );
         }
+        let transparency = (transparency / 100.0).clamp(0.0, 1.0) as f32;
+        if (transparency - c.transparency).abs() > 1e-6 {
+            self.change_model(
+                &format!("Change Transparency of {}", c.name),
+                Some(TRANSPARENCY_KEY ^ u64::from(id.0)),
+                |m| {
+                    if let Some(c) = m.assembly_mut().and_then(|a| a.component_mut(id)) {
+                        c.transparency = transparency;
+                    }
+                },
+            );
+        }
+        if transparency_done {
+            self.doc.seal_history();
+        }
         if open {
             self.open_component(id);
         }
         if unlink {
             self.unlink_part(c.definition);
         }
+        ui.add_space(6.0);
+        self.external_references_ui(ui, id);
     }
 }
 
@@ -1985,6 +2221,8 @@ mod tests {
             MateChange::Edit {
                 value: Some(Input::Number(25.0)),
                 flip: Some(true),
+                align: None,
+                flip_dimension: None,
             },
         );
         let second = app
@@ -2128,6 +2366,7 @@ mod tests {
             fixed: None,
             link: true,
             absolute: false,
+            configuration: None,
         });
         assert!(reply.ok, "{}", reply.json);
         app.selected_component = Some(CompId(1));
@@ -2187,6 +2426,7 @@ mod tests {
             fixed: None,
             link: true,
             absolute: false,
+            configuration: None,
         });
         assert!(reply.ok, "{}", reply.json);
         let asm = app.doc.current_id();
@@ -2422,7 +2662,7 @@ mod tests {
                 PatternKind::Circular {
                     axis,
                     angle,
-                    count: 8,
+                    count: Scalar::new(8.0),
                     flip: false,
                 },
             );
@@ -2577,6 +2817,112 @@ mod tests {
         windows(&mut app);
         assert!(!app.windows.interference && !app.windows.bill_of_materials);
         assert!(app.windows.mass_properties);
+    }
+
+    #[test]
+    fn an_assemblys_configurations_and_a_components_configuration_in_the_application() {
+        use crate::configs_ui::ConfigAction;
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        // A part with two configurations, in an assembly.
+        for op in [
+            json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}),
+            json!({"op": "extrude", "sketch": "Sketch1", "depth": 6}),
+            json!({"op": "add_configuration", "name": "Thick"}),
+            json!({"op": "edit", "feature": "Extrude1", "depth": 20, "configurations": "this"}),
+            json!({"op": "configuration", "configuration": "Default"}),
+            json!({"op": "new", "assembly": true, "keep": true}),
+            json!({"op": "insert", "part": 1, "name": "Plate"}),
+        ] {
+            ok(&mut app, &ctx, op);
+        }
+        let plate = CompId(1);
+        app.selected_component = Some(plate);
+        draw(&mut app, &ctx);
+        // The configurations list is the assembly's: add, rename, derive, activate, delete.
+        app.apply_configs(vec![ConfigAction::Add]);
+        assert_eq!(app.doc.model.active_configuration().name, "Configuration2");
+        app.apply_configs(vec![ConfigAction::Rename {
+            from: "Configuration2".to_owned(),
+            to: "Tall".to_owned(),
+        }]);
+        // The component's configuration, from its properties, in the active one only.
+        app.change_component(
+            plate,
+            ComponentChange::Configuration(Some("Thick".to_owned())),
+        );
+        let shown = |app: &PeetApp| {
+            let a = app.doc.model.assembly().unwrap();
+            a.configuration_name(a.component(plate).unwrap())
+                .unwrap()
+                .to_owned()
+        };
+        assert_eq!(shown(&app), "Thick");
+        app.apply_configs(vec![ConfigAction::Derive("Tall".to_owned())]);
+        let derived = app.doc.model.active_configuration().clone();
+        assert!(derived.parent.is_some());
+        assert_eq!(shown(&app), "Thick");
+        draw(&mut app, &ctx);
+        app.apply_configs(vec![ConfigAction::Activate("Default".to_owned())]);
+        assert_eq!(shown(&app), "Default");
+        app.apply_configs(vec![ConfigAction::Delete("Tall".to_owned())]);
+        assert_eq!(
+            app.doc.model.configurations().len(),
+            1,
+            "with what was derived from it"
+        );
+        assert!(app.untranslated().is_empty(), "{:?}", app.untranslated());
+    }
+
+    #[test]
+    fn display_states_and_transparency_in_the_application() {
+        use crate::display_ui::DisplayAction;
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        for op in [
+            json!({"op": "new", "assembly": true, "discard": true}),
+            json!({"op": "insert", "sample": "chassis", "name": "Tray"}),
+            json!({"op": "insert", "sample": "cover", "name": "Lid", "at": [0, 0, 60]}),
+        ] {
+            ok(&mut app, &ctx, op);
+        }
+        let lid = CompId(2);
+        app.selected_component = Some(lid);
+        draw(&mut app, &ctx);
+        // The list: add two, rename one.
+        app.apply_display(vec![DisplayAction::Add]);
+        app.apply_display(vec![DisplayAction::Add]);
+        let names: Vec<String> = app
+            .doc
+            .model
+            .display_states()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(names, ["Display State-1", "Display State-2"]);
+        let second = app.doc.model.active_display_state().unwrap().id;
+        app.apply_display(vec![DisplayAction::Rename {
+            id: second,
+            to: "See inside".to_owned(),
+        }]);
+        // The lid made see-through in its properties, in the display state shown.
+        app.change_model("Change Transparency of Lid", None, |m| {
+            if let Some(c) = m.assembly_mut().and_then(|a| a.component_mut(lid)) {
+                c.transparency = 0.7;
+            }
+        });
+        draw(&mut app, &ctx);
+        let first = app.doc.model.display_states()[0].id;
+        app.apply_display(vec![DisplayAction::Activate(first)]);
+        assert_eq!(app.doc.placed[1].transparency, 0.0);
+        app.apply_display(vec![DisplayAction::Activate(second)]);
+        assert_eq!(app.doc.placed[1].transparency, 0.7);
+        app.apply_display(vec![DisplayAction::Link(true)]);
+        assert!(app.doc.model.display_states_linked());
+        app.apply_display(vec![DisplayAction::Delete(first)]);
+        assert_eq!(app.doc.model.display_states().len(), 1);
+        draw(&mut app, &ctx);
+        assert!(app.untranslated().is_empty(), "{:?}", app.untranslated());
     }
 
     #[test]

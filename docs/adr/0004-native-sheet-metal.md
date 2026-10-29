@@ -50,8 +50,11 @@ A sheet metal body carries its own definition, a **layout in flat-pattern coordi
   (checked by a property test over random flanges).
 - No booleans are used, so sheet metal is independent of the general boolean's
   robustness.
-- Cuts across bends are limited to straight edges parallel or square to the bend line.
-  Round holes across a bend are refused with a clear message.
+- An edge of a cut that crosses a bend parallel or square to the bend line folds to a
+  line or an arc. Any other (a slanted line, the rim of a round hole) folds to a curve
+  that is neither, so it is fitted with a freeform curve and the wall through the sheet
+  along it is a ruled freeform surface (it was refused until the kernel had freeform
+  geometry). The blank is unaffected: there the edge is the line or circle it was drawn as.
 - Corners are left open: two flanges whose bend zones meet are reported as an overlap.
   Closed corners, miters and hems (Phase 5) need new piece kinds, but no new machinery.
 - A solid feature (Extrude, Cut-Extrude) applied to a sheet body turns it into a plain

@@ -65,6 +65,11 @@ pub struct PickRequest {
     /// How far from the cursor to look for edges, in pixels (clamped to
     /// [`MAX_PICK_RADIUS_PX`]). Around 6 works well.
     pub radius_px: f32,
+    /// Pick through see-through objects ([`crate::ObjectDraw::opacity`] below 1): what is
+    /// opaque behind one is picked first, as SolidWorks selects through a transparent
+    /// component; a see-through object is picked where nothing opaque is. Otherwise
+    /// whatever is nearest is picked, see-through or not (SolidWorks' Shift-click).
+    pub through_transparent: bool,
 }
 
 /// One picked element.
@@ -605,6 +610,7 @@ mod tests {
             PickRequest {
                 cursor_px: cursor,
                 radius_px: radius,
+                through_transparent: true,
             },
             viewport,
             &vp,

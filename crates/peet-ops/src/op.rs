@@ -203,6 +203,15 @@ pub enum Query {
     /// One feature: its fields, and a sketch's contents.
     Feature(FeatureSel),
     Parameters,
+    /// The part's dimensions by address (`Width@Sketch1`): all, a feature's, or the one
+    /// called `name`.
+    Dimensions {
+        feature: Option<FeatureSel>,
+        name: Option<String>,
+        /// In an assembly: a component, whose part's dimensions are listed by their
+        /// address from the assembly.
+        component: Option<CompSel>,
+    },
     /// The configurations, which one is active, and what differs between them.
     Configurations,
     /// Bounds, volume, and flat size for sheet metal.
@@ -244,6 +253,8 @@ pub enum Query {
     Mates,
     /// The steps of an assembly's exploded view.
     ExplodeSteps,
+    /// The display states of an assembly.
+    DisplayStates,
     /// Where the components of an assembly run into each other: every pair, or those
     /// one component is in.
     Interference {
@@ -301,6 +312,30 @@ pub enum Op {
         name: String,
         value: Input,
         configurations: Option<Configs>,
+    },
+    /// Set a value by its name, as SolidWorks' equations and FabSys do: a dimension by its
+    /// address (`"Width@Sketch1"`, `"D1@LPattern2"`, `"depth@Extrude1"`), or a parameter.
+    /// `configurations` as for [`Op::Edit`] (a parameter: as for [`Op::SetParameter`]).
+    Set {
+        name: String,
+        /// `None` (null): no equation of the assembly sets a component's value there.
+        value: Option<Input>,
+        configurations: Option<Configs>,
+    },
+    /// Name a dimension of a feature (found by its name or field): `Width`, or for a value
+    /// of a feature that isn't a sketch a whole address (`D2@Sketch10`).
+    NameDimension {
+        feature: FeatureSel,
+        dimension: String,
+        name: String,
+    },
+    /// Change a sketch text's string or style (SolidWorks' `SetSketchText`). `text` is
+    /// its entity id; without one, the sketch's only text.
+    SetText {
+        sketch: FeatureSel,
+        text: Option<u32>,
+        string: Option<String>,
+        style: sketch::TextStyle,
     },
     /// Bind a user name to a persistent face reference.
     NameFace {
@@ -367,11 +402,13 @@ pub enum Op {
         configurations: Configs,
     },
     /// Add a configuration: a copy of another (the active one if absent), which becomes
-    /// the active one.
+    /// the active one. With `parent`, one derived from that configuration (SolidWorks'
+    /// derived configuration): it follows the parent where it has no value of its own.
     AddConfiguration {
         name: String,
         copy: Option<String>,
         comment: Option<String>,
+        parent: Option<String>,
     },
     /// Rename a configuration, or change its comment.
     EditConfiguration {
@@ -497,6 +534,10 @@ pub enum Op {
         link: bool,
         /// Keep the link as a full path, not relative to the assembly's folder.
         absolute: bool,
+        /// The configuration of the part it shows (SolidWorks' referenced configuration):
+        /// the part's active one if absent (or, for another instance of a component, the
+        /// configuration that component shows).
+        configuration: Option<String>,
     },
     /// Read the linked parts of an assembly from their files again.
     UpdateLinks,
@@ -512,10 +553,13 @@ pub enum Op {
     Unlink {
         part: crate::links::PartSel,
     },
-    /// Change a component of an assembly.
+    /// Change a component of an assembly. What can differ between the assembly's
+    /// configurations (suppression, being fixed, where it is, the part's configuration it
+    /// shows) changes in `configurations`: the active one if absent.
     Component {
         component: CompSel,
         change: ComponentChange,
+        configurations: Option<Configs>,
     },
     /// Replace the model of one of an assembly's parts: how a part that was opened from
     /// an assembly and edited is stored back. A script saves that part instead.
@@ -539,13 +583,23 @@ pub enum Op {
         b: MateEndSel,
         /// Two flat faces the same way round, instead of against each other.
         flip: Option<bool>,
+        /// Which way round the ends go (SolidWorks' alignment); `flip` is `aligned`.
+        align: Option<peet_model::Align>,
+        /// The distance or angle measured the other way (SolidWorks' flip dimension).
+        flip_dimension: Option<bool>,
+        /// Added suppressed: nothing is solved, nothing moves, until it is unsuppressed.
+        suppressed: bool,
         /// An automatic name (`Coincident1`) if absent.
         name: Option<String>,
     },
-    /// Change a mate of an assembly.
+    /// Change a mate of an assembly. Its suppression (the active configuration if
+    /// `configurations` is absent) and its values (if absent: the active configuration if
+    /// they already differ between the assembly's configurations, else all) can differ
+    /// between configurations.
     EditMate {
         mate: MateSel,
         change: MateChange,
+        configurations: Option<Configs>,
     },
     /// Copy components of an assembly in rows or round an axis.
     ComponentPattern {
@@ -559,6 +613,15 @@ pub enum Op {
     EditComponentPattern {
         pattern: crate::pattern::PatternSel,
         change: crate::pattern::PatternChange,
+    },
+    /// Cut components in an assembly with an extruded sketch (SolidWorks' assembly cut).
+    AssemblyCut {
+        spec: crate::cut::CutSpec,
+    },
+    /// Change an assembly cut.
+    EditAssemblyCut {
+        cut: crate::cut::CutSel,
+        change: crate::cut::CutChange,
     },
     /// Add a step to an assembly's exploded view: components shown moved by a distance.
     ExplodeStep {
@@ -577,12 +640,62 @@ pub enum Op {
     Explode {
         on: Option<bool>,
     },
+    /// Add a display state to an assembly (of `configuration` when they are linked).
+    AddDisplayState {
+        name: String,
+        configuration: Option<String>,
+    },
+    /// Rename or delete a display state.
+    EditDisplayState {
+        state: crate::display::DisplayStateSel,
+        change: crate::display::DisplayChange,
+    },
+    /// Show a display state. Like the configuration shown, not an undo step.
+    DisplayState {
+        state: crate::display::DisplayStateSel,
+    },
+    /// Link display states to configurations, or make them independent.
+    LinkDisplayStates {
+        on: bool,
+    },
+    /// Change how a component looks in some display states.
+    Look {
+        component: CompSel,
+        change: crate::display::LookChange,
+        display_states: crate::display::DisplayScope,
+    },
     /// Show every hidden component of an assembly.
     ShowAll,
     /// Show these components of an assembly and hide every other.
     Isolate {
         components: Vec<CompSel>,
     },
+    /// Set or clear the equation that suppresses a component of an assembly.
+    ComponentSuppression {
+        component: CompSel,
+        value: Option<String>,
+        /// Which of the assembly's configurations (left out: the active one if the
+        /// expression already differs between them, else all).
+        configurations: Option<Configs>,
+    },
+    /// Add a reference dimension to an assembly (or replace the one of that name).
+    ReferenceDimension {
+        a: crate::mate::MateEndSel,
+        b: crate::mate::MateEndSel,
+        /// `RD1`, `RD2`, … if absent.
+        name: Option<String>,
+    },
+    /// Delete a reference dimension of an assembly.
+    DeleteReference {
+        name: String,
+    },
+    /// Give a component a copy of its part of its own, called `name`.
+    MakeIndependent {
+        component: CompSel,
+        name: String,
+    },
+    /// In-context references: make, list, lock or break them.
+    InContext(crate::in_context::InContextOp),
     /// Open a component's part as a document of its own (see
     /// [`crate::apply_session`]): saving that document stores it back.
     OpenComponent {
@@ -626,6 +739,9 @@ impl Op {
             Self::Sketch { .. } => "sketch",
             Self::Draw { .. } => "draw",
             Self::SetDimension { .. } => "set_dimension",
+            Self::Set { .. } => "set",
+            Self::NameDimension { .. } => "name_dimension",
+            Self::SetText { .. } => "set_text",
             Self::NameFace { .. } => "name_face",
             Self::NameEdge { .. } => "name_edge",
             Self::DeleteName { .. } => "delete_name",
@@ -671,11 +787,23 @@ impl Op {
             Self::EditMate { change, .. } => change.word(),
             Self::ComponentPattern { .. } => "component_pattern",
             Self::EditComponentPattern { change, .. } => change.word(),
+            Self::AssemblyCut { .. } => "assembly_cut",
+            Self::EditAssemblyCut { change, .. } => change.word(),
             Self::ExplodeStep { .. } => "explode_step",
             Self::EditExplodeStep { change, .. } => change.word(),
             Self::Explode { .. } => "explode",
+            Self::AddDisplayState { .. } => "add_display_state",
+            Self::EditDisplayState { change, .. } => change.word(),
+            Self::DisplayState { .. } => "display_state",
+            Self::LinkDisplayStates { .. } => "link_display_states",
+            Self::Look { change, .. } => change.word(),
             Self::ShowAll => "show_all",
             Self::Isolate { .. } => "isolate",
+            Self::ComponentSuppression { .. } => "set_suppression_expression",
+            Self::ReferenceDimension { .. } => "reference_dimension",
+            Self::DeleteReference { .. } => "delete",
+            Self::MakeIndependent { .. } => "make_independent",
+            Self::InContext(op) => op.word(),
             Self::SetPart { .. } => "set_part",
             Self::OpenComponent { .. } => "open_component",
             Self::Undo => "undo",
@@ -686,6 +814,7 @@ impl Op {
                 Query::Features => "features",
                 Query::Feature(_) => "feature",
                 Query::Parameters => "parameters",
+                Query::Dimensions { .. } => "dimensions",
                 Query::Configurations => "configurations",
                 Query::Bodies => "bodies",
                 Query::Faces { .. } => "faces",
@@ -698,6 +827,7 @@ impl Op {
                 Query::Components => "components",
                 Query::Mates => "mates",
                 Query::ExplodeSteps => "explode_steps",
+                Query::DisplayStates => "display_states",
                 Query::Interference { .. } => "interference",
                 Query::Bom { .. } => "bom",
             },
@@ -806,6 +936,26 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
         "Change a sketch dimension (\"d1\") to a number or an expression, in some configurations.",
     ),
     (
+        "set",
+        "name (a dimension's address NAME@FEATURE, or a parameter), value, configurations (as for set_dimension and edit; a parameter: as for set_parameter)",
+        "Set a value by its name, as SolidWorks' equations and FabSys do: \"Width@Sketch1\", \"D1@LPattern2\", \"depth@Extrude1\", a moved body's mate \"D1@Distance2\", or a parameter (\"Base Height\"). As in SolidWorks, an address's case doesn't matter where only one dimension has it.",
+    ),
+    (
+        "name_dimension",
+        "feature, dimension (its name, or a feature's field), name",
+        "Name a dimension, so that it is NAME@FEATURE (\"Width@Sketch1\"). A value of a feature that isn't a sketch can take a whole address (\"D2@Sketch10\").",
+    ),
+    (
+        "dimensions",
+        "feature, name (an address: just that one)",
+        "The part's dimensions by address NAME@FEATURE, with their values (each configuration's where they differ).",
+    ),
+    (
+        "set_text",
+        "sketch, text (its id; left out: the sketch's only text), string, font, height, angle, width, spacing, align",
+        "Change a sketch text's string (as SolidWorks' SetSketchText does) or its style, and draw it again.",
+    ),
+    (
         "edit",
         "feature, then any of the feature's fields ('on' for a sketch: its plane), configurations (\"this\", \"all\", a name or a list of names: for numeric fields only; left out: this one for a value that already differs between configurations, else all)",
         "Change fields of a feature. Its numeric values can differ between configurations.",
@@ -843,12 +993,12 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "set_parameter",
         "name, value, configurations (\"this\" (default), \"all\", a name or a list of names)",
-        "Add or change a named value usable in every expression. A new one exists in every configuration.",
+        "Add or change a named value usable in every expression. A new one exists in every configuration. Its name is a word (\"width\") or, as SolidWorks' global variables, any text without '\"' or '@' (\"Base Height\"), which expressions quote: \"Base Height\" / 2.",
     ),
     (
         "add_configuration",
-        "name, copy (a configuration; default the active one), comment",
-        "Add a configuration, which starts as a copy and becomes the active one.",
+        "name, copy (a configuration; default the active one), comment, parent (a configuration to derive it from, in place of copy)",
+        "Add a configuration, which starts as a copy and becomes the active one. With parent, a derived configuration: it follows its parent where it has no value of its own.",
     ),
     (
         "edit_configuration",
@@ -858,7 +1008,7 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "delete_configuration",
         "configuration",
-        "Delete a configuration. A part keeps at least one.",
+        "Delete a configuration, with the configurations derived from it. A part keeps at least one.",
     ),
     (
         "configuration",
@@ -907,7 +1057,7 @@ pub(crate) const OTHER_OPS: &[(&str, &str, &str)] = &[
     (
         "edges",
         "body",
-        "The edges of a body (or all): their ends and the faces they join.",
+        "The edges of a body (or all): their ends and the faces they join, a round edge's centre, axis and radius, a straight edge's direction.",
     ),
     (
         "bend_table",
@@ -1026,10 +1176,22 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
     if let Some(found) = crate::pattern::parse(op, a) {
         return found;
     }
+    if let Some(found) = crate::cut::parse(op, a) {
+        return found;
+    }
     if let Some(found) = crate::explode::parse(op, a) {
         return found;
     }
+    if let Some(found) = crate::display::parse(op, a) {
+        return found;
+    }
     if let Some(found) = crate::mate::parse(op, a) {
+        return found;
+    }
+    if let Some(found) = crate::equations::parse(op, a) {
+        return found;
+    }
+    if let Some(found) = crate::in_context::parse(op, a) {
         return found;
     }
     if let Some(found) = crate::assembly::parse(op, a) {
@@ -1046,6 +1208,7 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             name: a.required("name", |v| text(v).map(str::to_owned))?,
             copy: a.string("copy")?,
             comment: a.string("comment")?,
+            parent: a.string("parent")?,
         },
         "edit_configuration" => Op::EditConfiguration {
             configuration: a.required("configuration", |v| text(v).map(str::to_owned))?,
@@ -1221,6 +1384,31 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             value: a.required("value", Input::parse)?,
             configurations: a.parsed("configurations", Configs::parse)?,
         },
+        "set" => Op::Set {
+            name: a.required("name", |v| text(v).map(str::to_owned))?,
+            value: match a.take_nullable("value") {
+                Some(Value::Null) => None,
+                Some(v) => Some(Input::parse(&v).map_err(|e| format!("value: {e}"))?),
+                None => return Err("'set' needs a 'value' field.".to_owned()),
+            },
+            configurations: a.parsed("configurations", Configs::parse)?,
+        },
+        "name_dimension" => Op::NameDimension {
+            feature: feature(a, "feature")?,
+            dimension: a.required("dimension", |v| text(v).map(str::to_owned))?,
+            name: a.required("name", |v| text(v).map(str::to_owned))?,
+        },
+        "dimensions" => Op::Query(Query::Dimensions {
+            feature: a.parsed("feature", FeatureSel::parse)?,
+            name: a.string("name")?,
+            component: None,
+        }),
+        "set_text" => Op::SetText {
+            sketch: feature(a, "sketch")?,
+            text: a.parsed("text", integer)?,
+            string: a.string("string")?,
+            style: sketch::TextStyle::parse(a)?,
+        },
         "edit" => {
             let target = feature(a, "feature")?;
             let configurations = a.parsed("configurations", Configs::parse)?;
@@ -1358,6 +1546,13 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             all.extend(crate::links::LINK_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::explode::EXPLODE_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::pattern::PATTERN_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::cut::CUT_OPS.iter().map(|(n, ..)| *n));
+            all.extend(crate::equations::EQUATION_OPS.iter().map(|(_, n, ..)| *n));
+            all.extend(
+                crate::in_context::IN_CONTEXT_OPS
+                    .iter()
+                    .map(|(_, n, ..)| *n),
+            );
             all.sort_unstable();
             all.dedup();
             return Err(format!(

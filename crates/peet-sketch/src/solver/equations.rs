@@ -461,6 +461,88 @@ impl Ctx<'_> {
         }
     }
 
+    /// The point slots an entity of a pattern is placed by: a point's own, a line's ends, a
+    /// circle's centre.
+    fn placed_by(&self, id: EntityId) -> Vec<u32> {
+        match *self.geometry(id) {
+            Geometry::Point { .. } => vec![self.map.p(id)],
+            Geometry::Line { start, end } => vec![self.map.p(start), self.map.p(end)],
+            Geometry::Circle { center, .. } => vec![self.map.p(center)],
+            _ => unreachable!("validated as a point, line or circle"),
+        }
+    }
+
+    /// `other`'s points in the order of `seed`'s: a line copied may run either way.
+    fn paired(&self, seed: &[u32], other: Vec<u32>) -> Vec<u32> {
+        if let ([s0, s1], [o0, o1]) = (seed, other.as_slice()) {
+            let p = |s: u32| self.pos(s);
+            let straight = ((p(*o0) - p(*s0)) - (p(*o1) - p(*s1))).length();
+            let crossed = ((p(*o1) - p(*s0)) - (p(*o0) - p(*s1))).length();
+            if crossed < straight {
+                return vec![*o1, *o0];
+            }
+        }
+        other
+    }
+
+    /// `copy` is `seed` moved `k` times as far as `first` is, `k` the nearest whole number
+    /// to what it is now; with `copy` the same as `first`, `first` is `seed` moved.
+    fn patterned(&self, seed: EntityId, copy: EntityId, first: EntityId, out: &mut Vec<Eq>) {
+        let owner = self.owner;
+        let s = self.placed_by(seed);
+        let f = self.paired(&s, self.placed_by(first));
+        let circle = matches!(self.geometry(seed), Geometry::Circle { .. });
+        let same_size = |out: &mut Vec<Eq>| {
+            if circle {
+                out.push(
+                    Eq::new(EqKind::Zero, &[], owner)
+                        .minus_radius(self.radius(seed), -1.0)
+                        .minus_radius(self.radius(copy), 1.0),
+                );
+            }
+        };
+        if copy == first {
+            // Each point moved as the first one is
+            for i in 1..s.len() {
+                for k in 0..2 {
+                    out.push(Eq::linear(
+                        &[
+                            (f[i] + k, 1.0),
+                            (s[i] + k, -1.0),
+                            (f[0] + k, -1.0),
+                            (s[0] + k, 1.0),
+                        ],
+                        0.0,
+                        owner,
+                    ));
+                }
+            }
+            same_size(out);
+            return;
+        }
+        let c = self.paired(&s, self.placed_by(copy));
+        let step = self.pos(f[0]) - self.pos(s[0]);
+        let moved = self.pos(c[0]) - self.pos(s[0]);
+        let n = (moved.dot(step) / step.length_squared().max(TINY)).round();
+        for i in 0..s.len() {
+            for k in 0..2 {
+                // c_i - s_i = n (f_0 - s_0)
+                let terms: Vec<(u32, f64)> = if i == 0 {
+                    vec![(c[0] + k, 1.0), (s[0] + k, n - 1.0), (f[0] + k, -n)]
+                } else {
+                    vec![
+                        (c[i] + k, 1.0),
+                        (s[i] + k, -1.0),
+                        (f[0] + k, -n),
+                        (s[0] + k, n),
+                    ]
+                };
+                out.push(Eq::linear(&terms, 0.0, owner));
+            }
+        }
+        same_size(out);
+    }
+
     fn emit(&self, kind: &ConstraintKind, value: f64, contact: u32, out: &mut Vec<Eq>) {
         use ConstraintKind as K;
         let owner = self.owner;
@@ -559,6 +641,23 @@ impl Ctx<'_> {
                     );
                 }
             }
+            K::Midpoint { point, line } if !self.is_line(line) => {
+                // On the arc, and on the line through its centre square to its chord. Of the
+                // two places that leaves, the solver keeps the one the point is nearer.
+                let Geometry::Arc { center, start, end } = *self.geometry(line) else {
+                    unreachable!("validated as a line or an arc")
+                };
+                let (c, q, s, e) = (p(center), p(point), p(start), p(end));
+                out.push(
+                    Eq::new(EqKind::Dist, &[c, c + 1, q, q + 1], owner)
+                        .minus_radius(self.radius(line), 1.0),
+                );
+                out.push(Eq::new(
+                    EqKind::SymPerp,
+                    &[c, c + 1, q, q + 1, s, s + 1, e, e + 1],
+                    owner,
+                ));
+            }
             K::Midpoint { point, line } => {
                 let (a, b) = self.line_pts(line);
                 let q = p(point);
@@ -615,6 +714,101 @@ impl Ctx<'_> {
                     .minus_radius(self.radius(c), -1.0)
                     .with_k0(value * 0.5),
             ),
+            K::Patterned { seed, copy, first } => self.patterned(seed, copy, first, out),
+            K::Offset(a, b) if self.is_line(a) => {
+                // Parallel, and the first one's start the value from the other, on its side
+                out.push(self.four(EqKind::Parallel, a, b));
+                let (start, _) = self.line_pts(a);
+                let side = sign(self.signed_dist(start, b));
+                out.push(self.line_dist(start, b).with_k0(side * value));
+            }
+            K::Offset(a, b) => {
+                // Concentric, the radii the value apart, the bigger staying the bigger
+                self.coincident(self.center(a), self.center(b), out);
+                let t = sign(self.radius_value(a) - self.radius_value(b));
+                out.push(
+                    Eq::new(EqKind::Zero, &[], owner)
+                        .minus_radius(self.radius(a), -1.0)
+                        .minus_radius(self.radius(b), 1.0)
+                        .with_k0(t * value),
+                );
+            }
+            K::SideDistance { a, b, sides, along } => {
+                // D + ka·ra + kb·rb, with the sides and signs where things are now
+                let ends = [a, b];
+                let at = |id| {
+                    if self.is_point(id) {
+                        p(id)
+                    } else {
+                        self.center(id)
+                    }
+                };
+                let rad = |id| {
+                    if self.is_point(id) {
+                        0.0
+                    } else {
+                        self.radius_value(id)
+                    }
+                };
+                let line = if self.is_line(a) {
+                    Some((a, b))
+                } else if self.is_line(b) {
+                    Some((b, a))
+                } else {
+                    None
+                };
+                let (centers, radii, circular, off) = match line {
+                    Some((l, c)) => {
+                        let r = rad(c);
+                        let first = self.is_line(a);
+                        let off = self.signed_dist(at(c), l);
+                        let cc = self.pos(at(c));
+                        (
+                            [cc, cc],
+                            if first { [0.0, r] } else { [r, 0.0] },
+                            if first {
+                                [false, !self.is_point(c)]
+                            } else {
+                                [!self.is_point(c), false]
+                            },
+                            Some(off),
+                        )
+                    }
+                    None => (
+                        [self.pos(at(a)), self.pos(at(b))],
+                        [rad(a), rad(b)],
+                        [!self.is_point(a), !self.is_point(b)],
+                        None,
+                    ),
+                };
+                let (t, _) = crate::sketch::side_terms(centers, radii, circular, sides, along, off);
+                let core = if let Some((l, c)) = line {
+                    // The circle's centre from the line, on its side; the whole is turned
+                    // round with it (the same equation, negated).
+                    self.line_dist(at(c), l)
+                } else {
+                    let (pa, pb) = (at(a), at(b));
+                    match along {
+                        crate::Along::Straight => {
+                            Eq::new(EqKind::Dist, &[pa, pa + 1, pb, pb + 1], owner)
+                        }
+                        crate::Along::Horizontal | crate::Along::Vertical => {
+                            let k = u32::from(along == crate::Along::Vertical);
+                            Eq::linear(&[(pb + k, t.toward), (pa + k, -t.toward)], 0.0, owner)
+                        }
+                    }
+                };
+                // For a line, the residual is `toward ·` the measure: everything else is
+                // multiplied by it too.
+                let turn = if off.is_some() { t.toward } else { 1.0 };
+                let mut eq = core;
+                for (&coef, &end) in t.coef.iter().zip(ends.iter()) {
+                    if coef != 0.0 && !self.is_point(end) && !self.is_line(end) {
+                        eq = eq.minus_radius(self.radius(end), -turn * coef);
+                    }
+                }
+                out.push(eq.with_k0(turn * t.sign * value));
+            }
             K::Angle(l1, l2) => {
                 let (a1, b1) = self.line_pts(l1);
                 let (a2, b2) = self.line_pts(l2);

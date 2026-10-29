@@ -74,6 +74,10 @@ pub struct Placed {
     pub path: Vec<CompId>,
     /// The colour of the part the body belongs to.
     pub color: Option<[u8; 3]>,
+    /// How transparent it is drawn: 0 opaque, 1 not seen (see [`peet_model::Instance`]).
+    pub transparency: f32,
+    /// Hidden inside a sub-assembly (see [`peet_model::Instance::hidden`]).
+    pub hidden: bool,
 }
 
 impl Placed {
@@ -212,6 +216,8 @@ impl Document {
                         shown: Frame::WORLD,
                         path: Vec::new(),
                         color,
+                        transparency: 0.0,
+                        hidden: false,
                     })
                     .collect();
                 doc.bodies = bodies
@@ -273,6 +279,8 @@ impl Document {
     /// Rebuilds the model and refreshes the bodies (tessellating only changed ones).
     pub fn rebuild(&mut self) {
         self.pending_rebuild = false;
+        // An assembly is the context of its parts' in-context references by its file's name.
+        self.engine.set_context(Some(self.title()));
         self.engine.regenerate(&mut self.model);
         self.refresh_views();
         // Rebuilds write solved sketches back, which can change the hash.
@@ -306,12 +314,16 @@ impl Document {
                 shown: Frame::WORLD,
                 path: Vec::new(),
                 color,
+                transparency: 0.0,
+                hidden: false,
             })
             .chain(built.instances.iter().map(|i| Placed {
                 frame: i.frame,
                 shown: i.frame,
                 path: i.path.clone(),
                 color: i.color,
+                transparency: i.transparency,
+                hidden: i.hidden,
             }))
             .collect();
         self.bodies = built
@@ -391,6 +403,9 @@ impl Document {
 
     /// Whether a shown body is of a component that is hidden.
     pub fn is_hidden(&self, body: usize) -> bool {
+        if self.placed.get(body).is_some_and(|p| p.hidden) {
+            return true;
+        }
         let component = self.placed.get(body).and_then(Placed::component);
         match (self.model.assembly(), component) {
             (Some(assembly), Some(c)) => assembly.component(c).is_some_and(|c| !c.visible),
@@ -496,6 +511,17 @@ impl Document {
     /// changes to the part, and returns to the configuration each was made in.
     pub fn activate_configuration(&mut self, id: peet_model::ConfigId) -> bool {
         if !self.model.activate_configuration(id) {
+            return false;
+        }
+        self.history.seal();
+        self.rebuild();
+        true
+    }
+
+    /// Shows a display state of an assembly: like the configuration shown, not an undo
+    /// step. Returns whether that changed anything.
+    pub fn activate_display_state(&mut self, id: peet_model::DisplayStateId) -> bool {
+        if !self.model.activate_display_state(id) {
             return false;
         }
         self.history.seal();
@@ -653,6 +679,7 @@ impl Document {
                     .map(|first| first.to_uppercase().chain(c).collect())
                     .unwrap_or(d)
             }
+            peet_model::PlaneRef::External(x) => format!("-> {}", x.describe()),
         }
     }
 
@@ -741,7 +768,7 @@ impl Document {
         self.bodies
             .iter()
             .zip(&self.placed)
-            .filter(|(_, p)| !p.component().is_some_and(|c| hidden.contains(&c)))
+            .filter(|(_, p)| !p.hidden && !p.component().is_some_and(|c| hidden.contains(&c)))
             .map(|(b, p)| placed_bounds(&b.bounds(), &p.shown))
             .fold(Aabb::EMPTY, |a, b| a.union(&b))
     }
@@ -786,6 +813,17 @@ pub fn sketch_bounds(plane: &Plane, sketch: &Sketch) -> Aabb {
             Some(c) => c.bounds(),
             None => match e.geometry {
                 peet_sketch::Geometry::Point { pos } => (pos, pos),
+                // A text's glyph outlines.
+                peet_sketch::Geometry::Text { .. } => {
+                    let curves = sketch.text_curves(id);
+                    if curves.is_empty() {
+                        continue;
+                    }
+                    curves.iter().map(|c| c.bounds()).fold(
+                        (peet_math::DVec2::INFINITY, peet_math::DVec2::NEG_INFINITY),
+                        |(lo, hi), (a, b)| (lo.min(a), hi.max(b)),
+                    )
+                }
                 _ => continue,
             },
         };

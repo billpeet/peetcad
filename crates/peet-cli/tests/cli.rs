@@ -147,6 +147,52 @@ fn a_part_is_built_changed_asked_about_and_exported() {
 }
 
 #[test]
+fn an_inserted_part_is_mirrored_and_follows_its_file_when_asked() {
+    let dir = Folder::new("insert");
+    let right = dir.path("bracket-rh.peet");
+    let left = dir.path("bracket-lh.peet");
+    let made = peet(&[
+        "op",
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [10, 0], "to": [50, 20]}]}"#,
+        r#"{"op": "extrude", "sketch": "Sketch1", "depth": 5}"#,
+        "--new",
+        "-f",
+        &right,
+    ]);
+    assert_eq!(made.code, OK, "{}", made.err);
+    let inserted = peet(&[
+        "op",
+        &format!(
+            r#"{{"op": "insert_part", "file": {}, "mirror": "right", "name": "LH"}}"#,
+            json!(right)
+        ),
+        r#"{"op": "bodies"}"#,
+        "--new",
+        "-f",
+        &left,
+    ]);
+    assert_eq!(inserted.code, OK, "{}", inserted.out);
+    let body = &inserted.replies[1]["bodies"][0];
+    assert_eq!(body["min"], json!([-50.0, 0.0, 0.0]));
+    assert_eq!(body["volume_mm3"], json!(4000.0));
+    // The original changes: the mirror image follows once it is read again.
+    assert_eq!(
+        peet(&["edit", "feature=Extrude1", "depth=8", "-f", &right]).code,
+        OK
+    );
+    let updated = peet(&[
+        "op",
+        r#"{"op": "update_links"}"#,
+        r#"{"op": "bodies"}"#,
+        "-f",
+        &left,
+    ]);
+    assert_eq!(updated.code, OK, "{}", updated.out);
+    assert_eq!(updated.replies[0]["updated"], json!(["LH"]));
+    assert_eq!(updated.replies[1]["bodies"][0]["max"][2], json!(8.0));
+}
+
+#[test]
 fn a_failed_operation_stops_the_run_and_nothing_is_saved() {
     let dir = Folder::new("fail");
     let part = dir.path("panel.peet");
@@ -730,6 +776,70 @@ fn what_the_assemblies_skill_says_about_showing_and_exploding_is_true() {
 }
 
 #[test]
+fn what_the_assemblies_skill_says_about_display_states_is_true() {
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "assemblies")
+        .map(|(_, text)| *text)
+        .unwrap();
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"add_display_state\""))
+        .expect("the script with display states");
+    let script = format!("{script}{{\"op\": \"components\"}}\n");
+    let ran = peet_with(&["run", "-q"], &script);
+    assert_eq!(ran.code, OK, "{}", ran.out);
+    let listed = |nth: usize| {
+        ran.replies
+            .iter()
+            .filter(|r| r["op"] == "display_states")
+            .nth(nth)
+            .expect("a display_states reply")
+            .clone()
+    };
+    // Shown "Working": the lid hidden there, the tray blue, nothing see-through.
+    let first = listed(0);
+    assert_eq!(first["shown"], "Working");
+    assert_eq!(first["linked"], false);
+    let working = &first["display_states"][0];
+    assert_eq!(working["name"], "Working");
+    assert_eq!(
+        working["looks"],
+        json!([
+            {"component": "Tray", "color": "#3070c0"},
+            {"component": "Lid", "hidden": true}
+        ])
+    );
+    // "See inside" kept the lid see-through.
+    assert_eq!(
+        first["display_states"][1]["looks"],
+        json!([{"component": "Lid", "transparency": 0.7}])
+    );
+    // Linked: the new configuration has display states of its own, and the default
+    // configuration shows the one it showed.
+    let last = listed(1);
+    assert_eq!(last["linked"], true);
+    assert_eq!(last["shown"], "Working");
+    let states = last["display_states"].as_array().unwrap();
+    let long: Vec<&str> = states
+        .iter()
+        .filter(|s| s["configuration"] == "Long")
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(long, ["Display State-1", "Long, red"]);
+    let red = states.iter().find(|s| s["name"] == "Long, red").unwrap();
+    assert!(
+        red["looks"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"component": "Tray", "color": "#c82828"}))
+    );
+    let components = ran.replies.last().unwrap()["components"].clone();
+    assert_eq!(components[0]["color"], "#3070c0");
+    assert_eq!(components[1]["hidden"], true);
+}
+
+#[test]
 fn what_the_assemblies_skill_says_about_patterns_is_true() {
     let skill = peet_cli::SKILLS
         .iter()
@@ -738,7 +848,7 @@ fn what_the_assemblies_skill_says_about_patterns_is_true() {
         .unwrap();
     let script = scripts(skill)
         .into_iter()
-        .find(|s| s.contains("\"component_pattern\""))
+        .find(|s| s.contains("\"name\": \"Screws\""))
         .expect("the script that patterns a component");
     // "place ... on a copy fails and says which pattern made it and its original."
     let script = format!(
@@ -803,6 +913,67 @@ fn what_the_assemblies_skill_says_about_patterns_is_true() {
     assert_eq!(made.replies[1]["components"].as_array().unwrap().len(), 13);
     let again = peet(&["interference", "-f", &file]);
     assert_eq!(again.replies[0]["clear"], true);
+}
+
+#[test]
+fn what_the_assemblies_skill_says_about_nested_plane_mates_is_true() {
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "assemblies")
+        .map(|(_, text)| *text)
+        .unwrap();
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"name\": \"MatePlane\""))
+        .expect("the script that mates nested reference planes");
+    let ran = peet_with(&["run", "--strict", "-q"], &script);
+    assert_eq!(ran.code, OK, "{}{}", ran.out, ran.err);
+    let mate = ran.replies.iter().find_map(|r| r.get("mate")).unwrap();
+    assert_eq!(mate["status"], "ok");
+    assert_eq!(mate["b"]["path"], json!(["Stand", "Plate"]));
+    assert_eq!(mate["b"]["plane"], "MatePlane");
+    let listed = ran.replies.last().unwrap();
+    assert_eq!(listed["components"][1]["at"], json!([80.0, 0.0, -90.0]));
+    assert_eq!(listed["components"][2]["at"], json!([80.0, 0.0, -40.0]));
+    assert_eq!(
+        listed["patterns"][0]["direction"]["path"],
+        json!(["Stand", "Plate"])
+    );
+    assert_eq!(listed["patterns"][0]["status"], "ok");
+}
+
+#[test]
+fn what_the_assemblies_skill_says_about_width_modes_is_true() {
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "assemblies")
+        .map(|(_, text)| *text)
+        .unwrap();
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"type\": \"width\""))
+        .expect("the script using all width modes");
+    let ran = peet_with(&["run", "--strict", "-q"], &script);
+    assert_eq!(ran.code, OK, "{}{}", ran.out, ran.err);
+    let positions: Vec<_> = ran
+        .replies
+        .iter()
+        .filter_map(|r| r["components"][1]["at"][0].as_f64())
+        .collect();
+    assert_eq!(positions, vec![10.0, 0.0, 4.0, 5.0, 15.0, 10.0]);
+    let modes: Vec<_> = ran
+        .replies
+        .iter()
+        .filter_map(|r| r.get("mate"))
+        .map(|m| {
+            assert_eq!(m["status"], "ok");
+            m["mode"].as_str().unwrap()
+        })
+        .collect();
+    assert_eq!(
+        modes,
+        vec!["centered", "free", "dimension", "percent", "centered"]
+    );
 }
 
 #[test]
@@ -1042,6 +1213,25 @@ fn what_the_skills_say_about_operations_is_true() {
     assert_eq!(ran.replies[1]["feature"]["status"], "ok");
     assert!(ran.replies[2]["error"].as_str().unwrap().contains("d9"));
 
+    // A relation the others already imply is accepted, as in SolidWorks: the sketch is
+    // as defined as it was, and the relation is marked redundant.
+    let ran = peet_with(
+        &["run", "-q"],
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [80, 50], "as": "r"}, {"type": "coincident", "of": ["r.bottom.start", "origin"]}, {"type": "length", "of": ["r.bottom"], "value": 80}, {"type": "length", "of": ["r.left"], "value": 50}, {"type": "equal", "of": ["r.bottom", "r.top"]}]}
+{"op": "feature", "feature": "Sketch1"}
+"#,
+    );
+    assert_eq!(ran.code, OK, "{}", ran.err);
+    assert_eq!(ran.replies[0]["definition"], "fully_defined");
+    assert_eq!(ran.replies[0]["created"][0]["status"], "ok");
+    let relations = ran.replies[1]["relations"].as_array().unwrap();
+    let redundant: Vec<&Value> = relations
+        .iter()
+        .filter(|r| r["redundant"] == true)
+        .collect();
+    assert_eq!(redundant.len(), 1, "{relations:?}");
+    assert_eq!(redundant[0]["type"], "Equal");
+
     // A flange on an edge of the top face goes up; on one of the bottom face, down.
     let ran = peet_with(
         &["run", "-q"],
@@ -1078,6 +1268,86 @@ fn what_the_skills_say_about_operations_is_true() {
     let draw = peet(&["ops", "draw"]);
     assert!(draw.out.contains("draw items") && draw.out.contains("polyline"));
     assert_eq!(peet(&["ops", "selectors"]).code, OK);
+}
+
+#[test]
+fn what_the_sheet_metal_skill_says_about_unfold_and_fold_is_true() {
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "sheet-metal")
+        .unwrap()
+        .1;
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"unfold\""))
+        .expect("a script with an unfold");
+    let ran = peet_with(&["run", "-q"], &script);
+    assert_eq!(ran.code, OK, "{}", ran.err);
+    let volume = |r: &Value| r["total"]["volume_mm3"].as_f64().unwrap();
+    let flat = ran.replies.iter().find(|r| r["op"] == "bodies").unwrap();
+    assert!(
+        (flat["bodies"][0]["min"][2].as_f64().unwrap()).abs() < 1e-9,
+        "{flat}"
+    );
+    assert!((flat["bodies"][0]["max"][2].as_f64().unwrap() - 2.0).abs() < 1e-9);
+    let masses: Vec<f64> = ran
+        .replies
+        .iter()
+        .filter(|r| r["op"] == "mass")
+        .map(volume)
+        .collect();
+    // The part before the cut is 22856.637 mm³
+    let flat_cut = 22856.637 - masses[0];
+    let straight_cut = 22856.637 - masses[1];
+    assert!((flat_cut - 404.0).abs() < 5.0, "{flat_cut}");
+    assert!((straight_cut - 543.0).abs() < 5.0, "{straight_cut}");
+
+    // A fold with nothing laid flat fails; so does an unfold fixed on a bend
+    let ran = peet_with(
+        &["run", "-q", "--keep-going"],
+        r#"{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
+{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}
+{"op": "edge_flange", "name": "Wall", "length": 15, "edge": {"between": [[0, 0, 2], [60, 0, 2]]}}
+{"op": "fold"}
+{"op": "faces"}
+"#,
+    );
+    assert_eq!(ran.replies[3]["created"][0]["status"], "failed");
+    let bend = ran.replies[4]["faces"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|f| f["made_by"][0]["side"] == "bend")
+        .unwrap()["index"]
+        .clone();
+    let ran = peet_with(
+        &["run", "-q", "--keep-going"],
+        &format!(
+            r#"{{"op": "sketch", "on": "top", "draw": [{{"type": "rectangle", "from": [0, 0], "to": [60, 40]}}]}}
+{{"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}}
+{{"op": "edge_flange", "name": "Wall", "length": 15, "edge": {{"between": [[0, 0, 2], [60, 0, 2]]}}}}
+{{"op": "unfold", "fixed": {{"body": 0, "index": {bend}}}}}
+{{"op": "unfold", "fixed": {{"feature": "Base-Flange1", "side": "top"}}, "bends": [{{"body": 0, "index": {bend}}}]}}
+{{"op": "fold"}}
+{{"op": "unfold"}}
+{{"op": "bodies"}}
+"#
+        ),
+    );
+    // Left out, the fixed face is the largest: the plate stays, the wall lies flat beside it
+    assert_eq!(ran.replies[6]["created"][0]["status"], "ok");
+    assert!(ran.replies[7]["bodies"][0]["max"][2].as_f64().unwrap() <= 2.0 + 1e-9);
+    assert!(ran.replies[7]["bodies"][0]["min"][2].as_f64().unwrap() >= -1e-9);
+    assert_eq!(
+        ran.replies[3]["created"][0]["status"], "failed",
+        "{}",
+        ran.replies[3]
+    );
+    assert_eq!(
+        ran.replies[4]["created"][0]["status"], "ok",
+        "{}",
+        ran.replies[4]
+    );
 }
 
 #[test]

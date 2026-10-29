@@ -167,8 +167,13 @@ pub enum AppCommand {
     },
     /// Open a window or a panel.
     Window(Window),
-    /// Open a sketch for editing in the application.
-    EditSketch(FeatureSel),
+    /// Open a sketch for editing in the application. With `component` (in an assembly), a
+    /// sketch of that component's part, edited in context: in the assembly, among the
+    /// other components.
+    EditSketch {
+        sketch: FeatureSel,
+        component: Option<crate::CompSel>,
+    },
     /// Finish editing the open sketch, writing it to the part.
     ExitSketch,
     /// Pick a tool of the sketch editor.
@@ -184,7 +189,7 @@ impl AppCommand {
             Self::ZoomToFit => "zoom_to_fit",
             Self::Toggle { .. } => "toggle",
             Self::Window(_) => "window",
-            Self::EditSketch(_) => "edit_sketch",
+            Self::EditSketch { .. } => "edit_sketch",
             Self::ExitSketch => "exit_sketch",
             Self::Tool(_) => "tool",
             Self::Quit => "quit",
@@ -203,9 +208,12 @@ impl AppCommand {
                 })
             })(),
             "window" => a.required("open", Window::parse).map(Self::Window),
-            "edit_sketch" => a
-                .required("sketch", FeatureSel::parse)
-                .map(Self::EditSketch),
+            "edit_sketch" => (|| {
+                Ok(Self::EditSketch {
+                    sketch: a.required("sketch", FeatureSel::parse)?,
+                    component: a.parsed("component", crate::CompSel::parse)?,
+                })
+            })(),
             "exit_sketch" => Ok(Self::ExitSketch),
             "tool" => a.required("tool", SketchTool::parse).map(Self::Tool),
             "quit" => Ok(Self::Quit),
@@ -239,7 +247,8 @@ pub(crate) fn app_ops() -> Vec<(&'static str, String, &'static str)> {
         ),
         (
             "edit_sketch",
-            "sketch".to_owned(),
+            "sketch, component (in an assembly: edit that component's part's sketch in context)"
+                .to_owned(),
             "Open a sketch for editing in the application.",
         ),
         (

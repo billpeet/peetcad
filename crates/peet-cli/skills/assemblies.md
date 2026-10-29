@@ -1,6 +1,6 @@
 ---
 name: assemblies
-description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
+description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten; a point kept on a path), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis, counts and spacings from expressions), assembly cuts (cutting components in the assembly only, with a sketch on a plane or face and edges converted from components), configurations (a component showing one of its part's configurations, and an assembly's own configurations: left and right hinged, with components and mates suppressed, configured and placed per configuration, equations that differ per configuration, derived configurations), equations that size and suppress components from the assembly (SolidWorks addresses like Height@Sketch1@Door-1, reference dimensions, making a component independent), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating, colouring and making components see-through, display states (named looks of the assembly, linked to configurations or not), exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
 ---
 
 # Assemblies
@@ -26,7 +26,7 @@ A file becomes an assembly by its script starting with `{"op": "new", "assembly"
 `insert` takes the part from one of:
 
 - `path`: a `.peet` file. A part, or an assembly (it becomes a sub-assembly: one rigid
-  component).
+  component, unless it is made flexible: see "Flexible sub-assemblies").
 - `component`: one more instance of that component's part. Use this, not `path` again,
   after changing the part inside the assembly.
 - `part`: a document that is open in the same run (`peet skills core`, several
@@ -80,12 +80,15 @@ rough placement decides which of several possible positions is taken.
 {"op": "mates"}
 ```
 
-- **An end** is `{"component": NAME, "face": SELECTOR}` (or `"edge"`, or `"vertex"`).
+- **An end** is `{"component": NAME, "face": SELECTOR}` (or `"edge"`, `"vertex"`, or `"plane"`).
   The selector is in the **part's own coordinates**, as if the part were open by itself,
   not where the component is in the assembly (`peet skills selectors`). To see a part's
   faces, `open_component` it and run `faces`.
 - **What an end stands for:** a flat face is a plane; a round face (a hole, a shaft) or
-  a round edge is its axis; a straight edge is a line; a vertex is a point.
+  a round edge is its axis; a straight edge is a line; a vertex is a point. A round edge
+  `coincident` with a plane is the exception: the circle lies in the plane (the edge of
+  a disc flat on a face), as SolidWorks has it. `"origin": true` (with or without a
+  `component`) and sketch entities are ends too: see below.
 - **Types:**
   - `coincident`: two planes against each other, two lines in line, two points
     together, or a point or line in a plane.
@@ -100,6 +103,19 @@ rough placement decides which of several possible positions is taken.
   `"flip": true` puts them the same way round instead (two side faces flush). If a
   component ends up inside another or upside down, this is what to change:
   `{"op": "edit_mate", "mate": "Coincident1", "flip": true}`.
+- **`align`** says which way round in SolidWorks' terms: `aligned` (what `flip` does),
+  `anti_aligned` or `closest` (whichever way the components are nearer now). Give `flip`
+  or `align`, not both. Two axes (a pin in a hole) go whichever way is nearer unless
+  `align` says: `aligned` points the axes alike, `anti_aligned` apart. An axis's
+  direction is the `axis` that `faces` or `edges` gives for it, in its part.
+- **`flip_dimension`** measures a distance (or an angle) the other way. A distance from
+  a flat face goes out along its outward normal, from the first end if it is a flat face:
+  the other end is in front of the face. With `"flip_dimension": true` it is behind the
+  face, the same distance away. This is SolidWorks' "Flip dimension", and independent of
+  `flip`.
+- **`"suppressed": true`** adds the mate without solving it: nothing moves. It is solved
+  when unsuppressed (`{"op": "suppress", "mate": NAME, "on": false}`), as any mate is,
+  and fails then if it can't hold. Use it for a mate that should hold only sometimes.
 - **Read the reply.** `mate.status` is `ok` or `failed` with a `message`; `moved` lists
   the components the mate moved, with where they are now (`at`, `min`, `max`);
   `freedom` is how many ways the assembly's components can still move (0: fully held).
@@ -114,10 +130,334 @@ rough placement decides which of several possible positions is taken.
   value, its `flip` or its faces (delete it and add another), or delete the one it
   contradicts. A message about a face that "is gone" means the part was changed: delete
   the mate and add it again on the part as it is now.
-- `edit_mate` changes a `distance`, an `angle` or `flip`. `rename`, `suppress` and
+- `edit_mate` changes a `distance`, an `angle`, `flip` or `align`, or `flip_dimension`. `rename`, `suppress` and
   `delete` take `mate`. Deleting a component deletes its mates.
 - A mate's `distance` or `angle` can be an expression over the assembly's parameters
   (`set_parameter`): the components follow when the parameter changes.
+- `set` on an assembly takes a mate's value by SolidWorks' name for it, `D1@` the mate's
+  name (`D1@Distance1`, in any case), as FabSys sets it, or an assembly parameter by its
+  name; with `configurations`, in some of the assembly's configurations (see
+  "Configurations"). A dimension of a component's part is set from the assembly too: see
+  "Equations" below.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 6}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Base"}
+{"op": "insert", "part": 1, "name": "Lid", "at": [0, 0, 30]}
+{"op": "mate", "type": "distance", "distance": 10, "a": {"component": "Base", "face": {"normal": [0, 0, 1]}}, "b": {"component": "Lid", "face": {"normal": [0, 0, -1]}}}
+{"op": "set", "name": "D1@Distance1", "value": 20}
+{"op": "components"}
+{"op": "edit_mate", "mate": "Distance1", "flip_dimension": true}
+{"op": "components"}
+{"op": "insert", "part": 1, "name": "Side", "at": [80, 0, 0]}
+{"op": "mate", "type": "coincident", "align": "aligned", "suppressed": true, "a": {"component": "Base", "face": {"normal": [1, 0, 0]}}, "b": {"component": "Side", "face": {"normal": [1, 0, 0]}}}
+{"op": "suppress", "mate": "Coincident1", "on": false}
+{"op": "mates"}
+```
+
+The lid's underside goes 20 above the base's top, then 20 below it once the dimension is
+flipped. `Coincident1` moves nothing until it is unsuppressed; then `Side`'s right face is
+flush with the base's.
+
+### Reference planes and parts inside sub-assemblies
+
+Use a plane when the mate locates a part by its datum rather than a solid face.
+`plane` takes the same selector as a sketch's `on`. Create named reference planes in
+the part before inserting it. A plane mate follows edits to that plane and keeps its
+reference when the plane is renamed. Standard planes work even in a part with no bodies.
+
+To reach a part inside a sub-assembly, give `component` a nonempty array from the
+assembly's own component down to the part. Each entry is a name or id in that level's
+assembly. Geometry selectors still use the final part's own coordinates.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 30]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "plane", "from": "top", "distance": 7, "name": "MatePlane"}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Plate", "at": [0, 0, 100]}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Base"}
+{"op": "insert", "part": 2, "name": "Stand", "at": [80, 0, 50]}
+{"op": "mate", "type": "distance", "distance": 10, "flip": true, "a": {"component": "Base", "plane": "MatePlane"}, "b": {"component": ["Stand", "Plate"], "plane": "MatePlane"}}
+{"op": "component_pattern", "components": ["Stand"], "type": "linear", "direction": {"component": ["Stand", "Plate"], "plane": "top"}, "spacing": 50, "count": 2}
+{"op": "mates"}
+{"op": "components"}
+```
+
+The example moves `Stand` to Z = -90. Its plate stays 100 above the sub-assembly's
+origin, leaving 10 between the two mating planes. The sub-assembly moves as one rigid
+component. Two ends inside the same rigid top-level component cannot be joined here. Add
+that mate inside the sub-assembly instead. `fasten` holds the top-level components
+as wholes even when its ends name nested paths.
+
+`mates` reports a nested end's full `path` as names and a plane end's current `plane`
+name. An invalid path fails before adding a mate and names the level that could not
+be found. A stored mate fails if its plane or nested component is deleted or suppressed.
+Restore it, or delete the mate and select another end.
+
+### Flexible sub-assemblies
+
+A sub-assembly is **rigid** by default: it moves as one thing, posed as its own file has
+it. Make it **flexible** when something in it has to move in this assembly: a hinge that
+this assembly's mates open, a slide, a door stay. This is SolidWorks' "Solve as:
+Flexible".
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 5}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 25}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-10, -10], "to": [70, 10]}, {"type": "circle", "center": [0, 0], "radius": 5}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 6}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Post"}
+{"op": "insert", "part": 2, "name": "Arm"}
+{"op": "mate", "type": "concentric", "a": {"component": "Post", "face": {"at": [5, 0, 10]}}, "b": {"component": "Arm", "face": {"at": [5, 0, 3]}}}
+{"op": "mate", "type": "coincident", "flip": true, "a": {"component": "Post", "face": {"normal": [0, 0, -1]}}, "b": {"component": "Arm", "face": {"normal": [0, 0, -1]}}}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-50, -50], "to": [50, 50]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 4, "name": "Base"}
+{"op": "insert", "part": 3, "name": "Hinge", "at": [0, 0, 5], "fixed": true}
+{"op": "flexible", "component": "Hinge"}
+{"op": "place", "component": ["Hinge", "Arm"], "rotate": {"axis": "z", "angle": 60}}
+{"op": "mate", "type": "parallel", "align": "closest", "a": {"component": "Base", "face": {"normal": [0, 1, 0]}}, "b": {"component": ["Hinge", "Arm"], "face": {"normal": [1, 0, 0]}}}
+{"op": "components"}
+```
+
+Document 3 is a hinge: the post fixed, the arm free to turn round it. In the assembly
+the arm is turned to 60° and then mated to turn to 90°, along Y.
+
+- **`flexible`** (`component`, `on`, default true) solves the sub-assembly's own mates
+  here, together with this assembly's. What is fixed in the sub-assembly moves with it;
+  each component that is not fixed there moves as those mates and this assembly's let
+  it. `"on": false` makes it rigid again, posed as its file has it.
+- **Mate into it** with a component path (`["Hinge", "Arm"]`), as for any part inside a
+  sub-assembly. Then a mate that a rigid sub-assembly would fail ("can't hold") can
+  turn the arm instead.
+- **Each instance is posed on its own**: two instances of one hinge can be open to
+  different angles. The sub-assembly's file is not changed.
+- **`place`** takes a path to a component that moves in a flexible sub-assembly:
+  `{"op": "place", "component": ["Hinge", "Arm"], "rotate": ...}` (`at` and `rotate` in
+  this assembly's coordinates). Use it to start the arm near where it should end, so the
+  mates take it there and not to the other of two solutions. A component fixed in its
+  sub-assembly, or one in a rigid sub-assembly, is refused: place the sub-assembly.
+- **Read `components`**: a flexible component has `"flexible": true` and `moving`: each
+  component that moves in it, by its `path` below it, with where it is (`at`,
+  `rotate`) and its own `freedom`. The assembly's `freedom` counts them too: the
+  hinge above has 1 until the parallel mate holds the arm.
+- A flexible sub-assembly in a flexible one is taken apart too: reach it with a longer
+  path (`["Door", "Hinge", "Arm"]`). Make the inner one flexible in its own assembly
+  (the door's), and the outer one here.
+- A pattern's copy of a flexible sub-assembly is placed as one thing.
+- When the sub-assembly's mates and this assembly's can't all hold, the sub-assembly's
+  win and this assembly's mate fails, as a hinge can't come apart.
+
+### Width mates
+
+Use `width` to locate a tab between two faces without creating midpoint planes in
+each part. Select parallel, distinct planar faces or reference planes for each pair.
+The width pair is `a`, the tab is `b`. Each pair is usually on one top-level component
+(the ends may use different nested paths within it); see below for a pair on two. A single tab end
+can be a cylindrical face or an edge used as an axis. A cylinder uses its diameter for
+clearance; an edge used as an axis has zero thickness.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 30]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [20, 30]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Width"}
+{"op": "insert", "part": 2, "name": "Tab", "at": [60, 0, 0]}
+{"op": "mate", "type": "width", "name": "Locate tab", "a": [{"component": "Width", "face": {"normal": [-1, 0, 0]}}, {"component": "Width", "face": {"normal": [1, 0, 0]}}], "b": [{"component": "Tab", "face": {"normal": [-1, 0, 0]}}, {"component": "Tab", "face": {"normal": [1, 0, 0]}}]}
+{"op": "components"}
+{"op": "edit_mate", "mate": "Locate tab", "mode": "free"}
+{"op": "place", "component": "Tab", "at": [-30, 0, 0]}
+{"op": "components"}
+{"op": "edit_mate", "mate": "Locate tab", "mode": "dimension", "distance": 4}
+{"op": "components"}
+{"op": "set_parameter", "name": "ratio", "value": 25}
+{"op": "edit_mate", "mate": "Locate tab", "mode": "percent", "percent": "ratio"}
+{"op": "components"}
+{"op": "set_parameter", "name": "ratio", "value": 75}
+{"op": "components"}
+{"op": "edit_mate", "mate": "Locate tab", "mode": "centered"}
+{"op": "components"}
+{"op": "mates"}
+```
+
+The tab's X positions in the example are 10, 0, 4, 5, 15, then 10. The available
+clearance is the width span minus the tab span, here 20. `centered` divides it equally.
+`free` leaves sliding across the gap available; `place` and `drag` stop at either end.
+`dimension` sets the surface gap from the first width end to the nearest tab surface.
+`percent` divides the available clearance: 0 touches the first width end, 100 touches
+the second, and 50 centers the tab. Reversing the width pair reverses the side used by
+Dimension and Percent. Values can be expressions over the assembly's parameters.
+
+A planar tab keeps three freedoms in Centered, Dimension and Percent, or four in
+Free when clearance is positive. It can slide along the mating planes and rotate
+about their normal. A cylindrical tab keeps its axis in the midplane and its spin
+free. Width mates keep the nearest orientation and do not take `flip`, `align` or
+`flip_dimension`.
+
+Centred, the tab may be wider than the width pair: their midplanes coincide, as in
+SolidWorks. Nonparallel or coincident pairs, a tab wider than the gap in another mode,
+an out-of-range distance or a percent outside 0 to 100 fail the mate with a message. Correct the geometry or value;
+the stored mate recovers on rebuild. Drafted and angular width pairs are not supported.
+Changing either selected face or plane recomputes the midpoint and clearance. If an
+end is gone, restore it or delete the mate and select new ends. `mates` lists both ends
+of each pair and the current mode and value. The properties panel can edit the mode
+and value too.
+
+A pair may also be on **two components** (a tab centred between two separate side
+plates, or a gap between two parts that a third fills). Give the four ends as before;
+each face then counts by where it is along the first width face's normal, and a tab
+face is kept parallel to that face. Here the tab goes to X = 25, 17.5, then 14:
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [10, 30]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [20, 30]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Left"}
+{"op": "insert", "part": 1, "name": "Right", "at": [60, 0, 0], "fixed": true}
+{"op": "insert", "part": 2, "name": "Tab", "at": [15, 0, 0]}
+{"op": "mate", "type": "width", "a": [{"component": "Left", "face": {"normal": [1, 0, 0]}}, {"component": "Right", "face": {"normal": [-1, 0, 0]}}], "b": [{"component": "Tab", "face": {"normal": [-1, 0, 0]}}, {"component": "Tab", "face": {"normal": [1, 0, 0]}}]}
+{"op": "components"}
+{"op": "edit_mate", "mate": "Width1", "mode": "percent", "percent": 25}
+{"op": "edit_mate", "mate": "Width1", "mode": "dimension", "distance": 4}
+{"op": "components"}
+```
+
+### The assembly's own planes and origin, origins and sketches
+
+- **An end with no `component`** is the assembly's own standard plane or origin:
+  `{"plane": "top"}` (or `front`, `right`), `{"origin": true}`. They don't move, so a
+  part mated to them is placed in the assembly as SolidWorks places a part on the
+  assembly's planes. A mate needs a component at one end at least.
+- **`{"component": C, "origin": true}`** is the part's origin (with a path, the origin
+  of the part or sub-assembly the path ends at). Two origins `coincident` put the points
+  together and leave the part free to turn: add plane mates for its axes.
+- **`{"component": C, "sketch": "Sketch1", "entity": 13}`** is a point, line, circle or
+  arc of a sketch of the part: a point, a line, or a round edge (its axis, or in a plane
+  for `coincident` with one). Find the entity's id with
+  `{"op": "feature", "feature": "Sketch1"}` in the part (`open_component`, or before
+  inserting it); a line's ends and a circle's centre are points too (`start`, `end`,
+  `center`). It follows the sketch when it is edited.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 20]}, {"type": "point", "at": [10, 5]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 4}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 5}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 10}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Block", "at": [3, 4, 50], "fixed": false}
+{"op": "mate", "type": "coincident", "a": {"plane": "top"}, "b": {"component": "Block", "face": {"normal": [0, 0, -1]}}}
+{"op": "mate", "type": "coincident", "a": {"origin": true}, "b": {"component": "Block", "origin": true}}
+{"op": "insert", "part": 2, "name": "Disc", "at": [70, 3, 20]}
+{"op": "mate", "type": "coincident", "a": {"component": "Block", "face": {"normal": [0, 0, 1]}}, "b": {"component": "Disc", "edge": {"at": [-5, 0, 0]}}}
+{"op": "mate", "type": "coincident", "a": {"component": "Block", "sketch": "Sketch1", "entity": 13}, "b": {"component": "Disc", "face": {"at": [5, 0, 5]}}}
+{"op": "components"}
+```
+
+The block's underside goes onto the assembly's top plane with its origin at the
+assembly's; the disc's bottom edge lies on the block's top and its axis goes through the
+sketch point (10, 5).
+
+### Slot, limit and symmetric mates
+
+- **`slot`**: a pin in a straight slot. `a` and `b` are a face of the slot (one of its
+  round ends or a flat side) and the pin's round face or edge, either way round. The pin
+  stays parallel to the slot's ends, on the line between their axes. `mode`: `free` (the
+  default: anywhere between the ends, so `drag` slides it), `centered`, `dimension` with
+  `distance` from the first end's axis (the round end you picked, else the one the part
+  lists first; `flip_dimension` measures from the other), or `percent`. It fails if
+  neither end is a face of a straight slot (two round ends of one radius joined by flat
+  sides): pick a face of the slot itself, not of the plate around it.
+- **`limit_angle`** with `min` and `max` (degrees), and **`limit_distance`** with `min`
+  and `max` (lengths): the angle or distance, measured as `angle` and `distance` measure
+  it (`flip_dimension` too), kept anywhere between them. Nothing else is held, so add the
+  hinge or slide they limit. A component outside the range is brought just inside it.
+- **`symmetric`**: `a` and `b` (two planes, points or lines) mirror images in `plane`,
+  an end like any other (`{"plane": "right"}` for the assembly's). Both ends on one
+  component centre it on the plane: two opposite faces of a part about the assembly's
+  planes. The plane must be on one of the two components, a fixed one, or the
+  assembly; it fails otherwise.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [80, 40]}, {"type": "slot", "from": [20, 20], "to": [60, 20], "radius": 4}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "circle", "center": [0, 0], "radius": 3}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 20}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Base"}
+{"op": "insert", "part": 2, "name": "Pin", "at": [30, 25, -5]}
+{"op": "mate", "type": "slot", "a": {"component": "Base", "face": {"at": [40, 16, 2.5]}}, "b": {"component": "Pin", "face": {"at": [3, 0, 10]}}}
+{"op": "edit_mate", "mate": "Slot1", "mode": "percent", "percent": 75}
+{"op": "insert", "part": 1, "name": "Lid", "at": [0, 0, 30]}
+{"op": "mate", "type": "symmetric", "a": {"component": "Lid", "face": {"normal": [-1, 0, 0]}}, "b": {"component": "Lid", "face": {"normal": [1, 0, 0]}}, "plane": {"plane": "right"}}
+{"op": "mate", "type": "concentric", "a": {"component": "Base", "edge": {"at": [40, 0, 5]}}, "b": {"component": "Lid", "edge": {"at": [40, 0, 0]}}}
+{"op": "mate", "type": "limit_angle", "min": 10, "max": 60, "a": {"component": "Base", "face": {"normal": [0, 0, 1]}}, "b": {"component": "Lid", "face": {"normal": [0, 0, 1]}}}
+{"op": "components"}
+{"op": "mates"}
+```
+
+The pin goes to X = 50, three quarters along the slot. The lid is centred on the
+assembly's right plane, hinged on the base's front top edge, and opened to between
+10° and 60°.
+
+### Path mates
+
+**`path`** keeps a point of one component on a path of another: a stay's pin in a curved
+track, a slider on a rail that bends. `a` is the point (a vertex, a sketch point, or
+`"origin": true`); `b` is the path, one end or a list of them joined end to end, all on one
+component: straight and round edges, or a sketch's lines, arcs and circles (sketch the
+track's centreline in the part and use that). The path starts at the first piece's end away
+from the others (a path of one piece runs the way it was drawn).
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "sketch", "on": "top", "name": "Track", "draw": [{"type": "line", "from": [10, 20], "to": [60, 20]}, {"type": "arc", "center": [60, 40], "start": [60, 20], "end": [80, 40]}]}
+{"op": "feature", "feature": "Track"}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [-3, -2], "to": [12, 2]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 4}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Plate"}
+{"op": "insert", "part": 2, "name": "Shoe", "at": [30, 25, 0]}
+{"op": "mate", "type": "path", "a": {"component": "Shoe", "origin": true}, "b": [{"component": "Plate", "sketch": "Track", "entity": 1}, {"component": "Plate", "sketch": "Track", "entity": 4}]}
+{"op": "edit_mate", "mate": "PathMate1", "mode": "dimension", "distance": 20}
+{"op": "edit_mate", "mate": "PathMate1", "mode": "percent", "percent": 80}
+{"op": "components"}
+{"op": "mates"}
+```
+
+The shoe's origin goes onto the track at (30, 20), then 20 along it, then 80% of the way:
+round the bend. (The track's line is entity 1 and its arc 4: `feature` lists them.)
+
+- **Where along it:** `mode` `free` (the default: anywhere on the path, so `drag` slides it,
+  stopping at each joint between pieces), `dimension` with `distance` from the path's start
+  (`flip_dimension` measures from its end), `percent`, or `centered`. `edit_mate` changes
+  them.
+- **Which way it faces:** the point's component turns freely unless `follow` (`"x"`, `"y"`
+  or `"z"`: that axis of its own coordinates kept along the path, either way round:
+  SolidWorks' pitch and yaw "follow path") and `roll` (`{"axis": "z", "up": END}`: that axis
+  kept along a direction: a flat face's or plane's normal, a straight edge, an axis;
+  SolidWorks' "up vector") say. Both: the component is held but for its way along the path.
+- It fails if the path's pieces don't join end to end, aren't all on one component, or are
+  splines; or if `a` isn't a point. A distance longer than the path fails with its length.
+- `follow` and `roll` are given when the mate is added: to change them, delete the mate and
+  add it again.
 
 ## Posing what the mates leave free
 
@@ -181,6 +521,8 @@ else that repeats: **mate the original once, and the copies are in place**.
   coordinates as for a mate. Take it from a component when the pattern should follow
   that component: bolts round a housing use the housing's bore, so they stay on its
   bolt circle wherever the housing goes.
+- A component pattern's direction also accepts `plane` for its normal and a nested
+  component path, using the same selectors as a mate end.
 - **The copies are components** of the original's part: `components` lists them (with
   `"pattern": name`), the bill of materials counts them, and they are weighed,
   checked for interference and exported. A copy can be hidden, coloured, renamed or
@@ -196,11 +538,179 @@ else that repeats: **mate the original once, and the copies are in place**.
 - A pattern whose direction can't be found (the face it was taken from is gone, the
   component is suppressed) is not a failed operation: it is listed under `failures`
   with the reason, and its copies stay where they are.
+- **A count or spacing from an expression**, as SolidWorks' equations drive a component
+  pattern: `count` takes an expression, and `set` takes a pattern's values by SolidWorks'
+  names, `D1@PATTERN` (the count; `D2` the second direction's) and `D3@PATTERN` (the
+  spacing; `D4` the second's; a circular pattern's angle is `D3`). The expression is
+  worked out at every rebuild, and copies are made or removed as the count changes.
+  Expressions read the values by the same addresses. A count must work out to a whole
+  number; one that doesn't is refused when set, and leaves the pattern failed (its copies
+  as they were) when a later change makes it so.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [1200, 40], "as": "r"}, {"type": "coincident", "of": ["r.bottom.start", "origin"]}, {"type": "length", "of": ["r.bottom"], "value": 1200, "name": "Length"}, {"type": "length", "of": ["r.left"], "value": 40}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 2}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [20, 40]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 20}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Tray-1", "fixed": true}
+{"op": "insert", "part": 2, "name": "Bracket-1", "at": [0, 0, 2], "fixed": true}
+{"op": "component_pattern", "components": ["Bracket-1"], "type": "linear", "direction": "x", "spacing": 590, "count": "iif(\"Length@Sketch1@Tray-1\" > 1100, 3, 2)", "name": "Brackets"}
+{"op": "set", "name": "D3@Brackets", "value": "(\"Length@Sketch1@Tray-1\" - 20) / (\"D1@Brackets\" - 1)"}
+{"op": "set", "name": "Length@Sketch1@Tray-1", "value": 900}
+{"op": "components"}
+```
+
+  The tray made 900 long leaves two brackets, 880 apart.
 - `{"op": "open_sample", "sample": "assembly"}` opens a finished example: the chassis,
   a cover, the housing on the cover with six bolts (a circular pattern round the
   housing's bore) and four screws (a linear pattern along the chassis's walls), every
   component held, with an exploded view. The parts are samples too: `chassis`,
   `cover`, `housing`, `bolt`, `screw`.
+
+## Assembly cuts
+
+An assembly cut is SolidWorks' cut made in an assembly: an extruded sketch that removes
+material from **the components in the assembly only**. Their parts, and every other
+assembly that uses them, are unchanged (`open_component` shows the part whole). Use it
+for holes drilled through parts once they are put together. To change the part itself,
+cut it in the part.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Base", "fixed": true}
+{"op": "insert", "part": 1, "name": "Cover", "at": [0, 0, 5]}
+{"op": "assembly_cut", "on": "top", "draw": [{"type": "circle", "center": [50, 30], "radius": 10}], "end": "through_all", "flip": true, "components": ["Cover"]}
+{"op": "assembly_cut", "on": {"component": "Cover", "face": {"normal": [0, 0, 1]}}, "convert": [{"component": "Base", "edge": {"at": [100, 30, 5]}}], "draw": [{"type": "rectangle", "from": [0, 0], "to": [20, 10]}], "depth": 2, "name": "Notch"}
+{"op": "mass"}
+{"op": "components"}
+```
+
+The cover has a hole through it and a notch 2 deep in its top; the base is whole.
+
+- **What it lies on.** `on` is the assembly's own plane (`"top"`, `"front"`, `"right"`),
+  a flat face or a plane of a component (`{"component": ..., "face": ...}`), which the
+  sketch then follows when the component moves, or a plane at a place
+  (`{"origin": [x, y, z], "normal": [x, y, z], "x": [x, y, z]}`). `draw` is as for
+  `sketch`, in the plane's coordinates.
+- **Converted edges.** `convert` lists components' edges (`{"component": name or path,
+  "edge": selector}`) taken into the sketch where they are seen on its plane, as
+  SolidWorks' Convert Entities: they follow the components at every rebuild. A circle
+  converted from a bolt hole cuts that hole on through the parts it is bolted to. The
+  reply's `converted` gives each one's sketch `entity`.
+- **Which way, how far.** A cut goes against the plane's normal (into the face it is on);
+  `flip` turns it. `end` is `blind` (with `depth`), `mid_plane` or `through_all`.
+- **Scope.** Left out, it cuts every component it reaches (SolidWorks' feature scope
+  with every component); `components` limits it to those. A sub-assembly in the scope
+  is cut through all its parts.
+- **It cuts nothing?** Its `status` is `warning` with why: check the sketch, `flip`, the
+  depth and the scope. A cut whose plane or converted edge is gone fails, and the
+  components are whole until it is fixed.
+- The cut bodies are what is drawn, weighed (`mass`), checked for `interference` and
+  exported. Mates are solved on the parts as they are: mate to the part's own faces.
+- `edit_assembly_cut` (`cut`, and any of `on`, `draw` and `convert` (added), `end`,
+  `depth`, `flip`, `flip_side`, `components` (`null`: every one), `suppressed`);
+  `rename` and `delete` take `cut`. `components` lists the cuts under `cuts`.
+
+## In-context references
+
+A part's sketch can follow another component's geometry in the assembly: SolidWorks'
+in-context reference (a sketch related to, or converting, an edge of another part while
+the part is edited in the assembly). Use it when a part's size or holes come from where
+its neighbours are: a cover as wide as the plate it sits on, holes where a hinge's holes
+are. Where the size is a number both parts share, use an equation instead (`set` with a
+component's address): it doesn't tie the part to one assembly.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 20]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 2}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Plate", "fixed": true}
+{"op": "insert", "part": 2, "name": "Cover", "at": [0, 0, 5], "fixed": true}
+{"op": "in_context", "component": "Cover", "sketch": "Sketch1", "entity": 4, "from": {"component": "Plate", "edge": {"at": [100, 30, 5]}}}
+{"op": "place", "component": "Plate", "at": [20, 0, 0]}
+{"op": "external_references"}
+{"op": "lock_references", "component": "Cover"}
+{"op": "place", "component": "Plate", "at": [40, 0, 0]}
+{"op": "lock_references", "component": "Cover", "on": false}
+{"op": "break_references", "component": "Cover"}
+{"op": "components"}
+```
+
+The cover's right side (line 4 of its sketch) is the plate's right edge: the cover is
+100 wide, and 120 once the plate moves 20 along. Locked, it stays 120 while the plate
+moves on; unlocked, it catches up (140); broken, it stays 140 whatever the plate does.
+
+- **What it needs.** `component` is the part whose sketch follows (a component of this
+  assembly, or a path to a part in a sub-assembly), `sketch` one of its part's sketches,
+  and `from` what it follows: an end as
+  a mate's on *another* component, in that component's part's coordinates (`edge`,
+  `face`, `vertex`, `plane`, `{"sketch", "entity"}`, `origin`; a path for a part in a
+  sub-assembly). What it is seen as on the sketch's plane is held there: a point, a
+  line, a circle or arc parallel to the sketch, the line a circle square to it covers,
+  or the line a plane cuts it in. A tilted circle is refused.
+- **New or existing entity.** Left out, `entity` adds a fixed construction entity
+  (`construction: false` for a converted one that is part of the profile): relate or
+  dimension the sketch to it with `open_component` and the sketch operations (a hole 10
+  from another part's edge stays 10 from it wherever the edge goes). (In a running PeetCAD,
+  `edit_sketch` with `component` opens the sketch in the assembly for the user instead.) With `entity`, that
+  entity of the sketch is the one that follows (it must be of the kind it is seen as):
+  the quickest way to make an edge of a profile follow another part.
+- **What updates it.** The assembly it was made in (by its file name; saving the
+  assembly under a new name keeps it the context) and the component it was made for. At each rebuild the mates are solved, then the followed geometry is
+  put into the part and the part rebuilt, and the mates solved again until nothing
+  moves. The part changes for every instance of it and every assembly that uses it, as
+  a SolidWorks part does. A linked part is written when the assembly is saved
+  (`parts_written`).
+- **Anywhere else it keeps its last values**: the part opened on its own, in another
+  assembly, or another instance of the part. `external_references` says so:
+  `out_of_context`. In its context it is `in_context`; `dangling` (with `why`) when what
+  it follows is gone or suppressed: restore it, or `break_references`.
+- **`lock_references`** (`component`, `feature`, `on`) keeps them where they are in
+  their context too (SolidWorks' Lock); `"on": false` unlocks, and they catch up.
+  **`break_references`** turns them into plain fixed geometry for good (SolidWorks'
+  Break): use it when the part is to be used elsewhere on its own.
+- **A feature's plane** follows another component's flat face (or a plane) with `feature`
+  in place of `sketch`: a sketch sits on the face, a reference plane (offset or angled) is
+  made from it, an extrude or cut runs up to it (its end becomes "up to"). For "offset from
+  a face", make a plane offset from the followed one and run up to that. A followed sketch
+  plane keeps the sketch's place and side on it: only how far and which way the face is
+  matter. `break_references` leaves such a plane where it is for good (`broken`).
+- **The assembly's own planes and origin** can be followed too: `from` with no
+  `component`, `{"plane": "front"}` or `{"origin": true}` (SolidWorks relates a part's
+  sketch to the assembly's Front Plane the same way).
+- **A part inside a sub-assembly** follows too. Made in the sub-assembly (its file is the
+  context), it follows whenever the sub-assembly rebuilds, also inside a bigger assembly,
+  which rebuilds its sub-assemblies first: `external_references` there lists it with the
+  sub-assembly's status. Made in the top assembly, give `component` as a path,
+  `["Sub-1", "Cover-1"]`; it follows in the top assembly only. Either way the part changes
+  for every instance of it.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 20]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 2}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Plate", "fixed": true}
+{"op": "insert", "part": 2, "name": "Post", "at": [0, 0, -10], "fixed": true}
+{"op": "in_context", "component": "Post", "feature": "Extrude1", "from": {"component": "Plate", "face": {"normal": [0, 0, 1]}}}
+{"op": "in_context", "component": "Post", "sketch": "Sketch1", "entity": 10, "from": {"plane": "right"}}
+{"op": "place", "component": "Plate", "at": [0, 0, 20]}
+{"op": "external_references", "component": "Post"}
+{"op": "break_references", "component": "Post"}
+```
+
+The post runs up to the plate's top face, 15 tall, then 35 once the plate is 20 higher;
+its left side (line 10) stays on the assembly's right plane. Broken, both stay where they
+are.
 
 ## Changing components
 
@@ -218,6 +728,7 @@ None of these moves a component or changes a mate: they are about what is seen.
 {"op": "insert", "component": "Base", "at": [0, 0, 40], "name": "Top"}
 {"op": "insert", "sample": "housing", "name": "Bearing", "at": [60, 40, 80]}
 {"op": "set_color", "component": "Top", "color": "#c82828"}
+{"op": "set_transparency", "component": "Top", "transparency": 0.6}
 {"op": "isolate", "components": ["Bearing"]}
 {"op": "show_all"}
 {"op": "explode_step", "components": ["Top", "Bearing"], "by": [0, 0, 60]}
@@ -235,6 +746,13 @@ None of these moves a component or changes a mate: they are about what is seen.
   colour: use it to tell instances of one part apart. `"color": null` goes back to the
   part's. Without `component`, `set_color` is the part's own colour, set in the part's
   document (`open_component`), and it reaches every instance.
+- **`set_transparency`** makes a component see-through, from 0 (opaque) to 1 (not seen
+  at all): what is behind it shows through. In the application a click on it picks what
+  is opaque behind it, as SolidWorks does; Shift-click picks the see-through component.
+  A sub-assembly's transparency goes for everything in it. `components` gives a
+  component's `transparency` when it has one.
+- `show`, `isolate`, `show_all`, `set_color` and `set_transparency` change the display
+  state shown, if the assembly has display states (next section).
 - **An exploded view is a list of steps**, stored in the assembly. `explode_step` names
   components and how far they go (`by`, along the assembly's axes, in its units). A
   component in several steps is moved by their sum, so pull a group away first and then
@@ -250,6 +768,252 @@ None of these moves a component or changes a mate: they are about what is seen.
   `rename` and `delete` take `explode_step` in place of `feature`. Deleting a component
   takes it out of its steps, and a step left with none goes too.
 - `explode` with no steps fails: add one first.
+
+## Display states
+
+A display state (SolidWorks' display state) is a named look of the assembly: each
+component shown or hidden, coloured and see-through as it has it. It holds nothing else:
+suppression, the part's configuration a component shows and where it is belong to the
+assembly's configurations.
+
+```jsonl
+{"op": "new", "assembly": true}
+{"op": "insert", "sample": "chassis", "name": "Tray"}
+{"op": "insert", "sample": "cover", "name": "Lid", "at": [0, 0, 60]}
+{"op": "add_display_state", "name": "Working"}
+{"op": "add_display_state", "name": "See inside"}
+{"op": "set_transparency", "component": "Lid", "transparency": 0.7}
+{"op": "set_color", "component": "Tray", "color": "#3070c0", "display_states": "Working"}
+{"op": "show", "component": "Lid", "on": false, "display_states": ["Working"]}
+{"op": "display_state", "display_state": "Working"}
+{"op": "display_states"}
+{"op": "link_display_states"}
+{"op": "add_configuration", "name": "Long"}
+{"op": "add_display_state", "name": "Long, red"}
+{"op": "set_color", "component": "Tray", "color": "#c82828"}
+{"op": "configuration", "configuration": "Default"}
+{"op": "display_states"}
+```
+
+- **Until one is added, there are none**, and a component's look is simply its own.
+  `add_display_state` makes one that starts as the components look now and shows it, so
+  the first one names the look as it is; add a second before changing anything.
+- **The components hold the display state shown.** `show`, `isolate`, `show_all`,
+  `set_color` and `set_transparency` change it. Given `display_states` (a name, a list, or
+  `"all"`), `show`, `set_color` and `set_transparency` change those instead, and the
+  components stay as they are.
+- **`display_state` shows one**: every component takes its look there. Like
+  `configuration`, it is not an undo step. `display_states` lists them: which is `shown`,
+  and for each, under `looks`, every component that is hidden, coloured or see-through
+  in it.
+- **Linked or not.** `link_display_states` (`on`, default true) links them to
+  configurations, as SolidWorks does by default: each configuration has display states of
+  its own, and showing a configuration shows the display state it last showed. A
+  configuration with none gets one (`Display State-1`) when it is first shown, as the
+  components look then. Linking gives every display state to the active configuration;
+  unlinking (`"on": false`) makes every one available in every configuration and keeps the
+  one shown. When linked, `add_display_state` takes `configuration` to add one to another
+  configuration (shown there if it is that configuration's first), and names are each
+  configuration's own: a name is looked for in the active configuration first.
+- `rename` and `delete` take `display_state` in place of `feature`. Each configuration
+  (or, unlinked, the assembly) keeps one: deleting the last fails. Deleting a
+  configuration deletes its display states; deleting a component forgets its looks.
+- A component in a display state that says nothing of it is shown, in its part's colour,
+  opaque: a component inserted later is shown in every display state.
+- A sub-assembly is drawn in the display state its own document shows: what is hidden
+  there is hidden in the assembly too.
+- A part has no display states: its look is its colour (`set_color` without
+  `component`).
+
+## Equations: sizing and suppressing components from the assembly
+
+An assembly reads and sets its components' dimensions as SolidWorks' assembly equations
+and FabSys do. Use it when one part's size follows another's (a shield 50 narrower than
+its door), when a component is there only at some sizes (a third hinge on a tall door),
+or to set a part's size while building the assembly.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [800, 40], "as": "r"}, {"type": "coincident", "of": ["r.bottom.start", "origin"]}, {"type": "length", "of": ["r.bottom"], "value": 800, "name": "Width"}, {"type": "length", "of": ["r.left"], "value": 40, "name": "Height"}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 2}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [700, 30], "as": "r"}, {"type": "coincident", "of": ["r.bottom.start", "origin"]}, {"type": "length", "of": ["r.bottom"], "value": 700, "name": "Width"}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 2}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Door-1"}
+{"op": "insert", "part": 2, "name": "Shield-1", "at": [0, 0, 20]}
+{"op": "insert", "part": 2, "name": "Stiffener-1", "at": [0, 0, 40]}
+{"op": "make_independent", "component": "Stiffener-1", "name": "Stiffener"}
+{"op": "set", "name": "Height@Sketch1@Door-1", "value": 1600}
+{"op": "set", "name": "Width@Sketch1@Shield-1", "value": "\"Width@Sketch1@Door-1\" - 50"}
+{"op": "set_suppression_expression", "component": "Stiffener-1", "value": "iif(\"Height@Sketch1@Door-1\" > 1500, 0, 1)"}
+{"op": "reference_dimension", "a": {"component": "Door-1", "face": {"normal": [0, 0, 1]}}, "b": {"component": "Shield-1", "face": {"normal": [0, 0, -1]}}}
+{"op": "set_parameter", "name": "gap", "value": "\"RD1@Annotations\""}
+{"op": "suppress", "feature": "Extrude1@Stiffener-1"}
+{"op": "suppress", "feature": "Extrude1@Stiffener-1", "on": false}
+{"op": "dimensions"}
+{"op": "dimensions", "component": "Shield-1"}
+{"op": "set", "name": "Height@Sketch1@Door-1", "value": 1200}
+{"op": "components"}
+```
+
+The shield ends 750 wide and follows the door's width; the stiffener is there while the
+door is over 1500 high, so the last `set` suppresses it.
+
+- **An address that reaches into a component** is the part's address followed by the
+  component's name: `Height@Sketch1@Door-1` (a dimension), `Thickness@Door-1` (a
+  parameter of its part), `Height@Sketch1@Door-1@Door Assembly-1` (through a
+  sub-assembly). SolidWorks' forms are taken too: `Height@Sketch1@Door<1>.Part`,
+  `Door-1.Part`. As in SolidWorks, a component's name is found in any case where only
+  one component matches. Quote it in an expression: `"Height@Sketch1@Door-1" - 20`.
+- **`set` with a number changes the part**, and so every component of it, as setting a
+  part's dimension in a SolidWorks assembly changes the part's file. A linked part's file
+  is written (the reply's `written`). To change one component alone, `make_independent`
+  it first: it gets a copy of the part called `name`, and is renamed `name-1` (FabSys's
+  `ResolveComponent`). Address it by its new name afterwards.
+- **`set` with an expression** that reads anything (`"Width@Sketch1@Door-1" - 50`) makes
+  an **equation** of the assembly: worked out again at every rebuild, so the part follows.
+  A number set later replaces it. An equation lives in the assembly: opened on its own,
+  the part has the value the equation last gave it.
+- **`set_suppression_expression` with `component`** suppresses the component while the
+  expression is not 0, and unsuppresses it while it is 0 (SolidWorks' `suppressed` is 1,
+  `unsuppressed` 0). It decides over `suppress` until cleared with `"value": null`.
+- **`suppress` with `"feature": "FEATURE@COMPONENT"`** suppresses (or with `"on": false`
+  unsuppresses) a feature of the component's part, in every instance of it.
+- **`reference_dimension`** measures the distance between two ends (as a mate's: two
+  parallel flat faces or planes, a point and a plane, points, lines) where the mates put
+  the components. Expressions read it as `RD1@Annotations`, as SolidWorks does, so a pipe
+  can be as long as the gap it spans. The reply's `reference.value` is what it measures.
+  `{"op": "delete", "reference_dimension": "RD1"}` removes it.
+- **`dimensions`** on an assembly lists its own values (`D1@` each distance mate,
+  `RD1@Annotations`), its `equations` and `references`; with `component`, the addresses
+  of that component's part from the assembly. An equation that can't be worked out (a
+  dimension that is gone, a component renamed) is listed under `failures` with why: fix
+  the address with `set` again.
+
+## Configurations
+
+Two things, as in SolidWorks, and they go together:
+
+- **A component shows one configuration of its part** (SolidWorks' referenced
+  configuration). `insert` takes `configuration`; `component_configuration` changes it
+  (FabSys's `SetSubComponentConfig`). Two components of one part can show different
+  configurations: a door in "R Hinges" beside one in "Default". Without one, a component
+  shows whichever configuration its part has active.
+- **An assembly has configurations of its own**, made with the part operations
+  (`add_configuration`, `configuration`, `edit_configuration`, `delete_configuration`,
+  `configurations`). In each, a component can be suppressed or not, show another
+  configuration of its part, be fixed or not, and be somewhere else; a mate can be
+  suppressed or not and have another value. Use them for variants of one assembly: left
+  and right hinged, a long and a short duct.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 6}
+{"op": "add_configuration", "name": "Thick"}
+{"op": "edit", "feature": "Extrude1", "depth": 20, "configurations": "this"}
+{"op": "configuration", "configuration": "Default"}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Base"}
+{"op": "insert", "part": 1, "name": "Lid", "configuration": "Thick", "at": [0, 0, 40]}
+{"op": "mate", "type": "distance", "distance": 10, "a": {"component": "Base", "face": {"normal": [0, 0, 1]}}, "b": {"component": "Lid", "face": {"normal": [0, 0, -1]}}}
+{"op": "insert", "component": "Base", "name": "Spare", "at": [100, 0, 0]}
+{"op": "edit_configuration", "configuration": "Default", "name": "Closed"}
+{"op": "add_configuration", "name": "Open"}
+{"op": "set", "name": "D1@Distance1", "value": 50, "configurations": "this"}
+{"op": "component_configuration", "component": "Lid", "configuration": "Default"}
+{"op": "suppress", "component": "Spare", "configurations": ["Closed"]}
+{"op": "configurations"}
+{"op": "components"}
+{"op": "configuration", "configuration": "Closed"}
+{"op": "components"}
+{"op": "bom"}
+```
+
+In "Closed" the 20 thick lid is 10 above the base and the spare is suppressed; in "Open"
+the 6 thick lid is 50 above it and the spare is there.
+
+- **What changes where.** `suppress`, `fix`, `place` and `component_configuration` on a
+  component, and `suppress` on a mate, change the active configuration only, unless
+  `configurations` says which (`"all"`, a name, a list). A mate's value (`edit_mate`,
+  `set` `D1@MATE`) and an equation (`set` with a component's address,
+  `set_suppression_expression` with a component) change in all of them until they
+  differ, then in the active one: give `"configurations": "this"` to make them differ (see
+  "Equations that differ between configurations"). Parameters differ with
+  `set_parameter`'s `configurations`, as in a part. Everything else (names, colours, ends,
+  `flexible`, reference dimensions, patterns) is the same in every configuration.
+- **Where a component is belongs to the configuration.** Mates solve each configuration
+  from its own placements, and a solve or a `place` moves a component in the active one
+  only. So place components where they go in each configuration before relying on the
+  mates to choose between two solutions there.
+- **A new configuration is a copy** of the active one (or of `copy`). A component or mate
+  added later is in every configuration: suppress it where it does not belong.
+- **Read it back.** `configurations` lists, for each component and mate that differs,
+  what it is in every configuration; `components` gives each component's `configuration`
+  (where its part has several), and each part its `configurations`. The `bom` gives a
+  part in two configurations as two rows.
+- **A configuration that is not there.** `insert` and `component_configuration` with a
+  name the part doesn't have fail and list its configurations; `configuration` with a
+  name the assembly doesn't have fails the same way. SolidWorks silently ignores a missing
+  name; PeetCAD doesn't, on purpose: a script that asks for a configuration that isn't
+  there has a mistake in it, so fix the name rather than ignore the error. A part that loses the configuration a
+  component shows leaves the component showing its active one, with a warning in
+  `components`.
+- A sub-assembly is a component like a part: it shows one of its configurations, and its
+  own components and mates are as that configuration has them.
+- **`open_component` opens the part in the configuration the component shows** (the
+  reply's `configuration`), as SolidWorks does: a change made there with
+  `"configurations": "this"` is that configuration's. `save` stores it back with the
+  part's own active configuration as it was, so components that name no configuration
+  still show the same one.
+- **Derived configurations** (`add_configuration` with `parent`) work in an assembly as in
+  a part (`peet skills configurations`): each field of a component, each mate and each
+  equation follows the parent unless the derived one has its own.
+
+### Equations that differ between configurations
+
+An equation of the assembly (`set` with a component's address, `set_suppression_expression`
+with a component) can have another expression, or none, in some configurations: SolidWorks'
+"This configuration" in the equation manager. A global variable is a parameter, and differs
+with `set_parameter`'s `configurations`.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [60, 40]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 6}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Door"}
+{"op": "insert", "part": 1, "name": "Hinge", "at": [100, 0, 0]}
+{"op": "set_parameter", "name": "tall", "value": 0}
+{"op": "set", "name": "depth@Extrude1@Door", "value": "6 + 4 * tall"}
+{"op": "edit_configuration", "configuration": "Default", "name": "Short"}
+{"op": "add_configuration", "name": "Tall"}
+{"op": "set_parameter", "name": "tall", "value": 1, "configurations": "this"}
+{"op": "set", "name": "depth@Extrude1@Door", "value": "12mm", "configurations": "this"}
+{"op": "set_suppression_expression", "component": "Hinge", "value": "iif(tall > 0, 0, 1)", "configurations": "this"}
+{"op": "configurations"}
+{"op": "dimensions"}
+{"op": "configuration", "configuration": "Short"}
+{"op": "components"}
+```
+
+In "Tall" the door is 12 thick and the hinge is there; in "Short" the door is 6 thick and
+the hinge is as it was set there (not suppressed), as no equation sets it.
+
+- **Left out, `configurations` is "all"** for an equation that is the same everywhere,
+  and the active one for one that already differs, as for a mate's value.
+- `"value": null` (with `set`, or `set_suppression_expression`) removes the equation in
+  those configurations: what it set keeps its last value there.
+- **A number for some configurations is an equation of theirs** (`"12mm"`). A number for
+  all of them sets the part, as before.
+- **Suppression by an equation of some configurations** is that configuration's:
+  the component keeps its own suppression in the others.
+- **Read them back.** `configurations` lists under `equations` each one that differs, by
+  what it sets (`depth@Extrude1@Door`, or the component's name for suppression), with its
+  expression in every configuration (null: none). `dimensions` lists the active
+  configuration's equations, then those only others have (`expression` null), each that
+  differs with its `configurations`.
+- One equation per thing set, per configuration: setting it again replaces it there.
+  An equation reached through another instance of the same part (`Door-2`) replaces it
+  in every configuration.
 
 ## Changing a part of an assembly
 
@@ -393,8 +1157,19 @@ peet components -f received.peet
   sub-assembly, import it into a new assembly document and `insert` that.
 - `import_step` in a **part** takes the same file as bodies where they are, without
   the structure: use it when the whole is to be one part.
-- `warnings` in the reply says what was left out or assumed (a face that can't be
-  read, units not given).
+- `warnings` in the reply says what was left out, assumed or mended (a face that can't
+  be read, units not given). "lay up to … mm off its faces … and was moved onto them"
+  means the file gave edges a tolerance, as SolidWorks does, and PeetCAD refitted them
+  onto their faces: the shape moved by at most that much, and the body is sound.
+  "was repaired: … vertices moved … split … faces added to close the gaps" means the
+  file gave vertices a tolerance too (SolidWorks does, up to a millimetre, for a body
+  it imported from elsewhere: a small fillet squeezed into an edge): the body is sound,
+  but differs from the file by up to the distance named, so check its volume if that
+  matters. "The body #… was left out, and the rest imported without it" means a body
+  could not be made a valid solid: the reply's `bodies` is fewer than the file has.
+  Export that body again with a finer tolerance, or model it. If no body can be made
+  valid the import fails with the reason ("leaves the surface of face", "doesn't
+  close up").
 
 Done when `components` shows every component with `"status": "ok"` and the `min` and
 `max` that were asked for, `mates` shows every mate `"ok"`, `freedom` is what was

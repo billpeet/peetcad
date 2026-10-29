@@ -9,6 +9,7 @@ mod bodies;
 pub mod commands;
 mod config_table;
 mod configs_ui;
+mod display_ui;
 mod document;
 mod features_ui;
 mod files;

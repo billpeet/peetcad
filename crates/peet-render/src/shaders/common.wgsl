@@ -38,9 +38,15 @@ struct InstanceIn {
     @location(7) model_3: vec4<f32>,
     // rgb = highlight colour, a = how much to blend it in (0 = none)
     @location(8) tint: vec4<f32>,
-    // pick object id + 1 (0 = not pickable)
-    @location(9) pick: u32,
+    // x = pick object id + 1 (0 = not pickable); y = its depth band in the pick pass
+    // (0 depth as it is, 1 the nearer half: opaque, 2 the farther half: see-through);
+    // z = the bits of its opacity (f32, 1 = opaque)
+    @location(9) pick: vec4<u32>,
 };
+
+fn instance_opacity(i: InstanceIn) -> f32 {
+    return bitcast<f32>(i.pick.z);
+}
 
 fn instance_model(i: InstanceIn) -> mat4x4<f32> {
     return mat4x4<f32>(i.model_0, i.model_1, i.model_2, i.model_3);

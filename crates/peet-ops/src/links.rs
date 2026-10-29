@@ -88,7 +88,7 @@ pub(crate) const LINK_OPS: &[(&str, &str, &str)] = &[
     (
         "update_links",
         "",
-        "Read the assembly's linked parts from their files again, so that it shows them as they are now.",
+        "Read the assembly's linked parts, and a part's inserted parts, from their files again, so that it shows them as they are now.",
     ),
     (
         "link",
@@ -210,6 +210,94 @@ pub(crate) fn read(path: &Path, depth: usize) -> Result<Model, String> {
         refresh(&mut model, path.parent(), depth + 1);
     }
     Ok(model)
+}
+
+/// The file an inserted part means: where its path says (relative to the working folder,
+/// then to the document's), or a file of the same name beside the document.
+fn part_file(path: &str, doc: &Document) -> Option<PathBuf> {
+    let link = Link {
+        path: path.to_owned(),
+        relative: true,
+    };
+    find(&link, folder(doc).as_deref())
+}
+
+/// The bodies of the part in a file, built: what an inserted part keeps.
+pub(crate) fn part_source(path: &str, doc: &Document) -> Result<peet_model::PartSource, String> {
+    if cfg!(target_arch = "wasm32") {
+        return Err(
+            "Inserted parts are read from files on disk, which the browser doesn't have."
+                .to_owned(),
+        );
+    }
+    let file = part_file(path, doc).ok_or_else(|| format!("{path} can't be found."))?;
+    let model = read(&file, 0)?;
+    if model.is_assembly() {
+        return Err(format!("{path} is an assembly: insert a part."));
+    }
+    let built = Document::from_model(model, None);
+    let failed: Vec<String> = built
+        .model
+        .features()
+        .filter_map(|f| match built.status(f.id) {
+            Some(peet_model::Status::Failed(m)) => Some(format!("{}: {m}", f.name)),
+            _ => None,
+        })
+        .collect();
+    if !failed.is_empty() {
+        return Err(format!(
+            "{path} doesn't build as it is ({}): open it and fix it first.",
+            failed.join("; ")
+        ));
+    }
+    let solids: Vec<peet_model::ImportedSolid> = built
+        .evaluation()
+        .bodies
+        .iter()
+        .enumerate()
+        .map(|(i, b)| peet_model::ImportedSolid {
+            name: format!("{} body {}", built.model.name, i + 1),
+            solid: b.solid.clone(),
+        })
+        .collect();
+    if solids.is_empty() {
+        return Err(format!("{path} has no bodies to insert."));
+    }
+    Ok(peet_model::PartSource {
+        path: path.to_owned(),
+        solids,
+    })
+}
+
+/// Reads the parts a part inserts from their files again. Returns the features that
+/// changed and what couldn't be read.
+pub(crate) fn refresh_inserted(model: &mut Model, doc: &Document) -> (Vec<String>, Vec<String>) {
+    let (mut updated, mut problems) = (Vec::new(), Vec::new());
+    let inserted: Vec<(peet_model::FeatureId, String)> = model
+        .features()
+        .filter_map(|f| match &f.kind {
+            peet_model::FeatureKind::InsertPart(p) => Some((f.id, p.source.path.clone())),
+            _ => None,
+        })
+        .collect();
+    for (id, path) in inserted {
+        match part_source(&path, doc) {
+            Ok(now) => {
+                if let Some(f) = model.feature_mut(id)
+                    && let peet_model::FeatureKind::InsertPart(p) = &mut f.kind
+                    && p.source != now
+                {
+                    p.source = now;
+                    updated.push(f.name.clone());
+                }
+            }
+            Err(e) => problems.push(format!(
+                "{}: {e} It is shown as it was when it was last read.",
+                model.name_of(id)
+            )),
+        }
+    }
+    (updated, problems)
 }
 
 /// How a link is: what `components` and `update_links` say about it.

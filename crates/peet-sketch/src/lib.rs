@@ -12,6 +12,7 @@
 //! - [`shapes`]: rectangle, slot and polygon helpers
 //! - [`ops`]: trim, extend, offset, mirror and fillet
 //! - [`region`]: closed loop and region detection for features
+//! - [`text`]: sketch text, its glyph outlines as lines and arcs
 //! - [`triangulate`]: triangulation of regions, for shading profiles
 
 pub mod curve;
@@ -23,12 +24,13 @@ pub mod shapes;
 pub mod sketch;
 pub mod solver;
 pub mod spline;
+pub mod text;
 pub mod triangulate;
 
 pub use curve::{Curve, Intersection};
 pub use sketch::{
-    Constraint, ConstraintId, ConstraintKind, Dimension, Entity, EntityId, EntityKind, Geometry,
-    Sketch, SketchError,
+    Along, ArcSide, Constraint, ConstraintId, ConstraintKind, Dimension, Entity, EntityId,
+    EntityKind, Geometry, SideTerms, Sketch, SketchError, side_terms,
 };
 pub use solver::{Analysis, Drag, SolveReport, Solver};
 pub use spline::{Spline, SplinePiece};

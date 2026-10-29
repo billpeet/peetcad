@@ -15,21 +15,28 @@ use std::marker::PhantomData;
 
 use crate::value::{HoleStandard, RevolveAxis};
 use peet_document::Document;
-use peet_model::feature::{AxisDef, CoordSystemDef, FeatureKind, PatternDef, PlaneDef, PointDef};
+use peet_model::Sketch3dFeature;
+use peet_model::feature::{
+    AxisDef, CoordSystemDef, FeatureKind, PatternBound, PatternDef, PatternKeeps, PatternUpTo,
+    PlaneDef, PointDef,
+};
+use peet_model::sketch3d::{Axis3, Line3, Ref3, Relation3};
 use peet_model::{
-    AxisRef, BaseFlangeFeature, BendModelDef, CornerFeature, EdgeFlangeFeature, EdgeRef,
-    EndCondition, ExtrudeFeature, FaceName, FaceRef, FeatureId, FormFeature, HemFeature,
+    AxisRef, BaseFlangeFeature, BendModelDef, BreakCornerFeature, CornerFeature, EdgeFlangeFeature,
+    EdgeRef, EndCondition, ExtrudeFeature, FaceName, FaceRef, FeatureId, FormFeature, HemFeature,
     JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, Operation, PatternFeature,
-    PlaneRef, PointRef, RegionSelection, Scalar, ScalarKind, SheetCutFeature, SheetSettingsDef,
-    SketchFeature, SketchedBendFeature, StdAxis, StdPlane, VertexRef,
+    PlaneRef, PointRef, RegionSelection, Scalar, ScalarKind, SheetCutEnd, SheetCutFeature,
+    SheetSettingsDef, SketchFeature, SketchedBendFeature, StdAxis, StdPlane, VertexRef,
 };
 use peet_model::{
-    BlendFeature, BlendKind, ConvertToSheetFeature, DraftFeature, HoleEnd, HoleFeature, HoleFit,
-    HoleKind, LoftFeature, METRIC, RevolveAxisRef, RevolveFeature, ShellFeature, SweepFeature,
+    BlendFeature, BlendKind, BodyMate, ConvertToSheetFeature, DraftFeature, FoldFeature, HoleEnd,
+    HoleFeature, HoleFit, HoleKind, InsertPartFeature, LoftFeature, METRIC, MateGeom, MateKind,
+    MemberCorner, MoveBodyFeature, PartSource, RevolveAxisRef, RevolveFeature, ShellFeature,
+    StructuralMemberFeature, SweepFeature, UnfoldFeature,
 };
 use peet_sheetmetal::corner::{CornerKind, CornerRelief};
 use peet_sheetmetal::{
-    BendLinePosition, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
+    BendLinePosition, BreakKind, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
 };
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -39,7 +46,8 @@ use crate::args::{
 };
 use crate::select;
 use crate::value::{
-    AxisSel, Bend, EdgeSel, End, FaceSel, FeatureSel, Input, PlaneSel, PointSel, Regions, VertexSel,
+    AxisSel, Bend, BoundSel, EdgeSel, End, FaceSel, FeatureSel, GeomSel, Input, PlaneSel, PointSel,
+    Regions, VertexSel,
 };
 
 // ---- Kinds of field ----
@@ -117,7 +125,7 @@ scalar_field!(Number, ScalarKind::Number, "number");
 scalar_field!(
     PatternCount,
     ScalarKind::Number,
-    "whole number from 2 to 10000 (original included), or an expression returning one"
+    "whole number from 2 to 10000 (original included), or an expression, whose value is rounded to the nearest whole number"
 );
 
 /// A length that falls back to the body's default when absent.
@@ -148,6 +156,40 @@ impl Field for OptLength {
         target
             .as_ref()
             .map_or(Value::Null, |s| scalar_out(s, ScalarKind::Length, doc))
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.as_ref().map(input_of))
+    }
+}
+
+/// A number that falls back to the body's default when absent.
+pub(crate) struct OptNumber;
+
+impl Field for OptNumber {
+    type Arg = Option<Input>;
+    type Target = Option<Scalar>;
+    const NULLABLE: bool = true;
+    fn describe() -> String {
+        "number, or null for the body's default".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        if v.is_null() {
+            Ok(None)
+        } else {
+            Input::parse(v).map(Some)
+        }
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        *target = arg
+            .as_ref()
+            .map(|a| a.scalar(ScalarKind::Number, doc))
+            .transpose()?;
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target
+            .as_ref()
+            .map_or(Value::Null, |s| scalar_out(s, ScalarKind::Number, doc))
     }
     fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
         Some(target.as_ref().map(input_of))
@@ -229,6 +271,7 @@ macro_rules! words {
 }
 
 words!(
+    SheetCutEnd,
     ReliefType,
     FlangePosition,
     HemKind,
@@ -236,9 +279,11 @@ words!(
     JogDimension,
     CornerKind,
     CornerRelief,
+    BreakKind,
     FormKind,
     HoleKind,
-    HoleFit
+    HoleFit,
+    MemberCorner
 );
 
 impl Words for BlendKind {
@@ -288,6 +333,35 @@ impl<T: Words> Field for Choice<T> {
     }
 }
 
+/// One of a fixed set of words, or null for the body's default.
+pub(crate) struct OptChoice<T>(PhantomData<T>);
+
+impl<T: Words> Field for OptChoice<T> {
+    type Arg = Option<T>;
+    type Target = Option<T>;
+    const NULLABLE: bool = true;
+    fn describe() -> String {
+        format!("{}, or null for the body's default", T::words().join(" | "))
+    }
+    fn parse(v: &Value) -> Result<Option<T>, String> {
+        if v.is_null() {
+            Ok(None)
+        } else {
+            Choice::<T>::parse(v).map(Some)
+        }
+    }
+    fn assign(arg: &Option<T>, target: &mut Option<T>, _: &Document) -> Result<(), String> {
+        *target = arg.clone();
+        Ok(())
+    }
+    fn read(target: &Option<T>, _: &Document) -> Value {
+        target.as_ref().map_or(Value::Null, |t| json!(t.word()))
+    }
+    fn arg(target: &Option<T>, _: &Document) -> Option<Option<T>> {
+        Some(target.clone())
+    }
+}
+
 fn face_out(r: &FaceRef, doc: &Document) -> Value {
     json!({
         "face": doc.model.describe_face(&r.name),
@@ -313,6 +387,7 @@ fn plane_out(r: &PlaneRef, doc: &Document) -> Value {
         PlaneRef::Standard(StdPlane::Right) => json!("right"),
         PlaneRef::Feature(id) => json!(doc.model.name_of(*id)),
         PlaneRef::Face(f) => face_out(f, doc),
+        PlaneRef::External(x) => json!({ "in_context": x.describe() }),
     }
 }
 
@@ -349,6 +424,22 @@ fn a_sketch(sel: &FeatureSel, doc: &Document) -> Result<FeatureId, String> {
         Ok(id)
     } else {
         Err(format!("{} is not a sketch", doc.model.name_of(id)))
+    }
+}
+
+/// A sketch or a 3D sketch, whose lines a structural member follows.
+fn a_path(sel: &FeatureSel, doc: &Document) -> Result<FeatureId, String> {
+    let id = sel.resolve(doc)?;
+    let is_3d = doc
+        .feature(id)
+        .is_some_and(|f| matches!(f.kind, FeatureKind::Sketch3d(_)));
+    if is_3d || doc.model.sketch(id).is_some() {
+        Ok(id)
+    } else {
+        Err(format!(
+            "{} is not a sketch or a 3D sketch",
+            doc.model.name_of(id)
+        ))
     }
 }
 
@@ -407,6 +498,42 @@ reference_field!(PointF, PointSel, PointRef, required: true, nullable: false, "p
         PointRef::Vertex(v) => vertex_out(v, doc),
     },
     arg: |p, _| p.clone().into());
+reference_field!(OptPoint, Option<PointSel>, Option<PointRef>, required: false, nullable: true,
+    "\"origin\", a reference point or a vertex selector, or null for none",
+    parse: |v| or_null(v, PointSel::parse),
+    assign: |a, doc| a.as_ref().map(|p| select::point(doc, p)).transpose(),
+    read: |p, doc| match p {
+        None => Value::Null,
+        Some(PointRef::Origin) => json!("origin"),
+        Some(PointRef::Feature(id)) => json!(doc.model.name_of(*id)),
+        Some(PointRef::Vertex(v)) => vertex_out(v, doc),
+    },
+    arg: |p, _| p.clone().map(Into::into));
+reference_field!(AtPoint, PointSel, PointRef, required: false, nullable: false,
+    "\"origin\" (if absent), a reference point or a vertex selector",
+    parse: PointSel::parse,
+    assign: |a, doc| select::point(doc, a),
+    read: |p, doc| match p {
+        PointRef::Origin => json!("origin"),
+        PointRef::Feature(id) => json!(doc.model.name_of(*id)),
+        PointRef::Vertex(v) => vertex_out(v, doc),
+    },
+    arg: |p, _| p.clone().into());
+reference_field!(MirrorPlane, Option<PlaneSel>, Option<PlaneRef>, required: false, nullable: true,
+    "plane, or null (if absent) for none",
+    parse: |v| or_null(v, PlaneSel::parse),
+    assign: |a, doc| Ok(match a {
+        Some(p) => Some(select::plane(doc, p)?.0),
+        None => None,
+    }),
+    read: |p, doc| p.as_ref().map_or(Value::Null, |p| plane_out(p, doc)),
+    arg: |p, _| p.clone().map(Into::into));
+reference_field!(PartFile, String, PartSource, required: true, nullable: false,
+    "a part's file (.peet), read when it is set: a path from the working folder or the part's own",
+    parse: |v| text(v).map(str::to_owned),
+    assign: |a, doc| crate::links::part_source(a, doc),
+    read: |s, _| json!(s.path),
+    arg: |s, _| s.path.clone());
 reference_field!(FaceF, FaceSel, FaceRef, required: true, nullable: false, "face",
     parse: FaceSel::parse,
     assign: |a, doc| select::face_ref(doc, a),
@@ -458,6 +585,12 @@ reference_field!(Sketches, Vec<FeatureSel>, Vec<FeatureId>, required: true, null
     assign: |a, doc| each(a, |s| a_sketch(s, doc)),
     read: |ids, doc| ids.iter().map(|id| doc.model.name_of(*id)).collect(),
     arg: |ids, _| ids.iter().copied().map(FeatureSel::Id).collect());
+reference_field!(PathSketches, Vec<FeatureSel>, Vec<FeatureId>, required: true, nullable: false,
+    "list of sketches or 3D sketches (names or ids), in order (more may be picked afterwards)",
+    parse: |v| each(list(v)?, FeatureSel::parse),
+    assign: |a, doc| each(a, |s| a_path(s, doc)),
+    read: |ids, doc| ids.iter().map(|id| doc.model.name_of(*id)).collect(),
+    arg: |ids, _| ids.iter().copied().map(FeatureSel::Id).collect());
 reference_field!(OptFace, Option<FaceSel>, Option<FaceRef>, required: false, nullable: true,
     "face, or null for the largest flat face of the only body",
     parse: |v| or_null(v, FaceSel::parse),
@@ -466,6 +599,12 @@ reference_field!(OptFace, Option<FaceSel>, Option<FaceRef>, required: false, nul
     arg: |f, _| f.clone().map(FaceSel::Ref));
 reference_field!(OptSketch, Option<FeatureSel>, Option<FeatureId>, required: true, nullable: true,
     "sketch (name or id), or null to choose it afterwards",
+    parse: |v| or_null(v, FeatureSel::parse),
+    assign: |a, doc| a.as_ref().map(|s| a_sketch(s, doc)).transpose(),
+    read: |id, doc| id.map_or(Value::Null, |id| json!(doc.model.name_of(id))),
+    arg: |id, _| id.map(FeatureSel::Id));
+reference_field!(OptionalSketch, Option<FeatureSel>, Option<FeatureId>, required: false, nullable: true,
+    "sketch (name or id), or null for none",
     parse: |v| or_null(v, FeatureSel::parse),
     assign: |a, doc| a.as_ref().map(|s| a_sketch(s, doc)).transpose(),
     read: |id, doc| id.map_or(Value::Null, |id| json!(doc.model.name_of(id))),
@@ -491,25 +630,28 @@ reference_field!(OptPlane, Option<PlaneSel>, Option<PlaneRef>, required: true, n
     read: |p, doc| p.as_ref().map_or(Value::Null, |p| plane_out(p, doc)),
     arg: |p, _| p.clone().map(Into::into));
 reference_field!(EndF, End, EndCondition, required: false, nullable: false,
-"blind | mid_plane | through_all | {\"up_to\": plane}",
+"blind | mid_plane | through_all | through_next | {\"up_to\": plane}",
 parse: End::parse,
 assign: |a, doc| Ok(match a {
     End::Blind => EndCondition::Blind,
     End::MidPlane => EndCondition::Symmetric,
     End::ThroughAll => EndCondition::ThroughAll,
     End::UpTo(p) => EndCondition::UpTo(select::plane(doc, p)?.0),
+    End::ThroughNext => EndCondition::ThroughNext,
 }),
 read: |e, doc| match e {
     EndCondition::Blind => json!("blind"),
     EndCondition::Symmetric => json!("mid_plane"),
     EndCondition::ThroughAll => json!("through_all"),
     EndCondition::UpTo(p) => json!({ "up_to": plane_out(p, doc) }),
+    EndCondition::ThroughNext => json!("through_next"),
 },
 arg: |e, _| match e {
     EndCondition::Blind => End::Blind,
     EndCondition::Symmetric => End::MidPlane,
     EndCondition::ThroughAll => End::ThroughAll,
     EndCondition::UpTo(p) => End::UpTo(p.clone().into()),
+    EndCondition::ThroughNext => End::ThroughNext,
 });
 reference_field!(RegionsF, Regions, RegionSelection, required: false, nullable: false,
 "\"auto\", or a list of sketch points [x, y] inside the regions to use",
@@ -554,6 +696,78 @@ arg: |b, _| match b {
     BendModelDef::Allowance(s) => Bend::Allowance(input_of(s)),
     BendModelDef::Deduction(s) => Bend::Deduction(input_of(s)),
 });
+/// A bend model that falls back to the body's when absent.
+pub(crate) struct OptBend;
+
+impl Field for OptBend {
+    type Arg = Option<Bend>;
+    type Target = Option<BendModelDef>;
+    const NULLABLE: bool = true;
+    fn describe() -> String {
+        format!("{}, or null for the body's", BendF::describe())
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        if v.is_null() {
+            Ok(None)
+        } else {
+            BendF::parse(v).map(Some)
+        }
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        *target = match arg {
+            None => None,
+            Some(a) => {
+                let mut model = BendModelDef::KFactor(Scalar::new(0.44));
+                BendF::assign(a, &mut model, doc)?;
+                Some(model)
+            }
+        };
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target.as_ref().map_or(Value::Null, |t| BendF::read(t, doc))
+    }
+    fn arg(target: &Self::Target, doc: &Document) -> Option<Self::Arg> {
+        Some(target.as_ref().and_then(|t| BendF::arg(t, doc)))
+    }
+}
+
+/// A bend model for each bend of a profile, each a bend model or null for the body's.
+pub(crate) struct OptBends;
+
+impl Field for OptBends {
+    type Arg = Vec<Option<Bend>>;
+    type Target = Vec<Option<BendModelDef>>;
+    fn describe() -> String {
+        format!(
+            "list of {}, one for each bend along the profile",
+            OptBend::describe()
+        )
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        let list = v
+            .as_array()
+            .ok_or("expected a list, one bend model or null for each bend")?;
+        list.iter().map(OptBend::parse).collect()
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        let mut out = Vec::with_capacity(arg.len());
+        for a in arg {
+            let mut model = None;
+            OptBend::assign(a, &mut model, doc)?;
+            out.push(model);
+        }
+        *target = out;
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        Value::Array(target.iter().map(|t| OptBend::read(t, doc)).collect())
+    }
+    fn arg(target: &Self::Target, doc: &Document) -> Option<Self::Arg> {
+        target.iter().map(|t| OptBend::arg(t, doc)).collect()
+    }
+}
+
 reference_field!(RevolveAxisF, RevolveAxis, RevolveAxisRef, required: false, nullable: false,
 "sketch_x | sketch_y | {\"line\": id of a line of the sketch} | axis (default: the sketch's first construction line, else sketch_y)",
 parse: RevolveAxis::parse,
@@ -635,6 +849,7 @@ fn second_direction() -> LinearDirection {
         spacing: Scalar::new(20.0),
         count: Scalar::new(2.0),
         flip: false,
+        up_to: None,
     }
 }
 
@@ -707,6 +922,161 @@ macro_rules! second_field {
 second_field!(Spacing2, Length, spacing);
 second_field!(Count2, PatternCount, count);
 second_field!(Flip2, Flag, flip);
+
+impl Words for PatternKeeps {
+    fn all() -> &'static [Self] {
+        &[PatternKeeps::Spacing, PatternKeeps::Count]
+    }
+}
+
+fn bound_out(b: &PatternBound, doc: &Document) -> Value {
+    match b {
+        PatternBound::Plane(p) => json!({ "plane": plane_out(p, doc) }),
+        PatternBound::Point(p) => json!({ "point": match p {
+            PointRef::Origin => json!("origin"),
+            PointRef::Feature(id) => json!(doc.model.name_of(*id)),
+            PointRef::Vertex(v) => vertex_out(v, doc),
+        } }),
+    }
+}
+
+fn bound_ref(b: &BoundSel, doc: &Document) -> Result<PatternBound, String> {
+    Ok(match b {
+        BoundSel::Plane(p) => PatternBound::Plane(select::plane(doc, p)?.0),
+        BoundSel::Point(p) => PatternBound::Point(select::point(doc, p)?),
+    })
+}
+
+/// What a linear pattern runs up to (SolidWorks' "up to reference"): giving it makes the
+/// count (or the spacing) follow from where the reference is, and `null` sets both again.
+pub(crate) struct UpTo;
+
+impl Field for UpTo {
+    type Arg = Option<BoundSel>;
+    type Target = Option<Box<PatternUpTo>>;
+    const NULLABLE: bool = true;
+    fn describe() -> String {
+        "{\"plane\": plane or flat face} or {\"point\": vertex or reference point} the pattern runs up to, or null for the count as given".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        or_null(v, BoundSel::parse)
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        match arg {
+            Some(b) => {
+                let to = bound_ref(b, doc)?;
+                match target {
+                    Some(u) => u.to = to,
+                    None => {
+                        *target = Some(Box::new(PatternUpTo {
+                            to,
+                            offset: Scalar::new(0.0),
+                            reverse_offset: false,
+                            seed: None,
+                            keeps: PatternKeeps::Spacing,
+                        }));
+                    }
+                }
+            }
+            None => *target = None,
+        }
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target
+            .as_ref()
+            .map_or(Value::Null, |u| bound_out(&u.to, doc))
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.as_ref().map(|u| u.to.clone().into()))
+    }
+}
+
+/// Where on the seed a pattern that runs up to a reference measures from: `null` for the
+/// seed's centre.
+pub(crate) struct UpToSeedF;
+
+impl Field for UpToSeedF {
+    type Arg = Option<BoundSel>;
+    type Target = Option<Box<PatternUpTo>>;
+    const NULLABLE: bool = true;
+    fn describe() -> String {
+        "{\"plane\": ...} or {\"point\": ...} on the seed to measure from, or null for the seed's centre (needs up_to)".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        or_null(v, BoundSel::parse)
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        let u = target.as_mut().ok_or_else(up_to_first)?;
+        u.seed = arg.as_ref().map(|b| bound_ref(b, doc)).transpose()?;
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target
+            .as_ref()
+            .and_then(|u| u.seed.as_ref())
+            .map_or(Value::Null, |b| bound_out(b, doc))
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        target.as_ref().map(|u| u.seed.clone().map(Into::into))
+    }
+}
+
+fn up_to_first() -> String {
+    "the pattern doesn't run up to a reference: give 'up_to' too".to_owned()
+}
+
+/// A field of a linear pattern's run up to a reference, which needs `up_to`.
+macro_rules! up_to_field {
+    ($name:ident, $inner:ty, $member:ident, $text:literal) => {
+        pub(crate) struct $name;
+        impl Field for $name {
+            type Arg = <$inner as Field>::Arg;
+            type Target = Option<Box<PatternUpTo>>;
+            fn describe() -> String {
+                format!("{} ({})", <$inner>::describe(), $text)
+            }
+            fn parse(v: &Value) -> Result<Self::Arg, String> {
+                <$inner>::parse(v)
+            }
+            fn assign(
+                arg: &Self::Arg,
+                target: &mut Self::Target,
+                doc: &Document,
+            ) -> Result<(), String> {
+                let u = target.as_mut().ok_or_else(up_to_first)?;
+                <$inner>::assign(arg, &mut u.$member, doc)
+            }
+            fn read(target: &Self::Target, doc: &Document) -> Value {
+                target
+                    .as_ref()
+                    .map_or(Value::Null, |u| <$inner>::read(&u.$member, doc))
+            }
+            fn arg(target: &Self::Target, doc: &Document) -> Option<Self::Arg> {
+                target.as_ref().and_then(|u| <$inner>::arg(&u.$member, doc))
+            }
+        }
+    };
+}
+
+up_to_field!(
+    UpToOffset,
+    Length,
+    offset,
+    "how far short of the reference the last copy is; needs up_to"
+);
+up_to_field!(
+    UpToReverse,
+    Flag,
+    reverse_offset,
+    "the last copy past the reference by the offset; needs up_to"
+);
+up_to_field!(
+    UpToKeeps,
+    Choice<PatternKeeps>,
+    keeps,
+    "which is given, the other following from the reference; needs up_to"
+);
 
 fn field_arg<F: Field>(a: &mut Args, name: &str) -> Result<Option<F::Arg>, String> {
     let value = if F::NULLABLE {
@@ -863,13 +1233,20 @@ feature_args! {
 feature_args! {
     /// An extrusion or a cut of a sketch's closed regions.
     Extrude: FeatureKind::Extrude(f) => &mut **f,
-        ExtrudeFeature { sketch, params: peet_model::Extrude { end, depth, reverse, operation, regions } } => {
+        ExtrudeFeature { sketch, params: peet_model::Extrude { end, depth, reverse, operation, regions, flip_side, draft, draft_outward } } => {
     sketch: FeatureSel as SketchF = sketch,
     operation: Operation as Choice<Operation> = operation,
     end: End as EndF = end,
     depth: Input as Length = depth,
     reverse: bool as Flag = reverse,
     regions: Regions as RegionsF = regions,
+    /// A cut removes everything outside the regions, within its reach.
+    flip_side: bool as Flag = flip_side,
+    /// Degrees the walls lean from the direction of extrusion, from the sketch plane.
+    draft: Input as Angle = draft,
+    /// The draft widens what is added or removed away from the sketch, where it otherwise
+    /// narrows.
+    draft_outward: bool as Flag = draft_outward,
     }
 }
 
@@ -955,6 +1332,8 @@ feature_args! {
             depth,
             symmetric,
             flip_depth,
+            bends,
+            tab,
         } => {
     sketch: FeatureSel as SketchF = sketch,
     thickness: Input as Length = thickness,
@@ -968,13 +1347,18 @@ feature_args! {
     depth: Input as Length = depth,
     symmetric: bool as Flag = symmetric,
     flip_depth: bool as Flag = flip_depth,
+    /// Open profiles: a bend model of each bend's own, in order along the profile.
+    bends: Vec<Option<Bend>> as OptBends = bends,
+    /// A tab: adds the closed sketch to the sheet metal body whose flat face it is drawn
+    /// on (or in the plane of), with that body's thickness.
+    tab: bool as Flag = tab,
     }
 }
 
 feature_args! {
     /// A flange with a bend on an edge of a sheet metal body.
     EdgeFlange: FeatureKind::EdgeFlange(f) => &mut **f,
-        EdgeFlangeFeature { edge, length, angle, position, offset_start, offset_end, flip, radius } => {
+        EdgeFlangeFeature { edge, length, angle, position, offset_start, offset_end, flip, radius, relief, relief_ratio, bend, position_offset, outline, up_to } => {
     /// `Some(None)`: to be picked afterwards.
     edge: Option<EdgeSel> as OptEdge = edge,
     length: Input as Length = length,
@@ -985,13 +1369,33 @@ feature_args! {
     flip: bool as Flag = flip,
     /// `Some(None)` uses the body's default radius.
     radius: Option<Input> as OptLength = radius,
+    /// The relief where the flange is set back from an end of its edge. `Some(None)`
+    /// uses the body's.
+    relief: Option<ReliefType> as OptChoice<ReliefType> = relief,
+    /// That relief's size as a multiple of the thickness. `Some(None)` uses the body's.
+    relief_ratio: Option<Input> as OptNumber = relief_ratio,
+    /// How the flat length of this flange's bend is worked out. `Some(None)` uses the
+    /// body's.
+    bend: Option<Bend> as OptBend = bend,
+    /// How far out from its edge the flange is set (SolidWorks' position offset).
+    position_offset: Input as Length = position_offset,
+    /// A sketch of the flange's shape, or null for a plain rectangle.
+    outline: Option<FeatureSel> as OptionalSketch = outline,
+    /// A point the flange runs up to in place of its length (SolidWorks' up to vertex),
+    /// or null for its length.
+    up_to: Option<PointSel> as OptPoint = up_to,
     }
 }
 
 feature_args! {
     /// A cut through a sheet metal body, made in the flat pattern.
-    SheetCut: FeatureKind::SheetCut(f) => &mut **f, SheetCutFeature { sketch } => {
+    SheetCut: FeatureKind::SheetCut(f) => &mut **f, SheetCutFeature { sketch, end, depth, reverse, both } => {
     sketch: FeatureSel as SketchF = sketch,
+    /// How far it reaches past the sheet it is drawn on.
+    end: SheetCutEnd as Choice<SheetCutEnd> = end,
+    depth: Input as Length = depth,
+    reverse: bool as Flag = reverse,
+    both: bool as Flag = both,
     }
 }
 
@@ -1042,6 +1446,39 @@ feature_args! {
 }
 
 feature_args! {
+    /// Corners of a sheet metal body rounded or cut straight across.
+    BreakCorner: FeatureKind::BreakCorner(f) => &mut **f,
+        BreakCornerFeature { edges, kind, size, faces } => {
+    edges: Vec<EdgeSel> as Edges = edges,
+    kind: BreakKind as Choice<BreakKind> = kind,
+    size: Input as Length = size,
+    /// Flat faces whose every corner is broken, found again at each rebuild.
+    faces: Vec<FaceSel> as Faces = faces,
+    }
+}
+
+feature_args! {
+    /// Bends of a sheet metal body laid flat, a face staying where it is (SolidWorks' unfold).
+    Unfold: FeatureKind::Unfold(f) => &mut **f,
+        UnfoldFeature { fixed, bends } => {
+    /// The flat face of a flange that stays where it is. Absent: the largest flat face of
+    /// the only sheet metal body.
+    fixed: Option<FaceSel> as OptFace = fixed,
+    /// A face of each bend to lay flat. None: every bend.
+    bends: Vec<FaceSel> as Faces = bends,
+    }
+}
+
+feature_args! {
+    /// Bends an unfold laid flat folded again (SolidWorks' fold).
+    Fold: FeatureKind::Fold(f) => &mut **f,
+        FoldFeature { bends } => {
+    /// A face of each bend to fold. None: every bend laid flat.
+    bends: Vec<FaceSel> as Faces = bends,
+    }
+}
+
+feature_args! {
     /// A flange with a sketched profile along several edges of one face.
     MiterFlange: FeatureKind::MiterFlange(f) => &mut **f,
         MiterFlangeFeature { sketch, edges, gap, offset_start, offset_end } => {
@@ -1083,7 +1520,7 @@ feature_args! {
     LinearPattern: FeatureKind::Pattern(f) => &mut **f,
         PatternFeature {
             seeds,
-            def: PatternDef::Linear { first: LinearDirection { direction, spacing, count, flip }, second },
+            def: PatternDef::Linear { first: LinearDirection { direction, spacing, count, flip, up_to }, second },
         } => {
     features: Vec<FeatureSel> as Features = seeds,
     direction: AxisSel as AxisF = direction,
@@ -1091,6 +1528,17 @@ feature_args! {
     /// How many, the original included.
     count: Input as PatternCount = count,
     flip: bool as Flag = flip,
+    /// A plane or point the pattern runs up to (SolidWorks' up to reference), or null
+    /// for the spacing and count as given.
+    up_to: Option<BoundSel> as UpTo = up_to,
+    /// How far short of the reference the last copy is.
+    up_to_offset: Input as UpToOffset = up_to,
+    /// The last copy past the reference by the offset.
+    up_to_reverse: bool as UpToReverse = up_to,
+    /// Where on the seed to measure from, or null for its centre.
+    up_to_seed: Option<BoundSel> as UpToSeedF = up_to,
+    /// Which is given (spacing or count): the other follows from the reference.
+    up_to_keeps: PatternKeeps as UpToKeeps = up_to,
     /// `Some(None)`: a row, not a grid.
     direction2: Option<AxisSel> as Direction2 = second,
     spacing2: Input as Spacing2 = second,
@@ -1227,12 +1675,527 @@ feature_args! {
 feature_args! {
     /// A solid of one wall thickness turned into a sheet metal body.
     ConvertToSheet: FeatureKind::ConvertToSheet(f) => &mut **f,
-        ConvertToSheetFeature { face, model, relief, relief_ratio } => {
+        ConvertToSheetFeature { face, model, relief, relief_ratio, thickness } => {
     /// The flat face that stays fixed. Absent: the largest flat face of the only body.
     face: Option<FaceSel> as OptFace = face,
     bend: Bend as BendF = model,
     relief: ReliefType as Choice<ReliefType> = relief,
     relief_ratio: Input as Number = relief_ratio,
+    /// The sheet's own thickness, from the fixed face in (a flat body only). `Some(None)`
+    /// uses the solid's.
+    thickness: Option<Input> as OptLength = thickness,
+    }
+}
+
+/// One end of a mate that places a moved body: geometry of a body, or a reference plane.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BodyMateEndSel {
+    Geom(GeomSel),
+    Plane(PlaneSel),
+    /// Already resolved, with no selector of its own (an origin or a sketch entity, which
+    /// only an assembly's mates take).
+    Ref(MateGeom),
+}
+
+impl BodyMateEndSel {
+    fn parse(v: &Value) -> Result<Self, String> {
+        if let Some(p) = v
+            .as_object()
+            .filter(|m| m.len() == 1)
+            .and_then(|m| m.get("plane"))
+        {
+            return PlaneSel::parse(p).map(Self::Plane);
+        }
+        GeomSel::parse(v)
+            .map(Self::Geom)
+            .map_err(|_| format!("expected {{\"face\": selector}}, {{\"edge\": selector}}, {{\"vertex\": selector}} or {{\"plane\": plane}}, not {v}"))
+    }
+
+    fn resolve(&self, doc: &Document) -> Result<MateGeom, String> {
+        Ok(match self {
+            Self::Geom(GeomSel::Face(f)) => MateGeom::Face(select::face_ref(doc, f)?),
+            Self::Geom(GeomSel::Edge(e)) => MateGeom::Edge(select::edge_ref(doc, e)?),
+            Self::Geom(GeomSel::Vertex(v)) => MateGeom::Vertex(select::vertex_ref(doc, v)?),
+            Self::Plane(p) => MateGeom::Plane(select::plane(doc, p)?.0),
+            Self::Ref(g) => g.clone(),
+        })
+    }
+
+    fn of(g: &MateGeom) -> Self {
+        match g {
+            MateGeom::Face(f) => Self::Geom(GeomSel::Face(FaceSel::Ref(f.clone()))),
+            MateGeom::Edge(e) => Self::Geom(GeomSel::Edge(EdgeSel::Ref(e.clone()))),
+            MateGeom::Vertex(v) => Self::Geom(GeomSel::Vertex(VertexSel::Ref(v.clone()))),
+            MateGeom::Plane(p) => Self::Plane(p.clone().into()),
+            MateGeom::Origin | MateGeom::Sketch(_) => Self::Ref(g.clone()),
+        }
+    }
+}
+
+fn mate_geom_out(g: &MateGeom, doc: &Document) -> Value {
+    match g {
+        MateGeom::Face(f) => face_out(f, doc),
+        MateGeom::Edge(e) => edge_out(e, doc),
+        MateGeom::Vertex(v) => vertex_out(v, doc),
+        MateGeom::Plane(p) => json!({ "plane": plane_out(p, doc) }),
+        MateGeom::Origin => json!({ "origin": true }),
+        MateGeom::Sketch(s) => {
+            json!({ "sketch": doc.model.name_of(s.feature), "entity": s.entity.0 })
+        }
+    }
+}
+
+/// What a mate that places a moved body asks for.
+#[derive(Clone, Debug, PartialEq)]
+pub enum BodyMateType {
+    Coincident,
+    Concentric,
+    Parallel,
+    Distance(Input),
+    /// In degrees; perpendicular is 90.
+    Angle(Input),
+}
+
+/// A mate that places a moved body, as an operation gives it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct BodyMateSel {
+    pub name: Option<String>,
+    pub kind: BodyMateType,
+    /// On a body the move moves.
+    pub moved: BodyMateEndSel,
+    /// On the rest of the part, or a reference plane.
+    pub to: BodyMateEndSel,
+    pub aligned: bool,
+    pub flip: bool,
+}
+
+impl BodyMateSel {
+    fn parse(v: &Value) -> Result<Self, String> {
+        let mut a = Args::new(
+            "mate",
+            v.as_object().cloned().ok_or_else(|| {
+                format!("expected a mate {{\"type\": ..., \"moved\": ..., \"to\": ...}}, not {v}")
+            })?,
+        );
+        let word = a.required("type", |v| text(v).map(str::to_owned))?;
+        let value = |a: &mut Args, key: &str| {
+            a.parsed(key, Input::parse)?
+                .ok_or_else(|| format!("A {word} mate needs a '{key}' field."))
+        };
+        let kind = match word.as_str() {
+            "coincident" => BodyMateType::Coincident,
+            "concentric" => BodyMateType::Concentric,
+            "parallel" => BodyMateType::Parallel,
+            "perpendicular" => BodyMateType::Angle(Input::Base(90.0)),
+            "distance" => BodyMateType::Distance(value(&mut a, "distance")?),
+            "angle" => BodyMateType::Angle(value(&mut a, "angle")?),
+            other => {
+                return Err(format!(
+                    "type: '{other}' can't place a body: use coincident, concentric, parallel, perpendicular, distance or angle."
+                ));
+            }
+        };
+        let out = Self {
+            name: a.string("name")?,
+            kind,
+            moved: a.required("moved", BodyMateEndSel::parse)?,
+            to: a.required("to", BodyMateEndSel::parse)?,
+            aligned: a.parsed("aligned", boolean)?.unwrap_or(false),
+            flip: a.parsed("flip", boolean)?.unwrap_or(false),
+        };
+        a.check()?;
+        Ok(out)
+    }
+}
+
+/// The mates that place a moved body.
+pub(crate) struct BodyMates;
+
+impl Field for BodyMates {
+    type Arg = Vec<BodyMateSel>;
+    type Target = Vec<BodyMate>;
+    fn describe() -> String {
+        "list of mates, each {\"type\": coincident | concentric | parallel | perpendicular | distance | angle, \"moved\": end on a moved body, \"to\": end on the rest of the part, \"distance\" or \"angle\" (for those types), \"aligned\": bool, \"flip\": bool, \"name\"}; an end is {\"face\" | \"edge\" | \"vertex\": selector} or {\"plane\": plane}; a mate's distance or angle is the dimension D1@NAME (\"D1@Distance2\"), which `set` changes, in some configurations if asked".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        each(list(v)?, BodyMateSel::parse)
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        let mut out = Vec::with_capacity(arg.len());
+        for (i, m) in arg.iter().enumerate() {
+            let kind = match &m.kind {
+                BodyMateType::Coincident => MateKind::Coincident,
+                BodyMateType::Concentric => MateKind::Concentric,
+                BodyMateType::Parallel => MateKind::Parallel,
+                BodyMateType::Distance(v) => MateKind::Distance(v.scalar(ScalarKind::Length, doc)?),
+                BodyMateType::Angle(v) => MateKind::Angle(v.scalar(ScalarKind::Angle, doc)?),
+            };
+            let name = m.name.clone().unwrap_or_else(|| {
+                let word = kind.word();
+                format!("{}{}{}", word[..1].to_uppercase(), &word[1..], i + 1)
+            });
+            let on = |e: String| format!("{name}: {e}");
+            out.push(BodyMate {
+                moved: m.moved.resolve(doc).map_err(on)?,
+                to: m.to.resolve(doc).map_err(on)?,
+                aligned: m.aligned,
+                flip: m.flip,
+                name,
+                kind,
+            });
+        }
+        *target = out;
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target
+            .iter()
+            .map(|m| {
+                let mut out = Map::new();
+                out.insert("name".to_owned(), json!(m.name));
+                out.insert("type".to_owned(), json!(m.kind.word()));
+                match &m.kind {
+                    MateKind::Distance(s) => {
+                        out.insert(
+                            "distance".to_owned(),
+                            scalar_out(s, ScalarKind::Length, doc),
+                        );
+                    }
+                    MateKind::Angle(s) => {
+                        out.insert("angle".to_owned(), scalar_out(s, ScalarKind::Angle, doc));
+                    }
+                    _ => {}
+                }
+                out.insert("moved".to_owned(), mate_geom_out(&m.moved, doc));
+                out.insert("to".to_owned(), mate_geom_out(&m.to, doc));
+                out.insert("aligned".to_owned(), json!(m.aligned));
+                out.insert("flip".to_owned(), json!(m.flip));
+                Value::Object(out)
+            })
+            .collect()
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(
+            target
+                .iter()
+                .map(|m| BodyMateSel {
+                    name: Some(m.name.clone()),
+                    kind: match &m.kind {
+                        MateKind::Concentric => BodyMateType::Concentric,
+                        MateKind::Parallel => BodyMateType::Parallel,
+                        MateKind::Distance(s) => BodyMateType::Distance(input_of(s)),
+                        MateKind::Angle(s) => BodyMateType::Angle(input_of(s)),
+                        _ => BodyMateType::Coincident,
+                    },
+                    moved: BodyMateEndSel::of(&m.moved),
+                    to: BodyMateEndSel::of(&m.to),
+                    aligned: m.aligned,
+                    flip: m.flip,
+                })
+                .collect(),
+        )
+    }
+}
+
+feature_args! {
+    /// Bodies moved and turned, or moved copies of them.
+    MoveBody: FeatureKind::MoveBody(f) => &mut **f,
+        MoveBodyFeature {
+            bodies,
+            translate: [dx, dy, dz],
+            rotate: [rx, ry, rz],
+            center,
+            copy,
+            copies,
+            mates,
+        } => {
+    /// A face of each body to move. None: every body.
+    bodies: Vec<FaceSel> as Faces = bodies,
+    /// How far along X, after turning.
+    dx: Input as Length = dx,
+    dy: Input as Length = dy,
+    dz: Input as Length = dz,
+    /// Degrees about the X axis through `center`, turned first.
+    rx: Input as Angle = rx,
+    /// Then about Y.
+    ry: Input as Angle = ry,
+    /// Then about Z.
+    rz: Input as Angle = rz,
+    center: PointSel as AtPoint = center,
+    /// Leave the bodies where they are and make moved copies.
+    copy: bool as Flag = copy,
+    /// How many copies, each moved once more than the last.
+    copies: Input as Number = copies,
+    /// Mates that place the moved bodies (SolidWorks' constraints): they are solved from
+    /// where the distances and angles put them, at every rebuild.
+    mates: Vec<BodyMateSel> as BodyMates = mates,
+    }
+}
+
+// ---- 3D sketches ----
+
+/// A 3D sketch's points.
+pub(crate) struct Points3;
+
+impl Field for Points3 {
+    type Arg = Vec<[f64; 3]>;
+    type Target = Vec<[f64; 3]>;
+    fn describe() -> String {
+        "list of points [x, y, z] in the model, in document units; a point is named by its place in the list (0 first)".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        each(list(v)?, crate::args::coordinates::<3>)
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        let units = &doc.model.parameters.units;
+        *target = arg
+            .iter()
+            .map(|p| crate::args::mm3(*p, units).to_array())
+            .collect();
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        let units = &doc.model.parameters.units;
+        target
+            .iter()
+            .map(|p| point3_out(peet_math::DVec3::from_array(*p), units))
+            .collect()
+    }
+    fn arg(target: &Self::Target, doc: &Document) -> Option<Self::Arg> {
+        let units = &doc.model.parameters.units;
+        Some(target.iter().map(|p| p.map(|v| units.from_mm(v))).collect())
+    }
+}
+
+/// A 3D sketch's lines.
+pub(crate) struct Lines3;
+
+impl Field for Lines3 {
+    type Arg = Vec<Line3>;
+    type Target = Vec<Line3>;
+    fn describe() -> String {
+        "list of lines, each [from, to] (two points' places in the list of points) or {\"from\", \"to\", \"construction\": true for one a structural member doesn't follow}; a line is named by its place in this list".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        each(list(v)?, |item| {
+            if let Some(pair) = item.as_array() {
+                if pair.len() != 2 {
+                    return Err(format!("a line is two points, not {item}"));
+                }
+                return Ok(Line3 {
+                    start: integer(&pair[0])?,
+                    end: integer(&pair[1])?,
+                    construction: false,
+                });
+            }
+            let point = |k: &str| {
+                item.get(k)
+                    .ok_or_else(|| format!("a line needs '{k}': {item}"))
+                    .and_then(integer)
+            };
+            Ok(Line3 {
+                start: point("from")?,
+                end: point("to")?,
+                construction: item
+                    .get("construction")
+                    .map(boolean)
+                    .transpose()?
+                    .unwrap_or(false),
+            })
+        })
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, _: &Document) -> Result<(), String> {
+        target.clone_from(arg);
+        Ok(())
+    }
+    fn read(target: &Self::Target, _: &Document) -> Value {
+        target
+            .iter()
+            .map(|l| {
+                if l.construction {
+                    json!({"from": l.start, "to": l.end, "construction": true})
+                } else {
+                    json!([l.start, l.end])
+                }
+            })
+            .collect()
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.clone())
+    }
+}
+
+/// A 3D sketch's relations.
+pub(crate) struct Relations3;
+
+fn ref3(v: &Value) -> Result<Ref3, String> {
+    if let Some(p) = v.get("point") {
+        return Ok(Ref3::Point(integer(p)?));
+    }
+    if let Some(l) = v.get("line") {
+        return Ok(Ref3::Line(integer(l)?));
+    }
+    Err(format!(
+        "expected {{\"point\": n}} or {{\"line\": n}}, not {v}"
+    ))
+}
+
+fn ref3_out(r: Ref3) -> Value {
+    match r {
+        Ref3::Point(p) => json!({ "point": p }),
+        Ref3::Line(l) => json!({ "line": l }),
+    }
+}
+
+impl Field for Relations3 {
+    type Arg = Vec<Relation3>;
+    type Target = Vec<Relation3>;
+    fn describe() -> String {
+        "list of relations, each {\"type\", \"of\"}: coincident [point, point], on_line [point, line], midpoint [point, line], along_x | along_y | along_z [line] (along an axis of the model), parallel | perpendicular | equal [line, line], fix [point] (kept where it is), distance [{\"point\": n} or {\"line\": n}, the same] with \"dimension\": its place in the list of dimensions (between two points, a point and a line, or two parallel lines)".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        each(list(v)?, |item| {
+            let kind = item
+                .get("type")
+                .ok_or_else(|| format!("a relation needs a 'type': {item}"))
+                .and_then(text)?;
+            let of = item
+                .get("of")
+                .ok_or_else(|| format!("a relation needs 'of': {item}"))
+                .and_then(list)?;
+            let n = |k: usize| -> Result<u32, String> {
+                of.get(k)
+                    .ok_or_else(|| format!("{kind} needs more in 'of': {item}"))
+                    .and_then(integer)
+            };
+            Ok(match kind {
+                "coincident" => Relation3::Coincident(n(0)?, n(1)?),
+                "on_line" => Relation3::OnLine(n(0)?, n(1)?),
+                "midpoint" => Relation3::Midpoint(n(0)?, n(1)?),
+                "along_x" => Relation3::Along(Axis3::X, n(0)?),
+                "along_y" => Relation3::Along(Axis3::Y, n(0)?),
+                "along_z" => Relation3::Along(Axis3::Z, n(0)?),
+                "parallel" => Relation3::Parallel(n(0)?, n(1)?),
+                "perpendicular" => Relation3::Perpendicular(n(0)?, n(1)?),
+                "equal" => Relation3::Equal(n(0)?, n(1)?),
+                "fix" => Relation3::Fixed(n(0)?),
+                "distance" => {
+                    if of.len() != 2 {
+                        return Err(format!("a distance is between two things: {item}"));
+                    }
+                    Relation3::Distance {
+                        a: ref3(&of[0])?,
+                        b: ref3(&of[1])?,
+                        dimension: item
+                            .get("dimension")
+                            .ok_or_else(|| format!("a distance needs its 'dimension': {item}"))
+                            .and_then(integer)?,
+                    }
+                }
+                other => return Err(format!("a 3D sketch has no relation '{other}'")),
+            })
+        })
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, _: &Document) -> Result<(), String> {
+        target.clone_from(arg);
+        Ok(())
+    }
+    fn read(target: &Self::Target, _: &Document) -> Value {
+        target
+            .iter()
+            .map(|r| match r {
+                Relation3::Coincident(a, b) => json!({"type": "coincident", "of": [a, b]}),
+                Relation3::OnLine(a, b) => json!({"type": "on_line", "of": [a, b]}),
+                Relation3::Midpoint(a, b) => json!({"type": "midpoint", "of": [a, b]}),
+                Relation3::Along(axis, l) => json!({"type": match axis {
+                    Axis3::X => "along_x",
+                    Axis3::Y => "along_y",
+                    Axis3::Z => "along_z",
+                }, "of": [l]}),
+                Relation3::Parallel(a, b) => json!({"type": "parallel", "of": [a, b]}),
+                Relation3::Perpendicular(a, b) => json!({"type": "perpendicular", "of": [a, b]}),
+                Relation3::Equal(a, b) => json!({"type": "equal", "of": [a, b]}),
+                Relation3::Fixed(p) => json!({"type": "fix", "of": [p]}),
+                Relation3::Distance { a, b, dimension } => {
+                    json!({"type": "distance", "of": [ref3_out(*a), ref3_out(*b)], "dimension": dimension})
+                }
+            })
+            .collect()
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.clone())
+    }
+}
+
+/// A 3D sketch's dimensions' values.
+pub(crate) struct Dimensions3;
+
+impl Field for Dimensions3 {
+    type Arg = Vec<Input>;
+    type Target = Vec<Scalar>;
+    fn describe() -> String {
+        "list of lengths (numbers or expressions), the values of the distances that name them; each is a dimension d1, d2, … that 'name_dimension' can call D1 (an address D1@3DSketch1)".to_owned()
+    }
+    fn parse(v: &Value) -> Result<Self::Arg, String> {
+        each(list(v)?, Input::parse)
+    }
+    fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
+        if arg.len() > peet_model::sketch3d::MAX_DIMENSIONS {
+            return Err(format!(
+                "a 3D sketch has at most {} dimensions",
+                peet_model::sketch3d::MAX_DIMENSIONS
+            ));
+        }
+        *target = each(arg, |i| i.scalar(ScalarKind::Length, doc))?;
+        Ok(())
+    }
+    fn read(target: &Self::Target, doc: &Document) -> Value {
+        target
+            .iter()
+            .map(|s| scalar_out(s, ScalarKind::Length, doc))
+            .collect()
+    }
+    fn arg(target: &Self::Target, _: &Document) -> Option<Self::Arg> {
+        Some(target.iter().map(input_of).collect())
+    }
+}
+
+feature_args! {
+    /// A sketch in space (SolidWorks' 3D sketch): points and lines held by relations and
+    /// dimensions. A structural member can follow its lines.
+    Sketch3d: FeatureKind::Sketch3d(f) => &mut **f,
+        Sketch3dFeature { points, lines, relations, dimensions } => {
+    points: Vec<[f64; 3]> as Points3 = points,
+    lines: Vec<Line3> as Lines3 = lines,
+    relations: Vec<Relation3> as Relations3 = relations,
+    dimensions: Vec<Input> as Dimensions3 = dimensions,
+    }
+}
+
+feature_args! {
+    /// A profile swept along the lines of path sketches, a body for each line.
+    StructuralMember: FeatureKind::StructuralMember(f) => &mut **f,
+        StructuralMemberFeature { profile, paths, corner, trim, rotate } => {
+    /// The section, drawn with its origin where each line goes through it.
+    profile: FeatureSel as SketchF = profile,
+    /// Sketches or 3D sketches whose lines (not construction lines) the members follow.
+    paths: Vec<FeatureSel> as PathSketches = paths,
+    /// How two members end where their lines meet at an angle.
+    corner: MemberCorner as Choice<MemberCorner> = corner,
+    /// Trim members that end on earlier structural members to their outside.
+    trim: bool as Flag = trim,
+    /// Degrees the profile is turned about each line.
+    rotate: Input as Angle = rotate,
+    }
+}
+
+feature_args! {
+    /// The bodies of another part, as they are in its file, or their mirror image.
+    InsertPart: FeatureKind::InsertPart(f) => &mut **f, InsertPartFeature { source, mirror } => {
+    /// The part's file, read when it is set (and by update_links).
+    file: String as PartFile = source,
+    /// Mirror the part's bodies in this plane.
+    mirror: Option<PlaneSel> as MirrorPlane = mirror,
     }
 }
 
@@ -1463,7 +2426,7 @@ feature_ops! {
         => Some(FeatureKind::EdgeFlange(Box::new(EdgeFlangeFeature::new(None)))),
     SheetCut(SheetCut) "sheet_cut"
         "Cut a sketch through the sheet it is drawn on, in the flat pattern."
-        => Some(FeatureKind::SheetCut(Box::new(SheetCutFeature { sketch: NO_SKETCH }))),
+        => Some(FeatureKind::SheetCut(Box::new(SheetCutFeature::new(NO_SKETCH)))),
     Hem(Hem) "hem"
         "Fold an edge of a sheet metal body back over itself ('edges' makes one per edge)."
         => Some(FeatureKind::Hem(Box::new(HemFeature::new(None)))),
@@ -1476,6 +2439,15 @@ feature_ops! {
     MiterFlange(MiterFlange) "miter_flange"
         "A flange with a sketched profile along several edges of one face."
         => Some(FeatureKind::MiterFlange(Box::new(MiterFlangeFeature::new(NO_SKETCH, Vec::new())))),
+    BreakCorner(BreakCorner) "break_corner"
+        "Round or chamfer corners of a sheet metal body: each the edge through the sheet where two sides of a flat face meet."
+        => Some(FeatureKind::BreakCorner(Box::new(BreakCornerFeature::new(Vec::new())))),
+    Unfold(Unfold) "unfold"
+        "Lay bends of a sheet metal body flat, the fixed face staying put (SolidWorks' unfold): features after it are made on the flat part until a fold."
+        => Some(FeatureKind::Unfold(Box::new(UnfoldFeature { fixed: None, bends: Vec::new() }))),
+    Fold(Fold) "fold"
+        "Fold bends an unfold laid flat back round, carrying what was cut while they were flat (SolidWorks' fold)."
+        => Some(FeatureKind::Fold(Box::new(FoldFeature { bends: Vec::new() }))),
     Corner(Corner) "corner"
         "How the corners between flanges are treated (every corner if no faces are given)."
         => Some(FeatureKind::Corner(Box::new(CornerFeature::new(Vec::new())))),
@@ -1547,6 +2519,18 @@ feature_ops! {
     Hole(Hole) "hole"
         "Drill a hole at every point of a sketch: plain, counterbored or countersunk, to a standard size or given ones."
         => Some(FeatureKind::Hole(Box::new(HoleFeature::new(NO_SKETCH)))),
+    MoveBody(MoveBody) "move_body"
+        "Move and turn bodies, or make moved copies of them (SolidWorks' move/copy body)."
+        => Some(FeatureKind::MoveBody(Box::new(MoveBodyFeature::new(Vec::new())))),
+    Sketch3d(Sketch3d) "sketch3d"
+        "A sketch in space (SolidWorks' 3D sketch): points and lines, held by relations and dimensions solved in space. A structural member can follow its lines."
+        => Some(FeatureKind::Sketch3d(Box::new(Sketch3dFeature::new()))),
+    StructuralMember(StructuralMember) "structural_member"
+        "Sweep a profile along every line of path sketches, a body for each (SolidWorks' weldment structural member): mitred where lines of it meet, trimmed to earlier members."
+        => Some(FeatureKind::StructuralMember(Box::new(StructuralMemberFeature::new(NO_SKETCH, Vec::new())))),
+    InsertPart(InsertPart) "insert_part"
+        "Insert the bodies of another part's file, or their mirror image in a plane (SolidWorks' insert part and mirror part)."
+        => Some(FeatureKind::InsertPart(Box::new(InsertPartFeature::new(PartSource::default())))),
     SketchPlane(SketchPlane) "sketch_plane"
         "Move a sketch to another plane (an edit only: sketches are added with 'sketch')."
         => None,
@@ -1575,6 +2559,9 @@ fn word_of(kind: &FeatureKind) -> Option<&'static str> {
         FeatureKind::Jog(_) => "jog",
         FeatureKind::MiterFlange(_) => "miter_flange",
         FeatureKind::Corner(_) => "corner",
+        FeatureKind::BreakCorner(_) => "break_corner",
+        FeatureKind::Unfold(_) => "unfold",
+        FeatureKind::Fold(_) => "fold",
         FeatureKind::Form(_) => "dimple",
         FeatureKind::Pattern(p) => match p.def {
             PatternDef::Linear { .. } => "linear_pattern",
@@ -1589,6 +2576,10 @@ fn word_of(kind: &FeatureKind) -> Option<&'static str> {
         FeatureKind::Sweep(_) => "sweep",
         FeatureKind::Loft(_) => "loft",
         FeatureKind::ConvertToSheet(_) => "convert_to_sheet",
+        FeatureKind::MoveBody(_) => "move_body",
+        FeatureKind::InsertPart(_) => "insert_part",
+        FeatureKind::StructuralMember(_) => "structural_member",
+        FeatureKind::Sketch3d(_) => "sketch3d",
         // An imported body is what its file says: it has nothing to set.
         FeatureKind::Import(_) => return None,
     })

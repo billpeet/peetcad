@@ -261,6 +261,53 @@ fn dimples_from_a_sketch() {
 }
 
 #[test]
+fn pattern_of_a_cut_that_runs_off_its_flange() {
+    // A slot drawn on the plate that runs past its edge, over the bend and into the
+    // flange in the flat pattern, as a cut made with the part unfolded does. Its middle is
+    // off the plate, as are its copies': each copy cuts what the original does.
+    let (mut p, _) = plate();
+    let e = edge(&p, DVec3::new(0.0, H, T), DVec3::new(W, H, T));
+    p.model.add_edge_flange(Some(e));
+    p.rebuild();
+    p.assert_ok();
+    let whole = p.volume();
+    let top = p.on_face(DVec3::Z, DVec3::new(50.0, 30.0, T));
+    let slot = sketch_at(&mut p, top, |s, to| {
+        shapes::rectangle(
+            s,
+            to(DVec3::new(10.0, 50.0, T)),
+            to(DVec3::new(14.0, 90.0, T)),
+        );
+    });
+    let cut = p.model.add_sheet_cut(slot);
+    p.rebuild();
+    p.assert_ok();
+    let one = whole - p.volume();
+    assert!(one > 4.0 * 10.0 * T, "{one}");
+    let pattern = p.model.add_pattern(
+        vec![cut],
+        PatternDef::Linear {
+            first: LinearDirection {
+                direction: AxisRef::Standard(StdAxis::X),
+                spacing: Scalar::new(20.0),
+                count: Scalar::new(3.0),
+                flip: false,
+                up_to: None,
+            },
+            second: None,
+        },
+    );
+    p.rebuild();
+    p.assert_ok();
+    assert!(
+        matches!(p.status(pattern), Status::Ok),
+        "{:?}",
+        p.status(pattern)
+    );
+    assert_close(whole - p.volume(), 3.0 * one);
+}
+
+#[test]
 fn pattern_and_mirror_of_sheet_cuts() {
     let (mut p, _) = plate();
     let top = p.on_face(DVec3::Z, DVec3::new(50.0, 30.0, T));
@@ -281,12 +328,14 @@ fn pattern_and_mirror_of_sheet_cuts() {
                 spacing: Scalar::new(20.0),
                 count: Scalar::new(4.0),
                 flip: false,
+                up_to: None,
             },
             second: Some(LinearDirection {
                 direction: AxisRef::Standard(StdAxis::Y),
                 spacing: Scalar::new(30.0),
                 count: Scalar::new(2.0),
                 flip: false,
+                up_to: None,
             }),
         },
     );
@@ -316,8 +365,21 @@ fn pattern_and_mirror_of_sheet_cuts() {
     assert_close(p.volume(), W * H * T - 9.0 * one);
     let sheet = p.bodies()[0].sheet.clone().unwrap();
     assert_eq!(sheet.outline.iter().filter(|l| !l.outer).count(), 9);
-    // A mirror can't copy a pattern, and says so.
-    let bad = p.model.add_mirror(vec![pattern], PlaneRef::Feature(mid));
+    // A mirror of the pattern copies its eight holes, the original included, to x = 85,
+    // 65, 45 and 25: one of them is the hole the first mirror made already.
+    let copy = p.model.add_mirror(vec![pattern], PlaneRef::Feature(mid));
+    p.rebuild();
+    p.assert_ok();
+    assert!(matches!(p.status(copy), Status::Ok), "{:?}", p.status(copy));
+    assert_close(p.volume(), W * H * T - 16.0 * one);
+    // A mirror can't copy a base flange (other than a tab), and says so.
+    let base = p
+        .model
+        .features()
+        .find(|f| matches!(f.kind, FeatureKind::BaseFlange(_)))
+        .map(|f| f.id)
+        .unwrap();
+    let bad = p.model.add_mirror(vec![base], PlaneRef::Feature(mid));
     p.rebuild();
     let Status::Failed(m) = p.status(bad) else {
         panic!("{:?}", p.status(bad))
@@ -440,8 +502,9 @@ fn mirror_of_a_cut_with_an_arc() {
 #[test]
 fn copies_of_unsupported_features_fail_clearly() {
     let (mut p, _) = plate();
+    // A hem (edge flanges can be copied: see `a_flange_is_mirrored_and_patterned` in peet-ops)
     let e = edge(&p, DVec3::new(0.0, H, T), DVec3::new(W, H, T));
-    let f = p.model.add_edge_flange(Some(e));
+    let f = p.model.add_hem(Some(e));
     let pattern = p.model.add_pattern(
         vec![f],
         PatternDef::Linear {
@@ -450,6 +513,7 @@ fn copies_of_unsupported_features_fail_clearly() {
                 spacing: Scalar::new(20.0),
                 count: Scalar::new(2.0),
                 flip: false,
+                up_to: None,
             },
             second: None,
         },

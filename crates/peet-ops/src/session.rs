@@ -330,6 +330,7 @@ pub fn apply_session(
             fixed,
             link,
             absolute,
+            configuration,
         } => from_document(from).map(|model| {
             model.map(|m| Op::Insert {
                 from: InsertSource::Model(m),
@@ -338,15 +339,18 @@ pub fn apply_session(
                 fixed: *fixed,
                 link: *link,
                 absolute: *absolute,
+                configuration: configuration.clone(),
             })
         }),
         Op::Component {
             component,
             change: ComponentChange::Replace(from),
+            configurations,
         } => from_document(from).map(|model| {
             model.map(|m| Op::Component {
                 component: component.clone(),
                 change: ComponentChange::Replace(InsertSource::Model(m)),
+                configurations: configurations.clone(),
             })
         }),
         _ => None,
@@ -483,6 +487,15 @@ fn open_component(
         .assembly()
         .and_then(|a| a.definition_of(id))
         .ok_or_else(|| "The component's part is missing.".to_owned())?;
+    // The configuration of the part the component shows, as SolidWorks opens a component.
+    let shown = doc.model.assembly().and_then(|a| {
+        let c = a.component(id)?;
+        let model = &a.definition(c.definition)?.model;
+        let config = a
+            .configuration_of(c)
+            .unwrap_or(model.active_configuration().id);
+        Some((config, model.configuration(config)?.name.clone()))
+    });
     // A linked part is its own file: that is what is opened, and saved.
     if let Some(link) = &definition.link {
         let Some(path) = crate::links::find(link, crate::links::folder(doc).as_deref()) else {
@@ -545,9 +558,21 @@ fn open_component(
     match open {
         Some(open) => {
             session.switch(open);
+            // Open already: it shows the configuration this component does (making a
+            // configuration active is not a change).
+            if let Some((config, _)) = &shown
+                && let Some(part) = session.get_mut(open)
+                && part.model.configuration(*config).is_some()
+            {
+                part.activate_configuration(*config);
+            }
         }
         None => {
-            let mut part = Document::from_model((*definition.model).clone(), None);
+            let mut model = (*definition.model).clone();
+            if let Some((config, _)) = &shown {
+                model.activate_configuration(*config);
+            }
+            let mut part = Document::from_model(model, None);
             part.embedded = Some(embedded);
             // Rebuilding writes solved sketches back: that is not a change of the user's.
             part.mark_saved(None);
@@ -556,9 +581,12 @@ fn open_component(
     }
     let mut more = Map::new();
     more.insert("part".to_owned(), json!(session.title()));
+    if let Some((_, name)) = &shown {
+        more.insert("configuration".to_owned(), json!(name));
+    }
     more.insert(
         "note".to_owned(),
-        json!("'save' on this document stores the part back in its assembly, for every instance."),
+        json!("It is open in the configuration the component shows. 'save' on this document stores the part back in its assembly, for every instance, with the part's own active configuration as it was."),
     );
     let mut reply = done(session, "open_component", was, more);
     reply.replaced = true;
@@ -583,7 +611,22 @@ fn store(
             "{name} is a part of an assembly, which is where it is saved: leave 'path' out to store it there, then save the assembly."
         ));
     }
-    let model = Arc::new(doc.model.clone());
+    // The part keeps the configuration it has active in the assembly (the one components
+    // that name none show), whichever it was opened in.
+    let own = session
+        .get(embedded.assembly)
+        .and_then(|a| a.model.assembly())
+        .and_then(|a| a.definition(embedded.definition))
+        .map(|d| d.model.active_configuration().id);
+    let model = Arc::new(match own {
+        Some(own)
+            if own != doc.model.active_configuration().id
+                && doc.model.configuration(own).is_some() =>
+        {
+            doc.model.with_configuration(own)
+        }
+        _ => doc.model.clone(),
+    });
     let assembly = session.get_mut(embedded.assembly).ok_or_else(|| {
         format!("The assembly {name} came from is no longer open, so it can't be stored there.")
     })?;

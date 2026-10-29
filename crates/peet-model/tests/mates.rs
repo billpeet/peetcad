@@ -6,8 +6,8 @@ use std::sync::Arc;
 use peet_kernel::Surface;
 use peet_math::{DQuat, DVec2, DVec3, Frame, Plane};
 use peet_model::{
-    CompId, Engine, Evaluation, MateEnd, MateGeom, MateId, MateKind, Model, Operation, PlaneRef,
-    Scalar, Status, StdPlane,
+    Align, CompId, Engine, Evaluation, MateEnd, MateGeom, MateId, MateKind, Model, Operation,
+    PlaneRef, Scalar, Status, StdPlane,
 };
 
 /// A plate from (0, 0, 0) to (w, h, t), with a hole of radius `hole` through its middle
@@ -155,7 +155,7 @@ fn faces_are_brought_together_one_freedom_at_a_time() {
         end(base, face(&part, DVec3::NEG_X)),
         end(top, face(&part, DVec3::NEG_X)),
     );
-    model.assembly_mut().unwrap().mate_mut(m2).unwrap().flip = true;
+    model.assembly_mut().unwrap().mate_mut(m2).unwrap().align = Some(Align::Aligned);
     let built = engine.regenerate(&mut model).clone();
     ok(&built, m2);
     assert_eq!(built.freedom, 1, "it slides along the edge");
@@ -220,7 +220,7 @@ fn a_part_the_wrong_way_round_is_turned_over() {
     assert!(f.vector_to_world(UP).abs_diff_eq(DOWN, 1e-9), "{f:?}");
     assert!((f.to_world(DVec3::new(0.0, 0.0, 5.0)).z - 5.0).abs() < 1e-9);
     // Flipped, the faces look the same way: it is turned back, into the first.
-    model.assembly_mut().unwrap().mate_mut(m).unwrap().flip = true;
+    model.assembly_mut().unwrap().mate_mut(m).unwrap().align = Some(Align::Aligned);
     ok(&engine.regenerate(&mut model).clone(), m);
     let f = frame(&model, top);
     assert!(f.vector_to_world(UP).abs_diff_eq(UP, 1e-9), "{f:?}");
@@ -270,7 +270,7 @@ fn a_pin_goes_in_a_hole() {
         end(base, face(&holed, DOWN)),
         end(p, face(&pin, DOWN)),
     );
-    model.assembly_mut().unwrap().mate_mut(flush).unwrap().flip = true;
+    model.assembly_mut().unwrap().mate_mut(flush).unwrap().align = Some(Align::Aligned);
     let built = engine.regenerate(&mut model).clone();
     ok(&built, flush);
     assert_eq!(built.freedom, 1);
@@ -380,7 +380,7 @@ fn mates_that_cant_all_hold_are_told_apart() {
         end(base, face(&part, DVec3::X)),
         end(top, face(&part, DVec3::X)),
     );
-    model.assembly_mut().unwrap().mate_mut(side).unwrap().flip = true;
+    model.assembly_mut().unwrap().mate_mut(side).unwrap().align = Some(Align::Aligned);
     let mut engine = Engine::new();
     let built = engine.regenerate(&mut model).clone();
     // The earlier one wins; the one that contradicts it is flagged; the rest still hold.
@@ -546,7 +546,7 @@ fn fifty_components_are_solved_quickly() {
                     end(pair[0], below.clone()),
                     end(pair[1], above.clone()),
                 );
-                a.mate_mut(m).unwrap().flip = *flip;
+                a.mate_mut(m).unwrap().align = flip.then_some(Align::Aligned);
             }
         }
     }
@@ -684,7 +684,7 @@ fn a_dragged_component_goes_as_far_as_its_mates_allow() {
             end(base, face(&part, n)),
             end(top, face(&part, n)),
         );
-        model.assembly_mut().unwrap().mate_mut(m).unwrap().flip = flip;
+        model.assembly_mut().unwrap().mate_mut(m).unwrap().align = flip.then_some(Align::Aligned);
     }
     engine.regenerate(&mut model);
     let held = frame(&model, top);
@@ -724,7 +724,7 @@ fn a_hinged_component_swings_round_to_follow_the_drag() {
         end(post, face(&pin, DOWN)),
         end(arm, face(&holed, DOWN)),
     );
-    model.assembly_mut().unwrap().mate_mut(flush).unwrap().flip = true;
+    model.assembly_mut().unwrap().mate_mut(flush).unwrap().align = Some(Align::Aligned);
     let mut engine = Engine::new();
     assert_eq!(engine.regenerate(&mut model).freedom, 1);
 
@@ -841,7 +841,7 @@ fn each_component_says_how_it_can_still_move() {
         end(base, face(&part, DVec3::NEG_X)),
         end(top, face(&part, DVec3::NEG_X)),
     );
-    model.assembly_mut().unwrap().mate_mut(side).unwrap().flip = true;
+    model.assembly_mut().unwrap().mate_mut(side).unwrap().align = Some(Align::Aligned);
     engine.regenerate(&mut model);
     assert_eq!([top, third].map(|c| free(&engine, c)), [Some(1), Some(6)]);
 
@@ -948,7 +948,7 @@ fn a_hinge_leaves_one_way_to_move() {
         end(post, face(&pin, DOWN)),
         end(arm, face(&holed, DOWN)),
     );
-    model.assembly_mut().unwrap().mate_mut(flush).unwrap().flip = true;
+    model.assembly_mut().unwrap().mate_mut(flush).unwrap().align = Some(Align::Aligned);
     engine.regenerate(&mut model);
     assert_eq!(engine.evaluation().component_freedom(arm), Some(1));
     assert_eq!(engine.evaluation().component_freedom(post), Some(0));
@@ -988,13 +988,13 @@ fn components_are_patterned_in_rows_and_round_an_axis() {
             a.insert(pin, at(10.0, 0.0, 5.0)).unwrap(),
         )
     };
-    let along = |direction: DVec3, spacing: f64, count| PatternStep {
+    let along = |direction: DVec3, spacing: f64, count: u32| PatternStep {
         direction: PatternLine::Fixed {
             origin: DVec3::ZERO,
             direction,
         },
         spacing: Scalar::new(spacing),
-        count,
+        count: Scalar::new(f64::from(count)),
         flip: false,
     };
     // Three along x, two along y: five copies, each a component of the pin's part.
@@ -1108,7 +1108,7 @@ fn components_are_patterned_in_rows_and_round_an_axis() {
     let round = |component, angle: f64| PatternKind::Circular {
         axis: PatternLine::Geom(end(component, face(&plate, DVec3::ZERO))),
         angle: Scalar::new(angle),
-        count: 4,
+        count: Scalar::new(4.0),
         flip: false,
     };
     let ring = a.add_pattern(&[screw], round(base, 360.0)).unwrap();

@@ -5,7 +5,7 @@
 //! list of *components* (each an instance of a definition, with a placement). Any number
 //! of components share one definition, so a part used ten times is stored, rebuilt and
 //! drawn once. A definition can itself be an assembly: a sub-assembly, placed as one
-//! rigid thing.
+//! rigid thing, or solved as flexible (see [`Component::flexible`]).
 //!
 //! *Mates* ([`crate::Mate`]) hold components together: they are solved when the assembly
 //! is rebuilt, and the placements they come to are stored in the components.
@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::Model;
 use crate::feature::Scalar;
-use crate::mate::{Mate, MateEnd, MateId, MateKind};
+use crate::mate::{Mate, MateEnd, MateId, MateKind, MateV11};
 
 /// Identifies a definition within its assembly. Ids are not reused.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -185,6 +185,81 @@ pub struct Component {
     /// the pattern puts it, and goes when the pattern does.
     #[serde(default)]
     pub pattern: Option<PatternId>,
+    /// A sub-assembly solved as flexible (SolidWorks' "Solve as: Flexible"): its own mates
+    /// are solved in this assembly together with this assembly's, so that the components
+    /// in it that are not fixed there move as those mates let them. Otherwise (rigid) it
+    /// is one body, posed as its own file has it. Model schema 12.
+    pub flexible: bool,
+    /// For a flexible sub-assembly: where each component that moves in it is, in the
+    /// sub-assembly's coordinates, in place of where its own file has it. Written by the
+    /// solve; empty for a rigid one.
+    pub poses: Vec<Pose>,
+    /// The configuration of its part it shows (SolidWorks' referenced configuration):
+    /// one of the definition's model's. `None`: the one that model has active. Two
+    /// components of one part can show different configurations. Model schema 12.
+    pub configuration: Option<crate::ConfigId>,
+    /// How much of what is behind it shows through: 0 opaque, 1 not seen at all. Like
+    /// `visible` and `color`, its value in the display state shown now (see
+    /// [`crate::DisplayState`]); a sub-assembly's goes for everything in it. Model schema 12.
+    pub transparency: f32,
+}
+
+/// Where a component inside a flexible sub-assembly is: its path below the
+/// sub-assembly's component, and its placement in the sub-assembly's coordinates.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Pose {
+    pub path: Vec<CompId>,
+    pub frame: Frame,
+}
+
+/// A component as model schemas 8 to 11 hold it: always rigid.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ComponentV11 {
+    id: CompId,
+    name: String,
+    definition: DefId,
+    placement: Frame,
+    fixed: bool,
+    visible: bool,
+    suppressed: bool,
+    color: Option<[u8; 3]>,
+    pattern: Option<PatternId>,
+}
+
+impl From<&Arc<Component>> for ComponentV11 {
+    fn from(c: &Arc<Component>) -> Self {
+        Self {
+            id: c.id,
+            name: c.name.clone(),
+            definition: c.definition,
+            placement: c.placement,
+            fixed: c.fixed,
+            visible: c.visible,
+            suppressed: c.suppressed,
+            color: c.color,
+            pattern: c.pattern,
+        }
+    }
+}
+
+impl From<ComponentV11> for Arc<Component> {
+    fn from(c: ComponentV11) -> Self {
+        Arc::new(Component {
+            id: c.id,
+            name: c.name,
+            definition: c.definition,
+            placement: c.placement,
+            fixed: c.fixed,
+            visible: c.visible,
+            suppressed: c.suppressed,
+            color: c.color,
+            pattern: c.pattern,
+            flexible: false,
+            poses: Vec::new(),
+            configuration: None,
+            transparency: 0.0,
+        })
+    }
 }
 
 /// Identifies a component pattern within its assembly. Ids are not reused.
@@ -208,8 +283,11 @@ pub struct PatternStep {
     pub direction: PatternLine,
     /// From one instance to the next (mm).
     pub spacing: Scalar,
-    /// How many, the original included.
-    pub count: u32,
+    /// How many, the original included: a whole number, or an expression worked out at
+    /// every rebuild (model schema 12; a plain number before). Its `value` is the count
+    /// the copies were last made for.
+    #[serde(deserialize_with = "crate::feature::deserialize_pattern_count")]
+    pub count: Scalar,
     /// The other way along the direction.
     pub flip: bool,
 }
@@ -226,12 +304,231 @@ pub enum PatternKind {
     Circular {
         axis: PatternLine,
         angle: Scalar,
+        #[serde(deserialize_with = "crate::feature::deserialize_pattern_count")]
+        count: Scalar,
+        flip: bool,
+    },
+}
+
+/// A pattern's count as the copies were last made for: its value, whole, 1 or more.
+pub fn pattern_count(count: &Scalar) -> u32 {
+    let v = count.value.round();
+    if v.is_finite() && v >= 1.0 {
+        (v.min(f64::from(MAX_PATTERN))) as u32
+    } else {
+        1
+    }
+}
+
+/// Works out a pattern count: a whole number from 1 to [`MAX_PATTERN`], or why not.
+pub fn evaluate_pattern_count(
+    count: &Scalar,
+    params: &peet_sketch::expr::Parameters,
+) -> Result<u32, String> {
+    let v = match count.evaluate(crate::ScalarKind::Number, params) {
+        Ok(v) => v,
+        // A count worked out from lengths (`(Height - 64) / 1165`) is the number in mm.
+        Err(e) => match count.expression.as_deref() {
+            Some(source) => params
+                .evaluate_expression(source)
+                .map(|q| q.value)
+                .map_err(|_| e)?,
+            None => return Err(e),
+        },
+    };
+    let n = v.round();
+    if !n.is_finite() || (v - n).abs() > 1e-6 || n < 1.0 || n > f64::from(MAX_PATTERN) {
+        return Err(format!(
+            "The count must be a whole number from 1 to {MAX_PATTERN} (it is {}).",
+            crate::feature::format_number(v)
+        ));
+    }
+    Ok(n as u32)
+}
+
+/// One direction of a linear component pattern as model schemas through 11 stored it:
+/// a plain count.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct PatternStepV11 {
+    direction: PatternLine,
+    spacing: Scalar,
+    count: u32,
+    flip: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+enum PatternKindV11 {
+    Linear {
+        first: PatternStepV11,
+        second: Option<PatternStepV11>,
+    },
+    Circular {
+        axis: PatternLine,
+        angle: Scalar,
         count: u32,
         flip: bool,
     },
 }
 
+/// A component pattern as model schemas through 11 stored it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct ComponentPatternV11 {
+    id: PatternId,
+    name: String,
+    seeds: Vec<CompId>,
+    kind: PatternKindV11,
+    instances: Vec<PatternInstance>,
+}
+
+impl From<&PatternStep> for PatternStepV11 {
+    fn from(s: &PatternStep) -> Self {
+        Self {
+            direction: s.direction.clone(),
+            spacing: s.spacing.clone(),
+            count: pattern_count(&s.count),
+            flip: s.flip,
+        }
+    }
+}
+
+impl From<PatternStepV11> for PatternStep {
+    fn from(s: PatternStepV11) -> Self {
+        Self {
+            direction: s.direction,
+            spacing: s.spacing,
+            count: Scalar::new(f64::from(s.count)),
+            flip: s.flip,
+        }
+    }
+}
+
+impl From<&Arc<ComponentPattern>> for ComponentPatternV11 {
+    fn from(p: &Arc<ComponentPattern>) -> Self {
+        Self {
+            id: p.id,
+            name: p.name.clone(),
+            seeds: p.seeds.clone(),
+            kind: match &p.kind {
+                PatternKind::Linear { first, second } => PatternKindV11::Linear {
+                    first: first.into(),
+                    second: second.as_ref().map(Into::into),
+                },
+                PatternKind::Circular {
+                    axis,
+                    angle,
+                    count,
+                    flip,
+                } => PatternKindV11::Circular {
+                    axis: axis.clone(),
+                    angle: angle.clone(),
+                    count: pattern_count(count),
+                    flip: *flip,
+                },
+            },
+            instances: p.instances.clone(),
+        }
+    }
+}
+
+impl From<ComponentPatternV11> for Arc<ComponentPattern> {
+    fn from(p: ComponentPatternV11) -> Self {
+        Arc::new(ComponentPattern {
+            id: p.id,
+            name: p.name,
+            seeds: p.seeds,
+            kind: match p.kind {
+                PatternKindV11::Linear { first, second } => PatternKind::Linear {
+                    first: first.into(),
+                    second: second.map(Into::into),
+                },
+                PatternKindV11::Circular {
+                    axis,
+                    angle,
+                    count,
+                    flip,
+                } => PatternKind::Circular {
+                    axis,
+                    angle,
+                    count: Scalar::new(f64::from(count)),
+                    flip,
+                },
+            },
+            instances: p.instances,
+        })
+    }
+}
+
 impl PatternKind {
+    /// The counts' scalars: the first direction's (or round the axis), and the second's.
+    pub fn counts(&self) -> [Option<&Scalar>; 2] {
+        match self {
+            Self::Linear { first, second } => {
+                [Some(&first.count), second.as_ref().map(|s| &s.count)]
+            }
+            Self::Circular { count, .. } => [Some(count), None],
+        }
+    }
+
+    /// The counts' scalars, to change them.
+    pub fn counts_mut(&mut self) -> [Option<&mut Scalar>; 2] {
+        match self {
+            Self::Linear { first, second } => [
+                Some(&mut first.count),
+                second.as_mut().map(|s| &mut s.count),
+            ],
+            Self::Circular { count, .. } => [Some(count), None],
+        }
+    }
+
+    /// The pattern's numeric values by SolidWorks' names for a component pattern's
+    /// dimensions, with their kinds: a linear pattern's counts are `D1` and `D2` and its
+    /// spacings `D3` and `D4` (as SolidWorks numbers a linear pattern's), a circular
+    /// pattern's count `D1` and angle `D3`.
+    pub fn values(&self) -> Vec<(&'static str, &Scalar, crate::ScalarKind)> {
+        use crate::ScalarKind::{Angle, Length, Number};
+        match self {
+            Self::Linear { first, second } => {
+                let mut out = vec![("D1", &first.count, Number)];
+                if let Some(s) = second {
+                    out.push(("D2", &s.count, Number));
+                }
+                out.push(("D3", &first.spacing, Length));
+                if let Some(s) = second {
+                    out.push(("D4", &s.spacing, Length));
+                }
+                out
+            }
+            Self::Circular { count, angle, .. } => {
+                vec![("D1", count, Number), ("D3", angle, Angle)]
+            }
+        }
+    }
+
+    /// The value called `name` (`D1`, `D3`, ...; see [`PatternKind::values`]), to change it.
+    pub fn value_mut(&mut self, name: &str) -> Option<(&mut Scalar, crate::ScalarKind)> {
+        use crate::ScalarKind::{Angle, Length, Number};
+        let name = name.trim().to_ascii_uppercase();
+        match (self, name.as_str()) {
+            (Self::Linear { first, .. }, "D1") => Some((&mut first.count, Number)),
+            (
+                Self::Linear {
+                    second: Some(s), ..
+                },
+                "D2",
+            ) => Some((&mut s.count, Number)),
+            (Self::Linear { first, .. }, "D3") => Some((&mut first.spacing, Length)),
+            (
+                Self::Linear {
+                    second: Some(s), ..
+                },
+                "D4",
+            ) => Some((&mut s.spacing, Length)),
+            (Self::Circular { count, .. }, "D1") => Some((count, Number)),
+            (Self::Circular { angle, .. }, "D3") => Some((angle, Angle)),
+            _ => None,
+        }
+    }
+
     /// The kind in one word, for names and messages.
     pub fn word(&self) -> &'static str {
         match self {
@@ -244,8 +541,11 @@ impl PatternKind {
     /// along each direction, for a circular one the step round the axis (and 0).
     pub fn places(&self) -> Vec<[u32; 2]> {
         let (first, second) = match self {
-            Self::Linear { first, second } => (first.count, second.as_ref().map_or(1, |s| s.count)),
-            Self::Circular { count, .. } => (*count, 1),
+            Self::Linear { first, second } => (
+                pattern_count(&first.count),
+                second.as_ref().map_or(1, |s| pattern_count(&s.count)),
+            ),
+            Self::Circular { count, .. } => (pattern_count(count), 1),
         };
         let (first, second) = (first.clamp(1, MAX_PATTERN), second.clamp(1, MAX_PATTERN));
         (0..second)
@@ -322,13 +622,154 @@ pub struct Assembly {
     patterns: Vec<Arc<ComponentPattern>>,
     #[serde(default)]
     next_pattern: u32,
+    /// The assembly's equations that set something of its components: a dimension of a
+    /// component's part, or whether a component is suppressed (model schema 12).
+    #[serde(default)]
+    equations: Vec<crate::equations::Equation>,
+    /// Reference dimensions: distances measured in the assembly, which equations read
+    /// (model schema 12).
+    #[serde(default)]
+    references: Vec<Arc<crate::equations::ReferenceDimension>>,
+    /// What differs between the assembly's configurations: the components' and the
+    /// mates' states in every configuration other than the active one (model schema 12;
+    /// see [`crate::asm_config`]).
+    #[serde(default)]
+    pub(crate) varying: crate::asm_config::Varying,
+    /// Assembly cuts, in the order they are worked out (model schema 12; see
+    /// [`crate::asm_cut`]).
+    #[serde(default)]
+    cuts: Vec<Arc<crate::asm_cut::AssemblyCut>>,
+    #[serde(default)]
+    next_cut: u32,
+    /// The display states (model schema 12; see [`crate::DisplayState`]).
+    #[serde(default)]
+    pub(crate) display: crate::DisplayStates,
 }
 
 /// The assembly layout in schemas 8 through 10, with their feature layouts in definitions.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub(crate) struct AssemblyLegacy<F> {
     definitions: Vec<DefinitionLegacy<F>>,
-    components: Vec<Arc<Component>>,
+    components: Vec<ComponentV11>,
+    next_definition: u32,
+    next_component: u32,
+    mates: Vec<MateV11>,
+    next_mate: u32,
+    explode: Vec<Arc<ExplodeStep>>,
+    next_explode: u32,
+    patterns: Vec<ComponentPatternV11>,
+    next_pattern: u32,
+}
+
+/// The assembly layout of schema 11: today's, with schema 11 models in its definitions.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct AssemblyV11 {
+    definitions: Vec<DefinitionV11>,
+    components: Vec<ComponentV11>,
+    next_definition: u32,
+    next_component: u32,
+    mates: Vec<MateV11>,
+    next_mate: u32,
+    explode: Vec<Arc<ExplodeStep>>,
+    next_explode: u32,
+    patterns: Vec<ComponentPatternV11>,
+    next_pattern: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct DefinitionV11 {
+    id: DefId,
+    model: crate::model::ModelV11,
+    link: Option<Link>,
+}
+
+impl AssemblyV11 {
+    pub(crate) fn of(a: &Assembly) -> Self {
+        Self {
+            definitions: a
+                .definitions()
+                .map(|d| DefinitionV11 {
+                    id: d.id,
+                    model: crate::model::ModelV11::of(&d.model),
+                    link: d.link.clone(),
+                })
+                .collect(),
+            components: a.components.iter().map(ComponentV11::from).collect(),
+            next_definition: a.next_definition,
+            next_component: a.next_component,
+            mates: a.mates.iter().map(|m| MateV11::from(&**m)).collect(),
+            next_mate: a.next_mate,
+            explode: a.explode.clone(),
+            next_explode: a.next_explode,
+            patterns: a.patterns.iter().map(Into::into).collect(),
+            next_pattern: a.next_pattern,
+        }
+    }
+}
+
+impl From<AssemblyV11> for Assembly {
+    fn from(a: AssemblyV11) -> Self {
+        Self {
+            definitions: a
+                .definitions
+                .into_iter()
+                .map(|d| {
+                    Arc::new(Definition {
+                        id: d.id,
+                        model: Arc::new(d.model.into()),
+                        link: d.link,
+                    })
+                })
+                .collect(),
+            components: a.components.into_iter().map(Into::into).collect(),
+            next_definition: a.next_definition,
+            next_component: a.next_component,
+            mates: a.mates.into_iter().map(|m| Arc::new(m.into())).collect(),
+            next_mate: a.next_mate,
+            explode: a.explode,
+            next_explode: a.next_explode,
+            patterns: a.patterns.into_iter().map(Into::into).collect(),
+            next_pattern: a.next_pattern,
+            equations: Vec::new(),
+            references: Vec::new(),
+            varying: Default::default(),
+            cuts: Vec::new(),
+            next_cut: 0,
+            display: Default::default(),
+        }
+    }
+}
+
+/// A component as model schema 12 held it before display states: no transparency.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct ComponentV12NoDisplayStates {
+    id: CompId,
+    name: String,
+    definition: DefId,
+    placement: Frame,
+    fixed: bool,
+    visible: bool,
+    suppressed: bool,
+    color: Option<[u8; 3]>,
+    pattern: Option<PatternId>,
+    flexible: bool,
+    poses: Vec<Pose>,
+    configuration: Option<crate::ConfigId>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+struct DefinitionV12NoDisplayStates {
+    id: DefId,
+    model: crate::model::ModelV12NoDisplayStates,
+    link: Option<Link>,
+}
+
+/// The assembly layout of model schema 12 before display states: today's, without them,
+/// with components without transparency and parts (and sub-assemblies) of that layout.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct AssemblyV12NoDisplayStates {
+    definitions: Vec<DefinitionV12NoDisplayStates>,
+    components: Vec<ComponentV12NoDisplayStates>,
     next_definition: u32,
     next_component: u32,
     mates: Vec<Arc<Mate>>,
@@ -337,6 +778,110 @@ pub(crate) struct AssemblyLegacy<F> {
     next_explode: u32,
     patterns: Vec<Arc<ComponentPattern>>,
     next_pattern: u32,
+    equations: Vec<crate::equations::Equation>,
+    references: Vec<Arc<crate::equations::ReferenceDimension>>,
+    varying: crate::asm_config::Varying,
+    cuts: Vec<Arc<crate::asm_cut::AssemblyCut>>,
+    next_cut: u32,
+}
+
+impl AssemblyV12NoDisplayStates {
+    pub(crate) fn of(a: &Assembly) -> Self {
+        Self {
+            definitions: a
+                .definitions()
+                .map(|d| DefinitionV12NoDisplayStates {
+                    id: d.id,
+                    model: crate::model::ModelV12NoDisplayStates::of(&d.model),
+                    link: d.link.clone(),
+                })
+                .collect(),
+            components: a
+                .components
+                .iter()
+                .map(|c| ComponentV12NoDisplayStates {
+                    id: c.id,
+                    name: c.name.clone(),
+                    definition: c.definition,
+                    placement: c.placement,
+                    fixed: c.fixed,
+                    visible: c.visible,
+                    suppressed: c.suppressed,
+                    color: c.color,
+                    pattern: c.pattern,
+                    flexible: c.flexible,
+                    poses: c.poses.clone(),
+                    configuration: c.configuration,
+                })
+                .collect(),
+            next_definition: a.next_definition,
+            next_component: a.next_component,
+            mates: a.mates.clone(),
+            next_mate: a.next_mate,
+            explode: a.explode.clone(),
+            next_explode: a.next_explode,
+            patterns: a.patterns.clone(),
+            next_pattern: a.next_pattern,
+            equations: a.equations.clone(),
+            references: a.references.clone(),
+            varying: a.varying.clone(),
+            cuts: a.cuts.clone(),
+            next_cut: a.next_cut,
+        }
+    }
+}
+
+impl From<AssemblyV12NoDisplayStates> for Assembly {
+    fn from(a: AssemblyV12NoDisplayStates) -> Self {
+        Self {
+            definitions: a
+                .definitions
+                .into_iter()
+                .map(|d| {
+                    Arc::new(Definition {
+                        id: d.id,
+                        model: Arc::new(d.model.into()),
+                        link: d.link,
+                    })
+                })
+                .collect(),
+            components: a
+                .components
+                .into_iter()
+                .map(|c| {
+                    Arc::new(Component {
+                        id: c.id,
+                        name: c.name,
+                        definition: c.definition,
+                        placement: c.placement,
+                        fixed: c.fixed,
+                        visible: c.visible,
+                        suppressed: c.suppressed,
+                        color: c.color,
+                        pattern: c.pattern,
+                        flexible: c.flexible,
+                        poses: c.poses,
+                        configuration: c.configuration,
+                        transparency: 0.0,
+                    })
+                })
+                .collect(),
+            next_definition: a.next_definition,
+            next_component: a.next_component,
+            mates: a.mates,
+            next_mate: a.next_mate,
+            explode: a.explode,
+            next_explode: a.next_explode,
+            patterns: a.patterns,
+            next_pattern: a.next_pattern,
+            equations: a.equations,
+            references: a.references,
+            varying: a.varying,
+            cuts: a.cuts,
+            next_cut: a.next_cut,
+            display: Default::default(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -357,14 +902,14 @@ impl<F: From<crate::Feature>> AssemblyLegacy<F> {
                     link: d.link.clone(),
                 })
                 .collect(),
-            components: a.components.clone(),
+            components: a.components.iter().map(ComponentV11::from).collect(),
             next_definition: a.next_definition,
             next_component: a.next_component,
-            mates: a.mates.clone(),
+            mates: a.mates.iter().map(|m| MateV11::from(&**m)).collect(),
             next_mate: a.next_mate,
             explode: a.explode.clone(),
             next_explode: a.next_explode,
-            patterns: a.patterns.clone(),
+            patterns: a.patterns.iter().map(Into::into).collect(),
             next_pattern: a.next_pattern,
         }
     }
@@ -384,15 +929,21 @@ impl<F: Into<crate::Feature>> From<AssemblyLegacy<F>> for Assembly {
                     })
                 })
                 .collect(),
-            components: a.components,
+            components: a.components.into_iter().map(Into::into).collect(),
             next_definition: a.next_definition,
             next_component: a.next_component,
-            mates: a.mates,
+            mates: a.mates.into_iter().map(|m| Arc::new(m.into())).collect(),
             next_mate: a.next_mate,
             explode: a.explode,
             next_explode: a.next_explode,
-            patterns: a.patterns,
+            patterns: a.patterns.into_iter().map(Into::into).collect(),
             next_pattern: a.next_pattern,
+            equations: Vec::new(),
+            references: Vec::new(),
+            varying: Default::default(),
+            cuts: Vec::new(),
+            next_cut: 0,
+            display: Default::default(),
         }
     }
 }
@@ -445,7 +996,7 @@ impl Assembly {
     /// The mates with an end on the component.
     pub fn mates_of(&self, id: CompId) -> impl Iterator<Item = &Mate> {
         self.mates()
-            .filter(move |m| m.a.component() == Some(id) || m.b.component() == Some(id))
+            .filter(move |m| m.ends().any(|e| e.component() == Some(id)))
     }
 
     pub fn patterns(&self) -> impl ExactSizeIterator<Item = &ComponentPattern> {
@@ -459,6 +1010,55 @@ impl Assembly {
     /// The pattern that made a component and places it, if one did.
     pub fn pattern_of(&self, id: CompId) -> Option<&ComponentPattern> {
         self.pattern(self.component(id)?.pattern?)
+    }
+
+    /// The assembly cuts, in the order they are worked out.
+    pub fn cuts(&self) -> impl ExactSizeIterator<Item = &crate::asm_cut::AssemblyCut> {
+        self.cuts.iter().map(|c| &**c)
+    }
+
+    pub fn cut(&self, id: crate::asm_cut::CutId) -> Option<&crate::asm_cut::AssemblyCut> {
+        self.cuts.iter().find(|c| c.id == id).map(|c| &**c)
+    }
+
+    /// The cut, to change it. Other snapshots of the assembly are not affected.
+    pub fn cut_mut(
+        &mut self,
+        id: crate::asm_cut::CutId,
+    ) -> Option<&mut crate::asm_cut::AssemblyCut> {
+        self.cuts.iter_mut().find(|c| c.id == id).map(Arc::make_mut)
+    }
+
+    /// A new id for a cut about to be added with [`Assembly::add_cut`].
+    pub fn next_cut_id(&self) -> crate::asm_cut::CutId {
+        crate::asm_cut::CutId(self.next_cut + 1)
+    }
+
+    /// Adds a cut, named `Cut-Extrude1`, ... and its sketch `Sketch1`, ... where it has no
+    /// names (unique among the cuts).
+    pub fn add_cut(&mut self, mut cut: crate::asm_cut::AssemblyCut) -> crate::asm_cut::CutId {
+        self.next_cut += 1;
+        cut.id = crate::asm_cut::CutId(self.next_cut);
+        if cut.name.is_empty() {
+            cut.name = (1..)
+                .map(|n| format!("Cut-Extrude{n}"))
+                .find(|name| !self.cuts.iter().any(|c| c.name == *name))
+                .unwrap_or_default();
+        }
+        if cut.sketch_name.is_empty() {
+            cut.sketch_name = (1..)
+                .map(|n| format!("Sketch{n}"))
+                .find(|name| !self.cuts.iter().any(|c| c.sketch_name == *name))
+                .unwrap_or_default();
+        }
+        let id = cut.id;
+        self.cuts.push(Arc::new(cut));
+        id
+    }
+
+    pub fn remove_cut(&mut self, id: crate::asm_cut::CutId) -> Option<crate::asm_cut::AssemblyCut> {
+        let index = self.cuts.iter().position(|c| c.id == id)?;
+        Some(Arc::unwrap_or_clone(self.cuts.remove(index)))
     }
 
     pub fn explode_steps(&self) -> impl ExactSizeIterator<Item = &ExplodeStep> {
@@ -566,6 +1166,10 @@ impl Assembly {
             suppressed: false,
             color: None,
             pattern: None,
+            flexible: false,
+            poses: Vec::new(),
+            configuration: None,
+            transparency: 0.0,
         }));
         Some(id)
     }
@@ -593,7 +1197,8 @@ impl Assembly {
             kind,
             a,
             b,
-            flip: false,
+            align: None,
+            flip_dimension: false,
             suppressed: false,
         }));
         id
@@ -673,6 +1278,37 @@ impl Assembly {
         Some(removed)
     }
 
+    /// Works out the patterns' counts that are expressions and makes or removes copies to
+    /// match, as SolidWorks does when an equation drives a pattern's count. A count that
+    /// can't be worked out is left as it was (the rebuild reports the pattern failed).
+    /// Returns whether any pattern changed.
+    pub fn sync_pattern_counts(&mut self, params: &peet_sketch::expr::Parameters) -> bool {
+        let mut changed = Vec::new();
+        for p in &mut self.patterns {
+            let mut kind = p.kind.clone();
+            let mut differs = false;
+            for count in kind.counts_mut().into_iter().flatten() {
+                if count.expression.is_none() {
+                    continue;
+                }
+                if let Ok(n) = evaluate_pattern_count(count, params)
+                    && n != pattern_count(count)
+                {
+                    count.value = f64::from(n);
+                    differs = true;
+                }
+            }
+            if differs {
+                Arc::make_mut(p).kind = kind;
+                changed.push(p.id);
+            }
+        }
+        for id in &changed {
+            self.sync_pattern(*id);
+        }
+        !changed.is_empty()
+    }
+
     /// Makes a pattern's components be those its originals and its places ask for:
     /// what is missing is added (where its original is, until the next rebuild puts it
     /// in its place), and what is no longer asked for is removed.
@@ -694,8 +1330,9 @@ impl Assembly {
             self.remove_component(component);
         }
         for seed in &seeds {
-            let Some((definition, placement)) =
-                self.component(*seed).map(|c| (c.definition, c.placement))
+            let Some((definition, placement, configuration)) = self
+                .component(*seed)
+                .map(|c| (c.definition, c.placement, c.configuration))
             else {
                 continue;
             };
@@ -710,6 +1347,8 @@ impl Assembly {
                     if let Some(c) = self.component_mut(component) {
                         c.pattern = Some(id);
                         c.fixed = false;
+                        // The copy shows its part as its original does.
+                        c.configuration = configuration;
                     }
                     instances.push(PatternInstance {
                         seed: *seed,
@@ -734,13 +1373,90 @@ impl Assembly {
         self.prune();
     }
 
-    /// Takes a component out, with its mates. Nothing else is tidied.
+    /// Takes a component out, with its mates, the equations that set something of it and
+    /// the reference dimensions measured to it. Nothing else is tidied.
     fn remove_component(&mut self, id: CompId) -> Option<Component> {
         let index = self.components.iter().position(|c| c.id == id)?;
         let removed = self.components.remove(index);
         self.mates
-            .retain(|m| m.a.component() != Some(id) && m.b.component() != Some(id));
+            .retain(|m| !m.ends().any(|e| e.component() == Some(id)));
+        self.varying.forget(&self.components, &self.mates);
+        let components = &self.components;
+        self.display
+            .forget(|c| components.iter().any(|x| x.id == c));
+        self.equations.retain(|e| e.target.component() != id);
+        self.references
+            .retain(|r| r.a.component() != Some(id) && r.b.component() != Some(id));
+        for cut in &mut self.cuts {
+            if cut.scope.as_ref().is_some_and(|s| s.contains(&id)) {
+                let cut = Arc::make_mut(cut);
+                if let Some(scope) = &mut cut.scope {
+                    scope.retain(|c| *c != id);
+                }
+            }
+        }
         Some(Arc::unwrap_or_clone(removed))
+    }
+
+    /// The assembly's equations, in the order they are worked out.
+    pub fn equations(&self) -> &[crate::equations::Equation] {
+        &self.equations
+    }
+
+    /// The assembly's equations, for changing them.
+    pub fn equations_mut(&mut self) -> &mut Vec<crate::equations::Equation> {
+        &mut self.equations
+    }
+
+    /// The reference dimensions, in the order they were added.
+    pub fn references(
+        &self,
+    ) -> impl ExactSizeIterator<Item = &crate::equations::ReferenceDimension> {
+        self.references.iter().map(|r| &**r)
+    }
+
+    /// The reference dimension called `name` (in any case, where only one is).
+    pub fn reference(&self, name: &str) -> Option<&crate::equations::ReferenceDimension> {
+        let name = name.trim();
+        self.references().find(|r| r.name == name).or_else(|| {
+            let mut alike = self
+                .references()
+                .filter(|r| r.name.eq_ignore_ascii_case(name));
+            match (alike.next(), alike.next()) {
+                (Some(r), None) => Some(r),
+                _ => None,
+            }
+        })
+    }
+
+    /// Adds a reference dimension, or replaces the one of the same name.
+    pub fn set_reference(&mut self, reference: crate::equations::ReferenceDimension) {
+        match self
+            .references
+            .iter_mut()
+            .find(|r| r.name == reference.name)
+        {
+            Some(r) => *r = Arc::new(reference),
+            None => self.references.push(Arc::new(reference)),
+        }
+    }
+
+    /// Removes the reference dimension called `name`.
+    pub fn remove_reference(&mut self, name: &str) -> bool {
+        let before = self.references.len();
+        self.references.retain(|r| r.name != name);
+        self.references.len() != before
+    }
+
+    /// Stores what a reference dimension measured. Returns whether it changed.
+    pub(crate) fn set_reference_value(&mut self, name: &str, value: Option<f64>) -> bool {
+        match self.references.iter_mut().find(|r| r.name == name) {
+            Some(r) if r.value.map(f64::to_bits) != value.map(f64::to_bits) => {
+                Arc::make_mut(r).value = value;
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Adds a step to the exploded view, with an automatic name (`Explode1`). The
@@ -795,7 +1511,9 @@ impl Assembly {
 
     pub fn remove_mate(&mut self, id: MateId) -> Option<Mate> {
         let index = self.mates.iter().position(|m| m.id == id)?;
-        Some(Arc::unwrap_or_clone(self.mates.remove(index)))
+        let removed = Arc::unwrap_or_clone(self.mates.remove(index));
+        self.varying.forget(&self.components, &self.mates);
+        Some(removed)
     }
 
     /// Removes a component, with its mates, and its definition if nothing else uses it.
@@ -836,6 +1554,10 @@ impl Assembly {
             return false;
         };
         c.definition = definition;
+        // Poses and the configuration are of the part it was.
+        c.poses.clear();
+        c.configuration = None;
+        self.varying.forget_part(id);
         self.prune();
         true
     }
@@ -908,7 +1630,19 @@ impl Assembly {
                     m.id.0
                 ));
             }
-            if m.a.path.is_empty() || m.b.path.is_empty() {
+            // An end on the assembly itself is on one of its standard planes or its
+            // origin; any other is on a component.
+            let not_planes = |e: &crate::MateEnd| {
+                e.path.is_empty()
+                    && !matches!(
+                        e.geom,
+                        Some(
+                            crate::MateGeom::Plane(crate::PlaneRef::Standard(_))
+                                | crate::MateGeom::Origin
+                        )
+                    )
+            };
+            if m.ends().any(not_planes) || m.ends().all(|e| e.path.is_empty()) {
                 return Err(format!(
                     "The assembly is damaged: {} is not on two components.",
                     m.name
@@ -969,6 +1703,34 @@ impl Assembly {
         self.next_pattern = self
             .next_pattern
             .max(max(&mut self.patterns.iter().map(|p| p.id.0)));
+        let mut seen = std::collections::HashSet::new();
+        for c in &self.cuts {
+            if !seen.insert(c.id.0) {
+                return Err(format!(
+                    "The assembly is damaged: two cuts have the id {}.",
+                    c.id.0
+                ));
+            }
+        }
+        self.next_cut = self
+            .next_cut
+            .max(max(&mut self.cuts.iter().map(|c| c.id.0)));
+        for e in &self.equations {
+            if self.component(e.target.component()).is_none() {
+                return Err(
+                    "The assembly is damaged: an equation sets something of a component that is not in the file."
+                        .to_owned(),
+                );
+            }
+        }
+        for r in &self.references {
+            if r.a.path.is_empty() || r.b.path.is_empty() {
+                return Err(format!(
+                    "The assembly is damaged: {} is not measured between two components.",
+                    r.name
+                ));
+            }
+        }
         for d in &mut self.definitions {
             let mut model = (*d.model).clone();
             model.validate()?;
