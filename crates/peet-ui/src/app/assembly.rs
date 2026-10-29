@@ -2828,6 +2828,57 @@ mod tests {
     }
 
     #[test]
+    fn display_states_and_transparency_in_the_application() {
+        use crate::display_ui::DisplayAction;
+        let ctx = egui::Context::default();
+        let mut app = PeetApp::headless();
+        for op in [
+            json!({"op": "new", "assembly": true, "discard": true}),
+            json!({"op": "insert", "sample": "chassis", "name": "Tray"}),
+            json!({"op": "insert", "sample": "cover", "name": "Lid", "at": [0, 0, 60]}),
+        ] {
+            ok(&mut app, &ctx, op);
+        }
+        let lid = CompId(2);
+        app.selected_component = Some(lid);
+        draw(&mut app, &ctx);
+        // The list: add two, rename one.
+        app.apply_display(vec![DisplayAction::Add]);
+        app.apply_display(vec![DisplayAction::Add]);
+        let names: Vec<String> = app
+            .doc
+            .model
+            .display_states()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        assert_eq!(names, ["Display State-1", "Display State-2"]);
+        let second = app.doc.model.active_display_state().unwrap().id;
+        app.apply_display(vec![DisplayAction::Rename {
+            id: second,
+            to: "See inside".to_owned(),
+        }]);
+        // The lid made see-through in its properties, in the display state shown.
+        app.change_model("Change Transparency of Lid", None, |m| {
+            if let Some(c) = m.assembly_mut().and_then(|a| a.component_mut(lid)) {
+                c.transparency = 0.7;
+            }
+        });
+        draw(&mut app, &ctx);
+        let first = app.doc.model.display_states()[0].id;
+        app.apply_display(vec![DisplayAction::Activate(first)]);
+        assert_eq!(app.doc.placed[1].transparency, 0.0);
+        app.apply_display(vec![DisplayAction::Activate(second)]);
+        assert_eq!(app.doc.placed[1].transparency, 0.7);
+        app.apply_display(vec![DisplayAction::Link(true)]);
+        assert!(app.doc.model.display_states_linked());
+        app.apply_display(vec![DisplayAction::Delete(first)]);
+        assert_eq!(app.doc.model.display_states().len(), 1);
+        draw(&mut app, &ctx);
+        assert!(app.untranslated().is_empty(), "{:?}", app.untranslated());
+    }
+
+    #[test]
     fn an_assembly_is_worked_on_in_the_application() {
         let ctx = egui::Context::default();
         let mut app = PeetApp::headless();
