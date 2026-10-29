@@ -1586,7 +1586,13 @@ pub(crate) fn break_corner_panel(
                 peet_sheetmetal::BreakKind::Fillet => "Radius",
                 peet_sheetmetal::BreakKind::Chamfer => "Distance",
             });
-            out.committed |= scalar_field(ui, "break_corner_size", &mut b.size, ScalarKind::Length, params);
+            out.committed |= scalar_field(
+                ui,
+                "break_corner_size",
+                &mut b.size,
+                ScalarKind::Length,
+                params,
+            );
             ui.end_row();
         });
     out

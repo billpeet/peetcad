@@ -485,9 +485,11 @@ pub(crate) fn bend_model(
     };
     Ok(match def {
         None => None,
-        Some(BendModelDef::KFactor(k)) => {
-            Some(BendModel::KFactor(value(k, ScalarKind::Number, "K-factor")?))
-        }
+        Some(BendModelDef::KFactor(k)) => Some(BendModel::KFactor(value(
+            k,
+            ScalarKind::Number,
+            "K-factor",
+        )?)),
         Some(BendModelDef::Allowance(v)) => Some(BendModel::Allowance(value(
             v,
             ScalarKind::Length,
@@ -502,6 +504,7 @@ pub(crate) fn bend_model(
 }
 
 /// An edge flange: adds a flange to the sheet metal body the edge is on.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_edge_flange(
     feature: FeatureId,
     model: &Model,
@@ -582,6 +585,7 @@ pub(crate) fn apply_edge_flange(
 /// the sketch lies on, cut out of the sheet. Other flanges with a face in the sketch's
 /// plane are cut too, each through its own place in the flat pattern: two tabs side by
 /// side are far apart in the blank, and a sketch across both means both.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_sheet_cut(
     feature: FeatureId,
     model: &Model,
@@ -677,7 +681,10 @@ pub(crate) fn apply_sheet_cut(
             continue;
         }
         let through = |p: DVec2| other.to_local(plane.from_plane_coords(p)).truncate();
-        if probes.iter().all(|p| through(*p).distance(to_flat(*p)) < 1e-6) {
+        if probes
+            .iter()
+            .all(|p| through(*p).distance(to_flat(*p)) < 1e-6)
+        {
             continue;
         }
         others.push((i, other));
@@ -821,7 +828,10 @@ pub(crate) fn off_flange(bodies: &[Arc<Body>], face: Option<&FaceRef>) -> Option
     let Some(face) = face else { return Some(None) };
     let found = find_face(bodies, face)?;
     let sheet = bodies[found.body].sheet.as_ref()?;
-    sheet.flange_face(found.id).is_none().then_some(Some(found.body))
+    sheet
+        .flange_face(found.id)
+        .is_none()
+        .then_some(Some(found.body))
 }
 
 /// The cuts a sheet metal cut makes in `layout` from a sketch placed in the model by
@@ -1015,7 +1025,7 @@ pub(crate) fn sheet_cut_reach(
                 .depth
                 .evaluate(ScalarKind::Length, params)
                 .map_err(|m| format!("Depth: {m}."))?;
-            if !(d > 0.0) {
+            if d.is_nan() || d <= 0.0 {
                 return Err("The depth must be greater than zero.".to_owned());
             }
             d
@@ -1350,9 +1360,10 @@ fn sketch_lines(sketch: &Sketch) -> Vec<(u32, DVec2, DVec2)> {
 
 /// The flange whose material holds a point of the flat pattern.
 fn flange_at(layout: &Layout, p: DVec2) -> Option<usize> {
-    layout.pieces.iter().position(|pc| {
-        pc.is_flange() && pc.covers(p)
-    })
+    layout
+        .pieces
+        .iter()
+        .position(|pc| pc.is_flange() && pc.covers(p))
 }
 
 /// A sketch line in flat coordinates: its entity and its two ends.
@@ -1711,7 +1722,10 @@ pub(crate) fn apply_break_corner(
     for i in 0..cuts.len() {
         for j in i + 1..cuts.len() {
             if cuts[i].0 == cuts[j].0
-                && cuts[i].2.iter().any(|p| cuts[j].2.iter().any(|q| overlap(p, q)))
+                && cuts[i]
+                    .2
+                    .iter()
+                    .any(|p| cuts[j].2.iter().any(|q| overlap(p, q)))
             {
                 return Err(FeatureError(format!(
                     "Corners {} and {} are at the two ends of one side, which is too short for both at that size.",
@@ -1721,7 +1735,12 @@ pub(crate) fn apply_break_corner(
             }
         }
     }
-    let mut layout = bodies[index].sheet.as_ref().expect("checked").layout.clone();
+    let mut layout = bodies[index]
+        .sheet
+        .as_ref()
+        .expect("checked")
+        .layout
+        .clone();
     for (piece, area, _, adds) in cuts {
         if adds {
             // A rounded inside corner fills in what earlier cuts took there.

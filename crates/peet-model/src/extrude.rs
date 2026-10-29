@@ -282,7 +282,10 @@ fn up_to_next(input: &ExtrudeInput<'_>, s: f64) -> Result<f64, FeatureError> {
         // The first material along this ray, of any body: where it starts and ends
         let mut first: Option<(f64, f64)> = None;
         for tris in &meshes {
-            let mut hits: Vec<f64> = tris.iter().filter_map(|t| ray_triangle(o, dir, t)).collect();
+            let mut hits: Vec<f64> = tris
+                .iter()
+                .filter_map(|t| ray_triangle(o, dir, t))
+                .collect();
             hits.sort_by(f64::total_cmp);
             hits.dedup_by(|a, b| (*a - *b).abs() < 1e-7);
             // Inside at the start if an odd number of crossings lie behind it (a crossing

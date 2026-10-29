@@ -29,8 +29,8 @@ pub mod triangulate;
 
 pub use curve::{Curve, Intersection};
 pub use sketch::{
-    Along, ArcSide, Constraint, SideTerms, side_terms, ConstraintId, ConstraintKind, Dimension, Entity, EntityId, EntityKind, Geometry,
-    Sketch, SketchError,
+    Along, ArcSide, Constraint, ConstraintId, ConstraintKind, Dimension, Entity, EntityId,
+    EntityKind, Geometry, SideTerms, Sketch, SketchError, side_terms,
 };
 pub use solver::{Analysis, Drag, SolveReport, Solver};
 pub use spline::{Spline, SplinePiece};

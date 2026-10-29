@@ -39,7 +39,9 @@ impl CutSel {
         match v {
             Value::Number(_) => Ok(Self::Id(CutId(integer(v)?))),
             Value::String(name) => Ok(Self::Name(name.clone())),
-            other => Err(format!("expected an assembly cut's name or id, not {other}")),
+            other => Err(format!(
+                "expected an assembly cut's name or id, not {other}"
+            )),
         }
     }
 
@@ -54,10 +56,9 @@ impl CutSel {
             }
         };
         match self {
-            Self::Id(id) => assembly
-                .cut(*id)
-                .map(|c| c.id)
-                .ok_or_else(|| format!("There is no assembly cut with the id {}. {}", id.0, names())),
+            Self::Id(id) => assembly.cut(*id).map(|c| c.id).ok_or_else(|| {
+                format!("There is no assembly cut with the id {}. {}", id.0, names())
+            }),
             Self::Name(name) => assembly
                 .cuts()
                 .find(|c| c.name == *name || c.sketch_name == *name)
@@ -83,7 +84,9 @@ pub enum CutPlaneSel {
 impl CutPlaneSel {
     fn parse(v: &Value) -> Result<Self, String> {
         match v {
-            Value::String(s) => MateEndSel::parse(&json!({ "plane": s })).map(|e| Self::End(Box::new(e))),
+            Value::String(s) => {
+                MateEndSel::parse(&json!({ "plane": s })).map(|e| Self::End(Box::new(e)))
+            }
             Value::Object(map) if map.contains_key("normal") => {
                 let normal = DVec3::from_array(coordinates::<3>(&map["normal"])?);
                 let origin = match map.get("origin") {
@@ -94,7 +97,10 @@ impl CutPlaneSel {
                     .get("x")
                     .map(|x| coordinates::<3>(x).map(DVec3::from_array))
                     .transpose()?;
-                if map.keys().any(|k| !["normal", "origin", "x"].contains(&k.as_str())) {
+                if map
+                    .keys()
+                    .any(|k| !["normal", "origin", "x"].contains(&k.as_str()))
+                {
                     return Err(format!(
                         "A plane at a place is {{\"origin\": [x, y, z], \"normal\": [x, y, z], \"x\": [x, y, z]}}, not {v}"
                     ));
@@ -219,7 +225,11 @@ pub(crate) const CUT_OPS: &[(&str, &str, &str)] = &[
         "Change an assembly cut.",
     ),
     ("rename", "cut, name", "Rename an assembly cut."),
-    ("delete", "cut", "Delete an assembly cut: the components are whole again."),
+    (
+        "delete",
+        "cut",
+        "Delete an assembly cut: the components are whole again.",
+    ),
 ];
 
 fn components(v: &Value) -> Result<Vec<CompSel>, String> {
@@ -236,7 +246,9 @@ fn spec(a: &mut Args, new: bool) -> Result<CutSpec, String> {
         a.parsed("on", CutPlaneSel::parse)?
     };
     let convert = a
-        .parsed("convert", |v| list(v)?.iter().map(MateEndSel::parse).collect())?
+        .parsed("convert", |v| {
+            list(v)?.iter().map(MateEndSel::parse).collect()
+        })?
         .unwrap_or_default();
     let scope = match a.take_nullable("components") {
         None => None,
@@ -252,7 +264,11 @@ fn spec(a: &mut Args, new: bool) -> Result<CutSpec, String> {
         flip: a.parsed("flip", boolean)?,
         flip_side: a.parsed("flip_side", boolean)?,
         components: scope,
-        suppressed: if new { None } else { a.parsed("suppressed", boolean)? },
+        suppressed: if new {
+            None
+        } else {
+            a.parsed("suppressed", boolean)?
+        },
         name: if new { a.string("name")? } else { None },
         sketch_name: if new { a.string("sketch_name")? } else { None },
     })
@@ -315,7 +331,10 @@ fn fill(doc: &Document, cut: &mut AssemblyCut, spec: &CutSpec) -> Result<(), Str
     for e in &spec.convert {
         let edge = e.resolve(doc)?;
         if !matches!(edge.geom, Some(MateGeom::Edge(_))) || edge.path.is_empty() {
-            return Err("'convert' takes edges of components: {\"component\": ..., \"edge\": ...}.".to_owned());
+            return Err(
+                "'convert' takes edges of components: {\"component\": ..., \"edge\": ...}."
+                    .to_owned(),
+            );
         }
         cut.conversions.push(CutConversion { entity: None, edge });
     }
@@ -362,14 +381,24 @@ fn unique(assembly: &Assembly, id: Option<CutId>, name: &str) -> Result<String, 
         .cuts()
         .any(|c| Some(c.id) != id && (c.name == name || c.sketch_name == name))
     {
-        return Err(format!("Another assembly cut or its sketch is already called '{name}'."));
+        return Err(format!(
+            "Another assembly cut or its sketch is already called '{name}'."
+        ));
     }
     Ok(name.to_owned())
 }
 
-pub(crate) fn add(doc: &Document, model: &mut Model, spec: &CutSpec) -> Result<(CutId, String), String> {
+pub(crate) fn add(
+    doc: &Document,
+    model: &mut Model,
+    spec: &CutSpec,
+) -> Result<(CutId, String), String> {
     let assembly = the_assembly(doc)?;
-    let mut cut = AssemblyCut::new(assembly.next_cut_id(), CutPlane::Fixed(Plane::TOP), Plane::TOP);
+    let mut cut = AssemblyCut::new(
+        assembly.next_cut_id(),
+        CutPlane::Fixed(Plane::TOP),
+        Plane::TOP,
+    );
     if let Some(n) = &spec.name {
         cut.name = unique(assembly, None, n)?;
     }
@@ -388,7 +417,12 @@ pub(crate) fn add(doc: &Document, model: &mut Model, spec: &CutSpec) -> Result<(
     Ok((id, label))
 }
 
-pub(crate) fn change(doc: &Document, model: &mut Model, id: CutId, change: &CutChange) -> Result<String, String> {
+pub(crate) fn change(
+    doc: &Document,
+    model: &mut Model,
+    id: CutId,
+    change: &CutChange,
+) -> Result<String, String> {
     let assembly = the_assembly(doc)?;
     let gone = || "The assembly cut no longer exists.".to_owned();
     let was = assembly.cut(id).ok_or_else(gone)?.clone();
@@ -452,7 +486,10 @@ pub(crate) fn cut_out(doc: &Document, id: CutId) -> Value {
         }),
     );
     if cut.params.end.uses_depth() {
-        m.insert("depth".to_owned(), scalar_out(&cut.params.depth, ScalarKind::Length, doc));
+        m.insert(
+            "depth".to_owned(),
+            scalar_out(&cut.params.depth, ScalarKind::Length, doc),
+        );
     }
     if cut.params.reverse {
         m.insert("flip".to_owned(), json!(true));
@@ -517,7 +554,11 @@ pub(crate) fn failures(doc: &Document) -> Vec<Value> {
     };
     assembly
         .cuts()
-        .filter(|c| doc.evaluation().cut_status(c.id).is_some_and(|s| s.message().is_some()))
+        .filter(|c| {
+            doc.evaluation()
+                .cut_status(c.id)
+                .is_some_and(|s| s.message().is_some())
+        })
         .map(|c| cut_out(doc, c.id))
         .collect()
 }

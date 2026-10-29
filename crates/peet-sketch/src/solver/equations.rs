@@ -506,7 +506,12 @@ impl Ctx<'_> {
             for i in 1..s.len() {
                 for k in 0..2 {
                     out.push(Eq::linear(
-                        &[(f[i] + k, 1.0), (s[i] + k, -1.0), (f[0] + k, -1.0), (s[0] + k, 1.0)],
+                        &[
+                            (f[i] + k, 1.0),
+                            (s[i] + k, -1.0),
+                            (f[0] + k, -1.0),
+                            (s[0] + k, 1.0),
+                        ],
                         0.0,
                         owner,
                     ));
@@ -525,7 +530,12 @@ impl Ctx<'_> {
                 let terms: Vec<(u32, f64)> = if i == 0 {
                     vec![(c[0] + k, 1.0), (s[0] + k, n - 1.0), (f[0] + k, -n)]
                 } else {
-                    vec![(c[i] + k, 1.0), (s[i] + k, -1.0), (f[0] + k, -n), (s[0] + k, n)]
+                    vec![
+                        (c[i] + k, 1.0),
+                        (s[i] + k, -1.0),
+                        (f[0] + k, -n),
+                        (s[0] + k, n),
+                    ]
                 };
                 out.push(Eq::linear(&terms, 0.0, owner));
             }
@@ -726,9 +736,27 @@ impl Ctx<'_> {
             K::SideDistance { a, b, sides, along } => {
                 // D + ka·ra + kb·rb, with the sides and signs where things are now
                 let ends = [a, b];
-                let at = |id| if self.is_point(id) { p(id) } else { self.center(id) };
-                let rad = |id| if self.is_point(id) { 0.0 } else { self.radius_value(id) };
-                let line = if self.is_line(a) { Some((a, b)) } else if self.is_line(b) { Some((b, a)) } else { None };
+                let at = |id| {
+                    if self.is_point(id) {
+                        p(id)
+                    } else {
+                        self.center(id)
+                    }
+                };
+                let rad = |id| {
+                    if self.is_point(id) {
+                        0.0
+                    } else {
+                        self.radius_value(id)
+                    }
+                };
+                let line = if self.is_line(a) {
+                    Some((a, b))
+                } else if self.is_line(b) {
+                    Some((b, a))
+                } else {
+                    None
+                };
                 let (centers, radii, circular, off) = match line {
                     Some((l, c)) => {
                         let r = rad(c);
@@ -738,7 +766,11 @@ impl Ctx<'_> {
                         (
                             [cc, cc],
                             if first { [0.0, r] } else { [r, 0.0] },
-                            if first { [false, !self.is_point(c)] } else { [!self.is_point(c), false] },
+                            if first {
+                                [false, !self.is_point(c)]
+                            } else {
+                                [!self.is_point(c), false]
+                            },
                             Some(off),
                         )
                     }
@@ -770,9 +802,9 @@ impl Ctx<'_> {
                 // multiplied by it too.
                 let turn = if off.is_some() { t.toward } else { 1.0 };
                 let mut eq = core;
-                for k in 0..2 {
-                    if t.coef[k] != 0.0 && !self.is_point(ends[k]) && !self.is_line(ends[k]) {
-                        eq = eq.minus_radius(self.radius(ends[k]), -turn * t.coef[k]);
+                for (&coef, &end) in t.coef.iter().zip(ends.iter()) {
+                    if coef != 0.0 && !self.is_point(end) && !self.is_line(end) {
+                        eq = eq.minus_radius(self.radius(end), -turn * coef);
                     }
                 }
                 out.push(eq.with_k0(turn * t.sign * value));

@@ -407,8 +407,13 @@ impl Model {
     /// and makes or removes copies to match. Returns whether any pattern changed.
     pub fn sync_pattern_counts(&mut self) -> bool {
         let driven = self.assembly().is_some_and(|a| {
-            a.patterns()
-                .any(|p| p.kind.counts().into_iter().flatten().any(|c| c.expression.is_some()))
+            a.patterns().any(|p| {
+                p.kind
+                    .counts()
+                    .into_iter()
+                    .flatten()
+                    .any(|c| c.expression.is_some())
+            })
         });
         if !driven {
             return false;

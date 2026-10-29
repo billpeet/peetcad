@@ -228,7 +228,11 @@ fn a_cut_goes_through_every_flange_in_its_plane() {
         let (_, e) = edge(&p, DVec3::new(0.0, y, T), DVec3::new(100.0, y, T));
         edge_flange(&mut p, e, |f| f.length = Scalar::new(30.0));
         p.rebuild();
-        let (_, e) = edge(&p, DVec3::new(0.0, inner, 30.0), DVec3::new(100.0, inner, 30.0));
+        let (_, e) = edge(
+            &p,
+            DVec3::new(0.0, inner, 30.0),
+            DVec3::new(100.0, inner, 30.0),
+        );
         edge_flange(&mut p, e, |f| f.length = Scalar::new(15.0));
         p.rebuild();
     }

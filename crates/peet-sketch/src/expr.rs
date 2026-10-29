@@ -2872,12 +2872,14 @@ mod tests {
         );
         assert_eq!(solidworks_address("RD1@Annotations"), "RD1@Annotations");
         let mut p = Parameters::default();
-        p.dimensions.0.insert(
-            "Height@Sketch1@Door-1".to_owned(),
-            Quantity::length(1600.0),
-        );
+        p.dimensions
+            .0
+            .insert("Height@Sketch1@Door-1".to_owned(), Quantity::length(1600.0));
         // SolidWorks' forms read what PeetCAD's does.
-        for name in ["\"Height@Sketch1@Door<1>.Part\"", "\"Height@Sketch1@Door-1.Part\""] {
+        for name in [
+            "\"Height@Sketch1@Door<1>.Part\"",
+            "\"Height@Sketch1@Door-1.Part\"",
+        ] {
             assert_eq!(p.evaluate_expression(name).unwrap().value, 1600.0);
         }
     }

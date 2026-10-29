@@ -77,9 +77,9 @@ pub use fields::{
     PlanesAxis, Revolve, SheetCut, Shell, SketchPlane, SketchedBend, Sweep, Unfold, VertexPoint,
 };
 pub use host::{AppCommand, Headless, Host, SketchTool, Toggle, View, Window};
+pub use in_context::{InContextOp, MadeIn};
 pub use library::{CheckRule, Gauge, GaugeBend};
 pub use links::{PartSel, linked_files};
-pub use in_context::{InContextOp, MadeIn};
 pub use mate::{MateChange, MateEndSel, MateSel, MateType, WidthModeSel};
 pub use op::{
     DatumSel, DxfPlacement, DxfTarget, Format, New, Op, Place, Query, RollTo, Sample, Source,
@@ -158,7 +158,11 @@ struct Done {
     /// A reference dimension the operation was about, reported with what it measures.
     reference: Option<String>,
     /// An in-context reference the operation made: the component, its sketch and entity.
-    in_context: Option<(Vec<peet_model::CompId>, FeatureId, peet_model::in_context::Holder)>,
+    in_context: Option<(
+        Vec<peet_model::CompId>,
+        FeatureId,
+        peet_model::in_context::Holder,
+    )>,
     data: Map<String, Value>,
 }
 
@@ -831,7 +835,12 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 return Ok(done);
             }
             done.data.insert("linked".to_owned(), json!(*on));
-            if *on { "Link Display States" } else { "Unlink Display States" }.to_owned()
+            if *on {
+                "Link Display States"
+            } else {
+                "Unlink Display States"
+            }
+            .to_owned()
         }
         Op::Look {
             component,
@@ -1191,7 +1200,12 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             if !written.is_empty() {
                 done.data.insert(
                     "parts_written".to_owned(),
-                    json!(written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()),
+                    json!(
+                        written
+                            .iter()
+                            .map(|p| p.display().to_string())
+                            .collect::<Vec<_>>()
+                    ),
                 );
             }
             return Ok(done);
@@ -1803,7 +1817,10 @@ pub(crate) fn apply_with(
         out.insert("reference".to_owned(), equations::reference_out(doc, name));
     }
     if let Some((c, f, e)) = &done.in_context {
-        out.insert("in_context".to_owned(), in_context::made_out(doc, c, *f, *e));
+        out.insert(
+            "in_context".to_owned(),
+            in_context::made_out(doc, c, *f, *e),
+        );
     }
     if done.changed && !done.replaced && doc.is_assembly() {
         // The components that are somewhere else now: what a mate, or a placement that

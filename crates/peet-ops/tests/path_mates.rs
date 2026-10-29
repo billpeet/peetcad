@@ -116,7 +116,12 @@ fn a_point_runs_on_a_path_of_sketch_curves() {
     let angle: f64 = 20.0 / 20.0;
     let (at, freedom) = shoe(&mut doc);
     assert!(
-        near(at, 60.0 + 20.0 * angle.cos(), 40.0 - 20.0 * angle.sin(), 0.0),
+        near(
+            at,
+            60.0 + 20.0 * angle.cos(),
+            40.0 - 20.0 * angle.sin(),
+            0.0
+        ),
         "{at}"
     );
     assert_eq!(freedom, 3);

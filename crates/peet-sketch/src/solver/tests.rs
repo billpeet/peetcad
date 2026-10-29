@@ -428,18 +428,50 @@ fn linear_pattern_follows_its_seed() {
     let seed = s.add_circle(v(0.0, 0.0), 2.0);
     let first = s.add_circle(v(10.0, 0.1), 2.1);
     let third = s.add_circle(v(19.8, 0.0), 1.9);
-    add!(s, K::Patterned { seed, copy: first, first });
-    add!(s, K::Patterned { seed, copy: third, first });
+    add!(
+        s,
+        K::Patterned {
+            seed,
+            copy: first,
+            first
+        }
+    );
+    add!(
+        s,
+        K::Patterned {
+            seed,
+            copy: third,
+            first
+        }
+    );
     let l0 = s.add_line(v(0.0, 10.0), v(4.0, 12.0));
     let l1 = s.add_line(v(5.0, 10.0), v(9.0, 12.1));
     let l2 = s.add_line(v(10.0, 10.0), v(14.0, 12.0));
-    add!(s, K::Patterned { seed: l0, copy: l1, first: l1 });
-    add!(s, K::Patterned { seed: l0, copy: l2, first: l1 });
+    add!(
+        s,
+        K::Patterned {
+            seed: l0,
+            copy: l1,
+            first: l1
+        }
+    );
+    add!(
+        s,
+        K::Patterned {
+            seed: l0,
+            copy: l2,
+            first: l1
+        }
+    );
     assert_solved(&mut s);
     // The seed's size and the step drive the copies
     dim!(s, K::Radius(seed), 3.0);
     let (c0, c1) = (circ(&s, seed).0, circ(&s, first).0);
-    dim!(s, K::Distance(s.center(seed).unwrap(), s.center(first).unwrap()), 12.0);
+    dim!(
+        s,
+        K::Distance(s.center(seed).unwrap(), s.center(first).unwrap()),
+        12.0
+    );
     assert_solved(&mut s);
     let (c0n, c1n, c2n) = (circ(&s, seed).0, circ(&s, first).0, circ(&s, third).0);
     assert!((circ(&s, third).1 - 3.0).abs() < 1e-8);
@@ -1366,24 +1398,49 @@ fn distance_to_a_side_of_a_circle() {
     // hole inside it, near side to near side (SolidWorks' Min between nested circles)
     let mut s = Sketch::new();
     let p = s.add_point(v(0.0, 0.0));
-    add!(s, K::Fix { point: p, at: v(0.0, 0.0) });
+    add!(
+        s,
+        K::Fix {
+            point: p,
+            at: v(0.0, 0.0)
+        }
+    );
     let hole = s.add_circle(v(120.0, 5.0), 2.1);
     dim!(s, K::Radius(hole), 2.1);
     add!(s, K::HorizontalPoints(p, s.center(hole).unwrap()));
     dim!(
         s,
-        K::SideDistance { a: p, b: hole, sides: [ArcSide::Center, ArcSide::Far], along: Along::Horizontal },
+        K::SideDistance {
+            a: p,
+            b: hole,
+            sides: [ArcSide::Center, ArcSide::Far],
+            along: Along::Horizontal
+        },
         130.0
     );
     let ring = s.add_circle(v(0.5, 40.0), 6.0);
     let inner = s.add_circle(v(0.0, 40.0), 3.0);
     dim!(s, K::Radius(ring), 6.0);
     dim!(s, K::Radius(inner), 3.0);
-    add!(s, K::HorizontalPoints(s.center(ring).unwrap(), s.center(inner).unwrap()));
-    add!(s, K::Fix { point: s.center(inner).unwrap(), at: v(0.0, 40.0) });
+    add!(
+        s,
+        K::HorizontalPoints(s.center(ring).unwrap(), s.center(inner).unwrap())
+    );
+    add!(
+        s,
+        K::Fix {
+            point: s.center(inner).unwrap(),
+            at: v(0.0, 40.0)
+        }
+    );
     dim!(
         s,
-        K::SideDistance { a: ring, b: inner, sides: [ArcSide::Near, ArcSide::Near], along: Along::Straight },
+        K::SideDistance {
+            a: ring,
+            b: inner,
+            sides: [ArcSide::Near, ArcSide::Near],
+            along: Along::Straight
+        },
         2.0
     );
     assert_solved(&mut s);
@@ -1395,8 +1452,18 @@ fn distance_to_a_side_of_a_circle() {
     // Apart, near to near takes both radii off
     let a = s.add_circle(v(0.0, 100.0), 5.0);
     let b = s.add_circle(v(30.0, 100.0), 4.0);
-    let k = K::SideDistance { a, b, sides: [ArcSide::Near, ArcSide::Near], along: Along::Straight };
+    let k = K::SideDistance {
+        a,
+        b,
+        sides: [ArcSide::Near, ArcSide::Near],
+        along: Along::Straight,
+    };
     assert!((s.measure(&k).unwrap() - 21.0).abs() < 1e-12);
-    let k = K::SideDistance { a, b, sides: [ArcSide::Far, ArcSide::Near], along: Along::Straight };
+    let k = K::SideDistance {
+        a,
+        b,
+        sides: [ArcSide::Far, ArcSide::Near],
+        along: Along::Straight,
+    };
     assert!((s.measure(&k).unwrap() - 31.0).abs() < 1e-12);
 }

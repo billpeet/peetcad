@@ -213,8 +213,8 @@ impl Sketch3dFeature {
                 }
                 Relation3::Fixed(p) => {
                     let at = self.points[*p as usize];
-                    for c in 0..3 {
-                        eqs.push(Eq3::new(Kind::Fixed(c, at[c]), slots(*p).to_vec()));
+                    for (c, &v) in at.iter().enumerate() {
+                        eqs.push(Eq3::new(Kind::Fixed(c, v), slots(*p).to_vec()));
                     }
                 }
                 Relation3::Distance { a, b, dimension } => {

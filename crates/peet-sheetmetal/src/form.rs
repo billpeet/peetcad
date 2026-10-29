@@ -268,13 +268,8 @@ impl Layout {
             _ => {}
         }
         // Clear of the face's edges, its trims, cuts and other forms by a thickness.
-        let material = |q: DVec2| {
-            p.covers(q)
-                && !self
-                    .cuts
-                    .iter()
-                    .any(|c| c.removes(form.piece, q))
-        };
+        let material =
+            |q: DVec2| p.covers(q) && !self.cuts.iter().any(|c| c.removes(form.piece, q));
         if !form.ring(t).into_iter().all(material) {
             return Err(format!(
                 "The {what} runs off the face, into a cut or too close to an edge or a bend: keep it at least the thickness ({t:.3} mm) clear."

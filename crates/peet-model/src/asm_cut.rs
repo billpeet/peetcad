@@ -104,7 +104,12 @@ fn convert_edge(
 ) -> Result<crate::projection::Shape, String> {
     use crate::projection::Shape;
     if let peet_kernel::Curve3::Circle(c) = &edge.curve {
-        let tilt = c.frame.z_axis().normalize().cross(plane.normal().normalize()).length();
+        let tilt = c
+            .frame
+            .z_axis()
+            .normalize()
+            .cross(plane.normal().normalize())
+            .length();
         if tilt < 1e-4 {
             let uv = |p| plane.to_plane_coords(p);
             let center = uv(c.frame.origin);
@@ -171,11 +176,12 @@ fn resolve(
     if sketch.constraints().next().is_some() {
         let failures = peet_sketch::expr::apply_expressions(&mut sketch, params);
         if let Some((_, e)) = failures.first() {
-            return Err(format!("A dimension of its sketch can't be worked out: {e}"));
+            return Err(format!(
+                "A dimension of its sketch can't be worked out: {e}"
+            ));
         }
         let previous = sketch.clone();
-        let report =
-            peet_sketch::solver::Solver::new().solve_with_previous(&mut sketch, &previous);
+        let report = peet_sketch::solver::Solver::new().solve_with_previous(&mut sketch, &previous);
         if !report.converged {
             return Err(
                 "Its sketch can't be solved: its relations and dimensions contradict each other."
@@ -252,10 +258,7 @@ pub(crate) fn apply(
                 let local = Plane {
                     frame: inst.frame.inverse().compose(&plane.frame),
                 };
-                let ikey = crate::hash::combine(
-                    key,
-                    crate::hash::of(&(&local, inst.body.stamp)),
-                );
+                let ikey = crate::hash::combine(key, crate::hash::of(&(&local, inst.body.stamp)));
                 let bodies = match cache.get(&ikey) {
                     Some(b) => b.clone(),
                     None => {

@@ -540,11 +540,18 @@ fn reference_geometry_follows_the_model() {
     let Output::Point(moved) = p.eval().output(point) else {
         panic!()
     };
-    assert!(moved.abs_diff_eq(DVec3::new(130.0, 60.0, 12.0), 1e-9), "{moved:?}");
+    assert!(
+        moved.abs_diff_eq(DVec3::new(130.0, 60.0, 12.0), 1e-9),
+        "{moved:?}"
+    );
     let Output::Frame(f) = p.eval().output(csys) else {
         panic!()
     };
-    assert!(f.origin.abs_diff_eq(DVec3::new(130.0, 60.0, 12.0), 1e-9), "{:?}", f.origin);
+    assert!(
+        f.origin.abs_diff_eq(DVec3::new(130.0, 60.0, 12.0), 1e-9),
+        "{:?}",
+        f.origin
+    );
     assert!(f.z_axis().abs_diff_eq(DVec3::Z, 1e-12));
     assert_close(
         p.volume(),

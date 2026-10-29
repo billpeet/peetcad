@@ -21,8 +21,8 @@ use peet_sketch::expr;
 use peet_sketch::expr::Units;
 use peet_sketch::text::{SketchText, TextAlign};
 use peet_sketch::{
-    Along, ArcSide,
-    ConstraintId, ConstraintKind, EntityId, EntityKind, Geometry, Sketch, ops, shapes,
+    Along, ArcSide, ConstraintId, ConstraintKind, EntityId, EntityKind, Geometry, Sketch, ops,
+    shapes,
 };
 use serde_json::{Map, Value, json};
 
@@ -793,14 +793,15 @@ fn parse_sides(v: &Value) -> Result<[ArcSide; 2], String> {
     let words = list(v)?;
     let side = |w: &Value| {
         text(w).and_then(|t| {
-            ArcSide::from_word(t).ok_or_else(|| {
-                format!("'{t}' is not a side: give \"center\", \"near\" or \"far\"")
-            })
+            ArcSide::from_word(t)
+                .ok_or_else(|| format!("'{t}' is not a side: give \"center\", \"near\" or \"far\""))
         })
     };
     match words {
         [a, b] => Ok([side(a)?, side(b)?]),
-        _ => Err("sides takes two, one for each end in 'of': \"center\", \"near\" or \"far\"".to_owned()),
+        _ => Err(
+            "sides takes two, one for each end in 'of': \"center\", \"near\" or \"far\"".to_owned(),
+        ),
     }
 }
 

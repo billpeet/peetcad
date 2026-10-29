@@ -397,7 +397,9 @@ fn cuts_through_a_whole_bend_leave_its_strips() {
         .collect();
     let (y0, y1) = ys
         .iter()
-        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &y| (a.min(y), b.max(y)));
+        .fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), &y| {
+            (a.min(y), b.max(y))
+        });
     let (_, full) = built(layout.clone());
     for (k, x) in [20.0, 60.0].into_iter().enumerate() {
         layout.add_cut(Area::polygon(
@@ -646,8 +648,13 @@ fn a_flange_with_its_own_bend_model() {
     let size = |model: Option<BendModel>| {
         let mut layout = plate_layout(settings(0.44));
         let spec = flange(25.0, FlangePosition::MaterialInside);
-        let own = FlangeOwn { model, ..Default::default() };
-        layout.add_edge_flange_with(2, &top_edge(true), &spec, own).unwrap();
+        let own = FlangeOwn {
+            model,
+            ..Default::default()
+        };
+        layout
+            .add_edge_flange_with(2, &top_edge(true), &spec, own)
+            .unwrap();
         let (solid, body) = built(layout);
         let allowance = body.layout.bends().next().unwrap().1.values.allowance;
         (bounds(&solid), allowance)
@@ -2025,12 +2032,20 @@ fn a_sharp_bend() {
     s.radius = 0.0;
     let mut layout = plate_layout(s);
     layout
-        .add_edge_flange(2, &top_edge(true), &flange(20.0, FlangePosition::MaterialInside))
+        .add_edge_flange(
+            2,
+            &top_edge(true),
+            &flange(20.0, FlangePosition::MaterialInside),
+        )
         .unwrap();
     let (_, body) = built(layout);
     let v = BendValues::new(BendModel::KFactor(0.5), FRAC_PI_2, 0.0, T).unwrap();
     let blank = (body.flat_bounds().1 - body.flat_bounds().0).y;
-    assert_close(blank, H - v.outside_setback() + v.allowance + 20.0 - v.outside_setback(), 1e-6);
+    assert_close(
+        blank,
+        H - v.outside_setback() + v.allowance + 20.0 - v.outside_setback(),
+        1e-6,
+    );
     assert_close(v.outside_setback(), T, 1e-3);
 }
 
@@ -2047,7 +2062,10 @@ fn a_flange_shaped_to_an_outline() {
         DVec3::new(30.0, H, 30.0),
     ];
     let outline = |frame: &peet_math::Frame| {
-        let flat: Vec<DVec2> = world.iter().map(|p| frame.to_local(*p).truncate()).collect();
+        let flat: Vec<DVec2> = world
+            .iter()
+            .map(|p| frame.to_local(*p).truncate())
+            .collect();
         Area::polygon(&flat, |i| CurveTag::Sketch {
             owner: 9,
             entity: i as u32,
@@ -2074,7 +2092,9 @@ fn a_flange_shaped_to_an_outline() {
         .map(|v| v.point.x)
         .collect();
     assert!(!top.is_empty());
-    let (lo, hi) = top.iter().fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+    let (lo, hi) = top
+        .iter()
+        .fold((f64::MAX, f64::MIN), |(a, b), &x| (a.min(x), b.max(x)));
     assert_close(lo, 30.0, 1e-6);
     assert_close(hi, 70.0, 1e-6);
     // K = 0.5 keeps the volume: the blank is the folded part laid flat.
@@ -2220,7 +2240,11 @@ fn a_profile_bend_with_its_own_model() {
     )
     .unwrap();
     let bend = layout.bends().next().unwrap().1;
-    assert_close(bend.values.allowance, 2.0 * bend.values.outside_setback() - 0.1, 1e-9);
+    assert_close(
+        bend.values.allowance,
+        2.0 * bend.values.outside_setback() - 0.1,
+        1e-9,
+    );
     built(layout);
 }
 

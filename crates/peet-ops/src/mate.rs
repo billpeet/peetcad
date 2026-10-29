@@ -12,8 +12,8 @@ use std::sync::Arc;
 use peet_document::Document;
 use peet_math::Frame;
 use peet_model::{
-    Align, Assembly, CompId, Mate, MateEnd, MateGeom, MateId, MateKind, Model, ScalarKind, Status,
-    WidthMode, PathAxis, PathRoll,
+    Align, Assembly, CompId, Mate, MateEnd, MateGeom, MateId, MateKind, Model, PathAxis, PathRoll,
+    ScalarKind, Status, WidthMode,
 };
 use serde_json::{Map, Value, json};
 
@@ -84,6 +84,8 @@ impl MateSel {
 }
 
 /// One end of a mate.
+// An operation's input, made once per call: its size doesn't matter
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum MateEndSel {
     /// As a script writes it: a component path, and geometry, a plane, the origin or a
@@ -451,10 +453,16 @@ impl MateType {
             let follow = a.parsed("follow", path_axis)?;
             let roll = a.parsed("roll", |v| {
                 let Value::Object(map) = v else {
-                    return Err("roll is {\"axis\": x, y or z, \"up\": an end giving a direction}".to_owned());
+                    return Err(
+                        "roll is {\"axis\": x, y or z, \"up\": an end giving a direction}"
+                            .to_owned(),
+                    );
                 };
                 let axis = path_axis(map.get("axis").ok_or("roll needs an 'axis' (x, y or z)")?)?;
-                let up = MateEndSel::parse(map.get("up").ok_or("roll needs 'up': a flat face, a plane, a straight edge or an axis")?)?;
+                let up =
+                    MateEndSel::parse(map.get("up").ok_or(
+                        "roll needs 'up': a flat face, a plane, a straight edge or an axis",
+                    )?)?;
                 Ok((axis, Box::new(up)))
             })?;
             return Ok((

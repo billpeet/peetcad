@@ -36,7 +36,10 @@ fn parts(dir: &std::path::Path) -> (String, String) {
             &mut doc,
             json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [w, h]}]}),
         );
-        ok(&mut doc, json!({"op": "extrude", "sketch": "Sketch1", "depth": t}));
+        ok(
+            &mut doc,
+            json!({"op": "extrude", "sketch": "Sketch1", "depth": t}),
+        );
         ok(&mut doc, json!({"op": "save", "path": path}));
     }
     (plate, cover)
@@ -73,7 +76,10 @@ fn assembly(link: bool) -> (Document, std::path::PathBuf) {
     let (plate, cover) = parts(&dir);
     let mut doc = Document::default();
     ok(&mut doc, json!({"op": "new", "assembly": true}));
-    ok(&mut doc, json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}),
+    );
     ok(
         &mut doc,
         json!({"op": "insert", "path": cover, "name": "Cover-1", "at": [0, 0, 5], "fixed": true, "link": link}),
@@ -93,9 +99,16 @@ fn assembly(link: bool) -> (Document, std::path::PathBuf) {
 #[test]
 fn a_cover_follows_the_plate_it_was_made_on() {
     let (mut doc, _) = assembly(false);
-    assert_eq!(max_x(&mut doc, "Cover-1"), 100.0, "the cover reaches the plate's edge");
+    assert_eq!(
+        max_x(&mut doc, "Cover-1"),
+        100.0,
+        "the cover reaches the plate's edge"
+    );
     // The plate moves: the cover's sketch follows it in the cover's own coordinates.
-    ok(&mut doc, json!({"op": "place", "component": "Plate-1", "at": [30, 0, 0]}));
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Plate-1", "at": [30, 0, 0]}),
+    );
     assert_eq!(max_x(&mut doc, "Cover-1"), 130.0);
     assert_eq!(statuses(&mut doc), ["in_context"]);
 
@@ -106,7 +119,15 @@ fn a_cover_follows_the_plate_it_was_made_on() {
         .unwrap()
         .components()
         .find(|c| c.name == "Cover-1")
-        .map(|c| doc.model.assembly().unwrap().definition_of(c.id).unwrap().model.clone())
+        .map(|c| {
+            doc.model
+                .assembly()
+                .unwrap()
+                .definition_of(c.id)
+                .unwrap()
+                .model
+                .clone()
+        })
         .unwrap();
     let mut alone = Document::from_model((*part).clone(), None);
     assert_eq!(statuses(&mut alone), ["out_of_context"]);
@@ -114,12 +135,21 @@ fn a_cover_follows_the_plate_it_was_made_on() {
     assert_eq!(bodies["bodies"][0]["max"][0], 130.0, "{bodies}");
 
     // Locked: it stays where it is, in its context too, until unlocked.
-    let locked = ok(&mut doc, json!({"op": "lock_references", "component": "Cover-1"}));
+    let locked = ok(
+        &mut doc,
+        json!({"op": "lock_references", "component": "Cover-1"}),
+    );
     assert_eq!(locked["changed"], 1);
-    ok(&mut doc, json!({"op": "place", "component": "Plate-1", "at": [60, 0, 0]}));
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Plate-1", "at": [60, 0, 0]}),
+    );
     assert_eq!(max_x(&mut doc, "Cover-1"), 130.0);
     assert_eq!(statuses(&mut doc), ["locked"]);
-    ok(&mut doc, json!({"op": "lock_references", "component": "Cover-1", "on": false}));
+    ok(
+        &mut doc,
+        json!({"op": "lock_references", "component": "Cover-1", "on": false}),
+    );
     assert_eq!(max_x(&mut doc, "Cover-1"), 160.0);
 
     // Undone, the cover is where it was before the unlock.
@@ -129,9 +159,15 @@ fn a_cover_follows_the_plate_it_was_made_on() {
     assert_eq!(max_x(&mut doc, "Cover-1"), 160.0);
 
     // Broken: plain fixed geometry, which follows nothing.
-    let broken = ok(&mut doc, json!({"op": "break_references", "component": "Cover-1"}));
+    let broken = ok(
+        &mut doc,
+        json!({"op": "break_references", "component": "Cover-1"}),
+    );
     assert_eq!(broken["changed"], 1);
-    ok(&mut doc, json!({"op": "place", "component": "Plate-1", "at": [0, 0, 0]}));
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Plate-1", "at": [0, 0, 0]}),
+    );
     assert_eq!(max_x(&mut doc, "Cover-1"), 160.0);
     assert!(statuses(&mut doc).is_empty());
 
@@ -153,14 +189,31 @@ fn the_reference_belongs_to_the_instance_it_was_made_in() {
         .as_array()
         .unwrap()
         .iter()
-        .map(|r| (r["component"].as_str().unwrap().to_owned(), r["status"].as_str().unwrap().to_owned()))
+        .map(|r| {
+            (
+                r["component"].as_str().unwrap().to_owned(),
+                r["status"].as_str().unwrap().to_owned(),
+            )
+        })
         .collect();
-    assert!(by.contains(&("Cover-1".to_owned(), "in_context".to_owned())), "{listed}");
-    assert!(by.contains(&("Cover-2".to_owned(), "out_of_context".to_owned())), "{listed}");
+    assert!(
+        by.contains(&("Cover-1".to_owned(), "in_context".to_owned())),
+        "{listed}"
+    );
+    assert!(
+        by.contains(&("Cover-2".to_owned(), "out_of_context".to_owned())),
+        "{listed}"
+    );
     // Moving the second cover changes nothing; moving the plate changes both (one part).
-    ok(&mut doc, json!({"op": "place", "component": "Cover-2", "at": [-50, 100, 5]}));
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Cover-2", "at": [-50, 100, 5]}),
+    );
     assert_eq!(max_x(&mut doc, "Cover-1"), 100.0);
-    ok(&mut doc, json!({"op": "place", "component": "Plate-1", "at": [10, 0, 0]}));
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Plate-1", "at": [10, 0, 0]}),
+    );
     assert_eq!(max_x(&mut doc, "Cover-1"), 110.0);
     assert_eq!(max_x(&mut doc, "Cover-2"), 60.0);
 }
@@ -177,20 +230,35 @@ fn a_mated_part_follows_and_the_mates_are_solved_again() {
         &mut b,
         json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [10, 10]}]}),
     );
-    ok(&mut b, json!({"op": "extrude", "sketch": "Sketch1", "depth": 10}));
+    ok(
+        &mut b,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 10}),
+    );
     ok(&mut b, json!({"op": "save", "path": block}));
     let mut doc = Document::default();
     ok(&mut doc, json!({"op": "new", "assembly": true}));
-    ok(&mut doc, json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}));
-    ok(&mut doc, json!({"op": "insert", "path": cover, "name": "Cover-1", "at": [0, 0, 5], "fixed": true}));
-    ok(&mut doc, json!({"op": "insert", "path": block, "name": "Block-1", "at": [50, 0, 7]}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": cover, "name": "Cover-1", "at": [0, 0, 5], "fixed": true}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": block, "name": "Block-1", "at": [50, 0, 7]}),
+    );
     ok(
         &mut doc,
         json!({"op": "mate", "type": "coincident",
             "a": {"component": "Cover-1", "face": {"normal": [1, 0, 0]}},
             "b": {"component": "Block-1", "face": {"normal": [-1, 0, 0]}}}),
     );
-    assert_eq!(component(&ok(&mut doc, json!({"op": "components"})), "Block-1")["min"][0], 40.0);
+    assert_eq!(
+        component(&ok(&mut doc, json!({"op": "components"})), "Block-1")["min"][0],
+        40.0
+    );
     ok(
         &mut doc,
         json!({"op": "in_context", "component": "Cover-1", "sketch": "Sketch1", "entity": 4,
@@ -198,16 +266,25 @@ fn a_mated_part_follows_and_the_mates_are_solved_again() {
     );
     // The cover grew to the plate's edge, and the block's mate was solved again after it.
     assert_eq!(max_x(&mut doc, "Cover-1"), 100.0);
-    assert_eq!(component(&ok(&mut doc, json!({"op": "components"})), "Block-1")["min"][0], 100.0);
+    assert_eq!(
+        component(&ok(&mut doc, json!({"op": "components"})), "Block-1")["min"][0],
+        100.0
+    );
 }
 
 #[test]
 fn a_linked_part_is_written_when_the_assembly_is_saved() {
     let (mut doc, dir) = assembly(true);
     let file = dir.join("frame.peet");
-    ok(&mut doc, json!({"op": "save", "path": file.to_string_lossy()}));
+    ok(
+        &mut doc,
+        json!({"op": "save", "path": file.to_string_lossy()}),
+    );
     // Saved under its own name: the context follows its title.
-    ok(&mut doc, json!({"op": "place", "component": "Plate-1", "at": [20, 0, 0]}));
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Plate-1", "at": [20, 0, 0]}),
+    );
     assert_eq!(max_x(&mut doc, "Cover-1"), 120.0);
     let saved = ok(&mut doc, json!({"op": "save"}));
     let written = saved["parts_written"].to_string();
@@ -216,7 +293,10 @@ fn a_linked_part_is_written_when_the_assembly_is_saved() {
     let bytes = std::fs::read(dir.join("cover.peet")).unwrap();
     let cover = peet_io::document::open(&bytes).unwrap().model;
     let mut alone = Document::from_model(cover, None);
-    assert_eq!(ok(&mut alone, json!({"op": "bodies"}))["bodies"][0]["max"][0], 120.0);
+    assert_eq!(
+        ok(&mut alone, json!({"op": "bodies"}))["bodies"][0]["max"][0],
+        120.0
+    );
     assert_eq!(statuses(&mut alone), ["out_of_context"]);
 }
 
@@ -257,12 +337,21 @@ fn a_fixed_entity_made_to_follow_gives_up_its_fix() {
             {"type": "fix", "of": ["r.right"]}
         ]}),
     );
-    ok(&mut c, json!({"op": "extrude", "sketch": "Sketch1", "depth": 2}));
+    ok(
+        &mut c,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 2}),
+    );
     ok(&mut c, json!({"op": "save", "path": cover}));
     let mut doc = Document::default();
     ok(&mut doc, json!({"op": "new", "assembly": true}));
-    ok(&mut doc, json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}));
-    ok(&mut doc, json!({"op": "insert", "path": cover, "name": "Cover-1", "at": [0, 0, 5], "fixed": true}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": cover, "name": "Cover-1", "at": [0, 0, 5], "fixed": true}),
+    );
     ok(
         &mut doc,
         json!({"op": "in_context", "component": "Cover-1", "sketch": "Sketch1", "entity": 4,
@@ -270,7 +359,9 @@ fn a_fixed_entity_made_to_follow_gives_up_its_fix() {
     );
     assert_eq!(max_x(&mut doc, "Cover-1"), 100.0);
     assert!(
-        ok(&mut doc, json!({"op": "status"}))["failures"].as_array().is_none_or(Vec::is_empty),
+        ok(&mut doc, json!({"op": "status"}))["failures"]
+            .as_array()
+            .is_none_or(Vec::is_empty),
         "nothing fails"
     );
 }
@@ -288,12 +379,21 @@ fn a_dimension_of_the_part_followed_moves_the_in_context_sketch() {
             {"type": "horizontal_distance", "of": [2, 3], "value": 100, "name": "Width"}
         ]}),
     );
-    ok(&mut p, json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}));
+    ok(
+        &mut p,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+    );
     ok(&mut p, json!({"op": "save", "path": plate}));
     let mut doc = Document::default();
     ok(&mut doc, json!({"op": "new", "assembly": true}));
-    ok(&mut doc, json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}));
-    ok(&mut doc, json!({"op": "insert", "path": cover, "name": "Cover-1", "at": [0, 0, 5], "fixed": true}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": cover, "name": "Cover-1", "at": [0, 0, 5], "fixed": true}),
+    );
     ok(
         &mut doc,
         json!({"op": "in_context", "component": "Cover-1", "sketch": "Sketch1", "entity": 4,
@@ -301,7 +401,10 @@ fn a_dimension_of_the_part_followed_moves_the_in_context_sketch() {
     );
     assert_eq!(max_x(&mut doc, "Cover-1"), 100.0);
     // SolidWorks: the plate made wider, the cover's in-context sketch follows its edge.
-    ok(&mut doc, json!({"op": "set", "name": "Width@Sketch1@Plate-1", "value": 150}));
+    ok(
+        &mut doc,
+        json!({"op": "set", "name": "Width@Sketch1@Plate-1", "value": 150}),
+    );
     // (The plate's rectangle is held by nothing else: it grows both ways.)
     let edge = max_x(&mut doc, "Plate-1");
     assert!(edge > 120.0, "{edge}");
@@ -569,7 +672,10 @@ fn a_dimension_to_a_followed_edge_keeps_its_distance() {
             {"type": "horizontal_distance", "of": ["r.bottom.start", "r.bottom.end"], "value": 100, "name": "Width"}
         ]}),
     );
-    ok(&mut p, json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}));
+    ok(
+        &mut p,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+    );
     ok(&mut p, json!({"op": "save", "path": plate}));
     // The cover's hole is 10 from a fixed construction line where the plate's right edge
     // last was, as the SolidWorks importer draws an in-context dimension's copy.
@@ -592,7 +698,10 @@ fn a_dimension_to_a_followed_edge_keeps_its_distance() {
         .find(|d| d["as"] == "edge")
         .unwrap()["id"]
         .clone();
-    ok(&mut c, json!({"op": "extrude", "sketch": "Sketch1", "depth": 2}));
+    ok(
+        &mut c,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 2}),
+    );
     ok(&mut c, json!({"op": "save", "path": cover}));
     let mut doc = Document::default();
     ok(&mut doc, json!({"op": "new", "assembly": true}));
@@ -617,7 +726,10 @@ fn a_dimension_to_a_followed_edge_keeps_its_distance() {
     );
     assert_eq!(max_x(&mut doc, "Plate-1"), 150.0);
     let [x, y] = circle_center(&doc, "Cover-1", "Sketch1");
-    assert!((x - 140.0).abs() < 1e-6 && (y - 10.0).abs() < 1e-6, "{x}, {y}");
+    assert!(
+        (x - 140.0).abs() < 1e-6 && (y - 10.0).abs() < 1e-6,
+        "{x}, {y}"
+    );
     // The plate moved: the hole follows as far.
     ok(
         &mut doc,

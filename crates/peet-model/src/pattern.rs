@@ -40,7 +40,10 @@ use crate::{FeatureError, Model};
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub(crate) enum Motion {
     Rigid(Frame),
-    Mirror { point: DVec3, normal: DVec3 },
+    Mirror {
+        point: DVec3,
+        normal: DVec3,
+    },
     /// A reflection in the XY plane, then a rigid motion: what a mirror followed by a
     /// pattern (a copy of a mirror) comes to.
     Reflected(Frame),
@@ -753,9 +756,9 @@ fn sheet_copies(
     if let Seed::SheetCut { reach, .. } = seed
         && let Some(body) = crate::sheet::off_flange(bodies, face)
     {
-        return Ok(cut_copies_anywhere(
+        return cut_copies_anywhere(
             feature, model, bodies, body, plane, sketch, *reach, motions, si, stamp, name, skipped,
-        )?);
+        );
     }
     let on = sketch_face(model, bodies, face, "the copied feature")?;
     let mut layout = on.sheet.layout.clone();
@@ -839,8 +842,11 @@ fn sheet_copies(
             ));
             continue;
         };
-        let to_flat =
-            |p: peet_math::DVec2| frame.to_local(m.point(plane.from_plane_coords(p))).truncate();
+        let to_flat = |p: peet_math::DVec2| {
+            frame
+                .to_local(m.point(plane.from_plane_coords(p)))
+                .truncate()
+        };
         match seed {
             Seed::SheetCut { reach, .. } => {
                 let profile = find_regions(sketch);
@@ -878,13 +884,20 @@ fn sheet_copies(
                         r.contains(c)
                             .then_some(c)
                             .into_iter()
-                            .chain(r.outer.edges.iter().flat_map(|e| {
-                                (1..8).map(|k| e.curve.point_at(k as f64 / 8.0))
-                            }))
+                            .chain(
+                                r.outer
+                                    .edges
+                                    .iter()
+                                    .flat_map(|e| (1..8).map(|k| e.curve.point_at(k as f64 / 8.0))),
+                            )
                             .any(|p| layout.pieces.iter().any(|pc| pc.covers(map(p))))
                     })
                 };
-                let probes = [peet_math::DVec2::ZERO, peet_math::DVec2::X, peet_math::DVec2::Y];
+                let probes = [
+                    peet_math::DVec2::ZERO,
+                    peet_math::DVec2::X,
+                    peet_math::DVec2::Y,
+                ];
                 let mut others = Vec::new();
                 for (area, pieces) in
                     crate::sheet::cut_from_plane(&layout, &world, into, None, &regions, feature.0)
@@ -896,7 +909,9 @@ fn sheet_copies(
                     done[i] = true;
                     let other = layout.pieces[i].frame;
                     let through = |p: peet_math::DVec2| other.to_local(world(p)).truncate();
-                    if probes.iter().all(|p| through(*p).distance(to_flat(*p)) < 1e-6)
+                    if probes
+                        .iter()
+                        .all(|p| through(*p).distance(to_flat(*p)) < 1e-6)
                         || !over(&through)
                     {
                         continue;
@@ -949,8 +964,9 @@ fn sheet_copies(
                 }
                 // As far past its own sheet as the original goes
                 if let Some(span) = *reach {
-                    let beyond =
-                        crate::sheet::cut_beyond(&layout, &done, &world, into, span, &regions, feature.0);
+                    let beyond = crate::sheet::cut_beyond(
+                        &layout, &done, &world, into, span, &regions, feature.0,
+                    );
                     for (area, pieces) in beyond {
                         let area = area.retagged(|t| match t {
                             CurveTag::Sketch { owner, entity } => CurveTag::Copy {
@@ -1039,7 +1055,9 @@ fn cut_copies_anywhere(
         .map(|i| profile.regions[i].clone())
         .collect();
     if regions.is_empty() {
-        return Err(FeatureError("its sketch has no closed region to cut.".to_owned()));
+        return Err(FeatureError(
+            "its sketch has no closed region to cut.".to_owned(),
+        ));
     }
     let mut out = bodies.to_vec();
     let mut warning = None;
@@ -1084,7 +1102,10 @@ fn cut_copies_anywhere(
     }
     for (k, c) in cut.iter().enumerate() {
         if !c {
-            skipped.push(format!("copy {} of {name} (nothing of the sheet is in its way)", k + 2));
+            skipped.push(format!(
+                "copy {} of {name} (nothing of the sheet is in its way)",
+                k + 2
+            ));
         }
     }
     let made = cut.iter().filter(|c| **c).count();
@@ -1102,86 +1123,10 @@ fn flange_holding(
             p.iter().copied().sum::<peet_math::DVec2>() / p.len().max(1) as f64
         }
     };
-    layout.pieces.iter().position(|pc| {
-        pc.is_flange() && pc.covers(c)
-    })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn mirror_sketch_plane_reflects_points() {
-        let m = Motion::Mirror {
-            point: DVec3::new(10.0, 0.0, 0.0),
-            normal: DVec3::X,
-        };
-        let plane = Plane::TOP;
-        let moved = m.sketch_plane(&plane).unwrap();
-        // A sketch point (u, v), mirrored in the sketch to (u, −v), lands on the
-        // reflection of where (u, v) was.
-        for p in [DVec2::new(3.0, 4.0), DVec2::new(-2.0, 7.5)] {
-            let original = plane.from_plane_coords(p);
-            let copy = moved.from_plane_coords(DVec2::new(p.x, -p.y));
-            assert!(
-                copy.abs_diff_eq(m.point(original), 1e-12),
-                "{copy} {original}"
-            );
-        }
-        // The normal is reflected too.
-        assert!(moved.normal().abs_diff_eq(m.vector(plane.normal()), 1e-12));
-    }
-
-    #[test]
-    fn composed_motions_move_points_as_one_after_the_other() {
-        let mx = Motion::Mirror {
-            point: DVec3::new(100.0, 0.0, 0.0),
-            normal: DVec3::X,
-        };
-        let my = Motion::Mirror {
-            point: DVec3::new(0.0, 50.0, 0.0),
-            normal: DVec3::Y,
-        };
-        let shift = Motion::translation(DVec3::new(0.0, 0.0, 7.0));
-        let turn = Motion::rotation(DVec3::new(5.0, 0.0, 0.0), DVec3::Z, 0.3);
-        let p = DVec3::new(20.0, 15.0, 3.0);
-        for (outer, inner) in [(my, mx), (shift, mx), (mx, turn), (turn, shift), (mx, mx)] {
-            let both = outer.after(&inner);
-            let want = outer.point(inner.point(p));
-            assert!(both.point(p).abs_diff_eq(want, 1e-9), "{both:?}");
-            let v = DVec3::new(0.3, -0.7, 0.2);
-            assert!(
-                both.vector(v)
-                    .abs_diff_eq(outer.vector(inner.vector(v)), 1e-12)
-            );
-            assert_eq!(both.is_mirror(), outer.is_mirror() != inner.is_mirror());
-        }
-        // Two mirrors in planes square to each other: a half turn about their line.
-        let half = my.after(&mx);
-        assert!(
-            half.point(p)
-                .abs_diff_eq(DVec3::new(180.0, 85.0, 3.0), 1e-9)
-        );
-        // A reflected motion's sketch plane still lands mirrored points where they go.
-        let reflected = shift.after(&mx);
-        let moved = reflected.sketch_plane(&Plane::TOP).unwrap();
-        let q = DVec2::new(3.0, 4.0);
-        assert!(
-            moved
-                .from_plane_coords(DVec2::new(q.x, -q.y))
-                .abs_diff_eq(reflected.point(Plane::TOP.from_plane_coords(q)), 1e-9)
-        );
-    }
-
-    #[test]
-    fn rotation_about_an_offset_axis() {
-        let m = Motion::rotation(DVec3::new(5.0, 0.0, 0.0), DVec3::Z, std::f64::consts::PI);
-        assert!(
-            m.point(DVec3::new(6.0, 0.0, 1.0))
-                .abs_diff_eq(DVec3::new(4.0, 0.0, 1.0), 1e-12)
-        );
-    }
+    layout
+        .pieces
+        .iter()
+        .position(|pc| pc.is_flange() && pc.covers(c))
 }
 
 /// Every copy of an edge flange, added to the flat pattern of the body the original is on
@@ -1284,11 +1229,20 @@ fn flange_copies(
                     .collect();
                 let shape = |frame: &Frame| {
                     let to_flat = |p: peet_math::DVec2| {
-                        frame.to_local(m.point(plane.from_plane_coords(p))).truncate()
+                        frame
+                            .to_local(m.point(plane.from_plane_coords(p)))
+                            .truncate()
                     };
                     Area::from_regions(&regions, feature.0).mapped(&to_flat)
                 };
-                layout.add_edge_flange_outlined(feature.0, copy << 4, &site, &copy_spec, own, &shape)
+                layout.add_edge_flange_outlined(
+                    feature.0,
+                    copy << 4,
+                    &site,
+                    &copy_spec,
+                    own,
+                    &shape,
+                )
             }
         };
         match added {
@@ -1594,4 +1548,81 @@ fn miter_copies(
     }
     let (out, warning) = rebuild_sheet(model, bodies, index, layout, stamp)?;
     Ok((out, made, warning))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mirror_sketch_plane_reflects_points() {
+        let m = Motion::Mirror {
+            point: DVec3::new(10.0, 0.0, 0.0),
+            normal: DVec3::X,
+        };
+        let plane = Plane::TOP;
+        let moved = m.sketch_plane(&plane).unwrap();
+        // A sketch point (u, v), mirrored in the sketch to (u, −v), lands on the
+        // reflection of where (u, v) was.
+        for p in [DVec2::new(3.0, 4.0), DVec2::new(-2.0, 7.5)] {
+            let original = plane.from_plane_coords(p);
+            let copy = moved.from_plane_coords(DVec2::new(p.x, -p.y));
+            assert!(
+                copy.abs_diff_eq(m.point(original), 1e-12),
+                "{copy} {original}"
+            );
+        }
+        // The normal is reflected too.
+        assert!(moved.normal().abs_diff_eq(m.vector(plane.normal()), 1e-12));
+    }
+
+    #[test]
+    fn composed_motions_move_points_as_one_after_the_other() {
+        let mx = Motion::Mirror {
+            point: DVec3::new(100.0, 0.0, 0.0),
+            normal: DVec3::X,
+        };
+        let my = Motion::Mirror {
+            point: DVec3::new(0.0, 50.0, 0.0),
+            normal: DVec3::Y,
+        };
+        let shift = Motion::translation(DVec3::new(0.0, 0.0, 7.0));
+        let turn = Motion::rotation(DVec3::new(5.0, 0.0, 0.0), DVec3::Z, 0.3);
+        let p = DVec3::new(20.0, 15.0, 3.0);
+        for (outer, inner) in [(my, mx), (shift, mx), (mx, turn), (turn, shift), (mx, mx)] {
+            let both = outer.after(&inner);
+            let want = outer.point(inner.point(p));
+            assert!(both.point(p).abs_diff_eq(want, 1e-9), "{both:?}");
+            let v = DVec3::new(0.3, -0.7, 0.2);
+            assert!(
+                both.vector(v)
+                    .abs_diff_eq(outer.vector(inner.vector(v)), 1e-12)
+            );
+            assert_eq!(both.is_mirror(), outer.is_mirror() != inner.is_mirror());
+        }
+        // Two mirrors in planes square to each other: a half turn about their line.
+        let half = my.after(&mx);
+        assert!(
+            half.point(p)
+                .abs_diff_eq(DVec3::new(180.0, 85.0, 3.0), 1e-9)
+        );
+        // A reflected motion's sketch plane still lands mirrored points where they go.
+        let reflected = shift.after(&mx);
+        let moved = reflected.sketch_plane(&Plane::TOP).unwrap();
+        let q = DVec2::new(3.0, 4.0);
+        assert!(
+            moved
+                .from_plane_coords(DVec2::new(q.x, -q.y))
+                .abs_diff_eq(reflected.point(Plane::TOP.from_plane_coords(q)), 1e-9)
+        );
+    }
+
+    #[test]
+    fn rotation_about_an_offset_axis() {
+        let m = Motion::rotation(DVec3::new(5.0, 0.0, 0.0), DVec3::Z, std::f64::consts::PI);
+        assert!(
+            m.point(DVec3::new(6.0, 0.0, 1.0))
+                .abs_diff_eq(DVec3::new(4.0, 0.0, 1.0), 1e-12)
+        );
+    }
 }

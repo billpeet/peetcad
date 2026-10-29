@@ -541,6 +541,7 @@ impl Solver {
 /// next rank is held as well, and so on while it still works. Returns whether any of it
 /// worked (the values are then the last solution found; otherwise they are as they were)
 /// and the iterations used. A fully defined cluster comes out where it would anyway.
+#[allow(clippy::too_many_arguments)]
 fn solve_holding_still(
     vars: &[u32],
     cluster_eqs: &[u32],

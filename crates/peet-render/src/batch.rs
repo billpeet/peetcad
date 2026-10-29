@@ -312,7 +312,9 @@ mod tests {
     fn see_through_objects_come_after_the_opaque_ones_farthest_first() {
         for view_proj in views() {
             let (a, b) = (MeshId::test(1), MeshId::test(2));
-            let eye = view_proj.inverse().project_point3(DVec3::new(0.0, 0.0, 1.0));
+            let eye = view_proj
+                .inverse()
+                .project_point3(DVec3::new(0.0, 0.0, 1.0));
             let towards = eye.normalize();
             let draw = |mesh, along: f64, opacity, pick| ObjectDraw {
                 mesh,
@@ -357,9 +359,21 @@ mod tests {
             assert_eq!(band(1), Band::Back as u32);
             assert_eq!(band(4), Band::Back as u32);
             // Not picking through, or with nothing see-through: depth as it is.
-            let nearest = batch(&objects, |_| Some(unit()), &view_proj, [0.0; 3], Some(false));
+            let nearest = batch(
+                &objects,
+                |_| Some(unit()),
+                &view_proj,
+                [0.0; 3],
+                Some(false),
+            );
             assert!(nearest.instances.iter().all(|i| i.pick[1] == 0));
-            let opaque = batch(&objects[..1], |_| Some(unit()), &view_proj, [0.0; 3], Some(true));
+            let opaque = batch(
+                &objects[..1],
+                |_| Some(unit()),
+                &view_proj,
+                [0.0; 3],
+                Some(true),
+            );
             assert_eq!(opaque.instances[0].pick[1], 0);
         }
     }

@@ -680,8 +680,14 @@ fn a_flange_is_mirrored_and_patterned() {
     // As SolidWorks does: a copy of an edge flange is the same flange on the edge the
     // motion takes the original's edge to.
     let base = |doc: &mut Document| {
-        ok(doc, json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}));
-        ok(doc, json!({"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}));
+        ok(
+            doc,
+            json!({"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}),
+        );
+        ok(
+            doc,
+            json!({"op": "base_flange", "sketch": "Sketch1", "thickness": 2, "radius": 1}),
+        );
     };
     let mut plain = Document::default();
     base(&mut plain);
@@ -695,8 +701,14 @@ fn a_flange_is_mirrored_and_patterned() {
     let mut doc = Document::default();
     base(&mut doc);
     ok(&mut doc, lip.clone());
-    ok(&mut doc, json!({"op": "plane", "from": "front", "distance": 30, "flip": true, "name": "Mid"}));
-    ok(&mut doc, json!({"op": "mirror", "features": ["Lip"], "plane": "Mid"}));
+    ok(
+        &mut doc,
+        json!({"op": "plane", "from": "front", "distance": 30, "flip": true, "name": "Mid"}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "mirror", "features": ["Lip"], "plane": "Mid"}),
+    );
     close(volume(&doc), plate + 2.0 * flange);
     let faces = ok(&mut doc, json!({"op": "faces"}));
     let top = |feature: &str| -> Vec<f64> {
@@ -707,7 +719,9 @@ fn a_flange_is_mirrored_and_patterned() {
             .filter(|f| f["made_by"][0]["feature"] == feature && f["made_by"][0]["side"] == "top")
             .collect();
         assert_eq!(tops.len(), 1, "{tops:?}");
-        (0..3).map(|k| tops[0]["center"][k].as_f64().unwrap()).collect()
+        (0..3)
+            .map(|k| tops[0]["center"][k].as_f64().unwrap())
+            .collect()
     };
     let (original, copy) = (top("Lip"), top("Mirror1"));
     close(copy[0], original[0]);
@@ -717,6 +731,9 @@ fn a_flange_is_mirrored_and_patterned() {
     let mut doc = Document::default();
     base(&mut doc);
     ok(&mut doc, lip);
-    ok(&mut doc, json!({"op": "linear_pattern", "features": ["Lip"], "direction": "x", "flip": true, "spacing": 40, "count": 2}));
+    ok(
+        &mut doc,
+        json!({"op": "linear_pattern", "features": ["Lip"], "direction": "x", "flip": true, "spacing": 40, "count": 2}),
+    );
     close(volume(&doc), plate + 2.0 * flange);
 }

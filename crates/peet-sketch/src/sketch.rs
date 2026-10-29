@@ -352,14 +352,7 @@ pub fn side_terms(
     }
     let total = d + coef[0] * radii[0] + coef[1] * radii[1];
     let sign = if total < 0.0 { -1.0 } else { 1.0 };
-    (
-        SideTerms {
-            toward,
-            coef,
-            sign,
-        },
-        total * sign,
-    )
+    (SideTerms { toward, coef, sign }, total * sign)
 }
 
 impl ConstraintKind {
@@ -1091,10 +1084,14 @@ impl Sketch {
                 a != b
                     && match (k(a), k(b)) {
                         (K::Line, kb) => {
-                            kb.is_circular() && along == Along::Straight && sides[0] == ArcSide::Center
+                            kb.is_circular()
+                                && along == Along::Straight
+                                && sides[0] == ArcSide::Center
                         }
                         (ka, K::Line) => {
-                            ka.is_circular() && along == Along::Straight && sides[1] == ArcSide::Center
+                            ka.is_circular()
+                                && along == Along::Straight
+                                && sides[1] == ArcSide::Center
                         }
                         _ => end(a, sides[0]) && end(b, sides[1]),
                     }

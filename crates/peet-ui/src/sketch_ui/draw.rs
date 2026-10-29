@@ -527,7 +527,9 @@ fn side_points(
         (None, peet_sketch::Along::Straight) => (
             centers[0],
             centers[1],
-            (centers[1] - centers[0]).try_normalize().unwrap_or(DVec2::X),
+            (centers[1] - centers[0])
+                .try_normalize()
+                .unwrap_or(DVec2::X),
         ),
     };
     Some((

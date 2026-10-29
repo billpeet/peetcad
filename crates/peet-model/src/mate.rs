@@ -576,7 +576,6 @@ impl Element {
     }
 }
 
-
 /// A body of a component: the components below it down to its part (none for a part
 /// placed directly), the body, and where the part is in the component's coordinates.
 pub(crate) type ComponentBody = (Vec<CompId>, Arc<Body>, Frame);
@@ -923,9 +922,8 @@ pub(crate) fn edge_at(
 pub(crate) fn plane_at(end: &MateEnd, component: &Placed) -> Result<peet_math::Plane, String> {
     let name = &component.name;
     let inner = end.path.get(1..).unwrap_or_default();
-    let not_flat = || {
-        format!("The sketch must lie on a flat face or a plane: the end on {name} is neither.")
-    };
+    let not_flat =
+        || format!("The sketch must lie on a flat face or a plane: the end on {name} is neither.");
     match &end.geom {
         Some(MateGeom::Face(r) | MateGeom::Plane(PlaneRef::Face(r))) => {
             let (bodies, frames) = bodies_at(end, component);
@@ -2188,7 +2186,14 @@ fn path_equations(
             } else {
                 out.push(Proto {
                     target: radius,
-                    ..proto(EqKind::LineDistance, false, axis, center, DVec3::ZERO, point)
+                    ..proto(
+                        EqKind::LineDistance,
+                        false,
+                        axis,
+                        center,
+                        DVec3::ZERO,
+                        point,
+                    )
                 });
                 // Not past the arc's ends: on its circle, the arc is what is at least
                 // r·cos(sweep / 2) out along the radius through its middle
@@ -2984,34 +2989,33 @@ pub(crate) fn solve(
         // At exactly perpendicular planes (or an axis exactly normal to its plane),
         // a dot residual has zero rotational derivative. Seed a small turn so the
         // solver can reach either of the nearest equivalent width orientations.
-        if matches!(mate.kind, MateKind::Width { .. }) {
-            if let (Element::Plane(_, na), Element::Plane(_, nb) | Element::Line(_, nb)) = (a, b) {
-                let (wa, wb) = (
-                    components[ia].frame.vector_to_world(na),
-                    components[ib].frame.vector_to_world(nb),
-                );
-                let singular = if matches!(b, Element::Plane(..)) {
-                    wa.dot(wb).abs() < 1e-8
+        if matches!(mate.kind, MateKind::Width { .. })
+            && let (Element::Plane(_, na), Element::Plane(_, nb) | Element::Line(_, nb)) = (a, b)
+        {
+            let (wa, wb) = (
+                components[ia].frame.vector_to_world(na),
+                components[ib].frame.vector_to_world(nb),
+            );
+            let singular = if matches!(b, Element::Plane(..)) {
+                wa.dot(wb).abs() < 1e-8
+            } else {
+                wa.dot(wb).abs() > 1.0 - 1e-8
+            };
+            if singular {
+                let axis = wa
+                    .cross(wb)
+                    .try_normalize()
+                    .unwrap_or_else(|| wa.any_orthonormal_vector());
+                let q = DQuat::from_axis_angle(axis, 1e-3);
+                let target = if !components[ib].fixed {
+                    Some(ib)
+                } else if !components[ia].fixed {
+                    Some(ia)
                 } else {
-                    wa.dot(wb).abs() > 1.0 - 1e-8
+                    None
                 };
-                if singular {
-                    let axis = wa
-                        .cross(wb)
-                        .try_normalize()
-                        .unwrap_or_else(|| wa.any_orthonormal_vector());
-                    let q = DQuat::from_axis_angle(axis, 1e-3);
-                    let target = if !components[ib].fixed {
-                        Some(ib)
-                    } else if !components[ia].fixed {
-                        Some(ia)
-                    } else {
-                        None
-                    };
-                    if let Some(i) = target {
-                        components[i].frame.rotation =
-                            (q * components[i].frame.rotation).normalize();
-                    }
+                if let Some(i) = target {
+                    components[i].frame.rotation = (q * components[i].frame.rotation).normalize();
                 }
             }
         }

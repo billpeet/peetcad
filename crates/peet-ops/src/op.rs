@@ -1548,7 +1548,11 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
             all.extend(crate::pattern::PATTERN_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::cut::CUT_OPS.iter().map(|(n, ..)| *n));
             all.extend(crate::equations::EQUATION_OPS.iter().map(|(_, n, ..)| *n));
-            all.extend(crate::in_context::IN_CONTEXT_OPS.iter().map(|(_, n, ..)| *n));
+            all.extend(
+                crate::in_context::IN_CONTEXT_OPS
+                    .iter()
+                    .map(|(_, n, ..)| *n),
+            );
             all.sort_unstable();
             all.dedup();
             return Err(format!(

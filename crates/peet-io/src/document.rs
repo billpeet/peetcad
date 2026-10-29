@@ -494,10 +494,7 @@ mod tests {
         // component transparency; and one with them, as it is written now.
         let (mut model, _) = peet_model::samples::enclosure_assembly();
         let sub = model.clone();
-        let def = model
-            .assembly_mut()
-            .unwrap()
-            .define(Arc::new(sub));
+        let def = model.assembly_mut().unwrap().define(Arc::new(sub));
         let inner = model
             .assembly_mut()
             .unwrap()

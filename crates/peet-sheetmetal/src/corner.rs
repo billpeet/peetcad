@@ -41,6 +41,9 @@ use peet_math::{DVec2, DVec3};
 
 use crate::layout::{Area, CurveTag, Cut, Edge2, Layout, MIN_LENGTH, PieceKind, wall};
 
+/// A bend mitred with its flats: the bend, which of its ends, and the flats' half-planes (a point and an offset).
+type BendMitre = (usize, bool, Vec<(DVec2, f64)>);
+
 /// How the flanges at a corner meet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum CornerKind {
@@ -293,7 +296,7 @@ impl Layout {
         let mut bend_ends: Vec<(usize, usize, f64)> = Vec::new();
         // First bends mitred with their flats (across a bend): the bend, its end, the
         // flat's half-planes
-        let mut bend_mitres: Vec<(usize, bool, Vec<(DVec2, f64)>)> = Vec::new();
+        let mut bend_mitres: Vec<BendMitre> = Vec::new();
         let mut push =
             |flat: usize, cut: EndCut| match per_flat.iter_mut().find(|(f, _)| *f == flat) {
                 Some(s) => s.1.push(cut),

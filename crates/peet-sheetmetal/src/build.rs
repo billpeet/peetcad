@@ -371,7 +371,7 @@ impl SheetBody {
         kind: BreakKind,
         size: f64,
         tag: impl Fn(u8) -> CurveTag,
-    ) -> Result<(usize, crate::Area, [[DVec2; 2]; 2], bool), String> {
+    ) -> Result<BrokenCorner, String> {
         const NOT_A_CORNER: &str = "Pick a corner of the sheet: the short edge through its thickness where two straight sides of a flat face meet.";
         if !(size.is_finite() && size > crate::layout::MIN_LENGTH) {
             return Err("The size must be greater than zero.".to_owned());
@@ -850,9 +850,11 @@ fn drop_scrap(layout: &Layout, kept: Vec<(Region, usize)>) -> Vec<(Region, usize
     // scrap: a bend cut across in several places is in several strips, each joining its
     // flanges.
     let joined = |i: usize, j: usize| {
-        edges[i]
-            .iter()
-            .any(|a| edges[j].iter().any(|b| a.0 == b.0 && close(a.1, b.2) && close(a.2, b.1)))
+        edges[i].iter().any(|a| {
+            edges[j]
+                .iter()
+                .any(|b| a.0 == b.0 && close(a.1, b.2) && close(a.2, b.1))
+        })
     };
     loop {
         let mut grew = false;
@@ -2113,6 +2115,10 @@ struct FormCtx<'a> {
 
 /// An edge used by a loop: the edge, and whether the loop runs against its direction.
 type Use = (EdgeId, bool);
+
+/// A broken corner as laid out: the piece it is on, the area it takes away or adds, the two sides
+/// it meets (each from its corner along the side) and whether the corner is an inside one.
+type BrokenCorner = (usize, crate::Area, [[DVec2; 2]; 2], bool);
 
 /// The right-hand normal of a curve traversed in loop order, at `p`.
 fn right_normal(curve: &Curve, reversed: bool, p: DVec2) -> DVec2 {

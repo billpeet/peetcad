@@ -15,26 +15,25 @@ use std::marker::PhantomData;
 
 use crate::value::{HoleStandard, RevolveAxis};
 use peet_document::Document;
+use peet_model::Sketch3dFeature;
 use peet_model::feature::{
     AxisDef, CoordSystemDef, FeatureKind, PatternBound, PatternDef, PatternKeeps, PatternUpTo,
     PlaneDef, PointDef,
 };
-use peet_model::{
-    AxisRef, BaseFlangeFeature, BendModelDef, BreakCornerFeature, CornerFeature,
-    EdgeFlangeFeature, EdgeRef,
-    EndCondition, ExtrudeFeature, FaceName, FaceRef, FeatureId, FormFeature, HemFeature,
-    JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, Operation, PatternFeature,
-    PlaneRef, PointRef, RegionSelection, Scalar, ScalarKind, SheetCutEnd, SheetCutFeature, SheetSettingsDef,
-    SketchFeature, SketchedBendFeature, StdAxis, StdPlane, VertexRef,
-};
-use peet_model::{
-    BlendFeature, BlendKind, ConvertToSheetFeature, DraftFeature, HoleEnd, HoleFeature, HoleFit,
-    BodyMate, HoleKind, InsertPartFeature, LoftFeature, METRIC, MateGeom, MateKind, MemberCorner,
-    FoldFeature, MoveBodyFeature, PartSource, UnfoldFeature,
-    RevolveAxisRef, RevolveFeature, ShellFeature, StructuralMemberFeature, SweepFeature,
-};
-use peet_model::Sketch3dFeature;
 use peet_model::sketch3d::{Axis3, Line3, Ref3, Relation3};
+use peet_model::{
+    AxisRef, BaseFlangeFeature, BendModelDef, BreakCornerFeature, CornerFeature, EdgeFlangeFeature,
+    EdgeRef, EndCondition, ExtrudeFeature, FaceName, FaceRef, FeatureId, FormFeature, HemFeature,
+    JogFeature, LinearDirection, MirrorFeature, MiterFlangeFeature, Operation, PatternFeature,
+    PlaneRef, PointRef, RegionSelection, Scalar, ScalarKind, SheetCutEnd, SheetCutFeature,
+    SheetSettingsDef, SketchFeature, SketchedBendFeature, StdAxis, StdPlane, VertexRef,
+};
+use peet_model::{
+    BlendFeature, BlendKind, BodyMate, ConvertToSheetFeature, DraftFeature, FoldFeature, HoleEnd,
+    HoleFeature, HoleFit, HoleKind, InsertPartFeature, LoftFeature, METRIC, MateGeom, MateKind,
+    MemberCorner, MoveBodyFeature, PartSource, RevolveAxisRef, RevolveFeature, ShellFeature,
+    StructuralMemberFeature, SweepFeature, UnfoldFeature,
+};
 use peet_sheetmetal::corner::{CornerKind, CornerRelief};
 use peet_sheetmetal::{
     BendLinePosition, BreakKind, FlangePosition, FormKind, HemKind, JogDimension, ReliefType,
@@ -48,8 +47,7 @@ use crate::args::{
 use crate::select;
 use crate::value::{
     AxisSel, Bend, BoundSel, EdgeSel, End, FaceSel, FeatureSel, GeomSel, Input, PlaneSel, PointSel,
-    Regions,
-    VertexSel,
+    Regions, VertexSel,
 };
 
 // ---- Kinds of field ----
@@ -438,7 +436,10 @@ fn a_path(sel: &FeatureSel, doc: &Document) -> Result<FeatureId, String> {
     if is_3d || doc.model.sketch(id).is_some() {
         Ok(id)
     } else {
-        Err(format!("{} is not a sketch or a 3D sketch", doc.model.name_of(id)))
+        Err(format!(
+            "{} is not a sketch or a 3D sketch",
+            doc.model.name_of(id)
+        ))
     }
 }
 
@@ -738,10 +739,15 @@ impl Field for OptBends {
     type Arg = Vec<Option<Bend>>;
     type Target = Vec<Option<BendModelDef>>;
     fn describe() -> String {
-        format!("list of {}, one for each bend along the profile", OptBend::describe())
+        format!(
+            "list of {}, one for each bend along the profile",
+            OptBend::describe()
+        )
     }
     fn parse(v: &Value) -> Result<Self::Arg, String> {
-        let list = v.as_array().ok_or("expected a list, one bend model or null for each bend")?;
+        let list = v
+            .as_array()
+            .ok_or("expected a list, one bend model or null for each bend")?;
         list.iter().map(OptBend::parse).collect()
     }
     fn assign(arg: &Self::Arg, target: &mut Self::Target, doc: &Document) -> Result<(), String> {
@@ -1926,7 +1932,6 @@ feature_args! {
     }
 }
 
-
 // ---- 3D sketches ----
 
 /// A 3D sketch's points.
@@ -1958,12 +1963,7 @@ impl Field for Points3 {
     }
     fn arg(target: &Self::Target, doc: &Document) -> Option<Self::Arg> {
         let units = &doc.model.parameters.units;
-        Some(
-            target
-                .iter()
-                .map(|p| p.map(|v| units.from_mm(v)))
-                .collect(),
-        )
+        Some(target.iter().map(|p| p.map(|v| units.from_mm(v))).collect())
     }
 }
 
@@ -1996,7 +1996,11 @@ impl Field for Lines3 {
             Ok(Line3 {
                 start: point("from")?,
                 end: point("to")?,
-                construction: item.get("construction").map(boolean).transpose()?.unwrap_or(false),
+                construction: item
+                    .get("construction")
+                    .map(boolean)
+                    .transpose()?
+                    .unwrap_or(false),
             })
         })
     }
@@ -2031,7 +2035,9 @@ fn ref3(v: &Value) -> Result<Ref3, String> {
     if let Some(l) = v.get("line") {
         return Ok(Ref3::Line(integer(l)?));
     }
-    Err(format!("expected {{\"point\": n}} or {{\"line\": n}}, not {v}"))
+    Err(format!(
+        "expected {{\"point\": n}} or {{\"line\": n}}, not {v}"
+    ))
 }
 
 fn ref3_out(r: Ref3) -> Value {

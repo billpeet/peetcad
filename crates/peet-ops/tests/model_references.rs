@@ -221,7 +221,10 @@ fn suppressed_and_missing_sources_leave_the_projection_where_it_was() {
         json!({"op":"suppress","feature":"Stock","on":false}),
     );
     let status = &doc.evaluation().state(id).unwrap().status;
-    assert!(status.is_built() && status.message().is_none(), "{status:?}");
+    assert!(
+        status.is_built() && status.message().is_none(),
+        "{status:?}"
+    );
     let mut model = doc.model.clone();
     model.feature_mut(stock).unwrap().kind =
         peet_model::FeatureKind::Point(peet_model::PointDef::Coordinates {

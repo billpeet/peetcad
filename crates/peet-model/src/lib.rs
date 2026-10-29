@@ -66,8 +66,7 @@ pub use asm_cut::{AssemblyCut, CutConversion, CutId, CutPlane};
 pub use assembly::{
     Assembly, CompId, Component, ComponentPattern, DefId, Definition, ExplodeId, ExplodeStep, Link,
     MAX_PATTERN, PatternId, PatternInstance, PatternKind, PatternLine, PatternStep, Pose,
-    evaluate_pattern_count, pattern_count,
-    relative_to,
+    evaluate_pattern_count, pattern_count, relative_to,
 };
 pub use bodies::{InsertPartFeature, MoveBodyFeature, PartSource, body_motion};
 pub use config::{ConfigId, Configuration, Held, Scope, Slot, SlotValue};
@@ -91,8 +90,8 @@ pub use hole::{HoleEnd, HoleFeature, HoleFit, HoleKind, HoleSizes, METRIC, Metri
 pub use import::{ImportFeature, ImportedSolid};
 pub use loft::{LoftFeature, LoftInput, apply_loft};
 pub use mate::{
-    Align, BodyMate, Drag, Mate, MateEnd, MateGeom, MateId, MateKind, PathAxis, PathRoll, SketchRef,
-    WidthMode,
+    Align, BodyMate, Drag, Mate, MateEnd, MateGeom, MateId, MateKind, PathAxis, PathRoll,
+    SketchRef, WidthMode,
 };
 pub use material::{Material, STEEL_DENSITY};
 pub use model::{
@@ -105,8 +104,8 @@ pub use regen::{Engine, Evaluation, FeatureState, Instance, Output, SketchStatus
 pub use revolve::{
     RevolveAxisRef, RevolveFeature, RevolveInput, apply_revolve, default_axis, sketch_axis,
 };
-pub use sweep::{SweepFeature, SweepInput, apply_sweep};
 pub use sketch3d::Sketch3dFeature;
+pub use sweep::{SweepFeature, SweepInput, apply_sweep};
 pub use weldment::{MemberCorner, StructuralMemberFeature};
 
 /// Why a feature failed to rebuild. The message is shown next to the feature.

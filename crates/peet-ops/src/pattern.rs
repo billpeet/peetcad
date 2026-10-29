@@ -83,6 +83,8 @@ impl PatternSel {
 }
 
 /// A direction or an axis, as an operation gives it.
+// An operation's input, made once per call: its size doesn't matter
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternLineSel {
     /// Of the assembly itself: a direction, and for an axis a point on it.
@@ -225,8 +227,7 @@ fn count(input: &Input, doc: &Document) -> Result<peet_model::Scalar, String> {
         Input::Number(n) | Input::Base(n) => (peet_model::Scalar::new(*n), true),
         Input::Expr(text) => {
             let text = text.trim();
-            let constant =
-                peet_sketch::expr::Expr::parse(text).is_ok_and(|e| e.names().is_empty());
+            let constant = peet_sketch::expr::Expr::parse(text).is_ok_and(|e| e.names().is_empty());
             (
                 peet_model::Scalar {
                     value: 0.0,
@@ -245,6 +246,8 @@ fn count(input: &Input, doc: &Document) -> Result<peet_model::Scalar, String> {
 }
 
 /// What a new pattern is.
+// An operation's input, made once per call: its size doesn't matter
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternSpec {
     Linear {
@@ -307,6 +310,8 @@ pub struct PatternEdit {
 }
 
 /// What to do to a component pattern.
+// An operation's input, made once per call: its size doesn't matter
+#[allow(clippy::large_enum_variant)]
 #[derive(Clone, Debug, PartialEq)]
 pub enum PatternChange {
     Edit(PatternEdit),

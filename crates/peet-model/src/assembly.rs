@@ -462,7 +462,9 @@ impl PatternKind {
     /// The counts' scalars: the first direction's (or round the axis), and the second's.
     pub fn counts(&self) -> [Option<&Scalar>; 2] {
         match self {
-            Self::Linear { first, second } => [Some(&first.count), second.as_ref().map(|s| &s.count)],
+            Self::Linear { first, second } => {
+                [Some(&first.count), second.as_ref().map(|s| &s.count)]
+            }
             Self::Circular { count, .. } => [Some(count), None],
         }
     }
@@ -470,9 +472,10 @@ impl PatternKind {
     /// The counts' scalars, to change them.
     pub fn counts_mut(&mut self) -> [Option<&mut Scalar>; 2] {
         match self {
-            Self::Linear { first, second } => {
-                [Some(&mut first.count), second.as_mut().map(|s| &mut s.count)]
-            }
+            Self::Linear { first, second } => [
+                Some(&mut first.count),
+                second.as_mut().map(|s| &mut s.count),
+            ],
             Self::Circular { count, .. } => [Some(count), None],
         }
     }
@@ -507,9 +510,19 @@ impl PatternKind {
         let name = name.trim().to_ascii_uppercase();
         match (self, name.as_str()) {
             (Self::Linear { first, .. }, "D1") => Some((&mut first.count, Number)),
-            (Self::Linear { second: Some(s), .. }, "D2") => Some((&mut s.count, Number)),
+            (
+                Self::Linear {
+                    second: Some(s), ..
+                },
+                "D2",
+            ) => Some((&mut s.count, Number)),
             (Self::Linear { first, .. }, "D3") => Some((&mut first.spacing, Length)),
-            (Self::Linear { second: Some(s), .. }, "D4") => Some((&mut s.spacing, Length)),
+            (
+                Self::Linear {
+                    second: Some(s), ..
+                },
+                "D4",
+            ) => Some((&mut s.spacing, Length)),
             (Self::Circular { count, .. }, "D1") => Some((count, Number)),
             (Self::Circular { angle, .. }, "D3") => Some((angle, Angle)),
             _ => None,
@@ -1009,7 +1022,10 @@ impl Assembly {
     }
 
     /// The cut, to change it. Other snapshots of the assembly are not affected.
-    pub fn cut_mut(&mut self, id: crate::asm_cut::CutId) -> Option<&mut crate::asm_cut::AssemblyCut> {
+    pub fn cut_mut(
+        &mut self,
+        id: crate::asm_cut::CutId,
+    ) -> Option<&mut crate::asm_cut::AssemblyCut> {
         self.cuts.iter_mut().find(|c| c.id == id).map(Arc::make_mut)
     }
 

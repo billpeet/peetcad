@@ -508,6 +508,7 @@ impl Layout {
     /// Lays out a profile on an edge: its bends and flats, the strip the parent gives up
     /// (`trim` deep) and reliefs where it stops short of the edge's ends. Returns the
     /// index of its [`Attachment`].
+    #[allow(clippy::too_many_arguments)]
     pub fn add_profile(
         &mut self,
         owner: u32,
@@ -834,13 +835,13 @@ impl Layout {
         let d = (site.b - site.a) / len;
         let out_dir = DVec2::new(d.y, -d.x);
         let inward = -out_dir;
-        for end in 0..2 {
+        for (end, offset) in offsets.iter().enumerate() {
             let (q, moved, away) = if end == 0 {
                 (site.a, original.a.distance(site.a) > MIN_LENGTH, d)
             } else {
                 (site.b, original.b.distance(site.b) > MIN_LENGTH, -d)
             };
-            if offsets[end].abs() > MIN_LENGTH || moved {
+            if offset.abs() > MIN_LENGTH || moved {
                 continue;
             }
             let meets = self.attachments.iter().any(|o| {
