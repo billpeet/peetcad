@@ -110,6 +110,9 @@ pub struct PeetApp {
     /// The sketch being edited, if any (sketch mode), and its working copy.
     sketch: Option<SketchEditor>,
     sketch_work: Option<SketchItem>,
+    /// Set while the open sketch is one of the part edited in context: a sketch of that
+    /// part, shown in the assembly (see `in_context`).
+    sketch_in: Option<in_context::SketchInContext>,
     /// Inputs of the "add parameter" row in the parameters window.
     new_param: (String, String),
     param_error: Option<String>,
@@ -275,6 +278,7 @@ impl PeetApp {
             backend_name,
             sketch: None,
             sketch_work: None,
+            sketch_in: None,
             new_param: (String::new(), String::new()),
             param_error: None,
             config_list: ConfigList::default(),
@@ -646,6 +650,11 @@ impl PeetApp {
         let Some(id) = editor.item.feature() else {
             return;
         };
+        // A sketch of the part edited in context goes back into that part.
+        if let Some(inside) = self.sketch_in.take() {
+            self.store_sketch_in_context(&inside, id, &work);
+            return;
+        }
         let name = self.doc.model.name_of(id).to_owned();
         self.change(&format!("Edit {name}"), |m| {
             if let Some(f) = m.feature_mut(id) {
@@ -668,6 +677,7 @@ impl PeetApp {
         }
         self.sketch = None;
         self.sketch_work = None;
+        self.sketch_in = None;
     }
 
     fn new_sketch(&mut self, plane: PlaneRef, placement: peet_math::Plane) {
@@ -1170,6 +1180,10 @@ impl PeetApp {
             };
         }
         let in_sketch = self.sketch.is_some();
+        // Editing a part in context, its sketches are made and edited in the assembly.
+        if cmd == CommandId::NewSketch && self.in_context_component().is_some() {
+            return enabled(!in_sketch);
+        }
         // A part's commands are off in an assembly, and an assembly's in a part.
         let is_assembly = self.doc.is_assembly();
         if (is_assembly && !assembly::works_in_assembly(cmd))
@@ -1452,6 +1466,9 @@ impl PeetApp {
             CommandId::MassProperties => self.windows.mass_properties = true,
             CommandId::InterferenceCheck => self.windows.interference = true,
             CommandId::BillOfMaterials => self.windows.bill_of_materials = true,
+            CommandId::NewSketch if self.in_context_component().is_some() => {
+                self.new_sketch_on_picked();
+            }
             CommandId::NewSketch => match self.selected_plane() {
                 Some((plane, placement)) => self.new_sketch(plane, placement),
                 None => {
@@ -1682,7 +1699,8 @@ impl PeetApp {
                 DisplayAction::Link(on) => Op::LinkDisplayStates { on },
             };
             let switched = matches!(op, Op::DisplayState { .. } | Op::AddDisplayState { .. });
-            if self.perform(op).ok && switched
+            if self.perform(op).ok
+                && switched
                 && let Some(s) = self.doc.model.active_display_state()
             {
                 self.info(format!("Display state {}", s.name));
@@ -2641,15 +2659,20 @@ impl PeetApp {
     fn properties(&mut self, ui: &mut Ui, pending: &mut Vec<CommandId>) {
         ui.add_space(4.0);
         self.value_scope(ui, pending);
-        if let (Some(editor), Some(work)) = (&mut self.sketch, &mut self.sketch_work) {
-            let name = editor
-                .item
-                .feature()
-                .map(|id| self.doc.model.name_of(id).to_owned())
-                .unwrap_or_default();
-            ui.strong(format!("Editing {name}"));
+        if self.sketch.is_some() {
+            ui.strong(format!("Editing {}", self.open_sketch_name()));
             ui.separator();
-            if let Some(cmd) = editor.properties_ui(ui, work, &self.doc.model.parameters) {
+            // A sketch of the part edited in context: what it can follow in the assembly.
+            if self.sketch_in.is_some() {
+                self.in_context_sketch_properties(ui);
+            }
+            let params = self
+                .sketch_in
+                .as_ref()
+                .map_or(&self.doc.model.parameters, |s| &s.parameters);
+            if let (Some(editor), Some(work)) = (&mut self.sketch, &mut self.sketch_work)
+                && let Some(cmd) = editor.properties_ui(ui, work, params)
+            {
                 pending.push(cmd);
             }
             return;
@@ -3511,6 +3534,23 @@ impl PeetApp {
                 ui.checkbox(&mut s.show_grid, "Show grid");
                 ui.checkbox(&mut s.show_view_cube, "Show view cube");
                 ui.add_space(8.0);
+                ui.heading("Assemblies");
+                egui::ComboBox::from_label("Other components while editing in context")
+                    .selected_text(s.in_context_look.label())
+                    .show_ui(ui, |ui| {
+                        for look in crate::settings::InContextLook::ALL {
+                            ui.selectable_value(&mut s.in_context_look, look, look.label());
+                        }
+                    })
+                    .response
+                    .on_hover_text("How the components other than the part being edited in context are drawn. Transparent: you see the part through them, and clicks reach the part first (Shift-click picks the nearest). The display state is not changed.");
+                if s.in_context_look == crate::settings::InContextLook::Transparent {
+                    ui.add(
+                        egui::Slider::new(&mut s.in_context_transparency, 0.0..=0.95)
+                            .text("Transparency"),
+                    );
+                }
+                ui.add_space(8.0);
                 ui.heading("Files");
                 ui.checkbox(&mut s.save_caches, "Save display data with parts")
                     .on_hover_text("Parts open instantly, but the files are larger. Without it the part is rebuilt when opened.");
@@ -3908,8 +3948,11 @@ impl eframe::App for PeetApp {
         let mut component_drag = None;
         let mut flange_edit = None;
         let mut sketch_plane_click = None;
+        let mut sketch_geom_click = None;
         // Editing a part in context, its component stays highlighted.
-        let highlighted = self.in_context_component().or(self.selected_component);
+        let in_context = self.in_context_component();
+        let highlighted = in_context.or(self.selected_component);
+        let hovered_in_sketch = self.hovered_geom.filter(|g| self.pickable_in_sketch(*g));
         egui::CentralPanel::no_frame().show(ui, |ui| {
             let (Some(viewport), Some(render_state)) = (&mut self.viewport, &self.render_state) else {
                 ui.centered_and_justified(|ui| {
@@ -3926,12 +3969,19 @@ impl eframe::App for PeetApp {
                     selected: self.selected,
                     hovered: self.hovered,
                     dark,
-                    editing_sketch: self.sketch.as_ref().map(|e| e.item),
-                    hovered_geom: if self.sketch.is_some() { None } else { self.hovered_geom },
+                    // A sketch of a part edited in context is not one of the document's.
+                    editing_sketch: self.sketch.as_ref().filter(|_| self.sketch_in.is_none()).map(|e| e.item),
+                    // Sketching in context, the other components' geometry can be picked.
+                    hovered_geom: if self.sketch.is_none() {
+                        self.hovered_geom
+                    } else {
+                        hovered_in_sketch
+                    },
                     selected_geom: &self.selected_geom,
                     show_std_planes: self.picking_sketch_plane,
                     selected_component: highlighted,
                     hovered_component: self.hovered_component,
+                    in_context,
                 },
             );
             self.hovered_geom = viewport.hovered_geom;
@@ -3972,7 +4022,15 @@ impl eframe::App for PeetApp {
             extrude_arrow(ui, viewport, &self.doc, self.selected.filter(|_| handles));
             if let (Some(editor), Some(work)) = (&mut self.sketch, &mut self.sketch_work) {
                 if let Some(response) = &events.response {
-                    editor.show(ui, response, &viewport.camera, work, &self.doc.model.parameters, dark);
+                    let params = self
+                        .sketch_in
+                        .as_ref()
+                        .map_or(&self.doc.model.parameters, |s| &s.parameters);
+                    editor.show(ui, response, &viewport.camera, work, params, dark);
+                    // Clicked where the sketch has nothing: what is behind it.
+                    if editor.clicked_empty && self.sketch_in.is_some() {
+                        sketch_geom_click = Some(viewport.hovered_geom);
+                    }
                 }
             } else if events.clicked_background {
                 let additive = ui.input(|i| i.modifiers.shift || i.modifiers.command);
@@ -4046,6 +4104,9 @@ impl eframe::App for PeetApp {
         }
         if let Some((geom, plane)) = sketch_plane_click {
             self.finish_sketch_plane_pick(geom, plane);
+        }
+        if let Some(geom) = sketch_geom_click {
+            self.pick_in_sketch(geom);
         }
         self.settings_window(&ctx);
         self.shortcuts_window(&ctx);

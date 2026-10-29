@@ -188,6 +188,45 @@ impl OrbitChoice {
     }
 }
 
+/// How the other components of an assembly are drawn while a part is edited in context
+/// (SolidWorks' "Assembly transparency for in context edit").
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum InContextLook {
+    /// See-through, whatever the display state says (SolidWorks' default, "Force
+    /// assembly transparency").
+    Transparent,
+    /// As the display state has them ("Maintain assembly transparency").
+    Maintain,
+    /// Opaque, even those the display state makes see-through ("Opaque assembly").
+    Opaque,
+}
+
+impl InContextLook {
+    pub const ALL: [Self; 3] = [Self::Transparent, Self::Maintain, Self::Opaque];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Transparent => "Transparent",
+            Self::Maintain => "As the display state has them",
+            Self::Opaque => "Opaque",
+        }
+    }
+
+    /// How transparent a component other than the edited one is drawn (0 opaque, 1 not
+    /// seen), given how transparent the display state makes it (`own`) and how
+    /// transparent `Transparent` makes them (`forced`).
+    pub fn others(self, own: f32, forced: f32) -> f32 {
+        match self {
+            // What the display state makes more see-through than that stays so.
+            Self::Transparent => own.max(forced.clamp(0.0, 0.95)),
+            Self::Maintain => own,
+            // What is not seen at all stays so.
+            Self::Opaque if own >= 1.0 => own,
+            Self::Opaque => 0.0,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Settings {
@@ -216,6 +255,10 @@ pub struct Settings {
     /// The density last used, in kg/m³: what a part that has no material yet is weighed
     /// with in the mass properties window. A part's own material is saved with the part.
     pub density: f64,
+    /// How the other components are drawn while a part is edited in context.
+    pub in_context_look: InContextLook,
+    /// How transparent [`InContextLook::Transparent`] draws them: 0 opaque, 1 not seen.
+    pub in_context_transparency: f32,
 }
 
 impl Default for Settings {
@@ -237,6 +280,8 @@ impl Default for Settings {
             materials: peet_sheetmetal::MaterialLibrary::builtin(),
             check_rules: peet_sheetmetal::CheckRules::default(),
             density: STEEL_DENSITY,
+            in_context_look: InContextLook::Transparent,
+            in_context_transparency: 0.75,
         }
     }
 }
@@ -275,6 +320,19 @@ mod tests {
             p.action_for(PointerButton::Primary, alt_shift),
             Some(NavAction::Pan)
         );
+    }
+
+    #[test]
+    fn other_components_in_context() {
+        use InContextLook::*;
+        // Forced see-through, unless the display state already makes them more so.
+        assert_eq!(Transparent.others(0.0, 0.75), 0.75);
+        assert_eq!(Transparent.others(0.9, 0.75), 0.9);
+        // Never forced out of sight.
+        assert_eq!(Transparent.others(0.0, 1.0), 0.95);
+        assert_eq!(Maintain.others(0.4, 0.75), 0.4);
+        assert_eq!(Opaque.others(0.4, 0.75), 0.0);
+        assert_eq!(Opaque.others(1.0, 0.75), 1.0);
     }
 
     #[test]

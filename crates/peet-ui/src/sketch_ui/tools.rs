@@ -27,6 +27,7 @@ impl SketchEditor {
     ) {
         self.hover = None;
         self.inference = None;
+        self.clicked_empty = false;
         let modifiers = ui.input(|i| i.modifiers);
         // Alt + left drag is navigation in every mouse preset.
         let primary_click = response.clicked_by(PointerButton::Primary) && !modifiers.alt;
@@ -144,8 +145,11 @@ impl SketchEditor {
                     }
                 }
                 Some(sel) => self.selection = vec![sel],
-                None if !additive => self.selection.clear(),
-                None => {}
+                None if !additive => {
+                    self.selection.clear();
+                    self.clicked_empty = true;
+                }
+                None => self.clicked_empty = true,
             }
         }
 

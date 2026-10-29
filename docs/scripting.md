@@ -921,7 +921,7 @@ Without one they are refused.
 | `zoom_to_fit` | |
 | `toggle` | `what` (`perspective`, `grid`, `view_cube`, `feature_tree`, `properties`, `performance_overlay`, `relations`, `construction`), `on` (left out: the other way) |
 | `window` | `open` (`command_palette`, `settings`, `keyboard_shortcuts`, `about`, `parameters`, `configurations`, `bend_table`, `checks`, `materials`, `mass`) |
-| `edit_sketch` | `sketch`: open it in the sketch editor |
+| `edit_sketch` | `sketch`: open it in the sketch editor; `component` (in an assembly, and needed there): a sketch of that component's part, edited in context |
 | `exit_sketch` | finish the open sketch, writing it to the part |
 | `tool` | `tool` (`select`, `line`, `rectangle`, `center_rectangle`, `circle`, `arc`, `slot`, `polygon`, `point`, `trim`, `extend`, `fillet`, `offset`, `mirror`, `dimension`) |
 | `quit` | |

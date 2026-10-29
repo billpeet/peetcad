@@ -664,3 +664,16 @@ component), the feature showing "->" in the part.
   extrusion's end or a plane's base, from the properties. The tree marks a part with
   references "->", and its menu and properties list, lock, unlock and break them. The
   part is not opened as a document of its own: its sketches are edited with Edit Part.
+  *Superseded in part (October 2026):* the part's sketches are made and edited in place,
+  as SolidWorks' Edit Part does. The sketcher works on a copy of the part's sketch, put
+  on its plane where the component is shown; a new one goes on a plane or face of the
+  part, or on another component's flat face, which its plane then follows. Clicking
+  another component's edge, face or corner where the sketch has nothing picks it, to
+  convert it or to make the selected entity follow it (the sketch so far is written to
+  the part, `in_context` applied, and the copy taken back). Finishing the sketch writes
+  it into the part (`set_part`), and the assembly rebuilds it. While a part is edited in
+  context the other components are drawn see-through (the renderer's blended
+  transparency; picking reaches the edited part through them first, Shift picks the
+  nearest), without changing the display state; a setting chooses transparent (the
+  default, as SolidWorks' "Force assembly transparency"), as the display state has them,
+  or opaque. `edit_sketch` takes `component` to do the same from a script.

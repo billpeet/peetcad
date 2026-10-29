@@ -657,7 +657,8 @@ moves on; unlocked, it catches up (140); broken, it stays 140 whatever the plate
   or the line a plane cuts it in. A tilted circle is refused.
 - **New or existing entity.** Left out, `entity` adds a fixed construction entity
   (`construction: false` for a converted one that is part of the profile): relate the
-  sketch to it with `open_component` and the sketch operations. With `entity`, that
+  sketch to it with `open_component` and the sketch operations. (In a running PeetCAD,
+  `edit_sketch` with `component` opens the sketch in the assembly for the user instead.) With `entity`, that
   entity of the sketch is the one that follows (it must be of the kind it is seen as):
   the quickest way to make an edge of a profile follow another part.
 - **What updates it.** The assembly it was made in (by its file name; saving the

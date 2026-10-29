@@ -919,7 +919,7 @@ impl CommandId {
             Self::EditInContext => (
                 "Edit In Context",
                 "Assembly",
-                "Edit the selected component's part among the other components (SolidWorks' Edit Part): pick another component's face, edge or corner, and make a sketch of the part convert it, sit on it, or an extrusion run up to it. The part then follows that component in this assembly. Again to stop.",
+                "Edit the selected component's part among the other components (SolidWorks' Edit Part): pick another component's face, edge or corner, and make a sketch of the part convert it, sit on it, or an extrusion run up to it. The part then follows that component in this assembly. The part's sketches are made and edited right here, with the other components drawn see-through around them. Again to stop.",
                 None,
             ),
             Self::InsertLinkedComponent => (
