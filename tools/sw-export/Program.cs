@@ -25,7 +25,7 @@ using Json = Dictionary<string, object?>;
 internal static class Program
 {
     /// <summary>Raise this when the output changes shape, so the importer can tell exports apart.</summary>
-    private const int FormatVersion = 6;
+    private const int FormatVersion = 7;
     private const string FlatPatternSuffix = "SM-FLAT-PATTERN";
     private const int MaxRestarts = 5;
 
@@ -187,6 +187,13 @@ internal static class Program
                 configurations.Add(DumpConfiguration(doc, name, isAssembly, Path.GetFileName(path)));
             }
 
+            // Every external reference of the document (in-context features and others), as SolidWorks' List
+            // External References has them. Opened alone, a part's in-context references are out of context.
+            root["externalReferences"] = TryList(() => ExternalReferences("the document", (out object models, out object components,
+                out object features, out object types, out object statuses, out object entities, out object featureComponents,
+                out int configOption, out string configName) => doc.Extension.ListExternalFileReferences(out models, out components,
+                out features, out types, out statuses, out entities, out featureComponents, out configOption, out configName)));
+
             if (Sha256(path) != hash)
                 error = "The file changed while it was being exported.";
 
@@ -335,6 +342,12 @@ internal static class Program
                         Log("  " + failed["error"]);
                 if (hidden.Count > 0)
                     result["suppressedChildren"] = hidden;
+
+                // The features of components' parts that refer to other components (in-context features), read
+                // through the components so that what they refer to is in this assembly
+                var inContext = TryList(() => InContext(doc, listed));
+                if (inContext is { Count: > 0 })
+                    result["inContext"] = inContext;
 
                 // The whole assembly as SolidWorks has it in this configuration, to compare an import with
                 result["massProperties"] = TryJson(() => AssemblyMass(doc), "mass properties of " + name);
@@ -563,6 +576,11 @@ internal static class Program
                 result["namedDimensions"] = named;
         }
 
+        // A feature that refers to another document (an in-context feature: "->" in the tree): what it refers
+        // to, in which assembly, and the reference's status
+        if (Try(() => (object)feature.ListExternalFileReferencesCount()) is int referenceCount && referenceCount > 0)
+            result["externalReferences"] = TryList(() => FeatureReferences(feature));
+
         var specific = Try(() => feature.GetSpecificFeature2());
         if (specific is Sketch sketch)
             result["sketch"] = TryJson(() => DumpSketch(sketch), "sketch of " + feature.Name);
@@ -601,7 +619,7 @@ internal static class Program
     /// Reads every value a feature's definition offers. The API has one interface per kind of feature; reading them
     /// by reflection means no value is left out because nobody wrote the line that reads it.
     /// </summary>
-    private static Json? DumpDefinition(ModelDoc2 doc, Feature feature, string type, bool suppressed)
+    private static Json? DumpDefinition(ModelDoc2 doc, Feature feature, string type, bool suppressed, Component2? component = null)
     {
         var definition = feature.GetDefinition();
         if (definition == null)
@@ -643,13 +661,13 @@ internal static class Program
         if (readSelections) {
             var owner = interfaces.FirstOrDefault(i => i.GetMethod("AccessSelections") != null && i.GetMethod("ReleaseSelectionAccess") != null);
             if (owner != null) {
-                var accessed = Try(() => owner.GetMethod("AccessSelections")!.Invoke(definition, new object?[] { doc, null }));
+                var accessed = Try(() => owner.GetMethod("AccessSelections")!.Invoke(definition, new object?[] { doc, component }));
                 result["selectionsRead"] = accessed is true;
                 if (accessed is true)
                     release = () => owner.GetMethod("ReleaseSelectionAccess")!.Invoke(definition, null);
             }
             else if (dispatch != null && dispatch.Has("AccessSelections") && dispatch.Has("ReleaseSelectionAccess")) {
-                var accessed = Try(() => InvokeLate(definition, "AccessSelections", false, doc, new DispatchWrapper(null)));
+                var accessed = Try(() => InvokeLate(definition, "AccessSelections", false, doc, new DispatchWrapper(component)));
                 result["selectionsRead"] = accessed is true;
                 if (accessed is true)
                     release = () => InvokeLate(definition, "ReleaseSelectionAccess", false);
@@ -1261,6 +1279,198 @@ internal static class Program
         };
     }
 
+    // ---- External references (in-context features), format 7 ----
+    //
+    // A part feature made while editing the part in an assembly can refer to another component's geometry (a
+    // sketch relation or a converted edge, an end condition, a plane). SolidWorks lists such references by
+    // text (List External References): the assembly that is the context, the component, the feature, the
+    // kind of reference, its status and the entity. The geometry itself is only reachable in the assembly:
+    // the in-context component's features are read through the component, so that what their relations
+    // and selections refer to are the other components' entities. Every read is guarded: what fails is
+    // logged and left out.
+
+    private delegate void ListReferences(out object models, out object components, out object features, out object types,
+        out object statuses, out object entities, out object featureComponents, out int configOption, out string configName);
+
+    /// <summary>The parallel arrays SolidWorks gives for external references, one entry per reference.</summary>
+    private static List<Json> ExternalReferences(string what, ListReferences list)
+    {
+        list(out var models, out var components, out var features, out var types, out var statuses, out var entities,
+            out var featureComponents, out var configOption, out var configName);
+        var columns = new[] { models, components, features, types, statuses, entities, featureComponents }.Select(ArrayOf).ToArray();
+        var count = columns.Max(c => c.Length);
+        object? At(int column, int i) => i < columns[column].Length ? columns[column][i] : null;
+        var result = new List<Json>();
+        for (var i = 0; i < count; i++) {
+            var status = At(4, i) is { } s ? Try(() => (object)Convert.ToInt32(s)) as int? : null;
+            result.Add(new Json {
+                // The assembly the reference was made in (its context), as SolidWorks has its path
+                ["model"] = At(0, i) as string,
+                // The component referred to, as SolidWorks names it ("Door-1@Door Assembly")
+                ["component"] = At(1, i) as string,
+                // The feature that has the reference
+                ["feature"] = At(2, i) as string,
+                // What kind of reference: a sketch relation, a converted edge, an end condition, a plane, ...
+                ["dataType"] = At(3, i) as string,
+                // swExternalReferenceStatus_e: 0 broken, 1 locked, 3 in context, 4 out of context, 5 dangling
+                ["status"] = status,
+                ["statusName"] = status is int known && Enum.IsDefined(typeof(swExternalReferenceStatus_e), known)
+                    ? ((swExternalReferenceStatus_e)known).ToString().Replace("swExternalReference", "") : null,
+                // The entity referred to, as SolidWorks describes it ("Edge<1>@Door-1@Door Assembly")
+                ["entity"] = At(5, i) as string,
+                // The component the referring feature is in (the in-context component)
+                ["featureComponent"] = At(6, i) as string,
+                // swExternalFileReferencesConfig_e: 0 none, 1 the current configuration, 2 a named one
+                ["configOption"] = configOption,
+                ["configName"] = string.IsNullOrEmpty(configName) ? null : configName
+            });
+        }
+        if (count > 0)
+            Log($"  {count} external references of {what}");
+        return result;
+    }
+
+    private static List<Json> FeatureReferences(Feature feature) => ExternalReferences(feature.Name,
+        (out object models, out object components, out object features, out object types, out object statuses,
+            out object entities, out object featureComponents, out int configOption, out string configName) =>
+            feature.ListExternalFileReferences2(out models, out components, out features, out types, out statuses,
+                out entities, out featureComponents, out configOption, out configName));
+
+    private static List<Json> ComponentReferences(Component2 component) => ExternalReferences(component.Name2,
+        (out object models, out object components, out object features, out object types, out object statuses,
+            out object entities, out object featureComponents, out int configOption, out string configName) =>
+            component.ListExternalFileReferences2(out models, out components, out features, out types, out statuses,
+                out entities, out featureComponents, out configOption, out configName));
+
+    /// <summary>The component an entity read in an assembly belongs to, if it can be told.</summary>
+    private static Component2? ComponentOf(object? entity) =>
+        entity is IEntity e ? Try(() => e.GetComponent()) as Component2 : null;
+
+    /// <summary>
+    /// For each component of the assembly with external references: its references, and each of its part's
+    /// features that has some, read through the component: a sketch's relations that reach outside it (with
+    /// what they reach, its component and that component's transform), or another feature's definition with
+    /// its selections read in the assembly.
+    /// </summary>
+    private static List<Json> InContext(ModelDoc2 doc, List<Component2> components)
+    {
+        var result = new List<Json>();
+        foreach (var component in components) {
+            if (Try(() => (object)component.ListExternalFileReferencesCount()) is not int count || count == 0)
+                continue;
+            Log($"  {component.Name2} has {count} external references: reading its in-context features");
+            var entry = new Json {
+                ["component"] = component.Name2,
+                ["file"] = Try(() => component.GetPathName()),
+                ["configuration"] = Try(() => component.ReferencedConfiguration),
+                ["transform"] = Try(() => component.Transform2?.ArrayData),
+                ["references"] = TryList(() => ComponentReferences(component))
+            };
+            var features = new List<Json>();
+            var seen = new HashSet<int>();
+            void Visit(Feature feature)
+            {
+                if (Try(() => (object)feature.GetID()) is int id && !seen.Add(id))
+                    return;
+                if (Try(() => (object)feature.ListExternalFileReferencesCount()) is int n && n > 0)
+                    features.Add(InContextFeature(doc, component, feature));
+                for (var sub = Try(() => feature.GetFirstSubFeature()) as Feature; sub != null; sub = Try(() => sub.GetNextSubFeature()) as Feature)
+                    Visit(sub);
+            }
+            var guard = 0;
+            for (var feature = Try(() => component.FirstFeature()) as Feature; feature != null && ++guard < 100000;
+                 feature = Try(() => feature.GetNextFeature()) as Feature)
+                Visit(feature);
+            entry["features"] = features;
+            result.Add(entry);
+        }
+        return result;
+    }
+
+    private static Json InContextFeature(ModelDoc2 doc, Component2 component, Feature feature)
+    {
+        var type = Try(() => feature.GetTypeName2()) as string ?? "";
+        var item = new Json {
+            ["name"] = Try(() => feature.Name),
+            ["type"] = type,
+            ["references"] = TryList(() => FeatureReferences(feature))
+        };
+        var specific = Try(() => feature.GetSpecificFeature2());
+        if (specific is Sketch sketch) {
+            item["modelToSketch"] = Try(() => sketch.ModelToSketchTransform?.ArrayData);
+            item["relations"] = TryList(() => ContextRelations(sketch, component));
+        }
+        else if (specific is RefPlane plane)
+            item["planeTransform"] = Try(() => plane.Transform?.ArrayData);
+        if (specific is not Sketch) {
+            var suppression = ArrayOf(Try(() => feature.IsSuppressed2((int)swInConfigurationOpts_e.swThisConfiguration, null)));
+            var suppressed = suppression.Length > 0 && Convert.ToBoolean(suppression[0]);
+            item["definition"] = TryJson(() => DumpDefinition(doc, feature, type, suppressed, component), "in-context definition of " + feature.Name);
+        }
+        return item;
+    }
+
+    /// <summary>
+    /// The relations of a sketch read in an assembly that reach outside it: an entity that is not one of the
+    /// sketch's own points and segments, or a definition entity. `index` is the relation's place in the sketch's
+    /// list, as the part's own export has it.
+    /// </summary>
+    private static List<Json> ContextRelations(Sketch sketch, Component2 component)
+    {
+        static string Key(object? e) => e switch {
+            ISketchSegment s => "s" + string.Join(".", ArrayOf(s.GetID()).Select(Convert.ToString)),
+            ISketchPoint p => "p" + string.Join(".", ArrayOf(p.GetID()).Select(Convert.ToString)),
+            _ => ""
+        };
+        var own = new HashSet<string>(ArrayOf(Try(() => sketch.GetSketchSegments())).Select(Key)
+            .Concat(ArrayOf(Try(() => sketch.GetSketchPoints2())).Select(Key)));
+        var result = new List<Json>();
+        var index = -1;
+        foreach (var relation in ArrayOf(Try(() => sketch.RelationManager?.GetRelations((int)swSketchRelationFilterType_e.swAll))).OfType<SketchRelation>()) {
+            index++;
+            var entities = ArrayOf(Try(() => relation.GetEntities())).ToList();
+            var defined = ArrayOf(Try(() => relation.GetDefinitionEntities2())).ToList();
+            var outside = defined.Count > 0 || entities.Any(e => e == null || !own.Contains(Key(e))
+                || (ComponentOf(e) is { } c && c.Name2 != component.Name2));
+            if (!outside)
+                continue;
+            var display = Try(() => relation.GetDisplayDimension()) as DisplayDimension;
+            result.Add(new Json {
+                ["index"] = index,
+                ["type"] = Try(() => ((swConstraintType_e)relation.GetRelationType()).ToString().Replace("swConstraintType_", "").ToLowerInvariant()),
+                ["dimension"] = Try(() => ((Dimension?)display?.GetDimension2(0))?.FullName),
+                ["entities"] = entities.Select(DescribeInContext).ToList(),
+                ["definitionEntities"] = defined.Select(DescribeInContext).ToList()
+            });
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// An entity read in an assembly, as <see cref="Describe"/> has it, with the component it belongs to and that
+    /// component's transform (so that its numbers can be placed whichever space the API gives them in), and for
+    /// a sketch entity its sketch's model-to-sketch transform.
+    /// </summary>
+    private static object? DescribeInContext(object? entity)
+    {
+        var described = Describe(entity);
+        if (described is not Json json)
+            return described;
+        if (ComponentOf(entity) is { } component) {
+            json["component"] = Try(() => component.Name2);
+            json["componentFile"] = Try(() => component.GetPathName());
+            json["componentTransform"] = Try(() => component.Transform2?.ArrayData);
+        }
+        var sketch = entity switch {
+            ISketchSegment s => Try(() => s.GetSketch()) as Sketch,
+            ISketchPoint p => Try(() => p.GetSketch()) as Sketch,
+            _ => null
+        };
+        if (sketch != null)
+            json["sketchTransform"] = Try(() => sketch.ModelToSketchTransform?.ArrayData);
+        return json;
+    }
+
     /// <summary>The arc end condition of each end of a dimension, first and second; null if none can be read.</summary>
     private static List<object?>? ArcEndConditions(Dimension dimension)
     {
@@ -1368,6 +1578,8 @@ internal static class Program
         var name = currentDoc?.GetEntityName(face);
         result["name"] = string.IsNullOrWhiteSpace(name) ? null : name;
         result["feature"] = (Try(() => face.GetFeature()) as Feature)?.Name;
+        // Read in an assembly: the component it is on (format 7)
+        result["component"] = Try(() => ComponentOf(face)?.Name2);
         result["area"] = face.GetArea();
         var box = face.GetBox() as double[];
         result["box"] = box;
@@ -1393,6 +1605,8 @@ internal static class Program
         var result = new Json { ["kind"] = "edge" };
         var name = currentDoc?.GetEntityName(edge);
         result["name"] = string.IsNullOrWhiteSpace(name) ? null : name;
+        // Read in an assembly: the component it is on (format 7)
+        result["component"] = Try(() => ComponentOf(edge)?.Name2);
         // A closed edge (a full circle) has no ends
         result["start"] = (edge.GetStartVertex() as Vertex)?.GetPoint();
         result["end"] = (edge.GetEndVertex() as Vertex)?.GetPoint();
@@ -1442,7 +1656,7 @@ internal static class Program
                 case IEdge edge:
                     return Edge((Edge)edge);
                 case IVertex vertex:
-                    return new Json { ["kind"] = "vertex", ["point"] = vertex.GetPoint() };
+                    return new Json { ["kind"] = "vertex", ["point"] = vertex.GetPoint(), ["component"] = Try(() => ComponentOf(vertex)?.Name2) };
                 // With where it is, in its sketch's own coordinates: an id alone can be the id of something else
                 // (the origin and what a relation refers to outside the sketch are not in the sketch's lists)
                 case ISketchSegment segment: {

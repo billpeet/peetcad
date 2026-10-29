@@ -16,6 +16,10 @@ pub enum Source {
         sketch: FeatureId,
         entity: EntityId,
     },
+    /// Another component's geometry in an assembly the part is used in (SolidWorks'
+    /// in-context reference): the part is built from where it last was, and its context
+    /// assembly updates that (see [`crate::in_context`]).
+    External(Box<crate::in_context::External>),
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

@@ -594,6 +594,91 @@ function endOf(e, byPath, assembly, partFile, others = []) {
   return { component, ...where, element, sign: signOf(dir), ...(e.entity ? {} : { guessed: true }) };
 }
 
+// ---- In-context references (format 7) ----
+
+/**
+ * The end an in-context relation's entity on another component is, as `in_context` takes it (`from`): the
+ * component's path and its edge, face or vertex. The exporter reads the entity through the assembly; its numbers
+ * are taken in the component's part's coordinates (as a mate entity's are), and failing that in the assembly's
+ * (placed back by the component's transform). A circle that is not where SolidWorks' is, but one of the part's on
+ * that axis with that radius is, is that one (the nearest).
+ */
+function contextEnd(entity, byPath, assembly, partFile) {
+  const comp = byPath.get(entity.component);
+  if (!comp) return { error: `${entity.component}, which it refers to, is not in the assembly` };
+  const file = partFile(comp);
+  if (!file) return { error: `the part of ${entity.component}, which it refers to, was not imported` };
+  let end = endOf({ component: entity.component, entity }, byPath, assembly, partFile);
+  if (!end.error) return end;
+  const T = entity.componentTransform || comp.transform;
+  if (T) {
+    // The same numbers, taken as the assembly's
+    const back = inverse(matrixOf(T));
+    const at = p => p && toWorld(back, p);
+    const dir = d => d && toWorld({ R: back.R, t: [0, 0, 0] }, d);
+    const moved = { ...entity };
+    if (entity.start) moved.start = at(entity.start);
+    if (entity.end) moved.end = at(entity.end);
+    if (entity.point) moved.point = at(entity.point);
+    if (entity.circle) moved.circle = [...at(entity.circle.slice(0, 3)), ...dir(entity.circle.slice(3, 6)), entity.circle[6]];
+    const again = endOf({ component: entity.component, entity: moved }, byPath, assembly, partFile);
+    if (!again.error) return { ...again, note: "its numbers are the assembly's" };
+  }
+  if (entity.kind === "edge" && entity.circle) {
+    const c = entity.circle.slice(0, 3).map(v => v * MM), n = norm3(entity.circle.slice(3, 6)), r = entity.circle[6] * MM;
+    const { edges } = geometryOf(file);
+    const on = edges.filter(g => g.curve === "circle" && Math.abs(g.radius - r) < TOL && Math.abs(Math.abs(dot3(g.axis, n)) - 1) < 1e-6 && offLine(g.center, c, n) < TOL)
+      .sort((a, b) => len3(sub3(a.center, c)) - len3(sub3(b.center, c)));
+    if (on.length) return { component: entity.component.split("/"), edge: { body: on[0].body, index: on[0].index }, note: `the nearest circle on its axis, ${tidy(len3(sub3(on[0].center, c)))} mm from SolidWorks'` };
+  }
+  return end;
+}
+
+/**
+ * SolidWorks' in-context features (format 7: `inContext`, each in-context component's features read through the
+ * component): a relation of a part's sketch to another component's edge, face or vertex. The part's import drew
+ * the relation's hidden copy as a fixed entity of the sketch where SolidWorks last had it (the part's report's
+ * `inContext`); here it is made to follow what it refers to (`in_context`), which PeetCAD works out at every
+ * rebuild of the assembly, after the mates, in the part's coordinates. The rows go in `report.inContext`.
+ */
+function importInContext(peet, cfg, report, byPath, name) {
+  const list = cfg.inContext || [];
+  if (!list.length) return;
+  const partFile = comp => /\.sldprt$/i.test(comp.file || "") ? partOf(comp).view || null : null;
+  report.inContext = [];
+  for (const ic of list) {
+    const comp = byPath.get(ic.component);
+    const pr = partReport(ic.file || (comp && comp.file) || "");
+    const inserted = (report.components.find(c => c.component === ic.component) || {}).result === "inserted";
+    for (const ft of ic.features || []) {
+      for (const r of ft.relations || []) {
+        const row = { component: ic.component, feature: ft.name, relation: r.index, type: r.type, ...(ic.handMade ? { handMade: true } : {}) };
+        report.inContext.push(row);
+        if (ic.component.includes("/")) { row.result = "not supported"; row.why = "the in-context part is inside a sub-assembly: PeetCAD's in-context parts are the assembly's own components"; continue; }
+        if (!comp || !inserted) { row.result = "left out"; row.why = "its component was left out"; continue; }
+        const frozen = ((pr && pr.inContext) || []).filter(x => x.sketch === ft.name && x.relation === r.index);
+        if (!frozen.length) { row.result = "left out"; row.why = "the part's import has no fixed copy of what it refers to (the relation was imported to the part's own geometry, or dropped)"; continue; }
+        // What it refers to: the entities on another component
+        const targets = [...(r.entities || []), ...(r.definitionEntities || [])].filter(e => e && e.component && e.component !== ic.component);
+        if (!targets.length) { row.result = "left out"; row.why = "the export names no entity of another component for it"; continue; }
+        if (targets.length !== frozen.length) { row.result = "left out"; row.why = `${targets.length} entities of other components for ${frozen.length} copies in the part`; continue; }
+        row.follows = [];
+        for (let i = 0; i < frozen.length; i++) {
+          const end = contextEnd(targets[i], byPath, name, partFile);
+          if (end.error) { row.result = "failed"; row.why = end.error; break; }
+          const { element, sign, guessed, note, ...from } = end;
+          const reply = peet.apply({ op: "in_context", component: ic.component, sketch: frozen[i].peetSketch || ft.name, entity: frozen[i].entity, from });
+          if (!reply.ok) { row.result = "failed"; row.why = reply.error; break; }
+          const status = reply.in_context && reply.in_context.status;
+          row.follows.push({ component: targets[i].component, status, ...(note ? { note } : {}) });
+          if (status !== "in_context") { row.result = "failed"; row.why = (reply.in_context && reply.in_context.why) || status; break; }
+          row.result = "imported";
+        }
+      }
+    }
+  }
+}
+
 // ---- Equations ----
 
 /** A component's name as SolidWorks writes it in equations (`Door<1>.Part`, `Door-1.Part`), as PeetCAD's. */
@@ -1494,6 +1579,9 @@ function importAssembly(name, exp, outFile, listed = null, frame = null) {
     const op = mateOp(f, mateByPath, name, want, row);
     if (op) addMate(peet, f, op, row, want);
   }
+  // In-context features, after the mates (SolidWorks updates in-context parts once the mates are solved)
+  if (cfg && (cfg.inContext || []).length) importInContext(peet, cfg, report, byPath, name);
+
   if (others.length) {
     // The active configuration as imported, before the others are
     const { worst } = checkPlacements(peet, want, report.components);

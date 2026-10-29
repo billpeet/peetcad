@@ -273,6 +273,8 @@ impl Document {
     /// Rebuilds the model and refreshes the bodies (tessellating only changed ones).
     pub fn rebuild(&mut self) {
         self.pending_rebuild = false;
+        // An assembly is the context of its parts' in-context references by its file's name.
+        self.engine.set_context(Some(self.title()));
         self.engine.regenerate(&mut self.model);
         self.refresh_views();
         // Rebuilds write solved sketches back, which can change the hash.

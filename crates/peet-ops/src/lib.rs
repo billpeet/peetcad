@@ -52,6 +52,7 @@ mod explode;
 mod export;
 mod fields;
 mod host;
+mod in_context;
 mod library;
 mod links;
 mod mate;
@@ -151,6 +152,8 @@ struct Done {
     drag: Option<(peet_model::Drag, String)>,
     /// A reference dimension the operation was about, reported with what it measures.
     reference: Option<String>,
+    /// An in-context reference the operation made: the component, its sketch and entity.
+    in_context: Option<(peet_model::CompId, FeatureId, peet_sketch::EntityId)>,
     data: Map<String, Value>,
 }
 
@@ -479,6 +482,12 @@ fn help() -> Map<String, Value> {
                 );
             }
         }
+    }
+    for (whom, name, fields_text, what) in in_context::IN_CONTEXT_OPS {
+        ops.insert(
+            (*name).to_owned(),
+            json!({ "does": what, "fields": fields_text, "in": whom }),
+        );
     }
     for (name, fields_text, what) in session::SESSION_OPS {
         ops.insert(
@@ -811,6 +820,60 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             label
         }
         Op::DeleteReference { name } => equations::delete_reference(doc, &mut model, name)?,
+        Op::InContext(in_context::InContextOp::Make {
+            component,
+            sketch,
+            from,
+            entity,
+            construction,
+        }) => {
+            let (c, f, e, label) = in_context::make(
+                doc,
+                &mut model,
+                &mut done.data,
+                component,
+                sketch,
+                from,
+                *entity,
+                *construction,
+            )?;
+            done.in_context = Some((c, f, e));
+            label
+        }
+        Op::InContext(in_context::InContextOp::List { component }) => {
+            done.data = in_context::list(doc, component.as_ref())?;
+            return Ok(done);
+        }
+        Op::InContext(in_context::InContextOp::Lock {
+            component,
+            feature,
+            on,
+        }) => {
+            match in_context::change(
+                doc,
+                &mut model,
+                &mut done.data,
+                component.as_ref(),
+                feature.as_ref(),
+                Some(*on),
+            )? {
+                Some(label) => label,
+                None => return Ok(done),
+            }
+        }
+        Op::InContext(in_context::InContextOp::Break { component, feature }) => {
+            match in_context::change(
+                doc,
+                &mut model,
+                &mut done.data,
+                component.as_ref(),
+                feature.as_ref(),
+                None,
+            )? {
+                Some(label) => label,
+                None => return Ok(done),
+            }
+        }
         Op::MakeIndependent { component, name } => {
             let id = component.resolve(doc)?;
             let label =
@@ -1071,6 +1134,15 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
         }
         Op::Save { path, caches } => {
             done.data = export::save(doc, path.as_ref(), *caches)?;
+            // The linked parts this assembly's in-context references changed are saved
+            // with it, as SolidWorks saves them.
+            let written = in_context::write_moved_links(doc)?;
+            if !written.is_empty() {
+                done.data.insert(
+                    "parts_written".to_owned(),
+                    json!(written.iter().map(|p| p.display().to_string()).collect::<Vec<_>>()),
+                );
+            }
             return Ok(done);
         }
         Op::ImportStep { file } => {
@@ -1675,6 +1747,9 @@ pub(crate) fn apply_with(
     }
     if let Some(name) = &done.reference {
         out.insert("reference".to_owned(), equations::reference_out(doc, name));
+    }
+    if let Some((c, f, e)) = done.in_context {
+        out.insert("in_context".to_owned(), in_context::made_out(doc, c, f, e));
     }
     if done.changed && !done.replaced && doc.is_assembly() {
         // The components that are somewhere else now: what a mate, or a placement that

@@ -20,6 +20,8 @@
 //! - [`Engine`]: incremental regeneration into bodies, with per-feature status.
 //! - [`Assembly`]: parts placed relative to each other, inside a [`Model`] that is an
 //!   assembly instead of a part.
+//! - [`in_context`]: a part's sketch following another component of an assembly it is
+//!   used in (SolidWorks' in-context references).
 //! - [`History`]: undo and redo.
 //!
 //! The crate has no UI or GPU dependency: everything here runs headless.
@@ -40,6 +42,7 @@ pub mod hash;
 mod history;
 pub mod hole;
 mod import;
+pub mod in_context;
 mod loft;
 mod mate;
 mod material;

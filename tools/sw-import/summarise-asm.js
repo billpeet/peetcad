@@ -27,6 +27,14 @@ if (massed.length) {
   console.log(`assembled geometry: ${massed.length - off.length} of ${massed.length} configurations match SolidWorks' volume and box${off.length ? `; not: ${off.map(m => `${m.at} volume x${m.volume_ratio}${m.box_outside_mm ? `, box ${m.box_outside_mm} mm out` : ""}`).join("; ")}` : ""}`);
 }
 for (const [v, n] of [...verdicts].sort((a, b) => b[1] - a[1])) console.log(String(n).padStart(4), v);
+// In-context references (format 7 exports): each relation of a part's sketch to another component
+const contexts = reports.flatMap(r => (r.inContext || []).map(x => ({ ...x, assembly: r.name })));
+if (contexts.length) {
+  const made = contexts.filter(x => x.result === "imported");
+  const hand = contexts.filter(x => x.handMade).length;
+  console.log(`in-context references: ${made.length} of ${contexts.length} follow their components (${new Set(made.map(x => x.assembly)).size} assemblies)${hand ? `; ${hand} from hand-made format 7 data` : ""}`);
+  for (const x of contexts.filter(x => x.result !== "imported")) add(`in-context reference ${x.result}: ${general(x.why)}`, x.assembly);
+}
 // The configurations other than the active one, each checked against SolidWorks' placements for it
 const others = reports.flatMap(r => (r.configurations || []).filter(c => !c.active).map(c => ({ ...c, assembly: r.name })));
 if (others.length) {

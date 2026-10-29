@@ -85,6 +85,34 @@ Added in format 6:
   from the bodies' extreme points); and with `--step`, a STEP file of the configuration
   (`<file>.<configuration>.step`), as for parts.
 
+Added in format 7 (in-context features: SolidWorks' external references, "->" in the tree;
+written for SolidWorks 2018 SP5's API and not yet run):
+
+- `externalReferences` at the root of every document (`IModelDocExtension.ListExternalFileReferences`)
+  and on each feature that has some (`IFeature.ListExternalFileReferences2`): one entry per
+  reference with `model` (the assembly it was made in: its context), `component` (what it refers
+  to, as SolidWorks names it), `feature`, `dataType` (the kind of reference: a sketch relation, a
+  converted edge, an end condition, a plane, …), `status` and `statusName`
+  (`swExternalReferenceStatus_e`: 0 broken, 1 locked, 3 in context, 4 out of context, 5 dangling),
+  `entity` (SolidWorks' text for it), `featureComponent` (the in-context component),
+  `configOption` and `configName`. A part exported alone has its in-context references out of
+  context. An assembly's `InContextFeatHolder` features get theirs where SolidWorks gives any.
+- Assemblies, per configuration: `inContext`, for each component with external references
+  (`IComponent2.ListExternalFileReferencesCount`): its `component`, `file`, `configuration`,
+  `transform`, `references` (`IComponent2.ListExternalFileReferences2`), and `features`: each of
+  its part's features with references, read through the component (`IComponent2.FirstFeature`
+  and sub-features), so that what they refer to is the assembly's. A sketch has `modelToSketch`
+  and `relations`: each relation that reaches outside the sketch (an entity not among its own, or
+  a definition entity), with `index` (its place in the sketch's list, as the part's own export
+  has it), `type`, `dimension`, `entities` and `definitionEntities`. Each entity read there has
+  its `component`, `componentFile` and `componentTransform`, and a sketch entity its
+  `sketchTransform`. Another feature (an extrude up to another part's face, a plane on one) has
+  its `definition` read with `AccessSelections(doc, component)`, so its selections are the
+  other components' faces.
+- A face, edge or vertex read in an assembly says its `component` (`IEntity.GetComponent`).
+
+Every read is guarded: what fails is logged and left out.
+
 A configuration SolidWorks made for the flat pattern (`…SM-FLAT-PATTERN`) has its bodies
 only: their box is the flat size.
 
@@ -123,7 +151,7 @@ Run against SolidWorks 2026 on the whole template library (201 parts, 29 assembl
 all complete, in about 80 minutes, twice. The flat sizes in the DXF files agree with the
 flat-pattern configurations' bodies and with the bend deduction by hand.
 
-`formatVersion` is 5. What each version added:
+`formatVersion` is 7 (6 and 7 are described above). What each earlier version added:
 
 - **2:** a definition has its `Is…` methods (`IsBossFeature` is the only thing that tells a
   boss-extrude from a cut-extrude; a part's first extrude is `IsBaseExtrude`) and its

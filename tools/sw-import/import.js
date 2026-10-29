@@ -247,6 +247,43 @@ const DIMENSION_FIELDS = {
   Revolution: { "GetRevolutionAngle(true)": "angle" },
 };
 
+// ---- In-context references (format 7) ----
+
+/**
+ * Which relations of which sketches of a part refer to another component of an assembly (SolidWorks' in-context
+ * features): from the assembly exports beside the part's, whose `inContext` lists each in-context component's
+ * features read through the component, with the place of each such relation in its sketch's list (`index`); and
+ * the features the part's own export lists with external references (`externalReferences`, format 7), whose
+ * relations to something neither the part nor its sketches have are in-context too where the assemblies say
+ * nothing. Empty for an export before format 7.
+ */
+const contextCache = new Map();
+function inContextOf(doc) {
+  const dir = path.dirname(doc.__file || input);
+  if (!contextCache.has(dir)) {
+    const byPart = new Map();
+    for (const f of fs.readdirSync(dir).filter(f => /\.sldasm\.swx\.json$/i.test(f))) {
+      let a;
+      try { a = JSON.parse(fs.readFileSync(path.join(dir, f), "utf8")); } catch { continue; }
+      for (const cfg of a.configurations || []) for (const ic of cfg.inContext || []) {
+        const part = path.win32.basename(String(ic.file || "")).toLowerCase();
+        if (!byPart.has(part)) byPart.set(part, new Map());
+        const features = byPart.get(part);
+        for (const ft of ic.features || []) {
+          if (!features.has(ft.name)) features.set(ft.name, new Set());
+          for (const r of ft.relations || []) if (typeof r.index === "number") features.get(ft.name).add(r.index);
+        }
+      }
+    }
+    contextCache.set(dir, byPart);
+  }
+  const relations = contextCache.get(dir).get(path.win32.basename(String(doc.sourcePath || "")).toLowerCase()) || new Map();
+  const features = new Set([...(doc.externalReferences || []).map(r => r && r.feature), ...relations.keys()].filter(Boolean));
+  (function walk(list) { for (const x of list || []) { if ((x.externalReferences || []).length) features.add(x.name); walk(x.sub); } })(
+    ((doc.configurations || [])[0] || {}).features);
+  return { relations, features };
+}
+
 function importPart(doc, dir) {
   const config = doc.configurations.find(c => c.name === doc.activeConfiguration) || doc.configurations[0];
   const file = path.join(dir, doc.name + ".peet");
@@ -254,6 +291,7 @@ function importPart(doc, dir) {
   peet.note(`${path.basename(doc.sourcePath)}, configuration ${config.name}, imported from its SolidWorks export.`);
 
   const report = { name: doc.name, configuration: config.name, features: [], notes: [] };
+  const context = inContextOf(doc);
   // The sketches SolidWorks has suppressed in the active configuration, or that are under a feature it has
   // suppressed there: SolidWorks does not solve them, and the export has them as they were last solved
   // (the export reads every configuration's sketches in the active one)
@@ -858,6 +896,41 @@ function importPart(doc, dir) {
       }
       return undefined;
     };
+    // An in-context relation's hidden copy (format 7): what it refers to is another component's, which the part
+    // doesn't have. It is drawn where SolidWorks last had it, as a fixed construction entity, which the
+    // assembly's import makes follow that component (`in_context`); in the part alone it stays there, as
+    // SolidWorks keeps an out-of-context reference's last values.
+    const frozen = new Map();
+    const contextCopy = (e, index) => {
+      const key = (e.kind || "") + ":" + (e.id || []).join(".");
+      if (frozen.has(key)) return frozen.get(key);
+      let item = null;
+      if (e.kind === "sketchPoint" && e.x !== undefined) item = { type: "point", at: sk.toPeet(e) };
+      else if (e.type === "line" && e.start && e.end) item = { type: "line", from: sk.toPeet(e.start), to: sk.toPeet(e.end) };
+      else if (e.type === "arc" && e.center && e.radius) {
+        const whole = !e.start || !e.end || spot(e.start) === spot(e.end);
+        item = whole ? { type: "circle", center: sk.toPeet(e.center), radius: tidy(e.radius * MM) }
+          : { type: "arc", center: sk.toPeet(e.center), start: sk.toPeet(e.start), end: sk.toPeet(e.end) };
+      }
+      let made = null;
+      if (item) {
+        const as = "ic" + frozen.size;
+        const reply = peet.apply({ op: "draw", sketch: name, draw: [{ ...item, construction: true, as }, { type: "fix", of: [as] }] });
+        const d = reply.ok && (reply.drawn || [])[0];
+        if (d) {
+          const round = item.type === "arc" || item.type === "circle";
+          made = { id: d.id !== undefined ? d.id : (d.curves || d.points || [])[0], point: item.type === "point", round, circle: item.type === "circle", center: round ? d.center : undefined };
+          report.inContext = report.inContext || [];
+          report.inContext.push({ sketch: f.name, peetSketch: name, relation: index, hidden: (e.id || []).join("."), entity: made.id, type: item.type });
+        }
+      }
+      frozen.set(key, made);
+      return made;
+    };
+    const relationIndex = new Map(s.relations.map((r, i) => [r, i]));
+    const contextRelations = context.relations.get(f.name);
+    const contextFeature = context.features.has(f.name);
+
     // A point of SolidWorks' that is not the sketch's own is a model vertex its relation refers to (Battery
     // Bracket's Sketch8 measures its flange's height from the far corner of the flange's edge): it is
     // projected from where it is, if the model has a vertex there
@@ -1049,7 +1122,13 @@ function importPart(doc, dir) {
       // The hidden copies stand for what the relation is defined by where the export has nothing for it, or
       // where what it has could not be projected
       if (copies.length && (!r.defined || (lost && copies.length === r.defined.length))) {
-        const found = copies.map(hidden);
+        // An in-context relation's (format 7): fixed where SolidWorks has it, to follow the other component in
+        // the assembly. Where the assemblies list the relation, before anything of the part's own is tried;
+        // where only the feature is known to be in-context, failing the part's own.
+        const index = relationIndex.get(r);
+        const listed = contextRelations && contextRelations.has(index);
+        let found = listed ? copies.map(e => contextCopy(e, index)) : copies.map(hidden);
+        if (!listed && contextFeature && !found.every(p => p && p.id !== undefined)) found = copies.map(e => contextCopy(e, index));
         if (found.every(p => p && p.id !== undefined)) {
           outside = found; lost = false;
           // A vertex's copy is where the sketch sees it, as the sketch's own points are

@@ -183,6 +183,9 @@ pub struct Evaluation {
     pub equation_failures: Vec<(usize, String)>,
     /// For an assembly: what each reference dimension measured, or why it can't be.
     pub references: Vec<(String, Result<f64, String>)>,
+    /// For an assembly: each in-context reference of its components' parts, and how it
+    /// stands in this assembly (see [`crate::in_context`]).
+    pub external: Vec<crate::in_context::Resolved>,
     pub stats: Stats,
 }
 
@@ -293,6 +296,9 @@ struct Assembled {
     component_frames: HashMap<Vec<CompId>, Frame>,
     inner_freedom: HashMap<Vec<CompId>, usize>,
     references: Vec<(String, Result<f64, String>)>,
+    external: Vec<crate::in_context::Resolved>,
+    /// Whether an in-context reference moved, so its part changed and must be rebuilt.
+    in_context_changed: bool,
 }
 
 /// A definition of an assembly, in one of its configurations: the definition, and the
@@ -327,6 +333,9 @@ pub struct Engine {
     drag: Option<mate::Drag>,
     /// For an assembly: the bodies its cuts left of its component instances.
     cut_cache: HashMap<u64, Vec<Arc<Body>>>,
+    /// The name the model is known by as an assembly, for its parts' in-context references:
+    /// its file's name (see [`crate::in_context::context_key`]).
+    context: Option<String>,
     evaluation: Evaluation,
 }
 
@@ -367,6 +376,12 @@ impl Engine {
     /// of it towards a place, as far as its mates let it go. See [`crate::Drag`].
     pub fn set_drag(&mut self, drag: Option<mate::Drag>) {
         self.drag = drag;
+    }
+
+    /// Names the model this engine rebuilds as a context of in-context references: the
+    /// assembly's file name (or its name, if it has no file).
+    pub fn set_context(&mut self, name: Option<String>) {
+        self.context = name;
     }
 
     /// Forgets every remembered result, so the next rebuild recomputes everything.
@@ -459,26 +474,31 @@ impl Engine {
         }
         self.cache.retain(|id, _| run.states.contains_key(id));
         let mut assembled = self.assemble(model, &mut run.stats);
-        // What the reference dimensions measure, which equations may read: a part an
-        // equation changes is rebuilt and the mates solved again, until nothing changes.
-        for round in 0..4 {
+        // What the reference dimensions measure, which equations may read, and where the
+        // geometry in-context parts follow is: a part an equation or an in-context
+        // reference changes is rebuilt and the mates solved again, until nothing changes
+        // (SolidWorks solves the mates, then the in-context parts, and repeats).
+        for round in 0..6 {
             let mut changed = false;
             if let Some(assembly) = model.assembly_mut() {
                 for (name, value) in &assembled.references {
                     changed |= assembly.set_reference_value(name, value.as_ref().ok().copied());
                 }
             }
-            if !changed {
+            let in_context = assembled.in_context_changed;
+            if !changed && !in_context {
                 break;
             }
             // What expressions read now.
             model.refresh_dimension_values();
             let equations = model.assembly().is_some_and(|a| !a.equations().is_empty());
-            if !equations || round == 3 {
+            if (!equations && !in_context) || round == 5 {
                 break;
             }
-            equation_failures = model.apply_equations();
-            model.sync_pattern_counts();
+            if equations {
+                equation_failures = model.apply_equations();
+                model.sync_pattern_counts();
+            }
             assembled = self.assemble(model, &mut run.stats);
         }
         run.stats.ms = start.elapsed().as_secs_f64() * 1000.0;
@@ -496,6 +516,7 @@ impl Engine {
             inner_freedom: assembled.inner_freedom,
             equation_failures,
             references: assembled.references,
+            external: assembled.external,
             stats: run.stats,
         };
         &self.evaluation
@@ -614,6 +635,15 @@ impl Engine {
                 model: Arc::new(Model::new()),
                 engine: Self::new(),
             });
+            // A sub-assembly is the context of its parts' in-context references by its
+            // file's name, or its own.
+            if def.model.is_assembly() {
+                part.engine.context = Some(
+                    def.link
+                        .as_ref()
+                        .map_or_else(|| def.model.name.clone(), |l| l.path.clone()),
+                );
+            }
             if Arc::ptr_eq(&part.source, &def.model) {
                 continue;
             }
@@ -938,6 +968,27 @@ impl Engine {
             })
             .collect();
 
+        // ---- In-context references ----
+        // Where the geometry each in-context part follows is now that the mates and
+        // patterns have placed the components, in the part's coordinates: a part whose
+        // references moved is changed, and rebuilt (and the mates solved again) by the
+        // next round of `regenerate`.
+        let (in_context, external) = crate::in_context::update(
+            assembly,
+            self.context.as_deref(),
+            &|def| parts.get(&(def, None)).map(|p| p.model.clone()),
+            &|id| {
+                let c = assembly
+                    .component(id)
+                    .filter(|c| !c.suppressed && !left_out.contains(&c.id))?;
+                place(c, frames.get(&id).copied().unwrap_or(c.placement))
+            },
+            &|id| {
+                let c = assembly.component(id).filter(|c| !c.suppressed)?;
+                Some(frames.get(&id).copied().unwrap_or(c.placement))
+            },
+        );
+
         // ---- The components ----
         let mut instances = Vec::new();
         let mut components = HashMap::new();
@@ -1066,7 +1117,8 @@ impl Engine {
                 }
             }
         }
-        if (!written.is_empty() || !moved.is_empty() || !reposed.is_empty())
+        let in_context_changed = !in_context.is_empty();
+        if (!written.is_empty() || !moved.is_empty() || !reposed.is_empty() || in_context_changed)
             && let Some(assembly) = model.assembly_mut()
         {
             for (id, poses) in reposed {
@@ -1076,6 +1128,10 @@ impl Engine {
             }
             for (id, rebuilt) in written {
                 assembly.set_model(id, rebuilt);
+            }
+            // After the rebuilt models: the updates were made to those.
+            for (id, updated) in in_context {
+                assembly.set_model(id, Arc::new(updated));
             }
             for (id, frame) in moved {
                 if let Some(c) = assembly.component_mut(id) {
@@ -1097,6 +1153,8 @@ impl Engine {
             component_frames,
             inner_freedom,
             references,
+            external,
+            in_context_changed,
         }
     }
 
@@ -1167,6 +1225,10 @@ impl Engine {
                                 continue;
                             }
                         },
+                        // Where it last was: its context assembly keeps that up to date.
+                        Source::External(x) => x.last.project(plane).map_err(|e| {
+                            format!("Its in-context reference to {}: {e}", x.describe())
+                        })?,
                     };
                     shape.update(&mut sketch, projection.entity)?;
                 }
