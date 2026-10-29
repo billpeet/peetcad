@@ -566,13 +566,36 @@ every configuration is placed as SolidWorks has it, as before; what format 6 add
   SolidWorks 2018 gives the path as an entity it can't describe. The importer's fallback (the sketch
   curve SolidWorks' point lies on) matches Sliding Doorstay exactly.
 
+**In-context features** (29 October; the seventh export, format 7, `exports\out-all-v7`, 95 minutes;
+nothing changed on the NAS since the sixth; parts `run-m13`, assemblies `scratch\asm9\run`). A part's sketch can
+follow another component's face, edge, vertex, plane or sketch entity in an assembly it is used in
+(`in_context`): the assembly works out where that geometry now is after its mates, writes it into the part,
+rebuilds it and solves the mates again (up to six rounds), as SolidWorks does. Opened alone, or as another
+instance, the part keeps the geometry it last had and says it is out of context; `lock_references` and
+`break_references` are SolidWorks' Lock and Break; `external_references` lists them. An embedded part's copy
+changes; a linked part's file is written when the assembly is saved. The exporter writes each feature's
+external references and, per assembly, the in-context components' relations read through them.
+
+| | Before | Now |
+|---|---|---|
+| Parts matching | 198 of 201 | 198 of 201, nothing moved |
+| Sketch relations kept | 98.0% | 98.4% (relations to other components kept, as in-context references) |
+| Assemblies matching; assembled volume and box | 15 of 26; 32 of 34 | the same |
+| In-context references followed | 0 | 10 of 87, in 6 assemblies (Door, Gear Tray, Laptop Shelf, Plinth Folded, Plinth PFC, Tophat adjustable) |
+
+Of the other 77: 52 are Escutcheon Door's, reached through Escutcheon Assembly, where the in-context part is
+inside a sub-assembly (they follow in Escutcheon Door itself; PeetCAD's in-context parts are the assembly's
+own components); 15 have no entity on another component in SolidWorks' export; 10 the part's import has no
+copy for. Not done: in-context end conditions and reference planes ("up to" another component's face, a
+plane on one), in-context parts inside sub-assemblies, and editing in context in the application.
+
 **More FabSys script bugs**, in `enclosure_script MASTER.boo`: lines 1999 and 2001 suppress Meter
 Panel features "NSW CTMetering" and "VIC CTMeterPanelCutout"; the part's are "NSW CT Metering" and
 "VIC CT Metering", so FabSys fails on them in SolidWorks too.
 
 What is left:
 
-- **In-context features** (above), and display states if the library has any.
+- **In-context features** beyond sketches (end conditions, planes) and in sub-assemblies (above), and display states if the library has any.
 - **The templates and the export**: 11 live mates SolidWorks names the assembly for with no entity
   (Escutcheon Assembly's are on the Escutcheon Surround that doesn't exist; the Escutcheon Doors'
   point at a suppressed hinge, whose parts the export doesn't list), the path mate's empty path,

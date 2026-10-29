@@ -28,7 +28,8 @@ if (massed.length) {
 }
 for (const [v, n] of [...verdicts].sort((a, b) => b[1] - a[1])) console.log(String(n).padStart(4), v);
 // In-context references (format 7 exports): each relation of a part's sketch to another component
-const contexts = reports.flatMap(r => (r.inContext || []).map(x => ({ ...x, assembly: r.name })));
+// Relations of in-context sketches that tie only the part's own geometry are the part's: not counted
+const contexts = reports.flatMap(r => (r.inContext || []).filter(x => x.result !== "the part's own").map(x => ({ ...x, assembly: r.name })));
 if (contexts.length) {
   const made = contexts.filter(x => x.result === "imported");
   const hand = contexts.filter(x => x.handMade).length;

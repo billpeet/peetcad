@@ -656,10 +656,13 @@ function importInContext(peet, cfg, report, byPath, name) {
         report.inContext.push(row);
         if (ic.component.includes("/")) { row.result = "not supported"; row.why = "the in-context part is inside a sub-assembly: PeetCAD's in-context parts are the assembly's own components"; continue; }
         if (!comp || !inserted) { row.result = "left out"; row.why = "its component was left out"; continue; }
-        const frozen = ((pr && pr.inContext) || []).filter(x => x.sketch === ft.name && x.relation === r.index);
-        if (!frozen.length) { row.result = "left out"; row.why = "the part's import has no fixed copy of what it refers to (the relation was imported to the part's own geometry, or dropped)"; continue; }
-        // What it refers to: the entities on another component
+        // What it refers to: the entities on another component. SolidWorks lists every relation of an in-context
+        // sketch; one that ties only the part's own geometry is the part's, imported with it
         const targets = [...(r.entities || []), ...(r.definitionEntities || [])].filter(e => e && e.component && e.component !== ic.component);
+        const anyEntity = [...(r.entities || []), ...(r.definitionEntities || [])].some(e => e);
+        const frozen = ((pr && pr.inContext) || []).filter(x => x.sketch === ft.name && x.relation === r.index);
+        if (!targets.length && !frozen.length && anyEntity) { row.result = "the part's own"; row.why = "it ties only the part's own geometry: imported with the part"; continue; }
+        if (!frozen.length) { row.result = "left out"; row.why = "the part's import has no fixed copy of what it refers to (the relation was imported to the part's own geometry, or dropped)"; continue; }
         if (!targets.length) { row.result = "left out"; row.why = "the export names no entity of another component for it"; continue; }
         if (targets.length !== frozen.length) { row.result = "left out"; row.why = `${targets.length} entities of other components for ${frozen.length} copies in the part`; continue; }
         row.follows = [];
