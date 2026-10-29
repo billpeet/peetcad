@@ -1,6 +1,6 @@
 ---
 name: assemblies
-description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten; a point kept on a path), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis, counts and spacings from expressions), assembly cuts (cutting components in the assembly only, with a sketch on a plane or face and edges converted from components), configurations (a component showing one of its part's configurations, and an assembly's own configurations: left and right hinged, with components and mates suppressed, configured and placed per configuration, equations that differ per configuration, derived configurations), equations that size and suppress components from the assembly (SolidWorks addresses like Height@Sketch1@Door-1, reference dimensions, making a component independent), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating and colouring components, exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
+description: Assemblies in peet - starting one, inserting parts as components, placing and turning them, mates that hold components together (coincident, concentric, distance, angle, parallel, fasten; a point kept on a path), dragging a mated component to pose a mechanism, component patterns (rows of copies, copies round an axis, counts and spacings from expressions), assembly cuts (cutting components in the assembly only, with a sketch on a plane or face and edges converted from components), configurations (a component showing one of its part's configurations, and an assembly's own configurations: left and right hinged, with components and mates suppressed, configured and placed per configuration, equations that differ per configuration, derived configurations), equations that size and suppress components from the assembly (SolidWorks addresses like Height@Sketch1@Door-1, reference dimensions, making a component independent), linked parts that follow their own files, interference between components, the bill of materials and the mass of the whole, hiding, isolating, colouring and making components see-through, display states (named looks of the assembly, linked to configurations or not), exploded views, STEP files with their assembly structure (import and export), replacing and deleting, changing a part of an assembly, sub-assemblies, saving and exporting.
 ---
 
 # Assemblies
@@ -692,6 +692,7 @@ None of these moves a component or changes a mate: they are about what is seen.
 {"op": "insert", "component": "Base", "at": [0, 0, 40], "name": "Top"}
 {"op": "insert", "sample": "housing", "name": "Bearing", "at": [60, 40, 80]}
 {"op": "set_color", "component": "Top", "color": "#c82828"}
+{"op": "set_transparency", "component": "Top", "transparency": 0.6}
 {"op": "isolate", "components": ["Bearing"]}
 {"op": "show_all"}
 {"op": "explode_step", "components": ["Top", "Bearing"], "by": [0, 0, 60]}
@@ -709,6 +710,13 @@ None of these moves a component or changes a mate: they are about what is seen.
   colour: use it to tell instances of one part apart. `"color": null` goes back to the
   part's. Without `component`, `set_color` is the part's own colour, set in the part's
   document (`open_component`), and it reaches every instance.
+- **`set_transparency`** makes a component see-through, from 0 (opaque) to 1 (not seen
+  at all): what is behind it shows through. In the application a click on it picks what
+  is opaque behind it, as SolidWorks does; Shift-click picks the see-through component.
+  A sub-assembly's transparency goes for everything in it. `components` gives a
+  component's `transparency` when it has one.
+- `show`, `isolate`, `show_all`, `set_color` and `set_transparency` change the display
+  state shown, if the assembly has display states (next section).
 - **An exploded view is a list of steps**, stored in the assembly. `explode_step` names
   components and how far they go (`by`, along the assembly's axes, in its units). A
   component in several steps is moved by their sum, so pull a group away first and then
@@ -724,6 +732,62 @@ None of these moves a component or changes a mate: they are about what is seen.
   `rename` and `delete` take `explode_step` in place of `feature`. Deleting a component
   takes it out of its steps, and a step left with none goes too.
 - `explode` with no steps fails: add one first.
+
+## Display states
+
+A display state (SolidWorks' display state) is a named look of the assembly: each
+component shown or hidden, coloured and see-through as it has it. It holds nothing else:
+suppression, the part's configuration a component shows and where it is belong to the
+assembly's configurations.
+
+```jsonl
+{"op": "new", "assembly": true}
+{"op": "insert", "sample": "chassis", "name": "Tray"}
+{"op": "insert", "sample": "cover", "name": "Lid", "at": [0, 0, 60]}
+{"op": "add_display_state", "name": "Working"}
+{"op": "add_display_state", "name": "See inside"}
+{"op": "set_transparency", "component": "Lid", "transparency": 0.7}
+{"op": "set_color", "component": "Tray", "color": "#3070c0", "display_states": "Working"}
+{"op": "show", "component": "Lid", "on": false, "display_states": ["Working"]}
+{"op": "display_state", "display_state": "Working"}
+{"op": "display_states"}
+{"op": "link_display_states"}
+{"op": "add_configuration", "name": "Long"}
+{"op": "add_display_state", "name": "Long, red"}
+{"op": "set_color", "component": "Tray", "color": "#c82828"}
+{"op": "configuration", "configuration": "Default"}
+{"op": "display_states"}
+```
+
+- **Until one is added, there are none**, and a component's look is simply its own.
+  `add_display_state` makes one that starts as the components look now and shows it, so
+  the first one names the look as it is; add a second before changing anything.
+- **The components hold the display state shown.** `show`, `isolate`, `show_all`,
+  `set_color` and `set_transparency` change it. Given `display_states` (a name, a list, or
+  `"all"`), `show`, `set_color` and `set_transparency` change those instead, and the
+  components stay as they are.
+- **`display_state` shows one**: every component takes its look there. Like
+  `configuration`, it is not an undo step. `display_states` lists them: which is `shown`,
+  and for each, under `looks`, every component that is hidden, coloured or see-through
+  in it.
+- **Linked or not.** `link_display_states` (`on`, default true) links them to
+  configurations, as SolidWorks does by default: each configuration has display states of
+  its own, and showing a configuration shows the display state it last showed. A
+  configuration with none gets one (`Display State-1`) when it is first shown, as the
+  components look then. Linking gives every display state to the active configuration;
+  unlinking (`"on": false`) makes every one available in every configuration and keeps the
+  one shown. When linked, `add_display_state` takes `configuration` to add one to another
+  configuration (shown there if it is that configuration's first), and names are each
+  configuration's own: a name is looked for in the active configuration first.
+- `rename` and `delete` take `display_state` in place of `feature`. Each configuration
+  (or, unlinked, the assembly) keeps one: deleting the last fails. Deleting a
+  configuration deletes its display states; deleting a component forgets its looks.
+- A component in a display state that says nothing of it is shown, in its part's colour,
+  opaque: a component inserted later is shown in every display state.
+- A sub-assembly is drawn in the display state its own document shows: what is hidden
+  there is hidden in the assembly too.
+- A part has no display states: its look is its colour (`set_color` without
+  `component`).
 
 ## Equations: sizing and suppressing components from the assembly
 

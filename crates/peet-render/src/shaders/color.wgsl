@@ -35,7 +35,8 @@ fn vs_edge(v: ColorIn, instance: InstanceIn) -> ColorOut {
     let world = instance_model(instance) * vec4<f32>(v.position, 1.0);
     out.clip = biased_line_position(world.xyz);
     let rgb = mix(globals.edge_color.rgb, instance.tint.rgb, min(instance.tint.a * 1.6, 1.0));
-    out.color = vec4<f32>(rgb, globals.edge_color.a);
+    // A see-through object's edges are as see-through as it is.
+    out.color = vec4<f32>(rgb, globals.edge_color.a * instance_opacity(instance));
     return out;
 }
 

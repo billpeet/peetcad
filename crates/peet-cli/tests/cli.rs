@@ -776,6 +776,70 @@ fn what_the_assemblies_skill_says_about_showing_and_exploding_is_true() {
 }
 
 #[test]
+fn what_the_assemblies_skill_says_about_display_states_is_true() {
+    let skill = peet_cli::SKILLS
+        .iter()
+        .find(|(name, _)| *name == "assemblies")
+        .map(|(_, text)| *text)
+        .unwrap();
+    let script = scripts(skill)
+        .into_iter()
+        .find(|s| s.contains("\"add_display_state\""))
+        .expect("the script with display states");
+    let script = format!("{script}{{\"op\": \"components\"}}\n");
+    let ran = peet_with(&["run", "-q"], &script);
+    assert_eq!(ran.code, OK, "{}", ran.out);
+    let listed = |nth: usize| {
+        ran.replies
+            .iter()
+            .filter(|r| r["op"] == "display_states")
+            .nth(nth)
+            .expect("a display_states reply")
+            .clone()
+    };
+    // Shown "Working": the lid hidden there, the tray blue, nothing see-through.
+    let first = listed(0);
+    assert_eq!(first["shown"], "Working");
+    assert_eq!(first["linked"], false);
+    let working = &first["display_states"][0];
+    assert_eq!(working["name"], "Working");
+    assert_eq!(
+        working["looks"],
+        json!([
+            {"component": "Tray", "color": "#3070c0"},
+            {"component": "Lid", "hidden": true}
+        ])
+    );
+    // "See inside" kept the lid see-through.
+    assert_eq!(
+        first["display_states"][1]["looks"],
+        json!([{"component": "Lid", "transparency": 0.7}])
+    );
+    // Linked: the new configuration has display states of its own, and the default
+    // configuration shows the one it showed.
+    let last = listed(1);
+    assert_eq!(last["linked"], true);
+    assert_eq!(last["shown"], "Working");
+    let states = last["display_states"].as_array().unwrap();
+    let long: Vec<&str> = states
+        .iter()
+        .filter(|s| s["configuration"] == "Long")
+        .map(|s| s["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(long, ["Display State-1", "Long, red"]);
+    let red = states.iter().find(|s| s["name"] == "Long, red").unwrap();
+    assert!(
+        red["looks"]
+            .as_array()
+            .unwrap()
+            .contains(&json!({"component": "Tray", "color": "#c82828"}))
+    );
+    let components = ran.replies.last().unwrap()["components"].clone();
+    assert_eq!(components[0]["color"], "#3070c0");
+    assert_eq!(components[1]["hidden"], true);
+}
+
+#[test]
 fn what_the_assemblies_skill_says_about_patterns_is_true() {
     let skill = peet_cli::SKILLS
         .iter()

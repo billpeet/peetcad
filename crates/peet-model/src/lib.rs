@@ -33,6 +33,7 @@ mod bodies;
 pub mod config;
 mod convert;
 pub mod dimensions;
+mod display_state;
 mod dressup;
 pub mod equations;
 mod extrude;
@@ -71,6 +72,7 @@ pub use assembly::{
 pub use bodies::{InsertPartFeature, MoveBodyFeature, PartSource, body_motion};
 pub use config::{ConfigId, Configuration, Held, Scope, Slot, SlotValue};
 pub use convert::ConvertToSheetFeature;
+pub use display_state::{DisplayState, DisplayStateId, DisplayStates, Look, transparency};
 pub use dressup::{BlendFeature, BlendKind, DraftFeature, ShellFeature};
 pub use equations::{Equation, EquationTarget, ReferenceDimension};
 pub use extrude::{
@@ -95,7 +97,7 @@ pub use mate::{
 pub use material::{Material, STEEL_DENSITY};
 pub use model::{
     Datum, DependencyGraph, Model, ModelV4, ModelV5, ModelV7, ModelV8, ModelV9, ModelV10, ModelV11,
-    ModelV12Early,
+    ModelV12Early, ModelV12NoDisplayStates,
 };
 pub use naming::{Body, EdgeRef, FaceName, FaceOrigin, FaceRef, FaceRole, Found, VertexRef};
 pub use placement::face_sketch_plane;

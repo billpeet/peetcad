@@ -118,12 +118,23 @@ pub fn diff_scoped(
                 }
             }
             // In the assembly's active configuration where the component differs between
-            // them, in all of them where it doesn't.
-            let component = |c: &peet_model::Component, change| Op::Component {
-                component: c.id.into(),
-                change,
-                configurations: (old.configurations().len() > 1)
-                    .then(|| as_set_directly(old.component_differs(c.id))),
+            // them, in all of them where it doesn't. (What is the same in every
+            // configuration, its name and its look, takes no configurations.)
+            let component = |c: &peet_model::Component, change: ComponentChange| {
+                let per_configuration = matches!(
+                    change,
+                    ComponentChange::Suppress(_)
+                        | ComponentChange::Fix(_)
+                        | ComponentChange::Place(_)
+                        | ComponentChange::PlaceInner(..)
+                        | ComponentChange::Configuration(_)
+                );
+                Op::Component {
+                    component: c.id.into(),
+                    change,
+                    configurations: (per_configuration && old.configurations().len() > 1)
+                        .then(|| as_set_directly(old.component_differs(c.id))),
+                }
             };
             // The patterns that are gone, first: their copies go with them.
             let edit_pattern =
@@ -175,6 +186,9 @@ pub fn diff_scoped(
                 if c.color.is_some() {
                     ops.push(component(c, ComponentChange::Color(c.color)));
                 }
+                if c.transparency > 0.0 {
+                    ops.push(component(c, ComponentChange::Transparency(c.transparency)));
+                }
                 if c.flexible {
                     ops.push(component(c, ComponentChange::Flexible(true)));
                 }
@@ -216,6 +230,9 @@ pub fn diff_scoped(
                 }
                 if o.color != c.color {
                     ops.push(component(c, ComponentChange::Color(c.color)));
+                }
+                if o.transparency != c.transparency {
+                    ops.push(component(c, ComponentChange::Transparency(c.transparency)));
                 }
                 if o.configuration != c.configuration {
                     let name = match c.configuration {
@@ -311,6 +328,32 @@ pub fn diff_scoped(
             }
         }
         _ => {}
+    }
+    if let (Some(_), Some(after)) = (old.assembly(), new.assembly()) {
+        // Display states are changed by operations (add_display_state, display_state, …),
+        // and a component's look in one that is not shown by show, set_color and
+        // set_transparency with display_states. What a deleted component took with it
+        // needs none.
+        let states = |m: &Model| {
+            let list: Vec<_> = m
+                .all_display_states()
+                .into_iter()
+                .map(|s| {
+                    let looks: Vec<_> = s
+                        .stored_looks()
+                        .filter(|(c, _)| after.component(*c).is_some())
+                        .collect();
+                    (s.id, s.name.clone(), s.configuration, s.active, looks)
+                })
+                .collect();
+            (m.display_states_linked(), list)
+        };
+        if states(old) != states(new) {
+            return Err(
+                "the assembly's display states were changed directly: add_display_state, display_state, rename, delete and link_display_states change them, and show, set_color and set_transparency with display_states a component's look in one"
+                    .to_owned(),
+            );
+        }
     }
     if let (Some(before), Some(after)) = (old.assembly(), new.assembly()) {
         let references =

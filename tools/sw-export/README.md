@@ -111,6 +111,38 @@ written for SolidWorks 2018 SP5's API and not yet run):
   other components' faces.
 - A face, edge or vertex read in an assembly says its `component` (`IEntity.GetComponent`).
 
+Added in format 8 (display states and appearances; written for SolidWorks 2018 SP5's API, its member names
+checked against the 2018 interop assemblies, and not yet run):
+
+- At the root, whether display states are linked to configurations, read both ways the API offers:
+  `linkDisplayStatesToConfigurations` (`IConfigurationManager.LinkDisplayStatesToConfigurations`) and
+  `linkedDisplayState` (`IModelDocExtension.LinkedDisplayState`).
+- Per configuration, `appearance`: the document's own colour (`IModelDocExtension.GetMaterialPropertyValues`, this
+  configuration). A colour is SolidWorks' MaterialPropertyValues: red, green, blue (0 to 1), ambient, diffuse,
+  specular, shininess, transparency, emission.
+- Per configuration, `displayStates` (parts and assemblies), in `IConfiguration.GetDisplayStates`' order, which
+  gives the active one first (`active`). Each has `appearances` (`IModelDocExtension.GetRenderMaterials2` for that
+  display state: each render material's `file`, `primaryColor` (a COLORREF), `rgb`, `transparency`, `colorForm`,
+  `entities` it is on, `displayStates` it is linked to) and `properties` (`IConfiguration.GetDisplayStateProperties`).
+  - In an assembly, `components`: for every component (as `components` lists them, at every level), `visible`
+    (`IComponent2.GetVisibilityInAsmDisplayStates`: 0 hidden, 1 shown), `referencedDisplayState`
+    (`GetReferencedDisplayStates`), `appearances` (`GetRenderMaterials2`), and from
+    `IModelDocExtension.GetDisplayStateSetting` with the display state and the components: `displayMode`
+    (swDisplayMode_e), `transparency` (swTransparencyState_e: 0 transparent, 1 not), `visibility`
+    (swVisibilityState_e: 1 hidden, 2 shown) and `appearance` (`DisplayStateSpecMaterialPropertyValues`). All read by
+    name, without changing anything. Then, as a check, each display state is applied (`IConfiguration.ApplyDisplayState`)
+    and each component's `appliedVisible` (`IComponent2.Visible`) and `appliedAppearance` read; `applied` says
+    whether it could be; the active one is applied again at the end. `componentVisibility` and
+    `componentProperties` are what `IConfiguration.GetDisplayStateComponentVisibility` and
+    `GetDisplayStateComponentProperties` (undocumented in 2018) give, as they come.
+  - In a part, `bodies`, `features` and `faces`: what `IConfiguration.GetDisplayStateBodyProperties`,
+    `GetDisplayStateFeatureProperties` and `GetDisplayStateFaceProperties` give (`entities` and `values`, as they come).
+- Assemblies, each component also has its look in the active display state: `visible` (`IComponent2.Visible`),
+  `hidden` (`IsHidden`, counting a hidden parent), `appearance` (`GetMaterialPropertyValues2`, this configuration),
+  `modelAppearance` (its part's own, `GetModelMaterialPropertyValues`) and `referencedDisplayState`
+  (`ReferencedDisplayState2`).
+- Parts: a body's, a face's and a feature's own `appearance` where it has one (`HasMaterialPropertyValues`).
+
 Every read is guarded: what fails is logged and left out.
 
 A configuration SolidWorks made for the flat pattern (`…SM-FLAT-PATTERN`) has its bodies
@@ -151,7 +183,7 @@ Run against SolidWorks 2026 on the whole template library (201 parts, 29 assembl
 all complete, in about 80 minutes, twice. The flat sizes in the DXF files agree with the
 flat-pattern configurations' bodies and with the bend deduction by hand.
 
-`formatVersion` is 7 (6 and 7 are described above). What each earlier version added:
+`formatVersion` is 8 (6 to 8 are described above). What each earlier version added:
 
 - **2:** a definition has its `Is…` methods (`IsBossFeature` is the only thing that tells a
   boss-extrude from a cut-extrude; a part's first extrude is `IsBaseExtrude`) and its

@@ -253,6 +253,8 @@ pub enum Query {
     Mates,
     /// The steps of an assembly's exploded view.
     ExplodeSteps,
+    /// The display states of an assembly.
+    DisplayStates,
     /// Where the components of an assembly run into each other: every pair, or those
     /// one component is in.
     Interference {
@@ -638,6 +640,30 @@ pub enum Op {
     Explode {
         on: Option<bool>,
     },
+    /// Add a display state to an assembly (of `configuration` when they are linked).
+    AddDisplayState {
+        name: String,
+        configuration: Option<String>,
+    },
+    /// Rename or delete a display state.
+    EditDisplayState {
+        state: crate::display::DisplayStateSel,
+        change: crate::display::DisplayChange,
+    },
+    /// Show a display state. Like the configuration shown, not an undo step.
+    DisplayState {
+        state: crate::display::DisplayStateSel,
+    },
+    /// Link display states to configurations, or make them independent.
+    LinkDisplayStates {
+        on: bool,
+    },
+    /// Change how a component looks in some display states.
+    Look {
+        component: CompSel,
+        change: crate::display::LookChange,
+        display_states: crate::display::DisplayScope,
+    },
     /// Show every hidden component of an assembly.
     ShowAll,
     /// Show these components of an assembly and hide every other.
@@ -766,6 +792,11 @@ impl Op {
             Self::ExplodeStep { .. } => "explode_step",
             Self::EditExplodeStep { change, .. } => change.word(),
             Self::Explode { .. } => "explode",
+            Self::AddDisplayState { .. } => "add_display_state",
+            Self::EditDisplayState { change, .. } => change.word(),
+            Self::DisplayState { .. } => "display_state",
+            Self::LinkDisplayStates { .. } => "link_display_states",
+            Self::Look { change, .. } => change.word(),
             Self::ShowAll => "show_all",
             Self::Isolate { .. } => "isolate",
             Self::ComponentSuppression { .. } => "set_suppression_expression",
@@ -796,6 +827,7 @@ impl Op {
                 Query::Components => "components",
                 Query::Mates => "mates",
                 Query::ExplodeSteps => "explode_steps",
+                Query::DisplayStates => "display_states",
                 Query::Interference { .. } => "interference",
                 Query::Bom { .. } => "bom",
             },
@@ -1148,6 +1180,9 @@ fn read(op: &str, a: &mut Args, doc: &Document) -> Result<Op, String> {
         return found;
     }
     if let Some(found) = crate::explode::parse(op, a) {
+        return found;
+    }
+    if let Some(found) = crate::display::parse(op, a) {
         return found;
     }
     if let Some(found) = crate::mate::parse(op, a) {

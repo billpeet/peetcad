@@ -198,10 +198,14 @@ pub fn open(bytes: &[u8]) -> Result<Opened, PeetError> {
             .map(Model::from),
         Some(12) => match r.read_whole::<Model>(SectionKind::MODEL) {
             Some(m) => Some(m),
-            // A part saved while schema 12 was being made, before derived configurations.
-            None => match r.read_whole::<peet_model::ModelV12Early>(SectionKind::MODEL) {
+            // One saved before display states.
+            None => match r.read_whole::<peet_model::ModelV12NoDisplayStates>(SectionKind::MODEL) {
                 Some(m) => Some(m.into()),
-                None => r.read(SectionKind::MODEL)?,
+                // A part saved while schema 12 was being made, before derived configurations.
+                None => match r.read_whole::<peet_model::ModelV12Early>(SectionKind::MODEL) {
+                    Some(m) => Some(m.into()),
+                    None => r.read(SectionKind::MODEL)?,
+                },
             },
         },
         _ => r.read(SectionKind::MODEL)?,
@@ -482,6 +486,58 @@ mod tests {
                 .unwrap();
             assert_eq!(open(&w.finish()).unwrap().model, model);
         }
+    }
+
+    #[test]
+    fn schema_12_assemblies_from_before_display_states_open() {
+        // An assembly with a sub-assembly, as schema 12 wrote it before display states and
+        // component transparency; and one with them, as it is written now.
+        let (mut model, _) = peet_model::samples::enclosure_assembly();
+        let sub = model.clone();
+        let def = model
+            .assembly_mut()
+            .unwrap()
+            .define(Arc::new(sub));
+        let inner = model
+            .assembly_mut()
+            .unwrap()
+            .insert(def, peet_math::Frame::WORLD)
+            .unwrap();
+        model
+            .assembly_mut()
+            .unwrap()
+            .component_mut(inner)
+            .unwrap()
+            .color = Some([1, 2, 3]);
+        let mut w = Writer::new();
+        w.section(
+            SectionKind::MODEL,
+            12,
+            &peet_model::ModelV12NoDisplayStates::of(&model),
+        )
+        .unwrap();
+        assert_eq!(open(&w.finish()).unwrap().model, model);
+
+        let shown = model.add_display_state("Shown", None).unwrap();
+        model.add_display_state("See through", None).unwrap();
+        model
+            .set_look(inner, None, |l| l.transparency = 0.6)
+            .unwrap();
+        model.activate_display_state(shown);
+        let bytes = save(&model, &Metadata::default(), None).unwrap();
+        let opened = open(&bytes).unwrap().model;
+        assert_eq!(opened, model);
+        assert_eq!(opened.all_display_states().len(), 2);
+        // A part is the same in every layout: one saved before display states opens too.
+        let (part, _) = bracket();
+        let mut w = Writer::new();
+        w.section(
+            SectionKind::MODEL,
+            12,
+            &peet_model::ModelV12NoDisplayStates::of(&part),
+        )
+        .unwrap();
+        assert_eq!(open(&w.finish()).unwrap().model, part);
     }
 
     #[test]

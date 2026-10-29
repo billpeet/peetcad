@@ -167,6 +167,67 @@ impl From<ModelV12Early> for Model {
     }
 }
 
+/// A model as model schema 12 held it before display states: today's layout, with
+/// assemblies whose components have no transparency and that have no display states. A
+/// file of schema 12 that is neither today's layout nor [`ModelV12Early`] is read as this.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ModelV12NoDisplayStates {
+    name: String,
+    features: Vec<Arc<Feature>>,
+    parameters: Parameters,
+    rollback: Option<usize>,
+    datums_visible: [bool; 4],
+    next_id: u32,
+    name_counters: BTreeMap<String, u32>,
+    configurations: Configurations,
+    material: Option<Material>,
+    color: Option<[u8; 3]>,
+    assembly: Option<crate::assembly::AssemblyV12NoDisplayStates>,
+    geometry_names: BTreeMap<String, crate::naming::NamedGeometry>,
+}
+
+impl ModelV12NoDisplayStates {
+    /// `m` as it was saved then (its display states and transparencies are lost), to test
+    /// reading it.
+    pub fn of(m: &Model) -> Self {
+        Self {
+            name: m.name.clone(),
+            features: m.features.clone(),
+            parameters: m.parameters.clone(),
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters.clone(),
+            configurations: m.configurations.clone(),
+            material: m.material.clone(),
+            color: m.color,
+            assembly: m
+                .assembly()
+                .map(crate::assembly::AssemblyV12NoDisplayStates::of),
+            geometry_names: m.geometry_names.clone(),
+        }
+    }
+}
+
+impl From<ModelV12NoDisplayStates> for Model {
+    fn from(m: ModelV12NoDisplayStates) -> Self {
+        Self {
+            name: m.name,
+            features: m.features,
+            parameters: m.parameters,
+            rollback: m.rollback,
+            datums_visible: m.datums_visible,
+            next_id: m.next_id,
+            name_counters: m.name_counters,
+            configurations: m.configurations,
+            material: m.material,
+            color: m.color,
+            assembly: m.assembly.map(|a| Arc::new(a.into())),
+            geometry_names: m.geometry_names,
+        }
+    }
+}
+
 /// A schema 11 model: today's layout, with features as they were before an edge flange
 /// could have a relief of its own. The file format is not self-describing, so an older
 /// model is read as this and converted.

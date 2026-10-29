@@ -84,6 +84,8 @@ struct Scene {
     renderer: ViewportRenderer,
     camera: Camera,
     bounds: Aabb,
+    /// Pick through see-through objects.
+    through: bool,
 }
 
 impl Scene {
@@ -121,6 +123,7 @@ impl Scene {
                         pick: Some(PickRequest {
                             cursor_px,
                             radius_px: 4.0,
+                            through_transparent: self.through,
                         }),
                     },
                 )
@@ -155,6 +158,7 @@ fn objects_sharing_a_mesh_are_each_drawn_and_picked_where_they_are() {
         renderer,
         camera,
         bounds,
+        through: true,
     };
     let place = |x: f64, pick| ObjectDraw {
         mesh,
@@ -188,6 +192,64 @@ fn objects_sharing_a_mesh_are_each_drawn_and_picked_where_they_are() {
     let (right, drawn, culled) = scene.pick(&objects, DVec3::new(40.0, 0.0, 0.0));
     assert_eq!((drawn, culled), (2, 1));
     assert_eq!(right.face.map(|h| h.object), Some(1));
+}
+
+#[test]
+fn see_through_objects_are_drawn_and_picked_through() {
+    let Some((device, queue)) = gpu() else {
+        eprintln!("no graphics adapter: skipped");
+        return;
+    };
+    let mut renderer = ViewportRenderer::new(&device, 4);
+    let mesh = renderer.upload_mesh(&device, &square());
+    let bounds = Aabb::from_points([DVec3::new(-60.0, -30.0, -1.0), DVec3::new(60.0, 30.0, 10.0)]);
+    let mut camera = Camera {
+        rotation: StandardView::Top.rotation(),
+        projection: Projection::Orthographic,
+        ..Camera::default()
+    };
+    camera.fit(&bounds, f64::from(SIZE[0]) / f64::from(SIZE[1]));
+    let mut scene = Scene {
+        device,
+        queue,
+        renderer,
+        camera,
+        bounds,
+        through: true,
+    };
+    let place = |x: f64, z: f64, pick, opacity| ObjectDraw {
+        mesh,
+        transform: DMat4::from_translation(DVec3::new(x, 0.0, z)),
+        pick_object: Some(pick),
+        opacity,
+        ..ObjectDraw::default()
+    };
+    // An opaque square, and a see-through one above it (nearer the camera, which looks
+    // down); and a see-through one with nothing behind it.
+    let objects = [
+        place(-20.0, 0.0, 0, 1.0),
+        place(-20.0, 5.0, 1, 0.25),
+        place(30.0, 0.0, 2, 0.25),
+    ];
+    let (result, drawn, culled) = scene.pick(&objects, DVec3::new(-20.0, 0.0, 0.0));
+    assert_eq!((drawn, culled), (3, 0));
+    let hit = result.face.expect("a face is under the cursor");
+    assert_eq!(hit.object, 0, "the opaque square behind is picked");
+    assert!(hit.world.z.abs() < 0.5, "{}", hit.world);
+    // Where nothing opaque is, the see-through one is picked.
+    let (result, ..) = scene.pick(&objects, DVec3::new(30.0, 0.0, 0.0));
+    assert_eq!(result.face.map(|h| h.object), Some(2));
+    // Not picking through: the nearest, see-through or not.
+    scene.through = false;
+    let (result, ..) = scene.pick(&objects, DVec3::new(-20.0, 0.0, 5.0));
+    let hit = result.face.expect("a face is under the cursor");
+    assert_eq!(hit.object, 1);
+    assert!((hit.world.z - 5.0).abs() < 0.5, "{}", hit.world);
+    // Not seen at all: not drawn, but still there to pick.
+    let hidden = [place(-20.0, 0.0, 0, 0.0)];
+    let (result, drawn, _) = scene.pick(&hidden, DVec3::new(-20.0, 0.0, 0.0));
+    assert_eq!(drawn, 0);
+    assert_eq!(result.face.map(|h| h.object), Some(0));
 }
 
 /// The phase's exit criterion for drawing: 1,000 instances of 50 parts at 60 frames a
@@ -240,6 +302,7 @@ fn a_thousand_instances_of_fifty_parts_draw_in_a_frame() {
                     pick: pick.then_some(PickRequest {
                         cursor_px: [800.0, 500.0],
                         radius_px: 6.0,
+                        through_transparent: true,
                     }),
                 },
             )
