@@ -79,6 +79,7 @@ pub use fields::{
 pub use host::{AppCommand, Headless, Host, SketchTool, Toggle, View, Window};
 pub use library::{CheckRule, Gauge, GaugeBend};
 pub use links::{PartSel, linked_files};
+pub use in_context::{InContextOp, MadeIn};
 pub use mate::{MateChange, MateEndSel, MateSel, MateType, WidthModeSel};
 pub use op::{
     DatumSel, DxfPlacement, DxfTarget, Format, New, Op, Place, Query, RollTo, Sample, Source,
@@ -157,7 +158,7 @@ struct Done {
     /// A reference dimension the operation was about, reported with what it measures.
     reference: Option<String>,
     /// An in-context reference the operation made: the component, its sketch and entity.
-    in_context: Option<(peet_model::CompId, FeatureId, peet_sketch::EntityId)>,
+    in_context: Option<(Vec<peet_model::CompId>, FeatureId, peet_model::in_context::Holder)>,
     data: Map<String, Value>,
 }
 
@@ -872,7 +873,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
         Op::DeleteReference { name } => equations::delete_reference(doc, &mut model, name)?,
         Op::InContext(in_context::InContextOp::Make {
             component,
-            sketch,
+            target,
             from,
             entity,
             construction,
@@ -882,7 +883,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 &mut model,
                 &mut done.data,
                 component,
-                sketch,
+                target,
                 from,
                 *entity,
                 *construction,
@@ -891,7 +892,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
             label
         }
         Op::InContext(in_context::InContextOp::List { component }) => {
-            done.data = in_context::list(doc, component.as_ref())?;
+            done.data = in_context::list(doc, component.as_deref())?;
             return Ok(done);
         }
         Op::InContext(in_context::InContextOp::Lock {
@@ -903,7 +904,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 doc,
                 &mut model,
                 &mut done.data,
-                component.as_ref(),
+                component.as_deref(),
                 feature.as_ref(),
                 Some(*on),
             )? {
@@ -916,7 +917,7 @@ fn run(host: &mut dyn Host, doc: &mut Document, op: &Op) -> Result<Done, String>
                 doc,
                 &mut model,
                 &mut done.data,
-                component.as_ref(),
+                component.as_deref(),
                 feature.as_ref(),
                 None,
             )? {
@@ -1801,8 +1802,8 @@ pub(crate) fn apply_with(
     if let Some(name) = &done.reference {
         out.insert("reference".to_owned(), equations::reference_out(doc, name));
     }
-    if let Some((c, f, e)) = done.in_context {
-        out.insert("in_context".to_owned(), in_context::made_out(doc, c, f, e));
+    if let Some((c, f, e)) = &done.in_context {
+        out.insert("in_context".to_owned(), in_context::made_out(doc, c, *f, *e));
     }
     if done.changed && !done.replaced && doc.is_assembly() {
         // The components that are somewhere else now: what a mate, or a placement that

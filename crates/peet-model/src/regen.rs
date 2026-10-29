@@ -993,6 +993,13 @@ impl Engine {
                 let c = assembly.component(id).filter(|c| !c.suppressed)?;
                 Some(frames.get(&id).copied().unwrap_or(c.placement))
             },
+            &|id| {
+                assembly
+                    .component(id)
+                    .and_then(|c| parts.get(&part_key(assembly, c)))
+                    .map(|p| p.engine.evaluation().external.clone())
+                    .unwrap_or_default()
+            },
         );
 
         // ---- The components ----
@@ -2315,6 +2322,14 @@ impl<'m> Ctx<'m, '_> {
                 Output::Plane(p) => Ok(p),
                 Output::Frame(frame) => Ok(Plane { frame }),
                 _ => Err(format!("{} is not a plane.", self.model.name_of(*id))),
+            },
+            // Another component's, in an assembly: where its context last had it.
+            PlaneRef::External(x) => match x.last {
+                crate::in_context::Geom::Plane(p) => Ok(p),
+                _ => Err(format!(
+                    "Its plane follows {}, which is not flat: break the reference ('break_references') and pick a plane.",
+                    x.describe()
+                )),
             },
             PlaneRef::Face(face) => {
                 let found = find_face(self.bodies, face).ok_or_else(|| {

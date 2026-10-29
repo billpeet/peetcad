@@ -648,7 +648,8 @@ The cover's right side (line 4 of its sketch) is the plate's right edge: the cov
 moves on; unlocked, it catches up (140); broken, it stays 140 whatever the plate does.
 
 - **What it needs.** `component` is the part whose sketch follows (a component of this
-  assembly), `sketch` one of its part's sketches, and `from` what it follows: an end as
+  assembly, or a path to a part in a sub-assembly), `sketch` one of its part's sketches,
+  and `from` what it follows: an end as
   a mate's on *another* component, in that component's part's coordinates (`edge`,
   `face`, `vertex`, `plane`, `{"sketch", "entity"}`, `origin`; a path for a part in a
   sub-assembly). What it is seen as on the sketch's plane is held there: a point, a
@@ -673,8 +674,41 @@ moves on; unlocked, it catches up (140); broken, it stays 140 whatever the plate
   their context too (SolidWorks' Lock); `"on": false` unlocks, and they catch up.
   **`break_references`** turns them into plain fixed geometry for good (SolidWorks'
   Break): use it when the part is to be used elsewhere on its own.
-- Only a part placed directly in the assembly can follow (not one inside a
-  sub-assembly); what it follows can be anywhere.
+- **A feature's plane** follows another component's flat face (or a plane) with `feature`
+  in place of `sketch`: a sketch sits on the face, a reference plane (offset or angled) is
+  made from it, an extrude or cut runs up to it (its end becomes "up to"). For "offset from
+  a face", make a plane offset from the followed one and run up to that. A followed sketch
+  plane keeps the sketch's place and side on it: only how far and which way the face is
+  matter. `break_references` leaves such a plane where it is for good (`broken`).
+- **The assembly's own planes and origin** can be followed too: `from` with no
+  `component`, `{"plane": "front"}` or `{"origin": true}` (SolidWorks relates a part's
+  sketch to the assembly's Front Plane the same way).
+- **A part inside a sub-assembly** follows too. Made in the sub-assembly (its file is the
+  context), it follows whenever the sub-assembly rebuilds, also inside a bigger assembly,
+  which rebuilds its sub-assemblies first: `external_references` there lists it with the
+  sub-assembly's status. Made in the top assembly, give `component` as a path,
+  `["Sub-1", "Cover-1"]`; it follows in the top assembly only. Either way the part changes
+  for every instance of it.
+
+```jsonl
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [100, 60]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 5}
+{"op": "new", "keep": true}
+{"op": "sketch", "on": "top", "draw": [{"type": "rectangle", "from": [0, 0], "to": [40, 20]}]}
+{"op": "extrude", "sketch": "Sketch1", "depth": 2}
+{"op": "new", "assembly": true, "keep": true}
+{"op": "insert", "part": 1, "name": "Plate", "fixed": true}
+{"op": "insert", "part": 2, "name": "Post", "at": [0, 0, -10], "fixed": true}
+{"op": "in_context", "component": "Post", "feature": "Extrude1", "from": {"component": "Plate", "face": {"normal": [0, 0, 1]}}}
+{"op": "in_context", "component": "Post", "sketch": "Sketch1", "entity": 10, "from": {"plane": "right"}}
+{"op": "place", "component": "Plate", "at": [0, 0, 20]}
+{"op": "external_references", "component": "Post"}
+{"op": "break_references", "component": "Post"}
+```
+
+The post runs up to the plate's top face, 15 tall, then 35 once the plate is 20 higher;
+its left side (line 10) stays on the assembly's right plane. Broken, both stay where they
+are.
 
 ## Changing components
 

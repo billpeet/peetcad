@@ -717,7 +717,7 @@ pub(crate) fn end_out(assembly: &Assembly, end: &MateEnd) -> Value {
             peet_model::PlaneRef::Feature(id) => {
                 model.map_or_else(|| json!(id.0), |m| json!(m.name_of(*id)))
             }
-            peet_model::PlaneRef::Face(_) => Value::Null,
+            peet_model::PlaneRef::Face(_) | peet_model::PlaneRef::External(_) => Value::Null,
         };
         m.insert("plane".to_owned(), value);
     }

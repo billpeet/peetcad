@@ -42,6 +42,7 @@ pub fn coverage(cmd: CommandId) -> Coverage {
         C::InterferenceCheck => Op("interference"),
         C::BillOfMaterials => Op("bom"),
         C::EditComponent => Op("open_component"),
+        C::EditInContext => Op("in_context"),
         C::MateCoincident
         | C::MateConcentric
         | C::MateParallel

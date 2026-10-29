@@ -17,11 +17,18 @@
 //!
 //! A locked reference keeps its last values in its context too (SolidWorks' Lock); breaking
 //! one turns the projected entity into plain fixed sketch geometry (Break).
+//!
+//! Besides a sketch entity, a feature's plane can follow another component's flat face or
+//! plane ([`crate::PlaneRef::External`]: a sketch's plane, a reference plane's base, an
+//! extrusion's "up to" end), and what is followed can be the context's own planes and
+//! origin. The part can be anywhere below its context: a component's path reaches into
+//! sub-assemblies, and a sub-assembly that is the context of its own parts' references
+//! updates them when it rebuilds, inside whatever assembly it is in.
 
 use std::sync::Arc;
 
-use peet_kernel::geom::Surface;
 use peet_kernel::Curve3;
+use peet_kernel::geom::Surface;
 use peet_math::{DVec2, DVec3, Frame, Plane};
 use peet_sketch::EntityId;
 use serde::{Deserialize, Serialize};
@@ -151,10 +158,12 @@ impl Geom {
             // Square to the sketch: the line it covers, along the direction in both planes.
             let w = normal.cross(plane.normal()).normalize_or_zero();
             let w2 = (uv(center + w) - uv(center)).normalize_or_zero();
-            let (lo, hi) = points.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), q| {
-                let t = (uv(*q) - uv(center)).dot(w2);
-                (lo.min(t), hi.max(t))
-            });
+            let (lo, hi) = points
+                .iter()
+                .fold((f64::INFINITY, f64::NEG_INFINITY), |(lo, hi), q| {
+                    let t = (uv(*q) - uv(center)).dot(w2);
+                    (lo.min(t), hi.max(t))
+                });
             if hi - lo <= 1e-9 || (hi - lo).is_nan() {
                 return Err("What it follows is seen edge on and projects to a point.".to_owned());
             }
@@ -165,10 +174,10 @@ impl Geom {
             Self::Point(p) => Ok(Shape::Point(uv(p))),
             Self::Line(a, b) => {
                 let (a, b) = (uv(a), uv(b));
+                // Seen end on (a round face's axis square to the sketch): where it meets
+                // the sketch, as SolidWorks makes a point coincident with a round face.
                 if a.distance(b) <= 1e-9 {
-                    return Err(
-                        "The line it follows is seen end on: it projects to a point.".to_owned(),
-                    );
+                    return Ok(Shape::Point(a));
                 }
                 Ok(Shape::Line(a, b))
             }
@@ -211,6 +220,24 @@ impl Geom {
     }
 }
 
+/// The plane `new` is in, placed as `like` is as nearly as it can be: its origin where
+/// `like`'s falls on it, its x axis `like`'s laid on it and its normal on `like`'s side. A
+/// feature's plane that follows a face so keeps its sketch where it was on it: only how far
+/// and which way the face is matter, as for SolidWorks' sketch on a face, not where on the
+/// face its own axes happen to be.
+pub fn plane_like(new: Plane, like: Plane) -> Plane {
+    let mut n = new.normal();
+    if n.dot(like.normal()) < 0.0 {
+        n = -n;
+    }
+    let o = like.origin() - n * (like.origin() - new.origin()).dot(n);
+    let x = like.frame.x_axis();
+    let x = (x - n * x.dot(n))
+        .try_normalize()
+        .unwrap_or_else(|| new.frame.x_axis());
+    Plane::from_origin_normal_x(o, n, x).unwrap_or(new)
+}
+
 /// Points along an arc, counter-clockwise about `normal` from `start` to `end`.
 fn arc_points(center: DVec3, normal: DVec3, start: DVec3, end: DVec3, n: usize) -> Vec<DVec3> {
     let z = normal.normalize();
@@ -230,17 +257,21 @@ fn arc_points(center: DVec3, normal: DVec3, start: DVec3, end: DVec3, n: usize) 
         .collect()
 }
 
-/// A reference of a part's sketch to another component of an assembly it is used in.
+/// A reference of a part to another component of an assembly it is used in: held by a
+/// sketch entity (a projection) or by one of a feature's planes (a sketch's plane, what a
+/// reference plane is made from, an extrusion's "up to" end).
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct External {
     /// The assembly whose rebuild updates it, by its file name ("Door Assembly.peet"): the
     /// assembly it was made in. Any other assembly the part is in leaves it as it is.
     pub context: String,
     /// The component that is this part in the context (the instance it was made in), by
-    /// its path from the context's own components.
+    /// its path from the context's own components: one for a component of the context,
+    /// more for a part inside one of its sub-assemblies.
     pub component: Vec<CompId>,
     /// What it follows: another component of the context and its face, edge, vertex,
-    /// plane or sketch entity, as a mate's end names them (in that part's coordinates).
+    /// plane or sketch entity, as a mate's end names them (in that part's coordinates), or
+    /// the context's own standard plane or origin (an empty path).
     pub target: MateEnd,
     /// The names along `component` and along `target`'s path when it was made: what it
     /// refers to, said when the context isn't there.
@@ -252,6 +283,10 @@ pub struct External {
     /// Kept at `last` in its context too (SolidWorks' locked references).
     #[serde(default)]
     pub locked: bool,
+    /// Broken for good (SolidWorks' Break) where it is a feature's plane: kept at `last`,
+    /// as fixed as a sketch entity whose reference is broken.
+    #[serde(default)]
+    pub broken: bool,
 }
 
 impl External {
@@ -266,12 +301,33 @@ impl External {
             Some(MateGeom::Sketch(_)) => "sketch entity",
             None => "component",
         };
-        format!(
-            "{} ({what}) in {}",
-            self.target_names.join(" / "),
-            self.context
-        )
+        let names = if self.target.is_assembly() {
+            "the assembly".to_owned()
+        } else {
+            self.target_names.join(" / ")
+        };
+        format!("{names} ({what}) in {}", self.context)
     }
+}
+
+/// What holds an in-context reference in its feature.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Holder {
+    /// A sketch's entity, which is where the geometry is seen on the sketch.
+    Entity(EntityId),
+    /// One of the feature's planes, by its place in [`crate::FeatureKind::plane_refs`].
+    Plane(usize),
+}
+
+/// An in-context reference of a part, where it is.
+#[derive(Clone, Copy, Debug)]
+pub struct Reference<'a> {
+    pub feature: FeatureId,
+    pub holder: Holder,
+    /// What it is to the feature: `entity` for a sketch entity, else the plane's role
+    /// (`sketch_plane`, `plane`, `up_to`, ...).
+    pub role: &'static str,
+    pub external: &'a External,
 }
 
 /// How an in-context reference stands, as SolidWorks' List External References says.
@@ -284,6 +340,8 @@ pub enum RefStatus {
     OutOfContext,
     /// Locked: kept as it last was, in its context too.
     Locked,
+    /// A feature's plane whose reference is broken: kept as it last was, for good.
+    Broken,
     /// In its context, but what it follows is gone or can't be projected: kept as it last
     /// was, with why.
     Dangling(String),
@@ -295,18 +353,31 @@ impl RefStatus {
             Self::InContext => "in_context",
             Self::OutOfContext => "out_of_context",
             Self::Locked => "locked",
+            Self::Broken => "broken",
             Self::Dangling(_) => "dangling",
+        }
+    }
+
+    /// The status of a reference that its context isn't working out.
+    pub fn kept(x: &External) -> Self {
+        if x.broken {
+            Self::Broken
+        } else if x.locked {
+            Self::Locked
+        } else {
+            Self::OutOfContext
         }
     }
 }
 
-/// An in-context reference of a component's part, as an assembly's rebuild found it.
+/// An in-context reference of a part of an assembly, as the assembly's rebuild found it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Resolved {
-    /// The component of this assembly whose part has the reference.
-    pub component: CompId,
+    /// The part whose feature has the reference: a component of this assembly, or a
+    /// part inside one of its sub-assemblies, by path.
+    pub path: Vec<CompId>,
     pub feature: FeatureId,
-    pub entity: EntityId,
+    pub holder: Holder,
     pub status: RefStatus,
 }
 
@@ -321,43 +392,112 @@ pub fn context_key(name: &str) -> String {
     stem.trim().to_lowercase()
 }
 
+/// The in-context references a feature holds.
+fn held(kind: &crate::FeatureKind) -> Vec<(Holder, &'static str, &External)> {
+    let mut out = Vec::new();
+    if let crate::FeatureKind::Sketch(s) = kind {
+        for p in &s.projections {
+            if let crate::projection::Source::External(x) = &p.source {
+                out.push((Holder::Entity(p.entity), "entity", &**x));
+            }
+        }
+    }
+    for (i, (role, plane)) in kind.plane_refs().into_iter().enumerate() {
+        if let PlaneRef::External(x) = plane {
+            out.push((Holder::Plane(i), role, &**x));
+        }
+    }
+    out
+}
+
+/// [`held`], to change them.
+fn held_mut(kind: &mut crate::FeatureKind) -> Vec<(Holder, &mut External)> {
+    let mut out = Vec::new();
+    if let crate::FeatureKind::Sketch(s) = kind {
+        // Its one plane is the first of `plane_refs`.
+        if let PlaneRef::External(x) = &mut s.plane {
+            out.push((Holder::Plane(0), &mut **x));
+        }
+        for p in &mut s.projections {
+            if let crate::projection::Source::External(x) = &mut p.source {
+                out.push((Holder::Entity(p.entity), &mut **x));
+            }
+        }
+        return out;
+    }
+    for (i, (_, plane)) in kind.plane_refs_mut().into_iter().enumerate() {
+        if let PlaneRef::External(x) = plane {
+            out.push((Holder::Plane(i), &mut **x));
+        }
+    }
+    out
+}
+
 impl Model {
-    /// Every in-context reference of the part: its sketch, the projected entity, and the
+    /// Every in-context reference of the part: the feature, what holds it there, and the
     /// reference.
-    pub fn external_references(&self) -> Vec<(FeatureId, EntityId, &External)> {
+    pub fn external_references(&self) -> Vec<Reference<'_>> {
         let mut out = Vec::new();
         for f in self.features() {
-            if let Some(s) = f.sketch() {
-                for p in &s.projections {
-                    if let crate::projection::Source::External(x) = &p.source {
-                        out.push((f.id, p.entity, &**x));
-                    }
-                }
+            for (holder, role, external) in held(&f.kind) {
+                out.push(Reference {
+                    feature: f.id,
+                    holder,
+                    role,
+                    external,
+                });
             }
         }
         out
     }
 
+    /// Sets where an in-context reference's geometry last was. Returns whether it has one
+    /// there.
+    pub fn set_external_last(&mut self, feature: FeatureId, holder: Holder, geom: Geom) -> bool {
+        let Some(f) = self.feature_mut(feature) else {
+            return false;
+        };
+        let mut found = false;
+        for (h, x) in held_mut(&mut f.kind) {
+            if h == holder {
+                x.last = geom;
+                found = true;
+            }
+        }
+        found
+    }
+
     /// Locks (or unlocks) the part's in-context references, of `feature` only if given.
     /// Returns how many changed.
     pub fn lock_external(&mut self, feature: Option<FeatureId>, on: bool) -> usize {
-        self.change_external(feature, &mut |x| {
-            let changed = x.locked != on;
-            x.locked = on;
+        self.change_external(feature, &mut |_, x| {
+            let changed = x.locked != on && !x.broken;
+            if changed {
+                x.locked = on;
+            }
             changed
         })
     }
 
     /// Breaks the part's in-context references (of `feature` only if given): each projected
-    /// entity stays where it is, fixed, as plain sketch geometry. Returns how many.
+    /// entity stays where it is, fixed, as plain sketch geometry, and each plane stays
+    /// where it is, broken for good. Returns how many.
     pub fn break_external(&mut self, feature: Option<FeatureId>) -> usize {
+        let mut count = self.change_external(feature, &mut |holder, x| {
+            let plane = matches!(holder, Holder::Plane(_)) && !x.broken;
+            if plane {
+                x.broken = true;
+                x.locked = false;
+            }
+            plane
+        });
         let ids: Vec<FeatureId> = self
             .external_references()
             .into_iter()
-            .map(|(f, ..)| f)
+            .filter(|r| matches!(r.holder, Holder::Entity(_)))
+            .map(|r| r.feature)
             .filter(|f| feature.is_none_or(|g| g == *f))
             .collect();
-        let mut count = 0;
         for id in ids {
             if let Some(s) = self.feature_mut(id).and_then(crate::Feature::sketch_mut) {
                 let before = s.projections.len();
@@ -383,7 +523,7 @@ impl Model {
             let n = if part.is_assembly() {
                 part.rename_context(old, new)
             } else {
-                part.change_external(None, &mut |x| {
+                part.change_external(None, &mut |_, x| {
                     let mine = context_key(&x.context) == old_key && x.context != new;
                     if mine {
                         x.context = new.to_owned();
@@ -409,36 +549,30 @@ impl Model {
     fn change_external(
         &mut self,
         feature: Option<FeatureId>,
-        change: &mut dyn FnMut(&mut External) -> bool,
+        change: &mut dyn FnMut(Holder, &mut External) -> bool,
     ) -> usize {
-        let ids: Vec<FeatureId> = self
+        let mut ids: Vec<FeatureId> = self
             .external_references()
             .into_iter()
-            .map(|(f, ..)| f)
+            .map(|r| r.feature)
             .filter(|f| feature.is_none_or(|g| g == *f))
             .collect();
-        let mut ids = ids;
         ids.dedup();
         let mut count = 0;
         for id in ids {
             // Only cloned (copy on write) where something changes.
-            let wants = self.sketch(id).is_some_and(|s| {
-                s.projections.iter().any(|p| match &p.source {
-                    crate::projection::Source::External(x) => {
-                        let mut copy = (**x).clone();
-                        change(&mut copy)
-                    }
-                    _ => false,
+            let wants = self.feature(id).is_some_and(|f| {
+                held(&f.kind).into_iter().any(|(h, _, x)| {
+                    let mut copy = x.clone();
+                    change(h, &mut copy)
                 })
             });
             if !wants {
                 continue;
             }
-            if let Some(s) = self.feature_mut(id).and_then(crate::Feature::sketch_mut) {
-                for p in &mut s.projections {
-                    if let crate::projection::Source::External(x) = &mut p.source
-                        && change(x)
-                    {
+            if let Some(f) = self.feature_mut(id) {
+                for (h, x) in held_mut(&mut f.kind) {
+                    if change(h, x) {
                         count += 1;
                     }
                 }
@@ -446,6 +580,43 @@ impl Model {
         }
         count
     }
+}
+
+/// `model` (an assembly) with the part (or sub-assembly) at `path` below it changed by
+/// `change`: the definitions along the path are replaced, so each instance of them
+/// changes. `None` if the path doesn't lead to a model.
+pub fn change_at<R>(
+    model: &Model,
+    path: &[CompId],
+    change: &mut dyn FnMut(&mut Model) -> R,
+) -> Option<(Model, R)> {
+    let (first, rest) = path.split_first()?;
+    let assembly = model.assembly()?;
+    let def = assembly.definition_of(*first)?;
+    let (inner, r) = if rest.is_empty() {
+        let mut inner = (*def.model).clone();
+        let r = change(&mut inner);
+        (inner, r)
+    } else {
+        change_at(&def.model, rest, change)?
+    };
+    let id = def.id;
+    let mut out = model.clone();
+    out.assembly_mut()?.set_model(id, Arc::new(inner));
+    Some((out, r))
+}
+
+/// The part (or sub-assembly) at the end of a path of components below an assembly.
+pub fn model_at(model: &Model, path: &[CompId]) -> Option<Arc<Model>> {
+    let mut at: Option<Arc<Model>> = None;
+    for id in path {
+        let a = match &at {
+            None => model.assembly()?,
+            Some(m) => m.assembly()?,
+        };
+        at = Some(a.component_model(*id)?);
+    }
+    at
 }
 
 /// Where a face, edge, vertex, plane, origin or sketch entity of a part is, in the
@@ -458,9 +629,8 @@ pub(crate) fn geom_in(
     plane_of: &dyn Fn(&PlaneRef) -> Option<Plane>,
     geom: &MateGeom,
 ) -> Result<Geom, String> {
-    let gone = |what: &str| {
-        format!("The {what} it follows is gone: the part it is on was changed.")
-    };
+    let gone =
+        |what: &str| format!("The {what} it follows is gone: the part it is on was changed.");
     let face_geom = |r: &crate::FaceRef| -> Result<Geom, String> {
         let f = find_face(bodies, r).ok_or_else(|| gone("face"))?;
         let body = &bodies[f.body];
@@ -474,9 +644,7 @@ pub(crate) fn geom_in(
                 Geom::Plane(Plane { frame })
             }
             Surface::Cylinder(c) => Geom::Line(c.axis_origin(), c.axis_origin() + c.axis()),
-            Surface::Cone(c) => {
-                Geom::Line(c.axis_origin(), c.axis_origin() + c.frame.z_axis())
-            }
+            Surface::Cone(c) => Geom::Line(c.axis_origin(), c.axis_origin() + c.frame.z_axis()),
             Surface::Sphere(s) => Geom::Point(s.frame.origin),
             _ => {
                 return Err(
@@ -519,16 +687,16 @@ pub(crate) fn geom_in(
                     }
                 }
                 _ => {
-                    return Err(
-                        "The edge it follows is neither straight nor round.".to_owned(),
-                    );
+                    return Err("The edge it follows is neither straight nor round.".to_owned());
                 }
             };
             Ok(local.moved(&frames[f.body]))
         }
         MateGeom::Vertex(r) => {
             let f = find_vertex(bodies, r).ok_or_else(|| gone("corner"))?;
-            Ok(Geom::Point(frames[f.body].to_world(bodies[f.body].solid.vertex(f.id).point)))
+            Ok(Geom::Point(
+                frames[f.body].to_world(bodies[f.body].solid.vertex(f.id).point),
+            ))
         }
         MateGeom::Plane(reference) => plane_of(reference)
             .map(Geom::Plane)
@@ -595,10 +763,9 @@ pub fn geom_in_part(
 /// Where a mate end on a component is in the assembly, as the solve placed it.
 pub(crate) fn locate(end: &MateEnd, placed: &crate::mate::Placed) -> Result<Geom, String> {
     let inner = end.path.get(1..).unwrap_or_default();
-    let geom = end
-        .geom
-        .as_ref()
-        .ok_or("It follows a whole component: name a face, edge, vertex, plane or sketch entity.")?;
+    let geom = end.geom.as_ref().ok_or(
+        "It follows a whole component: name a face, edge, vertex, plane or sketch entity.",
+    )?;
     let (bodies, frames): (Vec<Arc<Body>>, Vec<Frame>) = placed
         .bodies
         .iter()
@@ -620,80 +787,136 @@ pub(crate) fn locate(end: &MateEnd, placed: &crate::mate::Placed) -> Result<Geom
     Ok(geom_in(&bodies, &frames, model, &plane_of, geom)?.moved(&placed.frame))
 }
 
-/// The in-context references of the assembly's components whose context is this assembly
-/// (`context`, its name as [`context_key`] has it): for each, where what it follows is now
-/// in its part's coordinates. `model_of` gives a definition's model as it is now, `at` a
-/// component of this assembly where the mates and patterns put it (none if suppressed), and
-/// `frame_of` only where it is.
-/// Returns the definitions whose references moved, changed, and every reference's status.
+/// The in-context references of the assembly's parts (its components, and the parts inside
+/// its sub-assemblies at any depth) whose context is this assembly (`context`, its name as
+/// [`context_key`] has it): for each, where what it follows is now in its part's
+/// coordinates. `model_of` gives a definition's model as it is now, `at` a component of this
+/// assembly where the mates and patterns put it (none if suppressed), `frame_of` only where
+/// it is, and `inner` the statuses a sub-assembly component's own rebuild found for its
+/// parts (by path in it).
+/// Returns the definitions whose references moved, changed (a sub-assembly's with the part
+/// in it changed), and every reference's status.
 pub(crate) fn update(
     assembly: &crate::Assembly,
     context: Option<&str>,
     model_of: &dyn Fn(crate::DefId) -> Option<Arc<Model>>,
     at: &dyn Fn(CompId) -> Option<crate::mate::Placed>,
     frame_of: &dyn Fn(CompId) -> Option<Frame>,
+    inner: &dyn Fn(CompId) -> Vec<Resolved>,
 ) -> (Vec<(crate::DefId, Model)>, Vec<Resolved>) {
     let mut changed: Vec<(crate::DefId, Model)> = Vec::new();
-    let mut statuses = Vec::new();
+    let mut statuses: Vec<Resolved> = Vec::new();
     let here = context.map(context_key);
     for c in assembly.components() {
         let Some(model) = model_of(c.definition) else {
             continue;
         };
-        if model.is_assembly() {
-            continue;
-        }
-        let references = model.external_references();
-        if references.is_empty() {
-            continue;
-        }
-        let mut moved: Vec<(FeatureId, EntityId, Geom)> = Vec::new();
-        for (feature, entity, x) in references {
-            let mine = here.as_deref() == Some(context_key(&x.context).as_str())
-                && x.component.as_slice() == [c.id];
-            let status = if !mine || c.suppressed {
-                RefStatus::OutOfContext
-            } else if x.locked {
-                RefStatus::Locked
-            } else {
-                let found = (|| -> Result<Geom, String> {
-                    let target = x.target.component().ok_or(
-                        "It follows the assembly itself, which has no geometry of its own to follow.",
-                    )?;
-                    if target == c.id {
-                        return Err("It follows its own component: refer to the part's own geometry instead.".to_owned());
-                    }
-                    let other = at(target).ok_or_else(|| {
-                        format!(
-                            "{} is gone or suppressed.",
-                            x.target_names.first().map_or("The component it follows", |n| n.as_str())
-                        )
-                    })?;
-                    let own = frame_of(c.id).ok_or("Its own component is not placed.")?;
-                    let geom = locate(&x.target, &other)?;
-                    let local = geom.moved(&own.inverse());
-                    // It must still project into the sketch.
-                    if let Some(s) = model.sketch(feature) {
-                        local.project(s.placement)?;
-                    }
-                    Ok(local)
-                })();
-                match found {
-                    Ok(geom) => {
-                        if !geom.same(&x.last, 1e-9) {
-                            moved.push((feature, entity, geom));
-                        }
-                        RefStatus::InContext
-                    }
-                    Err(why) => RefStatus::Dangling(why),
+        // The parts it is or has, by path below it, with where each is in its coordinates.
+        let parts: Vec<(Vec<CompId>, Arc<Model>, Frame)> = if !model.is_assembly() {
+            vec![(Vec::new(), model.clone(), Frame::WORLD)]
+        } else if c.suppressed {
+            Vec::new()
+        } else {
+            at(c.id)
+                .map(|p| {
+                    p.models
+                        .into_iter()
+                        .filter(|(path, m, _)| !path.is_empty() && !m.is_assembly())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let mut moved: Vec<(Vec<CompId>, FeatureId, Holder, Geom)> = Vec::new();
+        for (rest, part, rel) in &parts {
+            let mut full = vec![c.id];
+            full.extend(rest);
+            for r in part.external_references() {
+                let x = r.external;
+                let mine = here.as_deref() == Some(context_key(&x.context).as_str())
+                    && x.component == full;
+                // A part in a sub-assembly that is not this assembly's: the sub-assembly's
+                // own rebuild says how it stands.
+                if !rest.is_empty() && !mine {
+                    continue;
                 }
-            };
-            statuses.push(Resolved {
-                component: c.id,
-                feature,
-                entity,
-                status,
-            });
+                let status = if x.broken {
+                    RefStatus::Broken
+                } else if !mine || c.suppressed {
+                    RefStatus::OutOfContext
+                } else if x.locked {
+                    RefStatus::Locked
+                } else {
+                    let found = (|| -> Result<Geom, String> {
+                        if x.target.path == full {
+                            return Err("It follows its own component: refer to the part's own geometry instead.".to_owned());
+                        }
+                        let other = match x.target.component() {
+                            // The context's own planes and origin, which don't move.
+                            None => crate::mate::Placed::assembly(CompId(u32::MAX)),
+                            Some(target) => at(target).ok_or_else(|| {
+                                format!(
+                                    "{} is gone or suppressed.",
+                                    x.target_names
+                                        .first()
+                                        .map_or("The component it follows", |n| n.as_str())
+                                )
+                            })?,
+                        };
+                        let own = frame_of(c.id).ok_or("Its own component is not placed.")?;
+                        let own = own.compose(rel);
+                        let geom = locate(&x.target, &other)?;
+                        let mut local = geom.moved(&own.inverse());
+                        match r.holder {
+                            // It must still project into the sketch.
+                            Holder::Entity(_) => {
+                                if let Some(s) = part.sketch(r.feature) {
+                                    local.project(s.placement)?;
+                                }
+                            }
+                            Holder::Plane(_) => match (local, x.last) {
+                                (Geom::Plane(p), Geom::Plane(was)) => {
+                                    local = Geom::Plane(plane_like(p, was));
+                                }
+                                (Geom::Plane(_), _) => {}
+                                _ => {
+                                    return Err(format!(
+                                        "A plane can only follow a flat face or a plane: what it follows is now a {}.",
+                                        local.word()
+                                    ));
+                                }
+                            },
+                        }
+                        Ok(local)
+                    })();
+                    match found {
+                        Ok(geom) => {
+                            if !geom.same(&x.last, 1e-9) {
+                                moved.push((rest.clone(), r.feature, r.holder, geom));
+                            }
+                            RefStatus::InContext
+                        }
+                        Err(why) => RefStatus::Dangling(why),
+                    }
+                };
+                statuses.push(Resolved {
+                    path: full.clone(),
+                    feature: r.feature,
+                    holder: r.holder,
+                    status,
+                });
+            }
+        }
+        // How the sub-assembly's own rebuild found the rest of its parts' references.
+        if model.is_assembly() && !c.suppressed {
+            for mut s in inner(c.id) {
+                s.path.insert(0, c.id);
+                if !statuses
+                    .iter()
+                    .any(|t| t.path == s.path && t.feature == s.feature && t.holder == s.holder)
+                {
+                    statuses.push(s);
+                }
+            }
         }
         if moved.is_empty() {
             continue;
@@ -706,16 +929,14 @@ pub(crate) fn update(
                 changed.len() - 1
             }
         };
-        let part = &mut changed[index].1;
-        for (feature, entity, geom) in moved {
-            if let Some(s) = part.feature_mut(feature).and_then(crate::Feature::sketch_mut) {
-                for p in &mut s.projections {
-                    if p.entity == entity
-                        && let crate::projection::Source::External(x) = &mut p.source
-                    {
-                        x.last = geom;
-                    }
-                }
+        for (rest, feature, holder, geom) in moved {
+            let entry = &mut changed[index].1;
+            if rest.is_empty() {
+                entry.set_external_last(feature, holder, geom);
+            } else if let Some((updated, _)) = change_at(entry, &rest, &mut |m| {
+                m.set_external_last(feature, holder, geom)
+            }) {
+                *entry = updated;
             }
         }
     }

@@ -120,6 +120,7 @@ pub enum CommandId {
     NewAssembly,
     InsertComponent,
     EditComponent,
+    EditInContext,
     InsertLinkedComponent,
     UpdateLinks,
     InterferenceCheck,
@@ -166,7 +167,7 @@ const fn ctrl(key: Key) -> Option<KeyboardShortcut> {
 }
 
 impl CommandId {
-    pub const ALL: [Self; 129] = [
+    pub const ALL: [Self; 130] = [
         Self::Undo,
         Self::Redo,
         Self::CommandPalette,
@@ -278,6 +279,7 @@ impl CommandId {
         Self::NewAssembly,
         Self::InsertComponent,
         Self::EditComponent,
+        Self::EditInContext,
         Self::InsertLinkedComponent,
         Self::UpdateLinks,
         Self::InterferenceCheck,
@@ -912,6 +914,12 @@ impl CommandId {
                 "Edit Part",
                 "Assembly",
                 "Open the selected component's part as a document of its own. Saving it stores it back in the assembly, for every component of that part.",
+                None,
+            ),
+            Self::EditInContext => (
+                "Edit In Context",
+                "Assembly",
+                "Edit the selected component's part among the other components (SolidWorks' Edit Part): pick another component's face, edge or corner, and make a sketch of the part convert it, sit on it, or an extrusion run up to it. The part then follows that component in this assembly. Again to stop.",
                 None,
             ),
             Self::InsertLinkedComponent => (

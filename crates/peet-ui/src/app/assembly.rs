@@ -172,6 +172,10 @@ enum TreeAction {
     ChangeExplode(ExplodeId, ExplodeChange),
     SelectPattern(PatternId),
     DeletePattern(PatternId),
+    /// Edit the component's part in the context of the assembly.
+    InContext(CompId),
+    /// Lock, unlock (`Some`) or break (`None`) its part's in-context references.
+    References(CompId, Option<bool>),
 }
 
 /// What to say about how a component can still move.
@@ -213,6 +217,7 @@ pub(super) fn works_in_assembly(cmd: CommandId) -> bool {
                     | "bom"
                     | "mass"
                     | "open_component"
+                    | "in_context"
                     | "delete"
                     | "suppress"
                     | "mate"
@@ -231,6 +236,7 @@ pub(super) fn needs_assembly(cmd: CommandId) -> bool {
             | CommandId::InterferenceCheck
             | CommandId::BillOfMaterials
             | CommandId::EditComponent
+            | CommandId::EditInContext
             | CommandId::MateCoincident
             | CommandId::MateConcentric
             | CommandId::MateParallel
@@ -770,7 +776,7 @@ impl PeetApp {
 
     /// What is selected as the end of a mate: a face, an edge or a corner, with the
     /// component it is on.
-    fn mate_end(&self, geom: GeomRef) -> Option<MateEnd> {
+    pub(super) fn mate_end(&self, geom: GeomRef) -> Option<MateEnd> {
         let placed = self.doc.placed.get(geom.body())?;
         if placed.path.is_empty() {
             return None;
@@ -1366,12 +1372,23 @@ impl PeetApp {
         let any_hidden = assembly.components().any(|c| !c.visible);
         let selected_explode = self.selected_explode();
         let selected_pattern = self.selected_pattern();
+        // The components whose part has in-context references ("->" in the tree).
+        let references: Vec<CompId> = assembly
+            .components()
+            .filter(|c| {
+                assembly
+                    .definition_of(c.id)
+                    .is_some_and(|d| !d.model.external_references().is_empty())
+            })
+            .map(|c| c.id)
+            .collect();
+        let editing = self.in_context_component();
         for c in assembly.components() {
             let status = self.doc.evaluation().component_status(c.id);
             // As in other CAD systems: (f) fixed, (-) can still move.
             let freedom = self.doc.evaluation().component_freedom(c.id);
             let mut text = RichText::new(format!(
-                "{}{}{}",
+                "{}{}{}{}",
                 if c.fixed {
                     "(f) "
                 } else if freedom.is_some_and(|f| f > 0) {
@@ -1380,6 +1397,13 @@ impl PeetApp {
                     ""
                 },
                 c.name,
+                if editing == Some(c.id) {
+                    "  (editing in context)"
+                } else if references.contains(&c.id) {
+                    " ->"
+                } else {
+                    ""
+                },
                 match (c.visible, c.pattern.is_some()) {
                     (true, false) => "",
                     (true, true) => "  (pattern)",
@@ -1417,6 +1441,19 @@ impl PeetApp {
                     }
                 };
                 pick(ui, "Edit Part", TreeAction::Open(c.id));
+                pick(ui, "Edit In Context", TreeAction::InContext(c.id));
+                if references.contains(&c.id) {
+                    ui.menu_button("External References", |ui| {
+                        for (label, action) in [
+                            ("List", TreeAction::Select(c.id)),
+                            ("Lock", TreeAction::References(c.id, Some(true))),
+                            ("Unlock", TreeAction::References(c.id, Some(false))),
+                            ("Break", TreeAction::References(c.id, None)),
+                        ] {
+                            pick(ui, label, action);
+                        }
+                    });
+                }
                 ui.separator();
                 let change = |change| TreeAction::Change(c.id, change);
                 pick(
@@ -1595,6 +1632,12 @@ impl PeetApp {
                     self.selected_geom.clear();
                 }
                 TreeAction::Open(id) => self.open_component(id),
+                TreeAction::InContext(id) => {
+                    self.in_context = None;
+                    self.selected_component = Some(id);
+                    self.edit_in_context();
+                }
+                TreeAction::References(id, lock) => self.change_references(id, lock),
                 TreeAction::Change(id, change) => self.change_component(id, change),
             }
         }
@@ -2057,6 +2100,8 @@ impl PeetApp {
         if unlink {
             self.unlink_part(c.definition);
         }
+        ui.add_space(6.0);
+        self.external_references_ui(ui, id);
     }
 }
 

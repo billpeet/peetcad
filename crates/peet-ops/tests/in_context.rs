@@ -308,3 +308,219 @@ fn a_dimension_of_the_part_followed_moves_the_in_context_sketch() {
     assert_eq!(max_x(&mut doc, "Cover-1"), edge);
     assert_eq!(statuses(&mut doc), ["in_context"]);
 }
+
+fn max_z(doc: &mut Document, name: &str) -> f64 {
+    let all = ok(doc, json!({"op": "components"}));
+    component(&all, name)["max"][2].as_f64().unwrap()
+}
+
+#[test]
+fn a_part_inside_a_sub_assembly_follows_in_the_top_assembly() {
+    // The cover is in a sub-assembly; its reference is made in the top assembly, to the
+    // plate there: SolidWorks' Edit Part of a part in a sub-assembly, in the top's context.
+    let dir = temp("nested-top");
+    let (plate, cover) = parts(&dir);
+    let sub = dir.join("sub.peet").to_string_lossy().into_owned();
+    let mut s = Document::default();
+    ok(&mut s, json!({"op": "new", "assembly": true}));
+    ok(
+        &mut s,
+        json!({"op": "insert", "path": cover, "name": "Cover-1", "fixed": true}),
+    );
+    ok(&mut s, json!({"op": "save", "path": sub}));
+    let mut doc = Document::default();
+    ok(&mut doc, json!({"op": "new", "assembly": true}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": sub, "name": "Sub-1", "at": [0, 0, 5], "fixed": true}),
+    );
+    let made = ok(
+        &mut doc,
+        json!({"op": "in_context", "component": ["Sub-1", "Cover-1"], "sketch": "Sketch1", "entity": 4,
+            "from": {"component": "Plate-1", "edge": {"at": [100, 30, 5]}}}),
+    );
+    assert_eq!(made["in_context"]["status"], "in_context", "{made}");
+    assert_eq!(made["in_context"]["component"], "Sub-1 / Cover-1", "{made}");
+    assert_eq!(max_x(&mut doc, "Sub-1"), 100.0);
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Plate-1", "at": [25, 0, 0]}),
+    );
+    assert_eq!(max_x(&mut doc, "Sub-1"), 125.0);
+    assert_eq!(statuses(&mut doc), ["in_context"]);
+    // Locked and broken through the path, as for a component of the assembly.
+    let locked = ok(
+        &mut doc,
+        json!({"op": "lock_references", "component": ["Sub-1", "Cover-1"]}),
+    );
+    assert_eq!(locked["changed"], 1);
+    assert_eq!(statuses(&mut doc), ["locked"]);
+}
+
+#[test]
+fn a_part_follows_in_its_sub_assembly_when_the_top_assembly_rebuilds() {
+    // The reference is made in the sub-assembly (its context): the top assembly rebuilds the
+    // sub-assembly first, which updates it, as SolidWorks does.
+    let dir = temp("nested-sub");
+    let (_, cover) = parts(&dir);
+    // A plate whose width is a dimension.
+    let plate = dir.join("wide.peet").to_string_lossy().into_owned();
+    let mut p = Document::default();
+    ok(
+        &mut p,
+        json!({"op": "sketch", "on": "top", "draw": [
+            {"type": "rectangle", "from": [0, 0], "to": [100, 60]},
+            {"type": "horizontal_distance", "of": [2, 3], "value": 100, "name": "Width"}
+        ]}),
+    );
+    ok(
+        &mut p,
+        json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}),
+    );
+    ok(&mut p, json!({"op": "save", "path": plate}));
+    let frame = dir.join("frame.peet").to_string_lossy().into_owned();
+    let mut s = Document::default();
+    ok(&mut s, json!({"op": "new", "assembly": true}));
+    ok(
+        &mut s,
+        json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}),
+    );
+    ok(
+        &mut s,
+        json!({"op": "insert", "path": cover, "name": "Cover-1", "at": [0, 0, 5], "fixed": true}),
+    );
+    ok(&mut s, json!({"op": "save", "path": frame}));
+    ok(
+        &mut s,
+        json!({"op": "in_context", "component": "Cover-1", "sketch": "Sketch1", "entity": 4,
+            "from": {"component": "Plate-1", "edge": {"at": [100, 30, 5]}}}),
+    );
+    ok(&mut s, json!({"op": "save"}));
+    let mut doc = Document::default();
+    ok(&mut doc, json!({"op": "new", "assembly": true}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": frame, "name": "Frame-1", "fixed": true}),
+    );
+    let listed = ok(&mut doc, json!({"op": "external_references"}));
+    let r = &listed["references"][0];
+    assert_eq!(r["component"], "Frame-1 / Cover-1", "{listed}");
+    assert_eq!(
+        r["status"], "in_context",
+        "worked out by the sub-assembly: {listed}"
+    );
+    assert_eq!(r["context"], "frame.peet", "{listed}");
+    assert_eq!(r["at"][0], 100.0, "{listed}");
+    // The plate made wider in the sub-assembly: the cover follows when the top rebuilds.
+    ok(
+        &mut doc,
+        json!({"op": "set", "name": "Width@Sketch1@Plate-1@Frame-1", "value": 150}),
+    );
+    let listed = ok(&mut doc, json!({"op": "external_references"}));
+    let r = &listed["references"][0];
+    let at = r["at"][0].as_f64().unwrap();
+    assert!(
+        at > 120.0,
+        "the cover's side is the plate's new edge: {listed}"
+    );
+    assert_eq!(max_x(&mut doc, "Frame-1"), at, "{listed}");
+    assert_eq!(r["status"], "in_context", "{listed}");
+}
+
+#[test]
+fn a_sketch_follows_the_assemblys_own_plane() {
+    // SolidWorks relates a part's sketch to the assembly's planes as to another part's.
+    let (mut doc, _) = assembly(false);
+    ok(
+        &mut doc,
+        json!({"op": "break_references", "component": "Cover-1"}),
+    );
+    let made = ok(
+        &mut doc,
+        json!({"op": "in_context", "component": "Cover-1", "sketch": "Sketch1", "entity": 10,
+            "from": {"plane": "right"}}),
+    );
+    assert_eq!(made["in_context"]["on_assembly"], true, "{made}");
+    // The cover moves 30 along: its left side stays on the assembly's right plane (x = 0).
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Cover-1", "at": [30, 0, 5]}),
+    );
+    let all = ok(&mut doc, json!({"op": "components"}));
+    assert_eq!(component(&all, "Cover-1")["min"][0], 0.0, "{all}");
+    assert_eq!(component(&all, "Cover-1")["max"][0], 130.0, "{all}");
+}
+
+#[test]
+fn an_extrude_runs_up_to_another_parts_face_and_a_sketch_sits_on_one() {
+    // The cover stands 10 below the plate; its extrusion runs up to the plate's top face.
+    let dir = temp("planes");
+    let (plate, cover) = parts(&dir);
+    let mut doc = Document::default();
+    ok(&mut doc, json!({"op": "new", "assembly": true}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": cover, "name": "Cover-1", "at": [0, 0, -10], "fixed": true}),
+    );
+    let made = ok(
+        &mut doc,
+        json!({"op": "in_context", "component": "Cover-1", "feature": "Extrude1",
+            "from": {"component": "Plate-1", "face": {"normal": [0, 0, 1]}}}),
+    );
+    assert_eq!(made["in_context"]["use"], "up_to", "{made}");
+    assert_eq!(max_z(&mut doc, "Cover-1"), 5.0);
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Plate-1", "at": [0, 0, 20]}),
+    );
+    assert_eq!(max_z(&mut doc, "Cover-1"), 25.0);
+    assert_eq!(statuses(&mut doc), ["in_context"]);
+    // Broken, the end stays where it is.
+    ok(
+        &mut doc,
+        json!({"op": "break_references", "component": "Cover-1"}),
+    );
+    assert_eq!(statuses(&mut doc), ["broken"]);
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Plate-1", "at": [0, 0, 0]}),
+    );
+    assert_eq!(max_z(&mut doc, "Cover-1"), 25.0);
+
+    // A sketch on another part's face: the plate's top face, wherever the plate is.
+    let mut doc = Document::default();
+    ok(&mut doc, json!({"op": "new", "assembly": true}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": cover, "name": "Cover-1", "fixed": true}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "in_context", "component": "Cover-1", "feature": "Sketch1",
+            "from": {"component": "Plate-1", "face": {"normal": [0, 0, 1]}}}),
+    );
+    assert_eq!(max_z(&mut doc, "Cover-1"), 7.0);
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Plate-1", "at": [0, 0, 3]}),
+    );
+    assert_eq!(max_z(&mut doc, "Cover-1"), 10.0);
+    let e = error(
+        &mut doc,
+        json!({"op": "in_context", "component": "Cover-1", "feature": "Sketch1",
+            "from": {"component": "Plate-1", "edge": {"at": [100, 30, 5]}}}),
+    );
+    assert!(e.contains("flat face or a plane"), "{e}");
+}

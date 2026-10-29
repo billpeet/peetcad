@@ -636,10 +636,31 @@ component), the feature showing "->" in the part.
   dangling (what it follows is gone; the last values are kept).
 - **Save As** renames the context in the parts (`Model::rename_context`), as SolidWorks
   keeps an assembly saved under a new name the context of its in-context parts.
-- Operations: `in_context` (`component`, `sketch`, `from`, `entity`, `construction`),
-  `external_references`, `lock_references`, `break_references`.
-- Not done: an in-context part inside a sub-assembly (only top-level components follow;
-  what they follow may be at any depth); in-context end conditions and reference planes
-  (SolidWorks' "up to surface" of another part, a plane on another part's face): a sketch
-  can follow the face or plane, but an extrude's end condition or a plane feature can't
-  name another component; editing a part in context in the application.
+- Operations: `in_context` (`component`, `sketch` or `feature`, `from`, `entity`,
+  `construction`), `external_references`, `lock_references`, `break_references`.
+- **At any depth** (October 2026). A reference's `component` is a path from its context's
+  own components, so a part inside a sub-assembly can be made to follow in the top
+  assembly. `in_context::update` walks every part below each component (the sub-assembly's
+  placed models, where its solve puts them) and writes a moved reference into the part
+  through the definitions along the path (`change_at`), so the sub-assembly is rebuilt in
+  the next round. A reference made in the sub-assembly itself follows when the
+  sub-assembly's own engine rebuilds it, which the top assembly does first (its context is
+  the sub-assembly's file name, as before); the top's `Evaluation::external` takes the
+  sub-assembly's statuses (`Resolved::path`).
+- **Planes** (October 2026). `PlaneRef::External` is a plane that follows another
+  component's flat face or plane: a sketch's plane, a reference plane's base, an
+  extrusion's "up to" end, wherever a `PlaneRef` is (`FeatureKind::plane_refs`). Its
+  `last` is a `Geom::Plane` the rebuild uses as it is; the context updates it as a
+  sketch entity (`Holder::Plane` beside `Holder::Entity`), keeping the plane's own origin
+  and x axis on the face (`plane_like`): SolidWorks' sketch on a face depends on where the
+  face is, not on where on it its axes are. Breaking a plane leaves it `broken`, where it
+  is. SolidWorks' "offset from surface" is a plane offset from the followed one.
+- **The context's own planes and origin** can be followed (an empty target path), as
+  SolidWorks relates a part's sketch to the assembly's Front Plane (Escutcheon Door's
+  hinge holes).
+- **In the application**: Edit In Context (ribbon and the component's menu) keeps the
+  component highlighted among the others; a face, edge or corner picked on another
+  component can be converted into one of its sketches, or be a sketch's plane, an
+  extrusion's end or a plane's base, from the properties. The tree marks a part with
+  references "->", and its menu and properties list, lock, unlock and break them. The
+  part is not opened as a document of its own: its sketches are edited with Edit Part.
