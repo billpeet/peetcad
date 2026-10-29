@@ -50,6 +50,26 @@ pub struct ViewportParams<'a> {
     /// In an assembly: the component that is selected, and the one under the cursor.
     pub selected_component: Option<peet_model::CompId>,
     pub hovered_component: Option<peet_model::CompId>,
+    /// In an assembly: the component whose part is edited in context. The others are
+    /// drawn as the settings say ([`crate::settings::InContextLook`]).
+    pub in_context: Option<peet_model::CompId>,
+}
+
+/// How transparent a shown body is drawn (0 opaque, 1 not seen): as the display state has
+/// its component, or, while a part is edited in context, as the settings have the other
+/// components. The edited part itself is drawn as the display state has it.
+pub fn shown_transparency(
+    placed: &peet_document::Placed,
+    in_context: Option<peet_model::CompId>,
+    settings: &Settings,
+) -> f32 {
+    let own = placed.transparency.clamp(0.0, 1.0);
+    match (in_context, placed.component()) {
+        (Some(edited), Some(component)) if component != edited => settings
+            .in_context_look
+            .others(own, settings.in_context_transparency),
+        _ => own,
+    }
 }
 
 pub struct Viewport {
@@ -283,8 +303,9 @@ impl Viewport {
                         0.0
                     },
                     pick_object: Some(i as u32),
-                    // A component's transparency, from the display state shown.
-                    opacity: 1.0 - placed.transparency.clamp(0.0, 1.0),
+                    // A component's transparency, from the display state shown (and
+                    // the others' while a part is edited in context).
+                    opacity: 1.0 - shown_transparency(placed, params.in_context, params.settings),
                 }
             })
             .collect();
@@ -381,8 +402,15 @@ impl Viewport {
                     params.document.bodies.get(body).and_then(|b| {
                         let e = b.solid.edges.get(edge.index())?;
                         let view_proj = self.camera.view_projection(self.aspect(), &scene_bounds);
+                        // A component's corner is where its component is shown.
+                        let frame = params
+                            .document
+                            .placed
+                            .get(body)
+                            .map_or(peet_math::Frame::WORLD, |p| p.shown);
                         [e.start, e.end].into_iter().find_map(|v| {
-                            let clip = view_proj * b.solid.vertex(v).point.extend(1.0);
+                            let at = frame.to_world(b.solid.vertex(v).point);
+                            let clip = view_proj * at.extend(1.0);
                             if clip.w <= 0.0 {
                                 return None;
                             }
@@ -821,7 +849,8 @@ impl Viewport {
             };
             // A see-through component's silhouette is as see-through as it is.
             let mut color = edge_color;
-            color[3] = ((1.0 - placed.transparency.clamp(0.0, 1.0)) * 255.0).round() as u8;
+            let transparency = shown_transparency(placed, params.in_context, params.settings);
+            color[3] = ((1.0 - transparency) * 255.0).round() as u8;
             for [a, b] in lines {
                 self.overlay
                     .line(frame.to_world(*a), frame.to_world(*b), color);

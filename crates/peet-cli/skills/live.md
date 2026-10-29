@@ -52,5 +52,9 @@ peet view to=front --live
 - **The application's own operations** work only here: `view`, `zoom_to_fit`, `toggle`,
   `window`, `edit_sketch`, `exit_sketch`, `tool`, `quit` (`peet ops` marks them "needs a
   running PeetCAD"). Use `view` and `zoom_to_fit` to show the user what was done.
+- **In an assembly, `edit_sketch` needs `component`**: the sketch is that component's
+  part's, opened in the assembly among the other components (Edit In Context), so the
+  user can convert or follow other components' edges while drawing. `exit_sketch`
+  writes it into the part, and the assembly rebuilds it.
 - If PeetCAD doesn't take an operation within 20 seconds (a file dialog is open in it),
   the reply is `"ok": false` saying so, and the operation is not applied.

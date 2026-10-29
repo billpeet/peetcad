@@ -1327,6 +1327,8 @@ impl PeetApp {
     }
 
     fn open_component(&mut self, id: CompId) {
+        // A sketch edited in context goes into its part first.
+        self.close_sketch();
         let reply = self.perform(Op::OpenComponent {
             component: CompSel::Id(id),
         });

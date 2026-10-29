@@ -203,6 +203,10 @@ pub struct SketchEditor {
     /// Triangulated closed regions, shaded so the user can see which profiles are closed.
     fills: Vec<peet_sketch::triangulate::Triangles>,
     profile_dirty: bool,
+    /// Set for the frame in which the Select tool was clicked where the sketch has
+    /// nothing: what is behind it in the view (another component's edge, in context) can
+    /// be picked instead.
+    pub clicked_empty: bool,
 }
 
 impl SketchEditor {
@@ -233,6 +237,7 @@ impl SketchEditor {
             profile: Profile::default(),
             fills: Vec::new(),
             profile_dirty: true,
+            clicked_empty: false,
         };
         editor.resolve(sketch_item);
         editor

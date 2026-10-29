@@ -658,7 +658,8 @@ moves on; unlocked, it catches up (140); broken, it stays 140 whatever the plate
 - **New or existing entity.** Left out, `entity` adds a fixed construction entity
   (`construction: false` for a converted one that is part of the profile): relate or
   dimension the sketch to it with `open_component` and the sketch operations (a hole 10
-  from another part's edge stays 10 from it wherever the edge goes). With `entity`, that
+  from another part's edge stays 10 from it wherever the edge goes). (In a running PeetCAD,
+  `edit_sketch` with `component` opens the sketch in the assembly for the user instead.) With `entity`, that
   entity of the sketch is the one that follows (it must be of the kind it is seen as):
   the quickest way to make an edge of a profile follow another part.
 - **What updates it.** The assembly it was made in (by its file name; saving the
