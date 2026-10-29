@@ -589,13 +589,40 @@ own components); 15 have no entity on another component in SolidWorks' export; 1
 copy for. Not done: in-context end conditions and reference planes ("up to" another component's face, a
 plane on one), in-context parts inside sub-assemblies, and editing in context in the application.
 
+**In-context references at any depth, and display states** (29 October; parts `run-m15`, assemblies
+`scratch\asm11\run` from the eighth export's assemblies):
+
+- **In-context parts inside sub-assemblies** follow in their own context assembly, at any depth (the
+  sub-assembly rebuilds them inside the bigger assembly); a part can follow its context assembly's own
+  planes and origin; a sketch's plane, a reference plane's base and an extrude's "up to" end can follow
+  another component's flat face (`in_context` with `feature`). The application has Edit In Context: pick
+  another component's face, edge or corner to convert, sketch on, extrude up to or base a plane on, and
+  list, lock or break a part's references; parts with references are marked "->" in the tree.
+- The library's 32 non-sketch in-context features reference through their sketches (27) or have nothing
+  to import (5: disabled equations, an imported STEP body); none has an end condition on another
+  component. Laptop Bracket's Sketch6 now sits on HingeMale's face as SolidWorks has it.
+- **In-context references: 20 of 40 follow their components** (8 assemblies; 4 of them in their
+  sub-assembly), **16 are kept where SolidWorks keeps them** (10 made in assemblies not in the library,
+  so out of context; 5 broken; 1 belonging to another instance), 4 not followed: Esc Surround R L and R's
+  slot (drawn from its shape, without its distance to Esc Surround R Top's edge) and Limit switch assy's
+  part outside Templates.
+- **Display states** (format 8): an assembly's display states, linked to configurations or independent,
+  each with its components' visibility, colour and transparency (`add_display_state`, `display_state`,
+  `set_transparency`, `display_states`); see-through components are drawn blended, and a click picks
+  through them as in SolidWorks. **The library uses none beyond SolidWorks' defaults**: every assembly has
+  one display state per configuration with nothing hidden or see-through (the eighth export, assemblies
+  only, `exports\asm-v8`). Its import changes nothing.
+
+Parts, placements and assembled geometry are as before: 198 of 201 parts, 15 of 26 assemblies matching, 32
+of 34 configurations matching SolidWorks' volume and box.
+
 **More FabSys script bugs**, in `enclosure_script MASTER.boo`: lines 1999 and 2001 suppress Meter
 Panel features "NSW CTMetering" and "VIC CTMeterPanelCutout"; the part's are "NSW CT Metering" and
 "VIC CT Metering", so FabSys fails on them in SolidWorks too.
 
 What is left:
 
-- **In-context features** beyond sketches (end conditions, planes) and in sub-assemblies (above), and display states if the library has any.
+- **In-context**: Esc Surround R L and R's slot distance to another part's edge (4 references); sketching inside the assembly view.
 - **The templates and the export**: 11 live mates SolidWorks names the assembly for with no entity
   (Escutcheon Assembly's are on the Escutcheon Surround that doesn't exist; the Escutcheon Doors'
   point at a suppressed hinge, whose parts the export doesn't list), the path mate's empty path,
