@@ -524,3 +524,106 @@ fn an_extrude_runs_up_to_another_parts_face_and_a_sketch_sits_on_one() {
     );
     assert!(e.contains("flat face or a plane"), "{e}");
 }
+
+/// Where the centre of the first circle of `sketch` in the part of `component` is.
+fn circle_center(doc: &Document, component: &str, sketch: &str) -> [f64; 2] {
+    let assembly = doc.model.assembly().unwrap();
+    let id = assembly
+        .components()
+        .find(|c| c.name == component)
+        .unwrap()
+        .id;
+    let part = peet_model::in_context::model_at(&doc.model, &[id]).unwrap();
+    let s = &part
+        .features()
+        .find(|f| f.name == sketch)
+        .unwrap()
+        .sketch()
+        .unwrap()
+        .sketch;
+    let center = s
+        .entities()
+        .find_map(|(_, e)| match e.geometry {
+            peet_sketch::Geometry::Circle { center, .. } => Some(center),
+            _ => None,
+        })
+        .unwrap();
+    let p = s.point(center);
+    [p.x, p.y]
+}
+
+#[test]
+fn a_dimension_to_a_followed_edge_keeps_its_distance() {
+    // SolidWorks' hole placed by a distance to another part's edge, in context (Esc
+    // Surround R L's slot, 39 mm from Esc Surround R Top's edge): the copy of the edge
+    // follows, and the hole keeps its distance from it.
+    let dir = temp("distance");
+    let plate = dir.join("wide.peet").to_string_lossy().into_owned();
+    let cover = dir.join("holed.peet").to_string_lossy().into_owned();
+    let mut p = Document::default();
+    ok(
+        &mut p,
+        json!({"op": "sketch", "on": "top", "draw": [
+            {"type": "rectangle", "from": [0, 0], "to": [100, 60], "as": "r"},
+            {"type": "fix", "of": ["r.left"]},
+            {"type": "horizontal_distance", "of": ["r.bottom.start", "r.bottom.end"], "value": 100, "name": "Width"}
+        ]}),
+    );
+    ok(&mut p, json!({"op": "extrude", "sketch": "Sketch1", "depth": 5}));
+    ok(&mut p, json!({"op": "save", "path": plate}));
+    // The cover's hole is 10 from a fixed construction line where the plate's right edge
+    // last was, as the SolidWorks importer draws an in-context dimension's copy.
+    let mut c = Document::default();
+    let made = ok(
+        &mut c,
+        json!({"op": "sketch", "on": "top", "draw": [
+            {"type": "rectangle", "from": [0, 0], "to": [200, 20]},
+            {"type": "line", "from": [100, 0], "to": [100, 20], "construction": true, "as": "edge"},
+            {"type": "fix", "of": ["edge"]},
+            {"type": "circle", "center": [90, 10], "radius": 3, "as": "hole"},
+            {"type": "distance", "of": ["hole.center", "edge"], "value": 10},
+            {"type": "vertical_distance", "of": ["origin", "hole.center"], "value": 10}
+        ]}),
+    );
+    let edge = made["drawn"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["as"] == "edge")
+        .unwrap()["id"]
+        .clone();
+    ok(&mut c, json!({"op": "extrude", "sketch": "Sketch1", "depth": 2}));
+    ok(&mut c, json!({"op": "save", "path": cover}));
+    let mut doc = Document::default();
+    ok(&mut doc, json!({"op": "new", "assembly": true}));
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": plate, "name": "Plate-1", "fixed": true}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "insert", "path": cover, "name": "Cover-1", "at": [0, 0, 5], "fixed": true}),
+    );
+    ok(
+        &mut doc,
+        json!({"op": "in_context", "component": "Cover-1", "sketch": "Sketch1", "entity": edge,
+            "from": {"component": "Plate-1", "edge": {"at": [100, 30, 5]}}}),
+    );
+    assert_eq!(circle_center(&doc, "Cover-1", "Sketch1"), [90.0, 10.0]);
+    // The plate made wider: its edge moves 50, and the hole with it.
+    ok(
+        &mut doc,
+        json!({"op": "set", "name": "Width@Sketch1@Plate-1", "value": 150}),
+    );
+    assert_eq!(max_x(&mut doc, "Plate-1"), 150.0);
+    let [x, y] = circle_center(&doc, "Cover-1", "Sketch1");
+    assert!((x - 140.0).abs() < 1e-6 && (y - 10.0).abs() < 1e-6, "{x}, {y}");
+    // The plate moved: the hole follows as far.
+    ok(
+        &mut doc,
+        json!({"op": "place", "component": "Plate-1", "at": [-20, 0, 0]}),
+    );
+    let [x, _] = circle_center(&doc, "Cover-1", "Sketch1");
+    assert!((x - 120.0).abs() < 1e-6, "{x}");
+    assert_eq!(statuses(&mut doc), ["in_context"]);
+}

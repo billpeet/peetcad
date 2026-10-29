@@ -817,7 +817,9 @@ last set, and a linked part's file is not written by them.
 part's sketch can follow another component's geometry in an assembly it is used in:
 `in_context` names the assembly (its file name: the context), the component that is the
 part there (the instance it was made in) and what it follows, and holds a fixed entity of
-the sketch where that is, in the part's coordinates. The part is always built from where
+the sketch where that is, in the part's coordinates. The sketch's own relations and
+dimensions to it stay: a hole dimensioned from the entity keeps that distance from what
+it follows. The part is always built from where
 the entity last was. When the context assembly rebuilds, it solves its mates, then puts
 each such entity where what it follows now is and rebuilds the part, and solves the mates
 again, until nothing moves (as SolidWorks repeats mates and in-context parts); the part
